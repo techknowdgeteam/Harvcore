@@ -2412,26 +2412,26 @@ def delete_all_orders_and_positions(inv_id=None):
     
     return stats
 
-def disable_orders_in_restricted_timerange(inv_id=None):
+def restricted_timerange(inv_id=None):
     """
-    Function: Deletes ALL pending orders and closes ALL open positions unconditionally
-    that were created within the configured time range from accountmanagement.json.
+    Function: Checks if current time falls within the restricted time range
+    from accountmanagement.json. Does NOT delete orders or close positions.
     Uses EXISTING MT5 connection - does NOT initialize or shutdown MT5.
     
-    This function removes all pending orders and closes all open positions for the specified
-    investor(s) that fall within the configured time window (e.g., 9:00 PM - 12:00 AM).
+    This function verifies the time window status for the specified investor(s)
+    and sets the global alert flag accordingly.
     
     Args:
         inv_id: Optional specific investor ID to process. If None, processes all investors.
         
     Returns:
-        dict: Statistics about the deletion process
+        dict: Statistics about the time range check
     """
     global restricted_timerange_alert
     
     from datetime import datetime
     
-    print(f"\n{'='*10} 🔥 EMERGENCY PURGE {'='*10}")
+    print(f"\n{'='*10} ⏰ RESTRICTED TIME CHECK {'='*10}")
     if inv_id:
         print(f" Investor: {inv_id}")
 
@@ -2452,12 +2452,8 @@ def disable_orders_in_restricted_timerange(inv_id=None):
         
         return {
             "investor_id": inv_id if inv_id else "all",
-            "pending_orders_found": 0,
-            "pending_orders_deleted": 0,
-            "pending_orders_failed": 0,
-            "positions_found": 0,
-            "positions_closed": 0,
-            "positions_failed": 0,
+            "investors_checked": 0,
+            "investors_in_window": 0,
             "processing_success": False,
             "current_time": current_time.strftime('%I:%M:%S %p'),
             "errors": ["MT5 not connected"]
@@ -2466,24 +2462,19 @@ def disable_orders_in_restricted_timerange(inv_id=None):
     # --- DATA INITIALIZATION ---
     stats = {
         "investor_id": inv_id if inv_id else "all",
-        "pending_orders_found": 0,
-        "pending_orders_deleted": 0,
-        "pending_orders_failed": 0,
-        "positions_found": 0,
-        "positions_closed": 0,
-        "positions_failed": 0,
+        "investors_checked": 0,
+        "investors_in_window": 0,
         "processing_success": False,
         "current_time": current_time.strftime('%I:%M:%S %p'),
         "errors": []
     }
     
-    # Track if any purge action was taken
-    purge_occurred = False
+    # Track if any investor is within restricted time
+    any_in_window = False
     alert_details = {
         'investors_processed': [],
-        'total_orders_deleted': 0,
-        'total_positions_closed': 0,
-        'investors_with_purge': []
+        'investors_in_window': [],
+        'time_windows': {}
     }
     
     # Determine which investors to process
@@ -2491,12 +2482,9 @@ def disable_orders_in_restricted_timerange(inv_id=None):
     total_investors = len(investors_to_process) if not inv_id else 1
     processed = 0
 
-    # Get today's date for time comparison
-    today = datetime.now().date()
-
     for user_brokerid in investors_to_process:
         processed += 1
-        print(f"\n[{processed}/{total_investors}] 🔥 {user_brokerid}")
+        print(f"\n[{processed}/{total_investors}] ⏰ {user_brokerid}")
         
         # --- LOAD INVESTOR CONFIGURATION ---
         inv_root = Path(INV_PATH) / user_brokerid
@@ -2577,178 +2565,68 @@ def disable_orders_in_restricted_timerange(inv_id=None):
         start_time_display = f"{window_start_hour:02d}:{window_start_minute:02d}"
         end_time_display = f"{window_end_hour:02d}:{window_end_minute:02d}"
         
+        # Convert to 12-hour format for display
+        def to_12hr(hour, minute):
+            period = "AM" if hour < 12 else "PM"
+            hour_12 = hour % 12
+            if hour_12 == 0:
+                hour_12 = 12
+            return f"{hour_12}:{minute:02d} {period}"
+        
+        start_12hr = to_12hr(window_start_hour, window_start_minute)
+        end_12hr = to_12hr(window_end_hour, window_end_minute)
+        
         if time_range_config:
             print(f"  🕘 Window: {time_range_config['from']} - {time_range_config['to']}")
         else:
-            # Convert to 12-hour format for display
-            def to_12hr(hour, minute):
-                period = "AM" if hour < 12 else "PM"
-                hour_12 = hour % 12
-                if hour_12 == 0:
-                    hour_12 = 12
-                return f"{hour_12}:{minute:02d} {period}"
-            
-            start_12hr = to_12hr(window_start_hour, window_start_minute)
-            end_12hr = to_12hr(window_end_hour, window_end_minute)
             print(f"  🕘 Window: {start_12hr} - {end_12hr}")
         
         print(f"  🕐 Now: {current_time.strftime('%I:%M:%S %p')}")
         
-        if not is_within_window:
-            print(f"  ⛔ Outside window - skipping")
-            stats["errors"].append(f"{user_brokerid}: Outside deletion window")
-            continue
+        stats["investors_checked"] += 1
         
-        print(f"  ✅ Within window - purging...")
-        
-        # Verify account
-        acc_info = mt5.account_info()
-        if not acc_info:
-            print(f"  ❌ Account error")
-            stats["errors"].append(f"{user_brokerid}: Cannot fetch account info")
-            continue
-        
-        investor_orders_deleted = 0
-        investor_positions_closed = 0
-        
-        # --- DELETE PENDING ORDERS ---
-        pending_orders = mt5.orders_get()
-        
-        if pending_orders:
-            orders_in_window = []
+        if is_within_window:
+            print(f"  ⚠️  WITHIN restricted time window")
+            stats["investors_in_window"] += 1
+            any_in_window = True
             
-            for order in pending_orders:
-                if hasattr(order, 'time_setup') and order.time_setup > 0:
-                    order_time = datetime.fromtimestamp(order.time_setup)
-                    order_time_minutes = order_time.hour * 60 + order_time.minute
-                    
-                    if crosses_midnight:
-                        is_in_window = (order_time_minutes >= window_start_minutes or 
-                                       order_time_minutes <= window_end_minutes)
-                    else:
-                        is_in_window = window_start_minutes <= order_time_minutes <= window_end_minutes
-                    
-                    if is_in_window and order_time.date() == today:
-                        orders_in_window.append(order)
-            
-            stats["pending_orders_found"] = len(orders_in_window)
-            
-            if orders_in_window:
-                print(f"  📋 Deleting {len(orders_in_window)} orders...")
-                for order in orders_in_window:
-                    cancel_request = {
-                        "action": mt5.TRADE_ACTION_REMOVE,
-                        "order": order.ticket
-                    }
-                    result = mt5.order_send(cancel_request)
-                    
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        stats["pending_orders_deleted"] += 1
-                        investor_orders_deleted += 1
-                        purge_occurred = True
-                    else:
-                        stats["pending_orders_failed"] += 1
-                        stats["errors"].append(f"{user_brokerid}: Order #{order.ticket} delete failed")
-                
-                print(f"    ✅ Deleted: {stats['pending_orders_deleted']}/{len(orders_in_window)}")
-            else:
-                print(f"  📋 No orders in window")
-        else:
-            print(f"  📋 No orders found")
-        
-        # --- CLOSE POSITIONS ---
-        positions = mt5.positions_get()
-        
-        if positions:
-            positions_in_window = []
-            
-            for position in positions:
-                if hasattr(position, 'time') and position.time > 0:
-                    position_time = datetime.fromtimestamp(position.time)
-                    position_time_minutes = position_time.hour * 60 + position_time.minute
-                    
-                    if crosses_midnight:
-                        is_in_window = (position_time_minutes >= window_start_minutes or 
-                                       position_time_minutes <= window_end_minutes)
-                    else:
-                        is_in_window = window_start_minutes <= position_time_minutes <= window_end_minutes
-                    
-                    if is_in_window and position_time.date() == today:
-                        positions_in_window.append(position)
-            
-            stats["positions_found"] = len(positions_in_window)
-            
-            if positions_in_window:
-                print(f"  💼 Closing {len(positions_in_window)} positions...")
-                for position in positions_in_window:
-                    is_buy = position.type == mt5.POSITION_TYPE_BUY
-                    
-                    tick = mt5.symbol_info_tick(position.symbol)
-                    if not tick:
-                        stats["positions_failed"] += 1
-                        continue
-                    
-                    close_price = tick.bid if is_buy else tick.ask
-                    
-                    close_request = {
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": position.symbol,
-                        "volume": position.volume,
-                        "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-                        "position": position.ticket,
-                        "price": close_price,
-                        "deviation": 20,
-                        "magic": position.magic if hasattr(position, 'magic') else 0
-                    }
-                    
-                    result = mt5.order_send(close_request)
-                    
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        stats["positions_closed"] += 1
-                        investor_positions_closed += 1
-                        purge_occurred = True
-                    else:
-                        stats["positions_failed"] += 1
-                        stats["errors"].append(f"{user_brokerid}: Position #{position.ticket} close failed")
-                
-                print(f"    ✅ Closed: {stats['positions_closed']}/{len(positions_in_window)}")
-            else:
-                print(f"  💼 No positions in window")
-        else:
-            print(f"  💼 No positions found")
-        
-        # Track investor data for alert
-        alert_details['investors_processed'].append(user_brokerid)
-        if investor_orders_deleted > 0 or investor_positions_closed > 0:
-            alert_details['investors_with_purge'].append({
+            # Track this investor as being in the window
+            alert_details['investors_in_window'].append({
                 'investor': user_brokerid,
-                'orders_deleted': investor_orders_deleted,
-                'positions_closed': investor_positions_closed,
-                'time_window': time_range_config if time_range_config else f"{start_12hr} - {end_12hr}"
+                'time_window': time_range_config if time_range_config else f"{start_12hr} - {end_12hr}",
+                'current_time': current_time.strftime('%I:%M:%S %p')
             })
+        else:
+            print(f"  ✅ Outside restricted window")
         
-        alert_details['total_orders_deleted'] += investor_orders_deleted
-        alert_details['total_positions_closed'] += investor_positions_closed
+        # Store time window info
+        alert_details['time_windows'][user_brokerid] = {
+            'start': f"{window_start_hour:02d}:{window_start_minute:02d}",
+            'end': f"{window_end_hour:02d}:{window_end_minute:02d}",
+            'is_in_window': is_within_window
+        }
         
-        # Summary for this investor
-        if investor_orders_deleted > 0 or investor_positions_closed > 0:
-            print(f"  📊 Purged: {investor_orders_deleted} orders, {investor_positions_closed} positions")
+        alert_details['investors_processed'].append(user_brokerid)
         
         stats["processing_success"] = True
 
     # --- SET GLOBAL ALERT FLAG ---
     restricted_timerange_alert = {
-        'is_triggered': purge_occurred,
+        'is_triggered': any_in_window,
         'investor_id': inv_id if inv_id else "all",
         'timestamp': current_time.strftime('%I:%M:%S %p'),
-        'time_window': time_range_config if time_range_config else f"{start_12hr} - {end_12hr}",
-        'total_orders_deleted': alert_details['total_orders_deleted'],
-        'total_positions_closed': alert_details['total_positions_closed'],
+        'investors_checked': stats['investors_checked'],
+        'investors_in_window': stats['investors_in_window'],
         'investors_processed': alert_details['investors_processed'],
-        'investors_with_purge': alert_details['investors_with_purge'],
-        'details': alert_details
+        'investors_in_window_details': alert_details['investors_in_window'],
+        'time_windows': alert_details['time_windows']
     }
 
+    # --- FINAL SUMMARY ---
+    print(f"\n{'='*10} 📊 SUMMARY {'='*10}")
+    print(f"  Investors checked: {stats['investors_checked']}")
+    print(f"  Investors in restricted window: {stats['investors_in_window']}")
+    
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
     return stats
@@ -5150,482 +5028,6 @@ def additional_candles_for_orders_limitation(inv_id=None):
             print(f"  🔄 Cancelled {stats['mt5_orders_cancelled']} pending orders in MT5 (via tradeshistory lookup)")
     
     return stats
-
-def create_position_hedge_old(inv_id=None):
-    """
-    Creates hedge orders for existing running positions by analyzing MT5 positions AND tradeshistory.json.
-    
-    Process:
-    1. Gets ALL running positions directly from MT5 terminal
-    2. Checks MT5 history for any closed positions that were previously running
-    3. If closed position found in profit -> removes associated hedge from limit_orders.json
-    4. For each remaining MT5 position, creates hedge order using parent's exit price as entry
-    5. Updates trade history with status tracking
-    6. Saves hedge orders to limit_orders.json
-    """
-    
-    print("\n" + "="*80)
-    print("🔒 CREATING HEDGE ORDERS FOR RUNNING POSITIONS")
-    print("="*80)
-    
-    # Ensure MT5 is initialized
-    if not mt5.terminal_info():
-        print("  Initializing MT5 connection...")
-        if not mt5.initialize():
-            print("   Failed to initialize MT5")
-            return False
-    
-    investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
-    hedge_stats = {
-        'investors_processed': 0,
-        'positions_analyzed': 0,
-        'hedges_created': 0,
-        'hedges_removed': 0,
-        'positions_closed_profit': 0,
-        'positions_closed_loss': 0,
-        'errors': 0
-    }
-    
-    for user_brokerid in investor_ids:
-        print(f"\n{'='*60}")
-        print(f"📋 INVESTOR: {user_brokerid}")
-        print(f"{'='*60}")
-        
-        investor_root = Path(INV_PATH) / user_brokerid
-        
-        if not investor_root.exists():
-            print(f"   Investor root not found: {investor_root}")
-            continue
-        
-        # Step 1: Get strategy name using GLOBAL VERIFIED_INVESTORS (same as directional_bias)
-        acc_mgmt_path = investor_root / "accountmanagement.json"
-        strategy_name = "prices"
-        target_folder = "prices"
-        
-        if acc_mgmt_path.exists():
-            try:
-                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                # Use the global VERIFIED_INVESTORS variable (same as directional_bias)
-                if VERIFIED_INVESTORS:
-                    try:
-                        with open(VERIFIED_INVESTORS, 'r', encoding='utf-8') as f:
-                            investor_users = json.load(f)
-                        
-                        investor_cfg = investor_users.get(user_brokerid)
-                        if investor_cfg:
-                            invested_with = investor_cfg.get("INVESTED_WITH", "")
-                            if "_" in invested_with:
-                                target_folder = invested_with.split("_", 1)[1]
-                                strategy_name = target_folder
-                            else:
-                                target_folder = invested_with
-                                strategy_name = invested_with
-                    except Exception as e:
-                        print(f"  ⚠️ Error reading verified investors: {e}")
-                
-                # Also get risk_reward from config if needed
-                selected_risk_reward = config.get("selected_risk_reward", [3])
-                if isinstance(selected_risk_reward, list) and len(selected_risk_reward) > 0:
-                    risk_reward_default = selected_risk_reward[0]
-                else:
-                    risk_reward_default = 3
-                    
-            except Exception as e:
-                print(f"  ⚠️ Error reading config: {e}")
-                risk_reward_default = 3
-        else:
-            risk_reward_default = 3
-        
-        print(f"  📁 Strategy name: {strategy_name}")
-        print(f"  📁 Target folder: {target_folder}")
-        
-        # Step 2: Load tradeshistory.json
-        history_path = investor_root / "tradeshistory.json"
-        trade_details_by_ticket = {}
-        trade_history_list = []
-        
-        if history_path.exists():
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    trade_history_list = json.load(f)
-                
-                for trade in trade_history_list:
-                    ticket = trade.get('ticket')
-                    if ticket:
-                        trade_details_by_ticket[ticket] = trade
-                
-                print(f"  📋 Loaded {len(trade_details_by_ticket)} trade records from tradeshistory.json")
-            except Exception as e:
-                print(f"  ⚠️ Error reading tradeshistory.json: {e}")
-        
-        # Step 3: Get MT5 running positions
-        print(f"  🔍 Fetching running positions from MT5 terminal...")
-        mt5_positions = mt5.positions_get()
-        
-        if mt5_positions is None:
-            print(f"  ⚠️ No MT5 positions found or error retrieving positions")
-            continue
-        
-        # Filter by magic numbers
-        investor_magics = set()
-        for trade in trade_history_list:
-            magic = trade.get('magic')
-            if magic:
-                investor_magics.add(int(magic))
-        
-        if investor_magics:
-            running_positions = [p for p in mt5_positions if p.magic in investor_magics]
-            print(f"  📊 Found {len(running_positions)} running positions in MT5")
-        else:
-            running_positions = list(mt5_positions)
-            print(f"  📊 Found {len(running_positions)} running positions in MT5")
-        
-        running_tickets = {p.ticket for p in running_positions}
-        
-        # Step 4: CRITICAL - Check for closed positions in MT5 history
-        print(f"\n  🔍 Checking MT5 history for closed positions...")
-        
-        # Get history deals from last 7 days
-        from_date = datetime.now() - timedelta(days=7)
-        to_date = datetime.now()
-        
-        # Get all closed positions from MT5 history
-        history_deals = mt5.history_deals_get(from_date, to_date)
-        
-        # Track which positions we've processed for hedging
-        positions_to_hedge = []
-        positions_closed_profit_tickets = []
-        positions_closed_loss_tickets = []
-        
-        if history_deals:
-            # Group deals by position_id to find closed positions
-            closed_positions = {}
-            for deal in history_deals:
-                if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]:
-                    pos_id = deal.position_id
-                    if pos_id not in closed_positions:
-                        closed_positions[pos_id] = []
-                    closed_positions[pos_id].append(deal)
-            
-            # Check each closed position against our trade history
-            for pos_id, deals in closed_positions.items():
-                # Find the closing deal (profit/loss)
-                closing_deal = None
-                total_profit = 0
-                
-                for deal in deals:
-                    if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]:
-                        total_profit += deal.profit
-                        # The last deal in the sequence is usually the closing one
-                        closing_deal = deal
-                
-                # Check if this position exists in our trade history
-                if pos_id in trade_details_by_ticket:
-                    trade_record = trade_details_by_ticket[pos_id]
-                    current_status = trade_record.get('status')
-                    
-                    # If position is not running in MT5 but was previously running
-                    if pos_id not in running_tickets and current_status == 'running_position':
-                        is_profitable = total_profit > 0
-                        
-                        print(f"\n    📍 Closed position found: Ticket {pos_id}")
-                        print(f"       • Profit/Loss: ${total_profit:.2f}")
-                        print(f"       • Profitable: {is_profitable}")
-                        
-                        # Update trade history
-                        trade_record['status'] = 'closed'
-                        trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        trade_record['closed_profit'] = total_profit
-                        trade_record['closed_profitable'] = is_profitable
-                        
-                        if is_profitable:
-                            positions_closed_profit_tickets.append(pos_id)
-                            print(f"       ✅ Closed in PROFIT - will remove hedge")
-                        else:
-                            positions_closed_loss_tickets.append(pos_id)
-                            print(f"        Closed in LOSS - keeping hedge for protection")
-            
-            # Save updated trade history
-            if positions_closed_profit_tickets or positions_closed_loss_tickets:
-                try:
-                    with open(history_path, 'w', encoding='utf-8') as f:
-                        json.dump(trade_history_list, f, indent=4)
-                    print(f"\n  💾 Updated trade history with closed position statuses")
-                except Exception as e:
-                    print(f"   Error saving trade history: {e}")
-        
-        # Step 5: Remove hedges for positions that closed in profit
-        if positions_closed_profit_tickets:
-            print(f"\n  🗑️ REMOVING HEDGES FOR PROFITABLE CLOSED POSITIONS...")
-            
-            strategy_base_dir = investor_root / strategy_name
-            signals_file = strategy_base_dir / "pending_orders" / "limit_orders.json"
-            
-            if signals_file.exists():
-                try:
-                    with open(signals_file, 'r', encoding='utf-8') as f:
-                        limit_orders = json.load(f)
-                    
-                    original_count = len(limit_orders)
-                    orders_to_keep = []
-                    removed_count = 0
-                    
-                    for order in limit_orders:
-                        # Check if this order is a hedge for a closed profitable position
-                        parent_ticket = order.get('parent_ticket')
-                        is_hedge = order.get('is_hedge_order', False)
-                        
-                        if is_hedge and parent_ticket in positions_closed_profit_tickets:
-                            # Remove this hedge order
-                            print(f"    🗑️ Removing hedge for ticket {parent_ticket}: {order.get('order_type', 'unknown')} {order.get('symbol', 'unknown')} @ {order.get('entry', 'unknown')}")
-                            removed_count += 1
-                            hedge_stats['hedges_removed'] += 1
-                            continue
-                        else:
-                            # Keep this order
-                            orders_to_keep.append(order)
-                    
-                    if removed_count > 0:
-                        # Save the filtered orders
-                        with open(signals_file, 'w', encoding='utf-8') as f:
-                            json.dump(orders_to_keep, f, indent=4)
-                        
-                        print(f"\n  ✅ Removed {removed_count} hedge(s) from limit_orders.json")
-                        print(f"  📊 Remaining orders: {len(orders_to_keep)}")
-                        hedge_stats['positions_closed_profit'] += len(positions_closed_profit_tickets)
-                    else:
-                        print(f"  ℹ️ No hedge orders found for closed profitable positions")
-                        
-                except Exception as e:
-                    print(f"   Error processing limit_orders.json: {e}")
-                    hedge_stats['errors'] += 1
-        
-        # Update statistics for loss positions
-        if positions_closed_loss_tickets:
-            hedge_stats['positions_closed_loss'] += len(positions_closed_loss_tickets)
-            print(f"\n  ℹ️ {len(positions_closed_loss_tickets)} position(s) closed in loss - hedges kept as protection")
-        
-        # Step 6: Only process positions that are still running AND not yet hedged
-        if not running_positions:
-            print(f"\n  ℹ️ No running positions found for {user_brokerid}")
-            continue
-        
-        hedge_stats['investors_processed'] += 1
-        hedge_stats['positions_analyzed'] += len(running_positions)
-        
-        # Step 7: Load existing signals to check for existing hedges
-        strategy_base_dir = investor_root / strategy_name
-        pending_orders_dir = strategy_base_dir / "pending_orders"
-        signals_file = pending_orders_dir / "limit_orders.json"
-        pending_orders_dir.mkdir(parents=True, exist_ok=True)
-        
-        existing_signals = []
-        if signals_file.exists():
-            try:
-                with open(signals_file, 'r', encoding='utf-8') as f:
-                    existing_signals = json.load(f)
-                print(f"\n  📋 Loaded {len(existing_signals)} existing signals from limit_orders.json")
-            except Exception as e:
-                print(f"  ⚠️ Error reading existing signals: {e}")
-        
-        # Step 8: Create hedges for remaining running positions
-        hedges_created_for_investor = 0
-        
-        for position in running_positions:
-            print(f"\n  🔍 Analyzing MT5 position: Ticket {position.ticket}")
-            print(f"     • Symbol: {position.symbol}")
-            print(f"     • Type: {'BUY' if position.type == mt5.ORDER_TYPE_BUY else 'SELL'}")
-            print(f"     • Entry: {position.price_open}")
-            print(f"     • Current: {position.price_current}")
-            print(f"     • Volume: {position.volume}")
-            print(f"     • Profit: ${position.profit:.2f}")
-            
-            # Check if hedge already exists for this position
-            hedge_exists = False
-            for signal in existing_signals:
-                if signal.get('parent_ticket') == position.ticket and signal.get('is_hedge_order'):
-                    hedge_exists = True
-                    print(f"     ⏭️ Hedge already exists for this position")
-                    hedge_stats['hedges_skipped'] = hedge_stats.get('hedges_skipped', 0) + 1
-                    break
-            
-            if hedge_exists:
-                continue
-            
-            # Get trade details from history
-            trade_detail = trade_details_by_ticket.get(position.ticket, {})
-            
-            if trade_detail:
-                print(f"     ✅ Found matching trade record")
-                original_order_type = trade_detail.get('placed_order_type', '')
-                exit_price = trade_detail.get('exit', 0)  # This is the stop loss
-                candle_1_high = trade_detail.get('candle_1_high')
-                candle_1_low = trade_detail.get('candle_1_low')
-                candle_1_type = trade_detail.get('candle_1_type', '').lower()
-                timeframe = trade_detail.get('timeframe', '')
-                risk_reward = trade_detail.get('risk_reward', risk_reward_default)
-                volume = trade_detail.get('placed_volume', position.volume)
-                magic = trade_detail.get('magic', position.magic)
-            else:
-                print(f"     ⚠️ No trade record - using MT5 data")
-                original_order_type = 'buy' if position.type == mt5.ORDER_TYPE_BUY else 'sell'
-                exit_price = 0
-                candle_1_high = None
-                candle_1_low = None
-                candle_1_type = ''
-                timeframe = ''
-                risk_reward = risk_reward_default
-                volume = position.volume
-                magic = position.magic
-            
-            # Create hedge (opposite direction)
-            is_position_buy = (position.type == mt5.ORDER_TYPE_BUY)
-            
-            # Flip order type
-            def flip_order_type(original_type, is_buy_position):
-                if original_type:
-                    original_lower = original_type.lower()
-                else:
-                    original_lower = 'buy' if is_buy_position else 'sell'
-                
-                if original_lower == 'instant_buy':
-                    return 'instant_sell'
-                if original_lower == 'instant_sell':
-                    return 'instant_buy'
-                
-                if '_' in original_lower:
-                    parts = original_lower.split('_', 1)
-                    direction = parts[0]
-                    suffix = parts[1]
-                    new_direction = 'sell' if direction == 'buy' else 'buy'
-                    return f"{new_direction}_{suffix}"
-                else:
-                    if original_lower == 'buy':
-                        return 'sell'
-                    elif original_lower == 'sell':
-                        return 'buy'
-                    return original_lower
-            
-            opposite_order_type = flip_order_type(original_order_type, is_position_buy)
-            is_hedge_buy = 'buy' in opposite_order_type.lower()
-            
-            # Hedge entry = parent's exit (stop loss)
-            if exit_price and exit_price > 0:
-                hedge_entry = exit_price
-                print(f"     🎯 Hedge entry (parent SL): {hedge_entry}")
-            else:
-                tick = mt5.symbol_info_tick(position.symbol)
-                hedge_entry = tick.ask if is_hedge_buy else tick.bid if tick else position.price_current
-                print(f"     ⚠️ No SL found - using current price: {hedge_entry}")
-            
-            # Determine digits
-            digits = 5 if hedge_entry < 1 else len(f"{hedge_entry:.10f}".rstrip('0').split('.')[1]) if '.' in f"{hedge_entry:.10f}" else 2
-            
-            # Hedge stop loss based on candle
-            if candle_1_type == "bearish" and candle_1_high:
-                hedge_exit = candle_1_high
-            elif candle_1_type == "bullish" and candle_1_low:
-                hedge_exit = candle_1_low
-            else:
-                hedge_exit = hedge_entry - (hedge_entry * 0.005) if is_hedge_buy else hedge_entry + (hedge_entry * 0.005)
-            
-            hedge_entry = round(hedge_entry, digits)
-            hedge_exit = round(hedge_exit, digits)
-            
-            # Take profit based on risk/reward
-            risk_amount = abs(hedge_entry - hedge_exit)
-            target_distance = risk_amount * risk_reward
-            hedge_target = round(hedge_entry + target_distance if is_hedge_buy else hedge_entry - target_distance, digits)
-            
-            # Validate volume
-            symbol_info = mt5.symbol_info(position.symbol)
-            if symbol_info:
-                volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
-                volume = round(volume, 2)
-            
-            # Create hedge order
-            hedge_id = f"hedge_{position.ticket}_{position.symbol}_{int(datetime.now().timestamp())}"
-            
-            hedge_order = {
-                "symbol": position.symbol,
-                "timeframe": timeframe,
-                "risk_reward": risk_reward,
-                "order_type": opposite_order_type,
-                "entry": hedge_entry,
-                "exit": hedge_exit,
-                "target": hedge_target,
-                "is_hedge_order": True,
-                "hedge_type": "position_hedge",
-                "candle_1_high": round(candle_1_high, digits) if candle_1_high else None,
-                "candle_1_low": round(candle_1_low, digits) if candle_1_low else None,
-                "candle_1_type": candle_1_type,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "strategy": strategy_name,
-                "magic": magic,
-                "volume": volume,
-                "deriv_volume": volume,
-                "hedge_id": hedge_id,
-                "parent_ticket": position.ticket,
-                "parent_order_type": original_order_type,
-                "parent_entry": position.price_open,
-                "parent_exit": exit_price,
-                "parent_profit": position.profit,
-                "status": "Calculated",
-                "created_by": "create_position_hedge_function"
-            }
-            
-            # Remove None values
-            hedge_order = {k: v for k, v in hedge_order.items() if v is not None}
-            
-            # Add to signals
-            existing_signals.append(hedge_order)
-            hedges_created_for_investor += 1
-            hedge_stats['hedges_created'] += 1
-            
-            print(f"\n     ✅ HEDGE CREATED: {opposite_order_type.upper()} @ {hedge_entry}")
-            print(f"        • Stop Loss: {hedge_exit} | Target: {hedge_target}")
-            print(f"        • Hedge ID: {hedge_id}")
-        
-        # Step 9: Save updated signals
-        if hedges_created_for_investor > 0 or hedge_stats['hedges_removed'] > 0:
-            try:
-                with open(signals_file, 'w', encoding='utf-8') as f:
-                    json.dump(existing_signals, f, indent=4)
-                
-                hedge_count = sum(1 for s in existing_signals if s.get('is_hedge_order', False))
-                print(f"\n  💾 Saved {len(existing_signals)} signals to {signals_file}")
-                print(f"     • Hedges in file: {hedge_count}")
-                print(f"     • New hedges added: {hedges_created_for_investor}")
-                print(f"     • Hedges removed: {hedge_stats['hedges_removed']}")
-                
-            except Exception as e:
-                print(f"   Error saving signals: {e}")
-                hedge_stats['errors'] += 1
-        
-        # Investor summary
-        print(f"\n  📊 SUMMARY for {user_brokerid}:")
-        print(f"     • Running positions: {len(running_positions)}")
-        print(f"     • Closed in profit: {len(positions_closed_profit_tickets)}")
-        print(f"     • Closed in loss: {len(positions_closed_loss_tickets)}")
-        print(f"     • Hedges created: {hedges_created_for_investor}")
-        print(f"     • Hedges removed: {hedge_stats['hedges_removed']}")
-    
-    # Global summary
-    print("\n" + "="*80)
-    print("📊 GLOBAL HEDGE SUMMARY")
-    print("="*80)
-    print(f"  • Investors processed: {hedge_stats['investors_processed']}")
-    print(f"  • Positions analyzed: {hedge_stats['positions_analyzed']}")
-    print(f"  • Hedges created: {hedge_stats['hedges_created']}")
-    print(f"  • Hedges removed: {hedge_stats['hedges_removed']}")
-    print(f"  • Positions closed profit: {hedge_stats['positions_closed_profit']}")
-    print(f"  • Positions closed loss: {hedge_stats['positions_closed_loss']}")
-    print(f"  • Errors: {hedge_stats['errors']}")
-    print("="*80)
-    
-    return hedge_stats['hedges_created'] > 0 or hedge_stats['hedges_removed'] > 0
 
 def create_position_hedge(inv_id=None):
     """
@@ -11399,27 +10801,6 @@ def close_unauthorized_orders(inv_id=None):
     return global_stats
 
 def place_usd_orders(inv_id=None):
-    """
-    Places pending orders from limit_orders.json files for investors.
-    
-    ENHANCED FEATURES:
-    1. Detailed tradeshistory.json with complete order information
-    2. Per-order cache to prevent duplicate placement in same run
-    3. Proximity risk check against existing positions (configurable via accountmanagement.json)
-    4. Order regulation - always cancels unauthorized orders
-    5. Dynamic order types: buy_stop, sell_stop, buy_limit, sell_limit, instant_buy, instant_sell
-    6. No conversion logic - places exactly what limit_orders.json specifies
-    7. Uses 'volume' field from signals (ignores deriv_ prefix)
-    8. Recursively finds limit_orders.json in ALL strategy subfolders
-    9. SUFFIX RETRY - automatically tries ALL suffixes if symbol not tradeable
-    10. TRACKING: Running positions get unique IDs and proper status tracking
-    11. FULL FIELD PRESERVATION: All fields from limit_orders.json preserved in tradeshistory
-    12. FAILURE HANDLING: Removes candle_time_records entry if order placement fails
-    13. CONFIGURABLE PROXIMITY RISK: Reads skip_orders_close_to_position from accountmanagement.json
-    14. INVALID PRICE HANDLING: Converts invalid stop orders to instant market orders when enabled
-    15. SINGLE ORDER MANAGEMENT: Only ONE non-hedge order per symbol/type, with fallback to second order if newest fails
-    16. HEDGE ORDER EXEMPTION: Hedge orders (is_hedge_order=true) are ALL placed regardless of uniqueness rules
-    """
     
     # --- SUFFIX DICTIONARY FOR RETRY LOGIC ---
     SYMBOL_SUFFIXES = [
@@ -11797,70 +11178,8 @@ def place_usd_orders(inv_id=None):
         
         return False, None, 0, 0
 
-    # --- SUB-FUNCTION 8: REGULATE ORDERS (CANCEL UNAUTHORIZED) ---
-    def regulate_orders(investor_root, authorized_keys):
-        """
-        Cancel ALL pending orders that are NOT in the authorized list.
-        Always runs to keep account clean.
-        """
-        print(f"    🔍 Regulating orders - cancelling unauthorized pending orders...")
-        try:
-            # Load tradeshistory.json to get authorized tickets/magics
-            history_path = investor_root / "tradeshistory.json"
-            authorized_tickets = set()
-            authorized_magics = set()
-            
-            if history_path.exists():
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-                    for trade in history:
-                        if trade.get('ticket'):
-                            authorized_tickets.add(int(trade['ticket']))
-                        if trade.get('magic'):
-                            authorized_magics.add(int(trade['magic']))
-            
-            pending_orders = mt5.orders_get() or []
-            cancelled_count = 0
-            
-            for order in pending_orders:
-                is_authorized = False
-                
-                # Check by ticket
-                if order.ticket in authorized_tickets:
-                    is_authorized = True
-                # Check by magic
-                elif order.magic in authorized_magics:
-                    is_authorized = True
-                # Check by symbol+type+price+volume (from authorized_keys)
-                else:
-                    order_key = f"{order.symbol}_{order.type}_{round(order.price, 5)}_{round(order.volume_current, 2)}"
-                    if order_key in authorized_keys:
-                        is_authorized = True
-                
-                if not is_authorized:
-                    request = {
-                        "action": mt5.TRADE_ACTION_REMOVE,
-                        "order": order.ticket,
-                        "comment": "Cancelled by regulation - unauthorized"
-                    }
-                    result = mt5.order_send(request)
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        print(f"        ✅ Cancelled unauthorized order: #{order.ticket} ({order.symbol})")
-                        cancelled_count += 1
-            
-            if cancelled_count > 0:
-                print(f"    ✅ Regulation complete: Cancelled {cancelled_count} unauthorized orders")
-            else:
-                print(f"    ✅ No unauthorized orders found")
-                
-            return cancelled_count
-            
-        except Exception as e:
-            print(f"    ⚠️  Error during regulation: {e}")
-            return 0
-
     # --- SUB-FUNCTION 9: CURRENT PENDING ORDERS AND POSITIONS SNAPSHOT ---
-    def current_pendingorders_and_positions(investor_root):
+    def update_orders_status_in_tradeshistory(investor_root):
         """
         Checks MT5 for current pending orders and open positions.
         Records them in tradeshistory.json as a "current_orders" entry within the array.
@@ -12059,7 +11378,7 @@ def place_usd_orders(inv_id=None):
         Stores COMPLETE order information including all signal fields.
         Tracks running positions with unique IDs.
         
-        NOTE: Status updates are now handled by current_pendingorders_and_positions().
+        NOTE: Status updates are now handled by update_orders_status_in_tradeshistory().
         This function ONLY adds new trades, assigns position IDs, and updates position details.
         It does NOT change the status of existing trades.
         """
@@ -12234,7 +11553,7 @@ def place_usd_orders(inv_id=None):
                 needs_update = False
                 
                 # ========== ONLY update position details for running positions ==========
-                # We do NOT change the status field - that's handled by current_pendingorders_and_positions()
+                # We do NOT change the status field - that's handled by update_orders_status_in_tradeshistory()
                 
                 # Check if this ticket is currently an open position (Direct match)
                 if ticket in fresh_active_positions:
@@ -13135,7 +12454,7 @@ def place_usd_orders(inv_id=None):
         
         Args:
             skip_proximity_check: If True, skips proximity risk check entirely
-            switch_invalid_to_instant: If True, converts invalid stop orders to instant market orders
+            switch_invalid_to_instant: (KEPT FOR COMPATIBILITY BUT NOT USED)
         """
         
         # --- SUB-FUNCTION: GET SUPPORTED FILLING MODES ---
@@ -13257,327 +12576,6 @@ def place_usd_orders(inv_id=None):
             # All filling modes failed
             return None, None, "All filling modes failed"
         
-        # --- SUB-FUNCTION: HANDLE INVALID PRICE CONVERSION ---
-        def should_convert_to_instant(order_type, current_price, entry_price, exit_price, current_opposite_price=None):
-            """
-            Determine if a stop order should be converted to instant market order.
-            
-            Args:
-                order_type: The order type (buy_stop, sell_stop, etc.)
-                current_price: Current market price (ask for buy_stop, bid for sell_stop)
-                entry_price: The requested entry price
-                exit_price: The stop loss price (SL)
-                current_opposite_price: Current opposite price (bid for buy_stop, ask for sell_stop)
-                
-            Returns:
-                tuple: (should_convert, instant_order_type, reason, error_details)
-            """
-            if not switch_invalid_to_instant:
-                return False, None, None, None
-            
-            order_type_lower = order_type.lower()
-            
-            # Only process stop orders
-            if order_type_lower not in ['buy_stop', 'sell_stop']:
-                return False, None, None, None
-            
-            # For BUY_STOP: Entry price should be ABOVE current price
-            if order_type_lower == 'buy_stop':
-                price_difference = entry_price - current_price
-                
-                # Case 1: Entry price is BELOW current price - "too close from below" or "below current price"
-                if entry_price < current_price:
-                    # Check if current price is above the stop loss
-                    if exit_price and exit_price > 0 and current_price <= exit_price:
-                        print(f"             CANNOT CONVERT: Current ASK price ({current_price}) is NOT above SL ({exit_price})")
-                        print(f"               - Instant buy would violate stop loss protection")
-                        return False, None, 'current_price_not_above_sl', {
-                            'reason': f'Current ASK price ({current_price}) is not above stop loss ({exit_price})',
-                            'entry_price': entry_price,
-                            'current_price': current_price,
-                            'exit_price': exit_price,
-                            'requirement': 'current_price > exit_price for instant buy conversion'
-                        }
-                    
-                    error_details = {
-                        'reason': f'BUY_STOP entry price is BELOW current market price (too close from below)',
-                        'entry_price': entry_price,
-                        'current_price': current_price,
-                        'price_difference': price_difference,
-                        'difference_pips': abs(price_difference) * (10000 if current_price < 100 else 1),
-                        'violation_type': 'price_below_current',
-                        'description': f'The entry price {entry_price} is BELOW the current ASK price {current_price}. For a BUY_STOP order, the entry price MUST be ABOVE the current market price.'
-                    }
-                    print(f"            🔄 INVALID BUY_STOP detected - Price is BELOW current market (too close from below):")
-                    print(f"               - Entry price: {entry_price}")
-                    print(f"               - Current ASK price: {current_price}")
-                    print(f"               - Distance: {abs(price_difference):.5f} ({abs(price_difference) * 10000:.1f} pips below)")
-                    print(f"            🔄 Converting to INSTANT BUY at market price (current ASK: {current_price})")
-                    return True, 'instant_buy', 'price_below_current', error_details
-                
-                # Case 2: Entry price is EQUAL to current price
-                elif entry_price == current_price:
-                    error_details = {
-                        'reason': f'BUY_STOP entry price is EQUAL to current market price',
-                        'entry_price': entry_price,
-                        'current_price': current_price,
-                        'violation_type': 'price_equal_current',
-                        'description': f'The entry price {entry_price} is EQUAL to the current ASK price {current_price}. For a BUY_STOP order, the entry price MUST be ABOVE the current market price.'
-                    }
-                    print(f"            🔄 INVALID BUY_STOP detected - Price is EQUAL to current market:")
-                    print(f"               - Entry price: {entry_price}")
-                    print(f"               - Current ASK price: {current_price}")
-                    print(f"            🔄 Converting to INSTANT BUY at market price (current ASK: {current_price})")
-                    return True, 'instant_buy', 'price_equal_current', error_details
-                
-                # Case 3: Entry price is ABOVE current price but too close
-                elif entry_price > current_price:
-                    points_above = (entry_price - current_price) / symbol_info.point if symbol_info.point > 0 else 0
-                    if points_above < 10:  # Too close from above
-                        error_details = {
-                            'reason': f'BUY_STOP entry price is too close from above (only {points_above:.1f} points above)',
-                            'entry_price': entry_price,
-                            'current_price': current_price,
-                            'points_above': points_above,
-                            'minimum_points': 10,
-                            'violation_type': 'too_close_from_above',
-                            'description': f'The entry price {entry_price} is only {points_above:.1f} points ABOVE the current ASK price {current_price}. Minimum distance required is 10 points.'
-                        }
-                        print(f"            ⚠️  BUY_STOP too close from above detected:")
-                        print(f"               - Entry price: {entry_price}")
-                        print(f"               - Current ASK price: {current_price}")
-                        print(f"               - Distance: {points_above:.1f} points above (minimum required: 10 points)")
-                        print(f"            🔄 Converting to INSTANT BUY at market price")
-                        
-                        # Check stop loss condition
-                        if exit_price and exit_price > 0 and current_price <= exit_price:
-                            print(f"             CANNOT CONVERT: Current ASK price ({current_price}) is NOT above SL ({exit_price})")
-                            return False, None, 'current_price_not_above_sl', {
-                                'reason': f'Current ASK price ({current_price}) is not above stop loss ({exit_price})'
-                            }
-                        
-                        return True, 'instant_buy', 'too_close_from_above', error_details
-                    else:
-                        # Valid BUY_STOP - no conversion needed
-                        return False, None, None, None
-            
-            # For SELL_STOP: Entry price should be BELOW current price
-            elif order_type_lower == 'sell_stop':
-                price_difference = current_price - entry_price
-                
-                # Case 1: Entry price is ABOVE current price - "too close from above" or "above current price"
-                if entry_price > current_price:
-                    # Check if current price is below the stop loss
-                    if exit_price and exit_price > 0 and current_price >= exit_price:
-                        print(f"             CANNOT CONVERT: Current BID price ({current_price}) is NOT below SL ({exit_price})")
-                        print(f"               - Instant sell would violate stop loss protection")
-                        return False, None, 'current_price_not_below_sl', {
-                            'reason': f'Current BID price ({current_price}) is not below stop loss ({exit_price})',
-                            'entry_price': entry_price,
-                            'current_price': current_price,
-                            'exit_price': exit_price,
-                            'requirement': 'current_price < exit_price for instant sell conversion'
-                        }
-                    
-                    error_details = {
-                        'reason': f'SELL_STOP entry price is ABOVE current market price (too close from above)',
-                        'entry_price': entry_price,
-                        'current_price': current_price,
-                        'price_difference': price_difference,
-                        'difference_pips': abs(price_difference) * (10000 if current_price < 100 else 1),
-                        'violation_type': 'price_above_current',
-                        'description': f'The entry price {entry_price} is ABOVE the current BID price {current_price}. For a SELL_STOP order, the entry price MUST be BELOW the current market price.'
-                    }
-                    print(f"            🔄 INVALID SELL_STOP detected - Price is ABOVE current market (too close from above):")
-                    print(f"               - Entry price: {entry_price}")
-                    print(f"               - Current BID price: {current_price}")
-                    print(f"               - Distance: {abs(entry_price - current_price):.5f} ({abs(entry_price - current_price) * 10000:.1f} pips above)")
-                    print(f"            🔄 Converting to INSTANT SELL at market price (current BID: {current_price})")
-                    return True, 'instant_sell', 'price_above_current', error_details
-                
-                # Case 2: Entry price is EQUAL to current price
-                elif entry_price == current_price:
-                    error_details = {
-                        'reason': f'SELL_STOP entry price is EQUAL to current market price',
-                        'entry_price': entry_price,
-                        'current_price': current_price,
-                        'violation_type': 'price_equal_current',
-                        'description': f'The entry price {entry_price} is EQUAL to the current BID price {current_price}. For a SELL_STOP order, the entry price MUST be BELOW the current market price.'
-                    }
-                    print(f"            🔄 INVALID SELL_STOP detected - Price is EQUAL to current market:")
-                    print(f"               - Entry price: {entry_price}")
-                    print(f"               - Current BID price: {current_price}")
-                    print(f"            🔄 Converting to INSTANT SELL at market price (current BID: {current_price})")
-                    return True, 'instant_sell', 'price_equal_current', error_details
-                
-                # Case 3: Entry price is BELOW current price but too close
-                elif entry_price < current_price:
-                    points_below = (current_price - entry_price) / symbol_info.point if symbol_info.point > 0 else 0
-                    if points_below < 10:  # Too close from below
-                        error_details = {
-                            'reason': f'SELL_STOP entry price is too close from below (only {points_below:.1f} points below)',
-                            'entry_price': entry_price,
-                            'current_price': current_price,
-                            'points_below': points_below,
-                            'minimum_points': 10,
-                            'violation_type': 'too_close_from_below',
-                            'description': f'The entry price {entry_price} is only {points_below:.1f} points BELOW the current BID price {current_price}. Minimum distance required is 10 points.'
-                        }
-                        print(f"            ⚠️  SELL_STOP too close from below detected:")
-                        print(f"               - Entry price: {entry_price}")
-                        print(f"               - Current BID price: {current_price}")
-                        print(f"               - Distance: {points_below:.1f} points below (minimum required: 10 points)")
-                        print(f"            🔄 Converting to INSTANT SELL at market price")
-                        
-                        # Check stop loss condition
-                        if exit_price and exit_price > 0 and current_price >= exit_price:
-                            print(f"             CANNOT CONVERT: Current BID price ({current_price}) is NOT below SL ({exit_price})")
-                            return False, None, 'current_price_not_below_sl', {
-                                'reason': f'Current BID price ({current_price}) is not below stop loss ({exit_price})'
-                            }
-                        
-                        return True, 'instant_sell', 'too_close_from_below', error_details
-                    else:
-                        # Valid SELL_STOP - no conversion needed
-                        return False, None, None, None
-            
-            return False, None, None, None
-        
-        # --- SUB-FUNCTION: VALIDATE ORDER PRICE BEFORE SENDING ---
-        def validate_order_price(order_type, entry_price, current_ask, current_bid, symbol_info, tick):
-            """
-            Comprehensive pre-validation of order price with clear word-based messages.
-            Returns (is_valid, error_message, details_dict)
-            """
-            order_type_lower = order_type.lower()
-            
-            # Get point value for precise calculations
-            point = symbol_info.point
-            digits = symbol_info.digits
-            
-            # For market orders, no price validation needed beyond tick availability
-            if order_type_lower in ['instant_buy', 'instant_sell']:
-                if order_type_lower == 'instant_buy' and (current_ask is None or current_ask <= 0):
-                    return False, "No valid ASK price available for market buy", {'current_ask': current_ask}
-                if order_type_lower == 'instant_sell' and (current_bid is None or current_bid <= 0):
-                    return False, "No valid BID price available for market sell", {'current_bid': current_bid}
-                return True, None, None
-            
-            # Validate pending order prices
-            if order_type_lower == 'buy_stop':
-                points_above = (entry_price - current_ask) / point if point > 0 else 0
-                
-                if entry_price < current_ask:
-                    return False, f"BUY_STOP entry price is BELOW current ASK price", {
-                        'entry': entry_price,
-                        'current': current_ask,
-                        'difference': entry_price - current_ask,
-                        'difference_points': points_above,
-                        'violation_type': 'price_below_current',
-                        'description': f'The entry price {entry_price} is BELOW the current ASK price {current_ask}'
-                    }
-                elif entry_price == current_ask:
-                    return False, f"BUY_STOP entry price is EQUAL to current ASK price", {
-                        'entry': entry_price,
-                        'current': current_ask,
-                        'violation_type': 'price_equal_current',
-                        'description': f'The entry price {entry_price} is EQUAL to the current ASK price {current_ask}'
-                    }
-                elif points_above < 10:
-                    return False, f"BUY_STOP entry price is too close from above (only {points_above:.1f} points above current ASK)", {
-                        'entry': entry_price,
-                        'current': current_ask,
-                        'points_above': points_above,
-                        'minimum_points': 10,
-                        'violation_type': 'too_close_from_above',
-                        'description': f'The entry price is only {points_above:.1f} points ABOVE the current ASK price. Minimum distance is 10 points.'
-                    }
-                    
-            elif order_type_lower == 'sell_stop':
-                points_below = (current_bid - entry_price) / point if point > 0 else 0
-                
-                if entry_price > current_bid:
-                    return False, f"SELL_STOP entry price is ABOVE current BID price", {
-                        'entry': entry_price,
-                        'current': current_bid,
-                        'difference': entry_price - current_bid,
-                        'difference_points': points_below,
-                        'violation_type': 'price_above_current',
-                        'description': f'The entry price {entry_price} is ABOVE the current BID price {current_bid}'
-                    }
-                elif entry_price == current_bid:
-                    return False, f"SELL_STOP entry price is EQUAL to current BID price", {
-                        'entry': entry_price,
-                        'current': current_bid,
-                        'violation_type': 'price_equal_current',
-                        'description': f'The entry price {entry_price} is EQUAL to the current BID price {current_bid}'
-                    }
-                elif points_below < 10:
-                    return False, f"SELL_STOP entry price is too close from below (only {points_below:.1f} points below current BID)", {
-                        'entry': entry_price,
-                        'current': current_bid,
-                        'points_below': points_below,
-                        'minimum_points': 10,
-                        'violation_type': 'too_close_from_below',
-                        'description': f'The entry price is only {points_below:.1f} points BELOW the current BID price. Minimum distance is 10 points.'
-                    }
-            
-            elif order_type_lower == 'buy_limit':
-                points_below = (current_ask - entry_price) / point if point > 0 else 0
-                
-                if entry_price > current_ask:
-                    return False, f"BUY_LIMIT entry price is ABOVE current ASK price", {
-                        'entry': entry_price,
-                        'current': current_ask,
-                        'violation_type': 'price_above_current',
-                        'description': f'The entry price {entry_price} is ABOVE the current ASK price {current_ask}'
-                    }
-                elif entry_price == current_ask:
-                    return False, f"BUY_LIMIT entry price is EQUAL to current ASK price", {
-                        'entry': entry_price,
-                        'current': current_ask,
-                        'violation_type': 'price_equal_current',
-                        'description': f'The entry price {entry_price} is EQUAL to the current ASK price {current_ask}'
-                    }
-                elif points_below < 10:
-                    return False, f"BUY_LIMIT entry price is too close from above (only {points_below:.1f} points below current ASK)", {
-                        'entry': entry_price,
-                        'current': current_ask,
-                        'points_below': points_below,
-                        'minimum_points': 10,
-                        'violation_type': 'too_close_from_above',
-                        'description': f'The entry price is only {points_below:.1f} points BELOW the current ASK price. Minimum distance is 10 points.'
-                    }
-            
-            elif order_type_lower == 'sell_limit':
-                points_above = (entry_price - current_bid) / point if point > 0 else 0
-                
-                if entry_price < current_bid:
-                    return False, f"SELL_LIMIT entry price is BELOW current BID price", {
-                        'entry': entry_price,
-                        'current': current_bid,
-                        'violation_type': 'price_below_current',
-                        'description': f'The entry price {entry_price} is BELOW the current BID price {current_bid}'
-                    }
-                elif entry_price == current_bid:
-                    return False, f"SELL_LIMIT entry price is EQUAL to current BID price", {
-                        'entry': entry_price,
-                        'current': current_bid,
-                        'violation_type': 'price_equal_current',
-                        'description': f'The entry price {entry_price} is EQUAL to the current BID price {current_bid}'
-                    }
-                elif points_above < 10:
-                    return False, f"SELL_LIMIT entry price is too close from below (only {points_above:.1f} points above current BID)", {
-                        'entry': entry_price,
-                        'current': current_bid,
-                        'points_above': points_above,
-                        'minimum_points': 10,
-                        'violation_type': 'too_close_from_below',
-                        'description': f'The entry price is only {points_above:.1f} points ABOVE the current BID price. Minimum distance is 10 points.'
-                    }
-            
-            return True, None, None
-        
         symbol = order_data.get('symbol')
         order_type = order_data.get('order_type', '').lower()
         entry_price = float(order_data.get('entry', 0))
@@ -13613,7 +12611,7 @@ def place_usd_orders(inv_id=None):
             
             return False, None, error_msg, None
         
-        # Get current market prices for validation
+        # Get current market prices for reference
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
             error_msg = f"Cannot get tick for {symbol}"
@@ -13628,71 +12626,7 @@ def place_usd_orders(inv_id=None):
         current_ask = tick.ask
         current_bid = tick.bid
         
-        # --- CHECK AND HANDLE INVALID PRICE CONVERSION (with enhanced logic) ---
-        original_order_type = order_type
-        
-        # Get the appropriate current price based on order type
-        current_price_for_conversion = current_ask if order_type == 'buy_stop' else current_bid
-        opposite_price = current_bid if order_type == 'buy_stop' else current_ask
-        
-        should_convert, instant_type, conversion_reason, conversion_error_details = should_convert_to_instant(
-            order_type, 
-            current_price_for_conversion, 
-            entry_price,
-            exit_price,
-            opposite_price
-        )
-        
-        if should_convert:
-            # Check stop loss condition before converting
-            if order_type == 'buy_stop' and exit_price and exit_price > 0:
-                if current_ask <= exit_price:
-                    print(f"             INSTANT BUY CONVERSION REJECTED: Current ASK ({current_ask}) is not above SL ({exit_price})")
-                    print(f"               - Would violate stop loss protection")
-                    if timeframe and current_candle_time:
-                        remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-                    return False, None, f"Conversion blocked: current price not above stop loss", None
-            
-            elif order_type == 'sell_stop' and exit_price and exit_price > 0:
-                if current_bid >= exit_price:
-                    print(f"             INSTANT SELL CONVERSION REJECTED: Current BID ({current_bid}) is not below SL ({exit_price})")
-                    print(f"               - Would violate stop loss protection")
-                    if timeframe and current_candle_time:
-                        remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-                    return False, None, f"Conversion blocked: current price not below stop loss", None
-            
-            # Convert to instant market order
-            order_type = instant_type
-            print(f"            ✅ Converted {original_order_type.upper()} to {instant_type.upper()}")
-            print(f"               Original entry: {entry_price} | Current price: {current_ask if 'buy' in instant_type else current_bid}")
-            if conversion_error_details:
-                print(f"               Conversion reason: {conversion_error_details.get('reason', conversion_reason)}")
-                if 'description' in conversion_error_details:
-                    print(f"               {conversion_error_details['description']}")
-        
-        # --- PRE-VALIDATION: Check if price is valid BEFORE sending to MT5 ---
-        print(f"        🔍 Pre-validating {order_type.upper()} order...")
-        is_valid, validation_error, validation_details = validate_order_price(
-            order_type, entry_price, current_ask, current_bid, symbol_info, tick
-        )
-        
-        if not is_valid and not should_convert:
-            print(f"         PRICE VALIDATION FAILED: {validation_error}")
-            if validation_details:
-                print(f"           Details:")
-                for key, value in validation_details.items():
-                    if key != 'description':
-                        print(f"             - {key}: {value}")
-                if 'description' in validation_details:
-                    print(f"           {validation_details['description']}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to validation failure...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, validation_error, None
-        
-        print(f"        ✅ Price validation passed")
+        print(f"        📊 {order_type.upper()} order: Entry={entry_price}, Current ASK={current_ask}, Current BID={current_bid}")
         
         # Round values to symbol digits
         entry_price = round(entry_price, symbol_info.digits)
@@ -13713,7 +12647,6 @@ def place_usd_orders(inv_id=None):
             return False, None, error_msg, None
         
         # Generate cache key (includes exact symbol with suffix)
-        # Generate cache key (includes exact symbol with suffix)
         cache_key = f"{symbol}_{mt5_order_type}_{entry_price}_{volume}"
         
         # Check per-order cache
@@ -13722,7 +12655,7 @@ def place_usd_orders(inv_id=None):
             print(f"        ⏭️  SKIP - {error_msg}")
             return False, None, error_msg, cache_key
         
-        # ========== ADD THIS NEW RISK MANAGEMENT CHECK ==========
+        # ========== RISK MANAGEMENT CHECK ==========
         # Get current pending orders from MT5
         current_pending = mt5.orders_get() or []
         
@@ -13737,7 +12670,7 @@ def place_usd_orders(inv_id=None):
             
             if timeframe and current_candle_time:
                 remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), 
-                                         timeframe, current_candle_time)
+                                        timeframe, current_candle_time)
             
             return False, None, error_msg, cache_key
         elif risk_info.get('cancelled_count', 0) > 0:
@@ -13788,7 +12721,7 @@ def place_usd_orders(inv_id=None):
                 request_template["tp"] = target_price
                 
         else:
-            # Pending order
+            # Pending order - place exactly as specified
             request_template = {
                 "symbol": symbol,
                 "volume": volume,
@@ -13825,36 +12758,6 @@ def place_usd_orders(inv_id=None):
             error_msg = f"Order failed: {result.comment} (code: {result.retcode})"
             print(f"         {error_msg}")
             
-            # If we get an MT5 error, add context with word-based descriptions
-            if result.retcode == 10015:  # Invalid price
-                print(f"         💡 Detailed analysis of MT5 error 10015 (Invalid price):")
-                print(f"            - Order type: {order_type.upper()}")
-                print(f"            - Entry price: {entry_price}")
-                print(f"            - Current ASK price: {current_ask}")
-                print(f"            - Current BID price: {current_bid}")
-                
-                if order_type == 'buy_stop':
-                    if entry_price <= current_ask:
-                        print(f"             PROBLEM: Entry price is NOT ABOVE current ASK price")
-                        print(f"               - Current situation: Entry price is {entry_price} which is {'BELOW' if entry_price < current_ask else 'EQUAL TO'} current ASK {current_ask}")
-                        print(f"               - Required: Entry price MUST be ABOVE current ASK price")
-                    else:
-                        points_above = (entry_price - current_ask) / symbol_info.point if symbol_info.point > 0 else 0
-                        print(f"             PROBLEM: Entry price is too close from above")
-                        print(f"               - Distance: {points_above:.1f} points above current ASK")
-                        print(f"               - Required: At least 10 points distance")
-                
-                elif order_type == 'sell_stop':
-                    if entry_price >= current_bid:
-                        print(f"             PROBLEM: Entry price is NOT BELOW current BID price")
-                        print(f"               - Current situation: Entry price is {entry_price} which is {'ABOVE' if entry_price > current_bid else 'EQUAL TO'} current BID {current_bid}")
-                        print(f"               - Required: Entry price MUST be BELOW current BID price")
-                    else:
-                        points_below = (current_bid - entry_price) / symbol_info.point if symbol_info.point > 0 else 0
-                        print(f"             PROBLEM: Entry price is too close from below")
-                        print(f"               - Distance: {points_below:.1f} points below current BID")
-                        print(f"               - Required: At least 10 points distance")
-            
             if timeframe and current_candle_time:
                 print(f"        🗑️ Removing candle time record due to order placement failure...")
                 remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
@@ -13868,16 +12771,6 @@ def place_usd_orders(inv_id=None):
         for key, value in order_data.items():
             if not key.startswith('_'):  # Skip internal fields
                 trade_record[key] = value
-        
-        # Add conversion info if applicable
-        if should_convert:
-            trade_record['converted_from'] = original_order_type
-            trade_record['converted_to'] = order_type
-            trade_record['conversion_reason'] = conversion_reason
-            trade_record['original_entry_price'] = entry_price
-            trade_record['converted_at_price'] = current_ask if 'buy' in order_type else current_bid
-            if conversion_error_details:
-                trade_record['conversion_error_details'] = conversion_error_details
         
         # Add filling mode info
         if used_filling_mode:
@@ -13909,9 +12802,8 @@ def place_usd_orders(inv_id=None):
         # Save to history
         syncing_orders_and_pnl_details(investor_root, trade_record, original_signal)
         
-        conversion_msg = f" [CONVERTED from {original_order_type.upper()}]" if should_convert else ""
         hedge_msg = " 🛡️[HEDGE]" if is_hedge else ""
-        print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Strategy: {strategy_name}]{conversion_msg}{hedge_msg}")
+        print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Strategy: {strategy_name}]{hedge_msg}")
         return True, result, None, cache_key
 
     # --- NEW SUB-FUNCTION 15: PROCESS HEDGE ORDS (NO UNIQUENESS RULES) ---
@@ -14181,7 +13073,7 @@ def place_usd_orders(inv_id=None):
             
             # STEP 4: Take initial snapshot of current pending orders and positions (BEFORE sync)
             print(f"\n  📸 Taking initial snapshot of current orders/positions...")
-            snapshot_success, snapshot_stats = current_pendingorders_and_positions(investor_root)
+            snapshot_success, snapshot_stats = update_orders_status_in_tradeshistory(investor_root)
             
             # STEP 5: Sync existing tradeshistory.json (to get current status and assign position IDs)
             print(f"\n  🔄 Syncing tradeshistory.json with MT5 (checking all orders/positions)...")
@@ -14305,15 +13197,10 @@ def place_usd_orders(inv_id=None):
             hedge_placed = sum(1 for s in hedge_signals if s.get('_placed', False))
             global_stats['total_hedge_orders_placed'] += hedge_placed
             global_stats['total_hedge_orders_failed'] += len(hedge_signals) - hedge_placed
-            
-            # STEP 13: Regulate orders (cancel unauthorized)
-            print(f"\n  🧹 Running order regulation...")
-            cancelled_count = regulate_orders(investor_root, authorized_keys)
-            global_stats['total_orders_cancelled_regulation'] += cancelled_count
-            
+          
             # STEP 14: Take final snapshot of current pending orders and positions (AFTER placement and regulation)
             print(f"\n  📸 Taking final snapshot of current orders/positions...")
-            final_snapshot_success, final_snapshot_stats = current_pendingorders_and_positions(investor_root)
+            final_snapshot_success, final_snapshot_stats = update_orders_status_in_tradeshistory(investor_root)
             
             # STEP 15: Final sync to capture any changes from regulation (ONLY position details, NO status changes)
             print(f"\n  🔄 Final sync to capture position details...")
@@ -14323,30 +13210,13 @@ def place_usd_orders(inv_id=None):
                 print(f"  📊 Final status: {final_stats.get('running_positions', 0)} running positions, "
                     f"{final_stats.get('pending_orders', 0)} pending orders")
             
-            # Print investor summary
-            print(f"\n  📊 INVESTOR SUMMARY:")
-            print(f"     • Total signals found: {len(all_signals)} (Hedge: {len(hedge_signals)}, Regular: {len(regular_signals)})")
-            print(f"     • Orders placed: {investor_stats['orders_placed']}")
-            print(f"     • Orders failed: {investor_stats['orders_failed']}")
-            print(f"     • Fallback orders used (regular): {investor_stats['fallback_used']}")
-            print(f"     • Records removed (failed signals): {investor_stats['records_removed']}")
-            if skip_proximity_check:
-                print(f"     • Proximity check: DISABLED")
-            else:
-                print(f"     • Proximity check: ENABLED")
-            print(f"     • Cancelled (regulation): {cancelled_count}")
-            if suffix_retries > 0:
-                print(f"     • Suffix retries successful: {suffix_retries}")
-            if final_stats:
-                print(f"     • Running positions: {final_stats.get('running_positions', 0)}")
-                print(f"     • Pending orders: {final_stats.get('pending_orders', 0)}")
             
             if investor_stats['orders_placed'] > 0:
                 any_orders_placed = True
         return any_orders_placed
     main()
 
-def current_pendingorders_and_positions(inv_id=None):
+def update_orders_status_in_tradeshistory(inv_id=None):
     """
     Checks MT5 for current pending orders and open positions.
     Records them in tradeshistory.json as a "current_orders" entry within the array.
@@ -16061,130 +14931,6 @@ def apply_dynamic_breakeven(inv_id=None):
 
 
 # real accounts 
-def process_single_investor(inv_folder):
-    """
-    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Sequential execution without console output.
-    """
-    global restricted_timerange_alert
-    
-    inv_id = inv_folder.name
-    
-    account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
-        "price_collection_stats": {},
-        "candle_fetch_stats": {},
-        "crosser_analysis_stats": {},
-        "trapped_analysis_stats": {},
-        "liquidator_analysis_stats": {},
-        "ranging_analysis_stats": {},
-        "order_placement_stats": {},
-        "risk_correction_stats": {},
-        "risk_audit_stats": {},
-        "symbols_filtered": 0,
-        "orders_filtered": 0,
-        "symbols_processed": 0,
-        "symbols_successful": 0,
-        "orders_placed": 0,
-        "counter_orders_placed": 0,
-        "total_active_orders": 0,
-        "orders_adjusted": 0,
-        "orders_removed": 0,
-        "current_candle_forming": False,
-        "bid_wins": 0,
-        "ask_wins": 0,
-        "trapped_candles_found": 0,
-        "symbols_with_trapped": 0,
-        "symbols_with_liquidator": 0,
-        "liquidator_candles_found": 0,
-        "bullish_liquidators": 0,
-        "bearish_liquidators": 0,
-        "symbols_ranging": 0,
-        "avg_ranging_cycles": 0,
-        "spread_check_skipped": False,
-        "spread_warning_details": None,
-        "restricted_timerange_purge": False,
-        "execution_skipped": False,
-        "skip_reason": None
-    }
-    
-    broker_cfg = usersdictionary.get(inv_id)
-    if not broker_cfg:
-        return account_stats
-
-    import random
-    import time
-    time.sleep(random.uniform(0.1, 2.0)) 
-    
-    login_id = int(broker_cfg['LOGIN_ID'])
-    mt5_path = broker_cfg["TERMINAL_PATH"]
-
-    try:
-        if not mt5.initialize(path=mt5_path, timeout=180000):
-            return account_stats
-
-        acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                mt5.shutdown()
-                return account_stats
-        
-        # =====================================================================
-        # STEP 1: CHECK FOR RESTRICTED TIME RANGE PURGE
-        # =====================================================================
-        print(f"🔍 [{inv_id}] Checking restricted time range status...")
-        
-        # Run the restricted timerange check first
-        timerange_result = disable_orders_in_restricted_timerange(inv_id=inv_id)
-        
-        # Check if purge was triggered
-        if restricted_timerange_alert and restricted_timerange_alert.get('is_triggered', False):
-            print(f"⚠️ [{inv_id}] RESTRICTED TIME RANGE PURGE EXECUTED - Skipping main trading functions")
-            account_stats["restricted_timerange_purge"] = True
-            account_stats["execution_skipped"] = True
-            account_stats["skip_reason"] = f"Time range purge executed at {restricted_timerange_alert.get('timestamp', 'unknown')}"
-            account_stats["success"] = True  # Mark as success since purge was handled
-            account_stats["orders_removed"] = restricted_timerange_alert.get('total_orders_deleted', 0)
-            account_stats["positions_closed"] = restricted_timerange_alert.get('total_positions_closed', 0)
-            
-            # Only run essential cleanup functions
-            delete_all_orders_and_positions
-
-            
-            mt5.shutdown()
-            return account_stats
-        
-        # If no purge was triggered, proceed with normal operations
-        print(f"✅ [{inv_id}] No restricted timerange purge - proceeding with normal operations")
-        
-        # =====================================================================
-        # STEP 2: QUICK SPREAD CHECK (LIGHT VERSION THAT SAVES DATA)
-        # =====================================================================
-        print(f"🔍 [{inv_id}] Running quick spread check...")
-        
-        #is_wide, spread_details, saved = symbol_spread_alert(inv_id=inv_id)
-        move_verified_investors()
-        update_verified_investors_file()
-        get_requirements(inv_id=inv_id)
-        
-        
-    
-        mt5.shutdown()
-        account_stats["success"] = True
-        account_stats["spread_check_skipped"] = False
-        account_stats["spread_warning_details"] = None
-        account_stats["restricted_timerange_purge"] = False
-        account_stats["execution_skipped"] = False
-        
-    except Exception as e:
-        try:
-            mt5.shutdown()
-        except:
-            pass
-    
-    return account_stats
-
 def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
@@ -16260,7 +15006,104 @@ def process_single_invest(inv_folder):
         print(f"🔍 [{inv_id}] Checking restricted time range status...")
         
         # Run the restricted timerange check first
-        timerange_result = disable_orders_in_restricted_timerange(inv_id=inv_id)
+        
+        timerange_result = restricted_timerange(inv_id=inv_id)
+        
+        # Check if purge was triggered
+        if restricted_timerange_alert and restricted_timerange_alert.get('is_triggered', False):
+           delete_all_orders_and_positions(inv_id=inv_id)
+    
+        mt5.shutdown()
+        account_stats["success"] = True
+        account_stats["spread_check_skipped"] = False
+        account_stats["spread_warning_details"] = None
+        account_stats["restricted_timerange_purge"] = False
+        account_stats["execution_skipped"] = False
+        
+    except Exception as e:
+        try:
+            mt5.shutdown()
+        except:
+            pass
+    
+    return account_stats
+
+def process_single_investor(inv_folder):
+    """
+    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
+    Sequential execution without console output.
+    """
+    global restricted_timerange_alert
+    
+    inv_id = inv_folder.name
+    
+    account_stats = {
+        "inv_id": inv_id, 
+        "success": False, 
+        "price_collection_stats": {},
+        "candle_fetch_stats": {},
+        "crosser_analysis_stats": {},
+        "trapped_analysis_stats": {},
+        "liquidator_analysis_stats": {},
+        "ranging_analysis_stats": {},
+        "order_placement_stats": {},
+        "risk_correction_stats": {},
+        "risk_audit_stats": {},
+        "symbols_filtered": 0,
+        "orders_filtered": 0,
+        "symbols_processed": 0,
+        "symbols_successful": 0,
+        "orders_placed": 0,
+        "counter_orders_placed": 0,
+        "total_active_orders": 0,
+        "orders_adjusted": 0,
+        "orders_removed": 0,
+        "current_candle_forming": False,
+        "bid_wins": 0,
+        "ask_wins": 0,
+        "trapped_candles_found": 0,
+        "symbols_with_trapped": 0,
+        "symbols_with_liquidator": 0,
+        "liquidator_candles_found": 0,
+        "bullish_liquidators": 0,
+        "bearish_liquidators": 0,
+        "symbols_ranging": 0,
+        "avg_ranging_cycles": 0,
+        "spread_check_skipped": False,
+        "spread_warning_details": None,
+        "restricted_timerange_purge": False,
+        "execution_skipped": False,
+        "skip_reason": None
+    }
+    
+    broker_cfg = usersdictionary.get(inv_id)
+    if not broker_cfg:
+        return account_stats
+
+    import random
+    import time
+    time.sleep(random.uniform(0.1, 2.0)) 
+    
+    login_id = int(broker_cfg['LOGIN_ID'])
+    mt5_path = broker_cfg["TERMINAL_PATH"]
+
+    try:
+        if not mt5.initialize(path=mt5_path, timeout=180000):
+            return account_stats
+
+        acc = mt5.account_info()
+        if acc is None or acc.login != login_id:
+            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
+                mt5.shutdown()
+                return account_stats
+        
+        # =====================================================================
+        # STEP 1: CHECK FOR RESTRICTED TIME RANGE PURGE
+        # =====================================================================
+        print(f"🔍 [{inv_id}] Checking restricted time range status...")
+        
+        # Run the restricted timerange check first
+        timerange_result = restricted_timerange(inv_id=inv_id)
         
         # Check if purge was triggered
         if restricted_timerange_alert and restricted_timerange_alert.get('is_triggered', False):
@@ -16313,6 +15156,7 @@ def process_single_invest(inv_folder):
         apply_default_prices(inv_id=inv_id)
         martingale(inv_id=inv_id)
         place_usd_orders(inv_id=inv_id)
+        close_unauthorized_orders(inv_id=inv_id)
         orders_reward_correction(inv_id=inv_id)
         check_pending_orders_risk(inv_id=inv_id)
         history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
