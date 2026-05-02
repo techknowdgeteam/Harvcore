@@ -2074,6 +2074,220 @@ def update_investor_info(inv_id=None):
 #---         ----           --#
 
 #    safety checks  #
+def investor_broker_symbols(inv_id=None):
+    """
+    Display and compare broker symbols with investor's configured symbols.
+    Helps identify symbol naming mismatches.
+    
+    Parameters:
+    - inv_id: Optional investor ID to compare against their config
+    
+    Returns:
+    - dict: Broker symbols info and comparison results
+    """
+    
+    print(f"\n{'='*80}")
+    print(f"🔍 BROKER SYMBOLS DIAGNOSTIC TOOL")
+    print(f"{'='*80}\n")
+    
+    result = {
+        'broker_symbols': [],
+        'broker_symbols_lower': [],
+        'investor_symbols': [],
+        'matches': [],
+        'close_matches': [],
+        'suggestions': []
+    }
+    
+    # Get all symbols from MT5
+    if not mt5.terminal_info():
+        print("❌ MT5 is not initialized or not logged in!")
+        print("   Make sure MT5 is connected first (call initialize() and login())")
+        return result
+    
+    symbols = mt5.symbols_get()
+    if not symbols:
+        print(f"❌ Failed to retrieve symbols: {mt5.last_error()}")
+        return result
+    
+    # Extract symbol names
+    broker_symbols = [s.name for s in symbols]
+    broker_symbols_lower = [s.lower() for s in broker_symbols]
+    result['broker_symbols'] = broker_symbols
+    result['broker_symbols_lower'] = broker_symbols_lower
+    
+    print(f"✅ Retrieved {len(broker_symbols)} symbols from broker\n")
+    
+    # Show sample of broker symbols (first 20)
+    print(f"📋 BROKER SYMBOLS SAMPLE (first 20):")
+    for i, sym in enumerate(broker_symbols[:20], 1):
+        print(f"   {i:3d}. {sym}")
+    
+    if len(broker_symbols) > 20:
+        print(f"   ... and {len(broker_symbols) - 20} more\n")
+    else:
+        print()
+    
+    # Search for volatility-related symbols
+    print(f"🔎 SEARCHING FOR VOLATILITY-RELATED SYMBOLS:")
+    volatility_symbols = [s for s in broker_symbols if 'vol' in s.lower()]
+    
+    if volatility_symbols:
+        for sym in volatility_symbols:
+            print(f"   ✓ {sym}")
+    else:
+        print(f"   ❌ No volatility-related symbols found")
+    print()
+    
+    # If investor ID provided, compare against their symbols
+    if inv_id:
+        print(f"📊 COMPARING WITH INVESTOR '{inv_id}' CONFIGURATION:\n")
+        
+        # Load investor config
+        investor_users_path = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors\demo_investors.json"
+        
+        if os.path.exists(investor_users_path):
+            with open(investor_users_path, 'r', encoding='utf-8') as f:
+                investor_users = json.load(f)
+            
+            investor_cfg = investor_users.get(inv_id)
+            if investor_cfg:
+                # Get symbols from investor's accountmanagement.json
+                inv_path = r"C:\xampp\htdocs\harvcore\harvox\investors"
+                accountmanagement_path = os.path.join(inv_path, inv_id, "accountmanagement.json")
+                
+                if os.path.exists(accountmanagement_path):
+                    with open(accountmanagement_path, 'r', encoding='utf-8') as f:
+                        am_data = json.load(f)
+                    
+                    symbols_dict = am_data.get("symbols_dictionary", {})
+                    investor_symbols = []
+                    for category, symbol_list in symbols_dict.items():
+                        if isinstance(symbol_list, list):
+                            investor_symbols.extend(symbol_list)
+                        elif isinstance(symbol_list, str):
+                            investor_symbols.append(symbol_list)
+                    
+                    investor_symbols = list(set(investor_symbols))  # Remove duplicates
+                    result['investor_symbols'] = investor_symbols
+                    
+                    print(f"   Investor symbols from config ({len(investor_symbols)}):")
+                    for sym in investor_symbols:
+                        print(f"      • {sym}")
+                    print()
+                    
+                    # Find matches and close matches
+                    for inv_sym in investor_symbols:
+                        inv_sym_lower = inv_sym.lower()
+                        
+                        # Exact match (case-insensitive)
+                        if inv_sym_lower in broker_symbols_lower:
+                            exact_match = broker_symbols[broker_symbols_lower.index(inv_sym_lower)]
+                            result['matches'].append({
+                                'config': inv_sym,
+                                'broker': exact_match,
+                                'type': 'exact'
+                            })
+                            print(f"   ✅ EXACT MATCH: '{inv_sym}' → '{exact_match}'")
+                        
+                        # Close matches (containment or similarity)
+                        else:
+                            close_matches = []
+                            for broker_sym in broker_symbols:
+                                broker_lower = broker_sym.lower()
+                                
+                                # Check if config symbol is contained in broker symbol
+                                if inv_sym_lower in broker_lower:
+                                    close_matches.append(broker_sym)
+                                # Check if broker symbol is contained in config symbol
+                                elif broker_lower in inv_sym_lower:
+                                    close_matches.append(broker_sym)
+                                
+                                # Check word-by-word (for symbols with spaces)
+                                inv_words = set(inv_sym_lower.split())
+                                broker_words = set(broker_lower.split())
+                                if inv_words.intersection(broker_words) and len(inv_words) > 0:
+                                    if broker_sym not in close_matches:
+                                        close_matches.append(broker_sym)
+                            
+                            if close_matches:
+                                result['close_matches'].append({
+                                    'config': inv_sym,
+                                    'broker_matches': close_matches[:5]  # Limit to 5 suggestions
+                                })
+                                print(f"\n   🔍 CLOSE MATCHES for '{inv_sym}':")
+                                for match in close_matches[:5]:
+                                    print(f"      → {match}")
+                                
+                                # Generate suggestions
+                                suggestions = []
+                                for match in close_matches:
+                                    if '_' in match:
+                                        parts = match.split('_')
+                                        for part in parts:
+                                            if part.lower() in inv_sym_lower:
+                                                suggestions.append(match)
+                                                break
+                                    elif match.isalpha() and inv_sym_lower in match.lower():
+                                        suggestions.append(match)
+                                
+                                if suggestions:
+                                    result['suggestions'].append({
+                                        'config': inv_sym,
+                                        'suggested': suggestions[:3]
+                                    })
+                                    print(f"   💡 SUGGESTION: Try using '{suggestions[0]}' instead of '{inv_sym}'")
+                            else:
+                                print(f"   ❌ NO MATCH found for '{inv_sym}'")
+                    
+                    print()
+                    
+                    # Summary
+                    print(f"📈 SUMMARY:")
+                    print(f"   • Total broker symbols: {len(broker_symbols)}")
+                    print(f"   • Investor symbols: {len(investor_symbols)}")
+                    print(f"   • Exact matches: {len(result['matches'])}")
+                    print(f"   • Close matches: {len(result['close_matches'])}")
+                    
+                    if len(result['matches']) == 0 and len(result['close_matches']) == 0:
+                        print(f"\n   ⚠️  WARNING: No matches found at all!")
+                        print(f"   💡 Common issues:")
+                        print(f"      - Symbol name has spaces (MT5 usually uses underscores or no spaces)")
+                        print(f"      - Wrong symbol case (though MT5 is usually case-insensitive)")
+                        print(f"      - Symbol not available on this broker")
+                        print(f"      - Need to add suffix like '.m' for mini contracts or '.ecn'")
+                    
+                else:
+                    print(f"   ❌ accountmanagement.json not found for investor '{inv_id}'")
+            else:
+                print(f"   ❌ Investor '{inv_id}' not found in demo_investors.json")
+        else:
+            print(f"   ❌ demo_investors.json not found")
+    
+    # Save results to file for reference
+    output_dir = r"C:\xampp\htdocs\harvcore\harvox\cache"
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, f"broker_symbols_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    
+    # Remove large lists for JSON serialization
+    save_result = {
+        'timestamp': datetime.now().isoformat(),
+        'broker_symbols_count': len(result['broker_symbols']),
+        'broker_symbols_sample': result['broker_symbols'][:50],
+        'investor_symbols': result.get('investor_symbols', []),
+        'matches': result.get('matches', []),
+        'close_matches': result.get('close_matches', []),
+        'suggestions': result.get('suggestions', [])
+    }
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(save_result, f, indent=4)
+    
+    print(f"\n💾 Full symbol list saved to: {output_file}")
+    print(f"{'='*80}\n")
+    
+    return result
+
 def symbol_spread_alert(inv_id):
     """
     High-visibility monitor that identifies the exact timestamp a spread 
@@ -3132,29 +3346,46 @@ def fetch_ohlc_data_for_investor(inv_id):
         
         # Step 8: MT5 is already initialized and logged in by process_single_investor
         print(f"  ✅ Using existing MT5 connection (initialized by process_single_investor)")
-        
-        # Step 9: Validate symbols against MT5 availability
+
+        # Step 9: Validate symbols against MT5 availability (CASE-INSENSITIVE FIX)
         mt5_symbols, _ = get_symbols_from_mt5()
-        valid_symbols = [sym for sym in symbol_list if sym in mt5_symbols]
+        mt5_symbols_lower_map = {s.lower(): s for s in mt5_symbols}  # Create lookup map
+
+        valid_symbols = []
+        case_corrected_count = 0
+        for sym in symbol_list:
+            sym_lower = sym.lower()
+            if sym_lower in mt5_symbols_lower_map:
+                correct_symbol = mt5_symbols_lower_map[sym_lower]
+                valid_symbols.append(correct_symbol)
+                if sym != correct_symbol:
+                    case_corrected_count += 1
+                    print(f"  🔧 Investor {inv_id} | Case corrected: '{sym}' → '{correct_symbol}'")
+            else:
+                print(f"  ⚠️  Investor {inv_id} | Symbol '{sym}' not found in MT5")
+
         invalid_count = len(symbol_list) - len(valid_symbols)
-        
+
+        if case_corrected_count > 0:
+            print(f"  ✅ Investor {inv_id} | Case-corrected {case_corrected_count} symbol(s)")
+
         if invalid_count > 0:
             print(f"  ⚠️  Investor {inv_id} | {len(valid_symbols)} valid / {len(symbol_list)} total symbols ({invalid_count} invalid)")
-        
+
         if not valid_symbols:
             print(f"  ⚠️  Investor {inv_id} | No valid symbols to process")
             result['errors'].append("No valid symbols found on MT5")
             return result
-        
+
         # Step 10: Process the symbols
         processed_count = process_account_worker(
             inv_id, 
-            valid_symbols, 
+            valid_symbols,  # Now contains exact broker symbols like "Volatility 75 Index"
             investor_timeframe_map, 
             bars, 
             base_output_dir
         )
-        
+                
         result['symbols_processed'] = processed_count
         result['success'] = processed_count > 0
         
@@ -7172,8 +7403,23 @@ def populate_orders_missing_fields(inv_id=None, callback_function=None):
                         symbol_info = res['info']
                     else:
                         # Perform mapping only once
+                        # Perform mapping only once
                         broker_symbol = get_normalized_symbol(raw_symbol)
+
+                        # CASE-INSENSITIVE FIX: Try to find the symbol with correct case
                         symbol_info = mt5.symbol_info(broker_symbol)
+                        if symbol_info is None and broker_symbol:
+                            # Try case-insensitive lookup
+                            all_symbols = mt5.symbols_get()
+                            if all_symbols:
+                                symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+                                symbol_lower = broker_symbol.lower()
+                                if symbol_lower in symbols_lower_map:
+                                    correct_symbol = symbols_lower_map[symbol_lower]
+                                    if correct_symbol != broker_symbol:
+                                        print(f"    └─ 🔧 Case correction: '{broker_symbol}' → '{correct_symbol}'")
+                                        broker_symbol = correct_symbol
+                                        symbol_info = mt5.symbol_info(broker_symbol)
                         
                         resolution_cache[raw_symbol] = {'broker_sym': broker_symbol, 'info': symbol_info}
                         
@@ -11443,7 +11689,12 @@ def place_usd_orders(inv_id=None):
             # Track next position ID
             position_counter = 1
             # Filter out non-dict entries and current_orders snapshots
-            valid_trades = [t for t in history if isinstance(t, dict) and 'current_orders' not in t]
+            # FIX: Only process dictionary items, skip strings or other types
+            valid_trades = []
+            for t in history:
+                if isinstance(t, dict) and 'current_orders' not in t:
+                    valid_trades.append(t)
+            
             existing_position_ids = [t.get('position_id') for t in valid_trades if t.get('position_id')]
             if existing_position_ids:
                 max_id = 0
@@ -11458,7 +11709,7 @@ def place_usd_orders(inv_id=None):
             
             # ========== Add new trade if provided ==========
             if new_trade:
-                existing_ticket = any(t.get('ticket') == new_trade.get('ticket') for t in valid_trades)
+                existing_ticket = any(t.get('ticket') == new_trade.get('ticket') for t in valid_trades if isinstance(t, dict))
                 if not existing_ticket:
                     # Preserve ALL original signal fields
                     complete_trade_record = new_trade.copy()
@@ -11540,10 +11791,14 @@ def place_usd_orders(inv_id=None):
                     deals_by_position[deal.position_id].append(deal)
             
             # ========== Update existing records (position details, IDs, P&L - NO STATUS CHANGES) ==========
-            updated_count = 0            
+            updated_count = 0
+                
+            # FIX: Only iterate through items that are dictionaries
             for idx, trade in enumerate(history):
-                # Skip the current_orders snapshot entry
-                if isinstance(trade, dict) and 'current_orders' in trade:
+                # Skip non-dictionary entries (like strings) and current_orders snapshots
+                if not isinstance(trade, dict):
+                    continue
+                if 'current_orders' in trade:
                     continue
                     
                 ticket = trade.get('ticket')
@@ -11724,15 +11979,30 @@ def place_usd_orders(inv_id=None):
     # --- SUB-FUNCTION 11: CHECK IF SYMBOL IS TRADEABLE ---
     def is_symbol_tradeable(symbol):
         """
-        Check if a symbol exists AND trading is enabled.
+        Check if a symbol exists AND trading is enabled (CASE-INSENSITIVE).
         Returns True if tradeable, False otherwise.
         """
-        # Check if symbol exists
+        # First try direct lookup (case-sensitive)
         symbol_info = mt5.symbol_info(symbol)
+        
+        # If direct lookup fails, try case-insensitive lookup
         if symbol_info is None:
-            # Try to select it
-            if mt5.symbol_select(symbol, True):
-                symbol_info = mt5.symbol_info(symbol)
+            # Get all symbols from MT5
+            all_symbols = mt5.symbols_get()
+            if all_symbols:
+                # Create case-insensitive mapping
+                symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+                symbol_lower = symbol.lower()
+                
+                if symbol_lower in symbols_lower_map:
+                    correct_symbol = symbols_lower_map[symbol_lower]
+                    if correct_symbol != symbol:
+                        print(f"          🔧 Case correction: '{symbol}' → '{correct_symbol}'")
+                    symbol_info = mt5.symbol_info(correct_symbol)
+                    
+                    # Also try to select the correct symbol
+                    if symbol_info:
+                        mt5.symbol_select(correct_symbol, True)
         
         if symbol_info is None:
             return False
@@ -11746,7 +12016,7 @@ def place_usd_orders(inv_id=None):
             return False
         
         # Check if we can get a valid tick
-        tick = mt5.symbol_info_tick(symbol)
+        tick = mt5.symbol_info_tick(symbol_info.name)  # Use the correct symbol name
         if tick is None or (tick.ask == 0 and tick.bid == 0):
             return False
         
@@ -11756,15 +12026,16 @@ def place_usd_orders(inv_id=None):
     def find_tradeable_symbol_with_retry(base_symbol, resolution_cache):
         """
         Try ALL suffixes one after another until a tradeable symbol is found.
+        Now with CASE-INSENSITIVE matching.
         Returns (tradeable_symbol, used_suffix) or (None, None) if none found.
         """
         # Check cache first
-        cache_key = f"tradeable_{base_symbol}"
+        cache_key = f"tradeable_{base_symbol.lower()}"  # Use lowercase for cache key
         if cache_key in resolution_cache:
             cached_result = resolution_cache[cache_key]
             if cached_result is None:
                 return None, None
-            return cached_result, resolution_cache.get(f"suffix_{base_symbol}", "")
+            return cached_result, resolution_cache.get(f"suffix_{base_symbol.lower()}", "")
         
         print(f"        🔍 Searching for tradeable symbol for '{base_symbol}'...")
         
@@ -11773,19 +12044,35 @@ def place_usd_orders(inv_id=None):
             test_symbol = base_symbol + suffix if suffix else base_symbol
             
             # Skip if we already know this exact symbol is not tradeable
-            symbol_cache_key = f"checked_{test_symbol}"
+            symbol_cache_key = f"checked_{test_symbol.lower()}"  # Use lowercase for cache
             if symbol_cache_key in resolution_cache and not resolution_cache[symbol_cache_key]:
                 continue
             
             print(f"          Trying: {test_symbol} (suffix {idx+1}/{len(SYMBOL_SUFFIXES)})")
             
-            # Check if this symbol is tradeable
+            # Check if this symbol is tradeable (case-insensitive)
             if is_symbol_tradeable(test_symbol):
-                print(f"          ✅ SUCCESS! {test_symbol} IS TRADEABLE!")
-                resolution_cache[cache_key] = test_symbol
-                resolution_cache[f"suffix_{base_symbol}"] = suffix
-                resolution_cache[symbol_cache_key] = True
-                return test_symbol, suffix
+                # Get the actual symbol name from MT5 (with correct case)
+                actual_symbol = None
+                all_symbols = mt5.symbols_get()
+                if all_symbols:
+                    symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+                    test_lower = test_symbol.lower()
+                    if test_lower in symbols_lower_map:
+                        actual_symbol = symbols_lower_map[test_lower]
+                
+                if actual_symbol:
+                    print(f"          ✅ SUCCESS! {actual_symbol} IS TRADEABLE!")
+                    resolution_cache[cache_key] = actual_symbol
+                    resolution_cache[f"suffix_{base_symbol.lower()}"] = suffix
+                    resolution_cache[symbol_cache_key] = True
+                    return actual_symbol, suffix
+                else:
+                    print(f"          ✅ SUCCESS! {test_symbol} IS TRADEABLE!")
+                    resolution_cache[cache_key] = test_symbol
+                    resolution_cache[f"suffix_{base_symbol.lower()}"] = suffix
+                    resolution_cache[symbol_cache_key] = True
+                    return test_symbol, suffix
             else:
                 resolution_cache[symbol_cache_key] = False
         
@@ -11890,7 +12177,7 @@ def place_usd_orders(inv_id=None):
         return entries_with_paths, hedge_entries, regular_entries
 
     # --- SUB-FUNCTION 17: RISK MANAGEMENT FOR DUPLICATE ORDERS (FIXED WITH PROPER CANCELLATION) ---
-    def risk_management_for_duplicates(investor_root, new_order_data, existing_pending_orders, cancel_exceeding=True, check_only=False):
+    def risk_management_for_duplicates_old(investor_root, new_order_data, existing_pending_orders, cancel_exceeding=True, check_only=False):
         """
         Check and manage duplicate orders risk.
         
@@ -12441,6 +12728,545 @@ def place_usd_orders(inv_id=None):
         return True, {
             'total_risk': total_risk, 
             'existing_risk': existing_risk, 
+            'new_risk': new_risk, 
+            'cancelled_count': total_cancelled,
+            'closed_count': total_closed
+        }
+    
+    # --- SUB-FUNCTION 17: RISK MANAGEMENT FOR DUPLICATE ORDERS (FIXED WITH PROPER AGGREGATION) ---
+        
+    def risk_management_for_duplicates(investor_root, new_order_data, existing_pending_orders, cancel_exceeding=True, check_only=False):
+        """
+        Check and manage duplicate orders risk.
+        
+        FOR SCAN MODE (check_only=True):
+            - Groups ALL pending orders AND open positions by (symbol, direction)
+            - Calculates total combined risk per direction
+            - Cancels/Closes orders ONE BY ONE until total directional risk is within maximum threshold
+        
+        FOR NEW ORDER MODE (check_only=False):
+            - Same cleanup first, then evaluates new order against TOTAL directional risk
+        """
+        
+        def calculate_order_risk(order_entry, order_sl, symbol, volume, is_buy):
+            """Calculate risk in USD for an order or position"""
+            if order_sl == 0 or order_sl is None:
+                return 0
+            try:
+                calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+                risk_profit = mt5.order_calc_profit(calc_type, symbol, volume, order_entry, order_sl)
+                return abs(risk_profit) if risk_profit else 0
+            except Exception as e:
+                return 0
+        
+        def normalize_order_direction(order_type_or_constant):
+            """Get buy/sell direction from order type string or MT5 constant"""
+            if isinstance(order_type_or_constant, str):
+                order_lower = order_type_or_constant.lower()
+                if 'buy' in order_lower:
+                    return 'buy'
+                elif 'sell' in order_lower:
+                    return 'sell'
+            else:
+                # MT5 constant
+                if order_type_or_constant in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, 
+                                            mt5.ORDER_TYPE_BUY_STOP_LIMIT, mt5.ORDER_TYPE_BUY]:
+                    return 'buy'
+                elif order_type_or_constant in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP,
+                                            mt5.ORDER_TYPE_SELL_STOP_LIMIT, mt5.ORDER_TYPE_SELL]:
+                    return 'sell'
+            return None
+        
+        def cancel_single_order(order_ticket, reason):
+            """Cancel a single pending order using MT5"""
+            try:
+                # First, verify the order still exists
+                orders = mt5.orders_get(ticket=order_ticket)
+                
+                if not orders or len(orders) == 0:
+                    print(f"            ⚠️ Order #{order_ticket} not found (may have been filled/cancelled)")
+                    return False
+                
+                order = orders[0]
+                
+                # Verify it's still a pending order
+                if order.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                    mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]:
+                    print(f"            ⚠️ Order #{order_ticket} is no longer a pending order (type: {order.type})")
+                    return False
+                
+                # Create cancellation request
+                cancel_request = {
+                    "action": mt5.TRADE_ACTION_REMOVE,
+                    "order": order_ticket
+                }
+                
+                print(f"            📤 Cancelling pending order #{order_ticket}...")
+                
+                # Send cancellation request
+                result = mt5.order_send(cancel_request)
+                
+                if result is None:
+                    print(f"             No response from MT5 for #{order_ticket}")
+                    error = mt5.last_error()
+                    print(f"            🔍 MT5 Last Error: {error}")
+                    return False
+                
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"            ✅ Successfully cancelled order #{order_ticket}")
+                    return True
+                else:
+                    error_codes = {
+                        10004: "Trade timeout",
+                        10006: "Invalid order",
+                        10009: "Order already canceled",
+                        10010: "Insufficient rights",
+                        10011: "Too many requests",
+                        10012: "Trade disabled",
+                        10013: "Market closed",
+                        10014: "Invalid price",
+                        10015: "Invalid stops",
+                        10016: "Invalid volume",
+                        10017: "Order not found",
+                        10018: "Order already filled",
+                        10019: "Order canceled",
+                        10020: "No changes",
+                        10021: "Order locked",
+                        10022: "Invalid order type"
+                    }
+                    error_msg = error_codes.get(result.retcode, f"Unknown error ({result.retcode})")
+                    print(f"             Failed to cancel #{order_ticket}: {error_msg}")
+                    if result.comment:
+                        print(f"            📝 Broker comment: {result.comment}")
+                    return False
+                        
+            except Exception as e:
+                print(f"             Exception cancelling #{order_ticket}: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        def close_single_position(position_ticket, symbol, volume, is_buy, reason):
+            """Close a single open position using MT5"""
+            try:
+                # First, verify the position still exists
+                positions = mt5.positions_get(ticket=position_ticket)
+                
+                if not positions or len(positions) == 0:
+                    print(f"            ⚠️ Position #{position_ticket} not found (may have been closed)")
+                    return False
+                
+                position = positions[0]
+                
+                # Get current market price for the symbol
+                tick = mt5.symbol_info_tick(symbol)
+                if not tick:
+                    print(f"             Cannot get price for {symbol}")
+                    return False
+                
+                # Determine order type for closing
+                if is_buy:
+                    # To close a buy position, we sell
+                    order_type = mt5.ORDER_TYPE_SELL
+                    price = tick.bid
+                else:
+                    # To close a sell position, we buy
+                    order_type = mt5.ORDER_TYPE_BUY
+                    price = tick.ask
+                
+                # Create close request
+                close_request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": volume,
+                    "type": order_type,
+                    "position": position_ticket,
+                    "price": price,
+                    "deviation": 20,
+                    "magic": position.magic if hasattr(position, 'magic') else 0,
+                    "comment": reason[:31],  # Max 31 characters
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                
+                print(f"            📤 Closing position #{position_ticket} ({symbol}, {volume} lots)...")
+                
+                # Send close request
+                result = mt5.order_send(close_request)
+                
+                if result is None:
+                    print(f"             No response from MT5 for position #{position_ticket}")
+                    error = mt5.last_error()
+                    print(f"            🔍 MT5 Last Error: {error}")
+                    return False
+                
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"            ✅ Successfully closed position #{position_ticket}")
+                    return True
+                else:
+                    error_codes = {
+                        10004: "Trade timeout",
+                        10006: "Invalid request",
+                        10009: "Position already closed",
+                        10010: "Insufficient rights",
+                        10011: "Too many requests",
+                        10012: "Trade disabled",
+                        10013: "Market closed",
+                        10014: "Invalid price",
+                        10015: "Invalid stops",
+                        10016: "Invalid volume",
+                        10017: "Position not found",
+                        10018: "Position already closed",
+                        10019: "Position closed",
+                        10020: "No changes",
+                        10021: "Position locked",
+                        10022: "Invalid order type"
+                    }
+                    error_msg = error_codes.get(result.retcode, f"Unknown error ({result.retcode})")
+                    print(f"             Failed to close position #{position_ticket}: {error_msg}")
+                    if result.comment:
+                        print(f"            📝 Broker comment: {result.comment}")
+                    return False
+                        
+            except Exception as e:
+                print(f"             Exception closing position #{position_ticket}: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        def load_risk_thresholds(investor_root, balance):
+            """Load risk thresholds from accountmanagement.json"""
+            acc_mgmt_path = investor_root / "accountmanagement.json"
+            if not acc_mgmt_path.exists():
+                return None, None, False
+            
+            try:
+                with open(acc_mgmt_path, 'r') as f:
+                    config = json.load(f)
+                
+                default_map = config.get("account_balance_default_risk_management", {})
+                maximum_map = config.get("account_balance_maximum_risk_management", {})
+                
+                default_risk = None
+                maximum_risk = None
+                
+                for range_str, r_val in default_map.items():
+                    try:
+                        parts = range_str.split("_")[0]
+                        low, high = map(float, parts.split("-"))
+                        if low <= balance <= high:
+                            default_risk = float(r_val)
+                            break
+                    except:
+                        continue
+                
+                for range_str, r_val in maximum_map.items():
+                    try:
+                        parts = range_str.split("_")[0]
+                        low, high = map(float, parts.split("-"))
+                        if low <= balance <= high:
+                            maximum_risk = float(r_val)
+                            break
+                    except:
+                        continue
+                
+                if default_risk is None and maximum_risk is None:
+                    return None, None, False
+                if default_risk is None:
+                    default_risk = maximum_risk
+                if maximum_risk is None:
+                    maximum_risk = default_risk
+                if maximum_risk < default_risk:
+                    maximum_risk = default_risk
+                
+                return default_risk, maximum_risk, True
+                
+            except Exception as e:
+                print(f"        ⚠️ Error loading risk thresholds: {e}")
+                return None, None, False
+        
+        # --- Get account balance and thresholds ---
+        account_info = mt5.account_info()
+        if not account_info:
+            print(f"         Cannot get account info")
+            return False, {'error': 'No account info'}
+        
+        balance = account_info.balance
+        default_risk, max_risk, found = load_risk_thresholds(investor_root, balance)
+        
+        if not found:
+            print(f"        ℹ️ No risk thresholds configured - skipping")
+            return True, {'skipped': True}
+        
+        print(f"        🎯 Risk Limits: Target=${default_risk:.2f}, Maximum=${max_risk:.2f}")
+        print(f"        🔍 AutoTrading: {'✅ ENABLED' if mt5.terminal_info().trade_allowed else ' DISABLED'}")
+        
+        # --- GET ALL OPEN POSITIONS ---
+        open_positions = mt5.positions_get() or []
+        print(f"        📊 Found {len(open_positions)} open position(s)")
+        
+        # --- AGGREGATE ALL PENDING ORDERS AND OPEN POSITIONS BY (SYMBOL, DIRECTION) ---
+        # KEY CHANGE: Now grouping by symbol AND direction only (not entry price and volume)
+        direction_groups = {}
+        
+        # Process pending orders
+        for order in existing_pending_orders:
+            # Skip non-pending order types
+            if order.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]:
+                continue
+            
+            direction = normalize_order_direction(order.type)
+            if not direction:
+                continue
+            
+            # KEY CHANGE: Group by symbol + direction only
+            group_key = f"{order.symbol}_{direction}"
+            
+            # Calculate risk for this order
+            is_buy = direction == 'buy'
+            risk = calculate_order_risk(order.price_open, order.sl, order.symbol, order.volume_initial, is_buy)
+            
+            if group_key not in direction_groups:
+                direction_groups[group_key] = {
+                    'symbol': order.symbol,
+                    'direction': direction,
+                    'orders': [],
+                    'positions': [],
+                    'total_risk': 0
+                }
+            
+            direction_groups[group_key]['orders'].append({
+                'ticket': order.ticket,
+                'risk': risk,
+                'entry': order.price_open,
+                'volume': order.volume_initial,
+                'sl': order.sl,
+                'type': 'pending_order'
+            })
+            direction_groups[group_key]['total_risk'] += risk
+        
+        # Process open positions
+        for position in open_positions:
+            # Determine direction
+            direction = normalize_order_direction(position.type)
+            if not direction:
+                continue
+            
+            # KEY CHANGE: Group by symbol + direction only
+            group_key = f"{position.symbol}_{direction}"
+            
+            # Calculate risk for this position
+            is_buy = direction == 'buy'
+            risk = calculate_order_risk(position.price_open, position.sl, position.symbol, position.volume, is_buy)
+            
+            if group_key not in direction_groups:
+                direction_groups[group_key] = {
+                    'symbol': position.symbol,
+                    'direction': direction,
+                    'orders': [],
+                    'positions': [],
+                    'total_risk': 0
+                }
+            
+            direction_groups[group_key]['positions'].append({
+                'ticket': position.ticket,
+                'risk': risk,
+                'entry': position.price_open,
+                'volume': position.volume,
+                'is_buy': is_buy,
+                'type': 'open_position'
+            })
+            direction_groups[group_key]['total_risk'] += risk
+        
+        # --- SCAN AND CANCEL/CLOSE ORDERS/POSITIONS ONE BY ONE UNTIL WITHIN LIMITS ---
+        total_cancelled = 0
+        total_closed = 0
+        
+        if direction_groups:
+            print(f"        🔍 Found {len(direction_groups)} directional risk group(s)")
+            
+            for group_key, group in direction_groups.items():
+                # Combine all items (orders and positions) and sort by risk (highest first)
+                all_items = []
+                all_items.extend([(item, 'order') for item in group['orders']])
+                all_items.extend([(item, 'position') for item in group['positions']])
+                
+                # Sort by risk (highest first) - remove most risky first
+                all_items.sort(key=lambda x: x[0]['risk'], reverse=True)
+                
+                current_risk = group['total_risk']
+                
+                total_items = len(group['orders']) + len(group['positions'])
+                print(f"\n        📋 Directional Group: {group['symbol']} {group['direction'].upper()}")
+                print(f"           Total items: {total_items} ({len(group['orders'])} orders, {len(group['positions'])} positions) | Total risk: ${current_risk:.2f}")
+                
+                # If group risk exceeds maximum, cancel/close items one by one
+                if current_risk > max_risk and cancel_exceeding:
+                    print(f"           🚨 Total directional risk exceeds maximum (${current_risk:.2f} > ${max_risk:.2f})")
+                    print(f"           🔄 Closing/Cancelling items one by one until risk is within limit...")
+                    
+                    # Track what we close/cancel
+                    cancelled_in_group = 0
+                    closed_in_group = 0
+                    
+                    for item, item_type in all_items:
+                        # Check current risk after previous cancellations/closures
+                        if current_risk <= max_risk:
+                            print(f"           ✅ Risk now within limit: ${current_risk:.2f} ≤ ${max_risk:.2f}")
+                            print(f"           📊 Cancelled {cancelled_in_group} order(s), closed {closed_in_group} position(s)")
+                            break
+                        
+                        if item_type == 'order':
+                            # Try to cancel this order
+                            print(f"           🗑️ Attempting to cancel order #{item['ticket']} (entry: {item['entry']}, risk: ${item['risk']:.2f})")
+                            
+                            if cancel_single_order(item['ticket'], f"Directional risk ${current_risk:.2f} exceeds max ${max_risk:.2f}"):
+                                cancelled_in_group += 1
+                                total_cancelled += 1
+                                current_risk -= item['risk']
+                                print(f"           📊 Remaining directional risk: ${current_risk:.2f}")
+                            else:
+                                print(f"           ⚠️ Failed to cancel order #{item['ticket']}, skipping...")
+                                continue
+                                
+                        elif item_type == 'position':
+                            # Try to close this position
+                            print(f"           🔒 Attempting to close position #{item['ticket']} (entry: {item['entry']}, risk: ${item['risk']:.2f})")
+                            
+                            if close_single_position(
+                                item['ticket'], 
+                                group['symbol'], 
+                                item['volume'], 
+                                item['is_buy'],
+                                f"Directional risk ${current_risk:.2f} exceeds max ${max_risk:.2f}"
+                            ):
+                                closed_in_group += 1
+                                total_closed += 1
+                                current_risk -= item['risk']
+                                print(f"           📊 Remaining directional risk: ${current_risk:.2f}")
+                            else:
+                                print(f"           ⚠️ Failed to close position #{item['ticket']}, skipping...")
+                                continue
+                    
+                    # Final status for this group
+                    if current_risk > max_risk:
+                        print(f"           ⚠️ Group still exceeds limit after cleanup attempts! Risk: ${current_risk:.2f}")
+                        print(f"           💡 Some items may have been filled/closed by other processes")
+                    else:
+                        print(f"           ✅ Directional risk now within limit: ${current_risk:.2f} ≤ ${max_risk:.2f}")
+                
+                # Check individual items that exceed maximum by themselves (even if total is fine)
+                else:
+                    for item, item_type in all_items:
+                        if item['risk'] > max_risk and cancel_exceeding:
+                            if item_type == 'order':
+                                print(f"           🚨 Individual order #{item['ticket']} exceeds maximum (${item['risk']:.2f} > ${max_risk:.2f})")
+                                if cancel_single_order(item['ticket'], f"Individual risk ${item['risk']:.2f} exceeds max ${max_risk:.2f}"):
+                                    total_cancelled += 1
+                                else:
+                                    print(f"           ⚠️ Failed to cancel order #{item['ticket']}")
+                            elif item_type == 'position':
+                                print(f"           🚨 Individual position #{item['ticket']} exceeds maximum (${item['risk']:.2f} > ${max_risk:.2f})")
+                                if close_single_position(
+                                    item['ticket'], 
+                                    group['symbol'], 
+                                    item['volume'], 
+                                    item['is_buy'],
+                                    f"Individual risk ${item['risk']:.2f} exceeds max ${max_risk:.2f}"
+                                ):
+                                    total_closed += 1
+                                else:
+                                    print(f"           ⚠️ Failed to close position #{item['ticket']}")
+        else:
+            print(f"        ℹ️ No pending orders or open positions found to scan")
+        
+        if total_cancelled > 0 or total_closed > 0:
+            print(f"\n        ✅ Cleanup complete: Cancelled {total_cancelled} order(s), Closed {total_closed} position(s)")
+        else:
+            print(f"\n        ℹ️ No items needed to be cancelled or closed")
+        
+        # If check_only mode, return here
+        if check_only or new_order_data is None:
+            return True, {
+                'cancelled_count': total_cancelled, 
+                'closed_count': total_closed,
+                'check_only': True
+            }
+        
+        # Refresh pending orders and positions list after cleanup
+        import time
+        time.sleep(0.5)  # Small delay to ensure MT5 processes cancellations/closures
+        refreshed_pending = mt5.orders_get() or []
+        refreshed_positions = mt5.positions_get() or []
+        
+        # --- EVALUATE NEW ORDER AGAINST TOTAL DIRECTIONAL RISK ---
+        new_symbol = new_order_data.get('symbol')
+        new_entry = new_order_data.get('entry')
+        new_volume = new_order_data.get('volume', 0.01)
+        new_sl = new_order_data.get('exit', 0)
+        new_type = new_order_data.get('order_type', '').lower()
+        new_direction = normalize_order_direction(new_type)
+        new_is_buy = new_direction == 'buy'
+        
+        print(f"\n        📋 Evaluating New Order: {new_direction.upper()} {new_symbol} @ {new_entry} vol {new_volume}")
+        
+        # Calculate new order risk
+        new_risk = calculate_order_risk(new_entry, new_sl, new_symbol, new_volume, new_is_buy)
+        print(f"        📊 New order risk: ${new_risk:.2f}")
+        
+        # KEY CHANGE: Calculate total directional risk (all orders + positions for this symbol/direction)
+        new_group_key = f"{new_symbol}_{new_direction}"
+        existing_directional_risk = 0
+        
+        # Sum up risk from refreshed pending orders for same direction
+        for order in refreshed_pending:
+            if order.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]:
+                continue
+            
+            dir = normalize_order_direction(order.type)
+            if not dir:
+                continue
+            
+            if order.symbol == new_symbol and dir == new_direction:
+                is_buy = dir == 'buy'
+                rsk = calculate_order_risk(order.price_open, order.sl, order.symbol, order.volume_initial, is_buy)
+                existing_directional_risk += rsk
+                print(f"        📋 Existing order #{order.ticket}: {order.symbol} {dir} @ {order.price_open} vol {order.volume_initial} risk ${rsk:.2f}")
+        
+        # Sum up risk from refreshed positions for same direction
+        for position in refreshed_positions:
+            dir = normalize_order_direction(position.type)
+            if not dir:
+                continue
+            
+            if position.symbol == new_symbol and dir == new_direction:
+                is_buy = dir == 'buy'
+                rsk = calculate_order_risk(position.price_open, position.sl, position.symbol, position.volume, is_buy)
+                existing_directional_risk += rsk
+                print(f"        📋 Existing position #{position.ticket}: {position.symbol} {dir} @ {position.price_open} vol {position.volume} risk ${rsk:.2f}")
+        
+        print(f"        📊 Total existing directional risk ({new_symbol} {new_direction}): ${existing_directional_risk:.2f}")
+        
+        # Calculate total risk including new order
+        total_directional_risk = existing_directional_risk + new_risk
+        print(f"        📊 Total directional risk if placed: ${total_directional_risk:.2f}")
+        
+        # Decision based on total directional risk
+        if total_directional_risk > max_risk:
+            print(f"        🚨 TOTAL DIRECTIONAL RISK (${total_directional_risk:.2f}) EXCEEDS MAXIMUM (${max_risk:.2f})")
+            print(f"         ORDER REJECTED - would exceed maximum by ${total_directional_risk - max_risk:.2f}")
+            return False, {'reason': f'Directional risk ${total_directional_risk:.2f} exceeds max ${max_risk:.2f}'}
+        
+        if total_directional_risk <= default_risk:
+            print(f"        ✅ Within TARGET range: ${total_directional_risk:.2f} ≤ ${default_risk:.2f}")
+        else:
+            print(f"        ✅ Within TOLERANCE range: ${default_risk:.2f} < ${total_directional_risk:.2f} ≤ ${max_risk:.2f}")
+        
+        return True, {
+            'total_risk': total_directional_risk, 
+            'existing_risk': existing_directional_risk, 
             'new_risk': new_risk, 
             'cancelled_count': total_cancelled,
             'closed_count': total_closed
@@ -14931,7 +15757,7 @@ def apply_dynamic_breakeven(inv_id=None):
 
 
 # real accounts 
-def process_single_invest(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -14999,19 +15825,8 @@ def process_single_invest(inv_folder):
             if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
                 mt5.shutdown()
                 return account_stats
-        
-        # =====================================================================
-        # STEP 1: CHECK FOR RESTRICTED TIME RANGE PURGE
-        # =====================================================================
-        print(f"🔍 [{inv_id}] Checking restricted time range status...")
-        
-        # Run the restricted timerange check first
-        
-        timerange_result = restricted_timerange(inv_id=inv_id)
-        
-        # Check if purge was triggered
-        if restricted_timerange_alert and restricted_timerange_alert.get('is_triggered', False):
-           delete_all_orders_and_positions(inv_id=inv_id)
+            
+        place_usd_orders(inv_id=inv_id)
     
         mt5.shutdown()
         account_stats["success"] = True
@@ -15028,7 +15843,7 @@ def process_single_invest(inv_folder):
     
     return account_stats
 
-def process_single_investor(inv_folder):
+def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -15203,7 +16018,6 @@ def place_orders_parallel():
 
     #time.sleep(1)
     #place_orders_parallel()
-    
     return 
 
 
