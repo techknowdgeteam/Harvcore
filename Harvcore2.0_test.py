@@ -5260,7 +5260,7 @@ def additional_candles_for_orders_limitation(inv_id=None):
     
     return stats
 
-def create_position_hedge_old(inv_id=None):
+def create_position_hedge(inv_id=None):
     """
     Creates hedge orders for existing running positions by analyzing MT5 positions AND tradeshistory.json.
     
@@ -5938,824 +5938,6 @@ def create_position_hedge_old(inv_id=None):
     print("="*80)
     
     return hedge_stats['hedges_created'] > 0 or hedge_stats['hedges_removed'] > 0 or hedge_stats['orphaned_hedges_closed'] > 0 or hedge_stats['orphaned_hedges_cancelled'] > 0
-
-def create_position_hedge(inv_id=None):
-    """
-    Creates hedge orders for existing running positions by analyzing MT5 positions AND tradeshistory.json.
-    
-    NEW LOGIC: Validates if original position's stoploss is in profit/breakeven
-    - If SL is at profit/breakeven → SKIP creating OR REMOVE existing hedge
-    - If SL is in loss → CREATE/MAINTAIN hedge
-    
-    Process:
-    1. Gets ALL running positions directly from MT5 terminal
-    2. Checks MT5 history for any closed positions that were previously running
-    3. REMOVES ORPHANED HEDGES: If hedge's parent is NOT in running positions AND NOT in pending orders
-       -> Parent has been closed -> Remove hedge using same logic as close_unauthorized_orders
-    4. If closed position found in profit -> removes associated hedge from limit_orders.json
-    5. For each remaining MT5 position, CHECK SL PROFITABILITY before creating hedge
-    6. Updates trade history with status tracking
-    7. Saves hedge orders to limit_orders.json
-    """
-    
-    print("\n" + "="*80)
-    print("🔒 CREATING HEDGE ORDERS FOR RUNNING POSITIONS")
-    print("="*80)
-    
-    # Ensure MT5 is initialized
-    if not mt5.terminal_info():
-        print("  Initializing MT5 connection...")
-        if not mt5.initialize():
-            print("   Failed to initialize MT5")
-            return False
-    
-    investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
-    hedge_stats = {
-        'investors_processed': 0,
-        'positions_analyzed': 0,
-        'hedges_created': 0,
-        'hedges_removed': 0,
-        'hedges_skipped_sl_profit': 0,  # NEW: Track hedges skipped because SL in profit
-        'hedges_removed_sl_profit': 0,  # NEW: Track hedges removed because SL turned profitable
-        'orphaned_hedges_closed': 0,
-        'orphaned_hedges_cancelled': 0,
-        'positions_closed_profit': 0,
-        'positions_closed_loss': 0,
-        'errors': 0
-    }
-    
-    for user_brokerid in investor_ids:
-        print(f"\n{'='*60}")
-        print(f"📋 INVESTOR: {user_brokerid}")
-        print(f"{'='*60}")
-        
-        investor_root = Path(INV_PATH) / user_brokerid
-        
-        if not investor_root.exists():
-            print(f"   Investor root not found: {investor_root}")
-            continue
-        
-        # Step 1: Get strategy name using GLOBAL VERIFIED_INVESTORS (same as directional_bias)
-        acc_mgmt_path = investor_root / "accountmanagement.json"
-        strategy_name = "prices"
-        target_folder = "prices"
-        
-        if acc_mgmt_path.exists():
-            try:
-                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                # Use the global VERIFIED_INVESTORS variable (same as directional_bias)
-                if VERIFIED_INVESTORS:
-                    try:
-                        with open(VERIFIED_INVESTORS, 'r', encoding='utf-8') as f:
-                            investor_users = json.load(f)
-                        
-                        investor_cfg = investor_users.get(user_brokerid)
-                        if investor_cfg:
-                            invested_with = investor_cfg.get("INVESTED_WITH", "")
-                            if "_" in invested_with:
-                                target_folder = invested_with.split("_", 1)[1]
-                                strategy_name = target_folder
-                            else:
-                                target_folder = invested_with
-                                strategy_name = invested_with
-                    except Exception as e:
-                        print(f"  ⚠️ Error reading verified investors: {e}")
-                
-                # Also get risk_reward from config if needed
-                selected_risk_reward = config.get("selected_risk_reward", [3])
-                if isinstance(selected_risk_reward, list) and len(selected_risk_reward) > 0:
-                    risk_reward_default = selected_risk_reward[0]
-                else:
-                    risk_reward_default = 3
-                    
-            except Exception as e:
-                print(f"  ⚠️ Error reading config: {e}")
-                risk_reward_default = 3
-        else:
-            risk_reward_default = 3
-        
-        print(f"  📁 Strategy name: {strategy_name}")
-        print(f"  📁 Target folder: {target_folder}")
-        
-        # Connect to MT5 account
-        broker_cfg = usersdictionary.get(user_brokerid)
-        if not broker_cfg:
-            print(f"  ⚠️ No broker configuration found for {user_brokerid}")
-            continue
-        
-        login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
-        
-        # Check if already connected to correct account
-        acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"  ⚠️ Not logged into correct account. Expected: {login_id}")
-            if not mt5.initialize(path=mt5_path, login=login_id, 
-                                   password=broker_cfg["PASSWORD"], 
-                                   server=broker_cfg["SERVER"]):
-                print(f"   Failed to initialize MT5 for {user_brokerid}")
-                continue
-        else:
-            print(f"  ✅ Connected to account: {acc.login}")
-        
-        # Step 2: Load tradeshistory.json
-        history_path = investor_root / "tradeshistory.json"
-        trade_details_by_ticket = {}
-        trade_history_list = []
-        
-        if history_path.exists():
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    trade_history_list = json.load(f)
-                
-                for trade in trade_history_list:
-                    ticket = trade.get('ticket')
-                    if ticket:
-                        trade_details_by_ticket[ticket] = trade
-                
-                print(f"  📋 Loaded {len(trade_details_by_ticket)} trade records from tradeshistory.json")
-            except Exception as e:
-                print(f"  ⚠️ Error reading tradeshistory.json: {e}")
-        
-        # Step 3: Get MT5 running positions AND pending orders
-        print(f"  🔍 Fetching running positions from MT5 terminal...")
-        mt5_positions = mt5.positions_get()
-        mt5_pending_orders = mt5.orders_get()
-        
-        if mt5_positions is None:
-            print(f"  ⚠️ No MT5 positions found or error retrieving positions")
-        
-        # Filter by magic numbers
-        investor_magics = set()
-        for trade in trade_history_list:
-            magic = trade.get('magic')
-            if magic:
-                investor_magics.add(int(magic))
-        
-        if investor_magics:
-            running_positions = [p for p in mt5_positions if p.magic in investor_magics] if mt5_positions else []
-            pending_orders = [o for o in mt5_pending_orders if o.magic in investor_magics] if mt5_pending_orders else []
-            print(f"  📊 Found {len(running_positions)} running positions in MT5")
-            print(f"  📊 Found {len(pending_orders)} pending orders in MT5")
-        else:
-            running_positions = list(mt5_positions) if mt5_positions else []
-            pending_orders = list(mt5_pending_orders) if mt5_pending_orders else []
-            print(f"  📊 Found {len(running_positions)} running positions in MT5")
-            print(f"  📊 Found {len(pending_orders)} pending orders in MT5")
-        
-        # Create sets of ALL active tickets (running + pending)
-        running_tickets = {p.ticket for p in running_positions} if running_positions else set()
-        pending_tickets = {o.ticket for o in pending_orders} if pending_orders else set()
-        all_active_tickets = running_tickets | pending_tickets
-        
-        print(f"  🎫 All active tickets (running + pending): {len(all_active_tickets)}")
-        
-        # ============================================================
-        # NEW STEP: VALIDATE EXISTING HEDGES AGAINST SL PROFITABILITY
-        # Check if hedge's parent position has its SL in profit/breakeven
-        # If SL is now profitable → remove the hedge (it's no longer needed)
-        # ============================================================
-        print(f"\n  🔍 VALIDATING EXISTING HEDGES AGAINST SL PROFITABILITY...")
-        
-        hedges_removed_due_to_sl_profit = 0
-        
-        # Load existing signals to check for hedges
-        strategy_base_dir = investor_root / strategy_name
-        pending_orders_dir = strategy_base_dir / "pending_orders"
-        signals_file = pending_orders_dir / "limit_orders.json"
-        
-        existing_signals = []
-        if signals_file.exists():
-            try:
-                with open(signals_file, 'r', encoding='utf-8') as f:
-                    existing_signals = json.load(f)
-                print(f"  📋 Loaded {len(existing_signals)} existing signals from limit_orders.json")
-            except Exception as e:
-                print(f"  ⚠️ Error reading existing signals: {e}")
-        
-        # Create a map of positions by ticket for easy lookup
-        position_by_ticket = {p.ticket: p for p in running_positions} if running_positions else {}
-        
-        # Function to check if SL is in profit/breakeven
-        def is_sl_in_profit(position):
-            """
-            Check if position's stoploss is at breakeven or in profit.
-            
-            Returns:
-                True if SL is at profit/breakeven (hedge not needed)
-                False if SL is in loss (hedge needed)
-            """
-            entry_price = position.price_open
-            sl_price = position.sl
-            
-            if sl_price == 0:
-                # No stoploss set - this is dangerous, but for hedge logic:
-                # Without SL, position is unprotected - hedge IS needed
-                return False
-            
-            is_long = (position.type == mt5.POSITION_TYPE_BUY)
-            
-            if is_long:
-                # For LONG: SL at or above entry = breakeven or profit
-                # Example: Entry 1.1000, SL 1.1010 (above) → SL in profit
-                # Example: Entry 1.1000, SL 1.1000 (equal) → Breakeven
-                return sl_price >= entry_price
-            else:
-                # For SHORT: SL at or below entry = breakeven or profit
-                # Example: Entry 1.1000, SL 1.0990 (below) → SL in profit
-                return sl_price <= entry_price
-        
-        # Check existing hedges and validate if still needed
-        if existing_signals and position_by_ticket:
-            signals_to_keep = []
-            
-            for signal in existing_signals:
-                is_hedge = signal.get('is_hedge_order', False)
-                
-                if is_hedge:
-                    parent_ticket = signal.get('parent_ticket')
-                    
-                    if parent_ticket and parent_ticket in position_by_ticket:
-                        # Hedge's parent is still running - check if hedge is still needed
-                        parent_position = position_by_ticket[parent_ticket]
-                        
-                        if is_sl_in_profit(parent_position):
-                            # SL is in profit/breakeven - hedge is no longer needed
-                            print(f"\n    🗑️ HEDGE NO LONGER NEEDED: Parent #{parent_ticket}")
-                            print(f"       • Symbol: {parent_position.symbol}")
-                            print(f"       • Direction: {'LONG' if parent_position.type == mt5.POSITION_TYPE_BUY else 'SHORT'}")
-                            print(f"       • Entry: {parent_position.price_open}")
-                            print(f"       • Current SL: {parent_position.sl}")
-                            print(f"       • SL Status: {'≥ Entry (Profit/BE)' if parent_position.type == mt5.POSITION_TYPE_BUY else '≤ Entry (Profit/BE)'}")
-                            print(f"       → Removing hedge from limit_orders.json")
-                            
-                            hedges_removed_due_to_sl_profit += 1
-                            hedge_stats['hedges_removed_sl_profit'] += 1
-                            # Skip adding this signal to signals_to_keep (effectively removing it)
-                            continue
-                        else:
-                            # Hedge still needed - keep it
-                            signals_to_keep.append(signal)
-                    else:
-                        # Parent not found in current positions - may be orphaned or closed
-                        # Keep for orphaned hedge detection later
-                        signals_to_keep.append(signal)
-                else:
-                    # Not a hedge - keep it
-                    signals_to_keep.append(signal)
-            
-            if hedges_removed_due_to_sl_profit > 0:
-                existing_signals = signals_to_keep
-                print(f"\n  ✅ Removed {hedges_removed_due_to_sl_profit} hedge(s) because parent SL became profitable/breakeven")
-                
-                # Save the updated signals
-                try:
-                    with open(signals_file, 'w', encoding='utf-8') as f:
-                        json.dump(existing_signals, f, indent=4)
-                    print(f"  💾 Updated limit_orders.json after removing unneeded hedges")
-                except Exception as e:
-                    print(f"  ⚠️ Error saving updated signals: {e}")
-        
-        # ============================================================
-        # CLEANUP ORPHANED HEDGE ORDERS (existing logic)
-        # Check if hedge's parent ticket is NOT in active positions/pending orders
-        # If parent is gone -> close/cancel the hedge using close_unauthorized_orders logic
-        # ============================================================
-        print(f"\n  🧹 CHECKING FOR ORPHANED HEDGE ORDERS...")
-        
-        orphaned_hedges_removed = 0
-        
-        # Check running positions that are hedges
-        if running_positions:
-            for position in running_positions:
-                # Check if this position is a hedge order
-                # Look for it in trade history
-                pos_ticket = position.ticket
-                trade_record = trade_details_by_ticket.get(pos_ticket, {})
-                
-                if trade_record.get('is_hedge_order'):
-                    parent_ticket = trade_record.get('parent_ticket')
-                    
-                    if parent_ticket and parent_ticket not in all_active_tickets:
-                        # Parent is no longer active - close this hedge position
-                        print(f"\n    🚨 ORPHANED HEDGE FOUND: Position #{pos_ticket}")
-                        print(f"       • Symbol: {position.symbol}")
-                        print(f"       • Type: {'BUY' if position.type == mt5.POSITION_TYPE_BUY else 'SELL'}")
-                        print(f"       • Parent ticket {parent_ticket} is NOT active anymore")
-                        print(f"       → Closing this orphaned hedge...")
-                        
-                        # Get current market price
-                        tick = mt5.symbol_info_tick(position.symbol)
-                        if not tick:
-                            print(f"         Cannot get price for {position.symbol} - cannot close")
-                            hedge_stats['errors'] += 1
-                            continue
-                        
-                        # Determine closing order type
-                        if position.type == mt5.POSITION_TYPE_BUY:
-                            close_type = mt5.ORDER_TYPE_SELL
-                            close_price = tick.bid
-                        else:
-                            close_type = mt5.ORDER_TYPE_BUY
-                            close_price = tick.ask
-                        
-                        close_request = {
-                            "action": mt5.TRADE_ACTION_DEAL,
-                            "symbol": position.symbol,
-                            "volume": position.volume,
-                            "type": close_type,
-                            "position": pos_ticket,
-                            "price": close_price,
-                            "deviation": 20,
-                            "magic": position.magic if hasattr(position, 'magic') else 0,
-                            "comment": "ORPHANED HEDGE - Parent closed",
-                            "type_time": mt5.ORDER_TIME_GTC,
-                            "type_filling": mt5.ORDER_FILLING_IOC,
-                        }
-                        
-                        try:
-                            result = mt5.order_send(close_request)
-                            
-                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                print(f"         ✅ SUCCESS: Orphaned hedge #{pos_ticket} CLOSED")
-                                orphaned_hedges_removed += 1
-                                hedge_stats['orphaned_hedges_closed'] += 1
-                                
-                                # Update trade history
-                                trade_record['status'] = 'closed'
-                                trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                trade_record['closed_reason'] = 'orphaned_hedge_parent_closed'
-                            else:
-                                error_msg = result.comment if result else "No response"
-                                error_code = result.retcode if result else "Unknown"
-                                print(f"          FAILED: {error_msg} (code: {error_code})")
-                                
-                                # Try alternative closure
-                                print(f"         🔄 Attempting alternative closure...")
-                                alt_close_request = {
-                                    "action": mt5.TRADE_ACTION_DEAL,
-                                    "symbol": position.symbol,
-                                    "volume": position.volume,
-                                    "type": close_type,
-                                    "position": pos_ticket,
-                                    "price": close_price,
-                                    "deviation": 50,
-                                    "comment": "ORPHANED HEDGE - Retry",
-                                    "type_filling": mt5.ORDER_FILLING_RETURN,
-                                }
-                                
-                                alt_result = mt5.order_send(alt_close_request)
-                                if alt_result and alt_result.retcode == mt5.TRADE_RETCODE_DONE:
-                                    print(f"         ✅ SUCCESS (alt): Orphaned hedge #{pos_ticket} CLOSED")
-                                    orphaned_hedges_removed += 1
-                                    hedge_stats['orphaned_hedges_closed'] += 1
-                                    
-                                    trade_record['status'] = 'closed'
-                                    trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                    trade_record['closed_reason'] = 'orphaned_hedge_parent_closed'
-                                else:
-                                    alt_error = alt_result.comment if alt_result else "No response"
-                                    print(f"          Alternative also FAILED: {alt_error}")
-                                    hedge_stats['errors'] += 1
-                        except Exception as e:
-                            print(f"          EXCEPTION: {e}")
-                            hedge_stats['errors'] += 1
-        
-        # Check pending orders that are hedges
-        if pending_orders:
-            for order in pending_orders:
-                order_ticket = order.ticket
-                trade_record = trade_details_by_ticket.get(order_ticket, {})
-                
-                if trade_record.get('is_hedge_order'):
-                    parent_ticket = trade_record.get('parent_ticket')
-                    
-                    if parent_ticket and parent_ticket not in all_active_tickets:
-                        # Parent is no longer active - cancel this hedge pending order
-                        print(f"\n    🚨 ORPHANED HEDGE PENDING ORDER: #{order_ticket}")
-                        print(f"       • Symbol: {order.symbol}")
-                        print(f"       • Type: {order.type}")
-                        print(f"       • Parent ticket {parent_ticket} is NOT active anymore")
-                        print(f"       → Cancelling this orphaned hedge order...")
-                        
-                        cancel_request = {
-                            "action": mt5.TRADE_ACTION_REMOVE,
-                            "order": order_ticket
-                        }
-                        
-                        try:
-                            result = mt5.order_send(cancel_request)
-                            
-                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                print(f"         ✅ SUCCESS: Orphaned hedge order #{order_ticket} CANCELLED")
-                                orphaned_hedges_removed += 1
-                                hedge_stats['orphaned_hedges_cancelled'] += 1
-                                
-                                # Update trade history
-                                trade_record['status'] = 'cancelled'
-                                trade_record['cancelled_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                trade_record['cancelled_reason'] = 'orphaned_hedge_parent_closed'
-                            else:
-                                error_msg = result.comment if result else "No response"
-                                error_code = result.retcode if result else "Unknown"
-                                print(f"          FAILED: {error_msg} (code: {error_code})")
-                                hedge_stats['errors'] += 1
-                        except Exception as e:
-                            print(f"          EXCEPTION: {e}")
-                            hedge_stats['errors'] += 1
-        
-        if orphaned_hedges_removed > 0:
-            print(f"\n  ✅ Removed {orphaned_hedges_removed} orphaned hedge(s) from MT5")
-        
-        # Step 4: CRITICAL - Check for closed positions in MT5 history
-        print(f"\n  🔍 Checking MT5 history for closed positions...")
-        
-        # Get history deals from last 7 days
-        from_date = datetime.now() - timedelta(days=7)
-        to_date = datetime.now()
-        
-        # Get all closed positions from MT5 history
-        history_deals = mt5.history_deals_get(from_date, to_date)
-        
-        # Track which positions we've processed for hedging
-        positions_to_hedge = []
-        positions_closed_profit_tickets = []
-        positions_closed_loss_tickets = []
-        
-        if history_deals:
-            # Group deals by position_id to find closed positions
-            closed_positions = {}
-            for deal in history_deals:
-                if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]:
-                    pos_id = deal.position_id
-                    if pos_id not in closed_positions:
-                        closed_positions[pos_id] = []
-                    closed_positions[pos_id].append(deal)
-            
-            # Check each closed position against our trade history
-            for pos_id, deals in closed_positions.items():
-                # Find the closing deal (profit/loss)
-                closing_deal = None
-                total_profit = 0
-                
-                for deal in deals:
-                    if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]:
-                        total_profit += deal.profit
-                        # The last deal in the sequence is usually the closing one
-                        closing_deal = deal
-                
-                # Check if this position exists in our trade history
-                if pos_id in trade_details_by_ticket:
-                    trade_record = trade_details_by_ticket[pos_id]
-                    current_status = trade_record.get('status')
-                    
-                    # If position is not running in MT5 but was previously running
-                    if pos_id not in running_tickets and current_status == 'running_position':
-                        is_profitable = total_profit > 0
-                        
-                        print(f"\n    📍 Closed position found: Ticket {pos_id}")
-                        print(f"       • Profit/Loss: ${total_profit:.2f}")
-                        print(f"       • Profitable: {is_profitable}")
-                        
-                        # Update trade history
-                        trade_record['status'] = 'closed'
-                        trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        trade_record['closed_profit'] = total_profit
-                        trade_record['closed_profitable'] = is_profitable
-                        
-                        if is_profitable:
-                            positions_closed_profit_tickets.append(pos_id)
-                            print(f"       ✅ Closed in PROFIT - will remove hedge")
-                        else:
-                            positions_closed_loss_tickets.append(pos_id)
-                            print(f"        Closed in LOSS - keeping hedge for protection")
-            
-            # Save updated trade history
-            if positions_closed_profit_tickets or positions_closed_loss_tickets:
-                try:
-                    with open(history_path, 'w', encoding='utf-8') as f:
-                        json.dump(trade_history_list, f, indent=4)
-                    print(f"\n  💾 Updated trade history with closed position statuses")
-                except Exception as e:
-                    print(f"   Error saving trade history: {e}")
-        
-        # Step 5: Remove hedges for positions that closed in profit
-        if positions_closed_profit_tickets:
-            print(f"\n  🗑️ REMOVING HEDGES FOR PROFITABLE CLOSED POSITIONS...")
-            
-            if signals_file.exists():
-                try:
-                    with open(signals_file, 'r', encoding='utf-8') as f:
-                        limit_orders = json.load(f)
-                    
-                    original_count = len(limit_orders)
-                    orders_to_keep = []
-                    removed_count = 0
-                    
-                    for order in limit_orders:
-                        # Check if this order is a hedge for a closed profitable position
-                        parent_ticket = order.get('parent_ticket')
-                        is_hedge = order.get('is_hedge_order', False)
-                        
-                        if is_hedge and parent_ticket in positions_closed_profit_tickets:
-                            # Remove this hedge order
-                            print(f"    🗑️ Removing hedge for ticket {parent_ticket}: {order.get('order_type', 'unknown')} {order.get('symbol', 'unknown')} @ {order.get('entry', 'unknown')}")
-                            removed_count += 1
-                            hedge_stats['hedges_removed'] += 1
-                            continue
-                        else:
-                            # Keep this order
-                            orders_to_keep.append(order)
-                    
-                    if removed_count > 0:
-                        # Save the filtered orders
-                        with open(signals_file, 'w', encoding='utf-8') as f:
-                            json.dump(orders_to_keep, f, indent=4)
-                        
-                        print(f"\n  ✅ Removed {removed_count} hedge(s) from limit_orders.json")
-                        print(f"  📊 Remaining orders: {len(orders_to_keep)}")
-                        hedge_stats['positions_closed_profit'] += len(positions_closed_profit_tickets)
-                    else:
-                        print(f"  ℹ️ No hedge orders found for closed profitable positions")
-                        
-                except Exception as e:
-                    print(f"   Error processing limit_orders.json: {e}")
-                    hedge_stats['errors'] += 1
-        
-        # Update statistics for loss positions
-        if positions_closed_loss_tickets:
-            hedge_stats['positions_closed_loss'] += len(positions_closed_loss_tickets)
-            print(f"\n  ℹ️ {len(positions_closed_loss_tickets)} position(s) closed in loss - hedges kept as protection")
-        
-        # Step 6: Only process positions that are still running AND not yet hedged
-        if not running_positions:
-            print(f"\n  ℹ️ No running positions found for {user_brokerid}")
-            continue
-        
-        hedge_stats['investors_processed'] += 1
-        hedge_stats['positions_analyzed'] += len(running_positions)
-        
-        # Step 7: Reload existing signals (in case they were updated)
-        if signals_file.exists():
-            try:
-                with open(signals_file, 'r', encoding='utf-8') as f:
-                    existing_signals = json.load(f)
-                print(f"\n  📋 Reloaded {len(existing_signals)} existing signals from limit_orders.json")
-            except Exception as e:
-                print(f"  ⚠️ Error reading existing signals: {e}")
-        
-        # Step 8: Create hedges for remaining running positions (with SL profitability check)
-        hedges_created_for_investor = 0
-        hedges_skipped_due_to_sl_profit = 0
-        
-        for position in running_positions:
-            # Skip if this position itself is a hedge order
-            pos_ticket = position.ticket
-            pos_trade = trade_details_by_ticket.get(pos_ticket, {})
-            if pos_trade.get('is_hedge_order'):
-                print(f"\n  ⏭️ Position #{pos_ticket} is a hedge order - skipping")
-                continue
-            
-            print(f"\n  🔍 Analyzing MT5 position: Ticket {position.ticket}")
-            print(f"     • Symbol: {position.symbol}")
-            print(f"     • Type: {'BUY' if position.type == mt5.ORDER_TYPE_BUY else 'SELL'}")
-            print(f"     • Entry: {position.price_open}")
-            print(f"     • Current: {position.price_current}")
-            print(f"     • Volume: {position.volume}")
-            print(f"     • Profit: ${position.profit:.2f}")
-            
-            # NEW LOGIC: Check if position's SL is at profit/breakeven
-            if is_sl_in_profit(position):
-                print(f"     🎯 SL STATUS: PROTECTED / PROFITABLE")
-                print(f"     • Stoploss: {position.sl if position.sl != 0 else 'NOT SET'}")
-                if position.type == mt5.POSITION_TYPE_BUY:
-                    print(f"     • SL {position.sl} ≥ Entry {position.price_open} → In Profit/BE")
-                else:
-                    print(f"     • SL {position.sl} ≤ Entry {position.price_open} → In Profit/BE")
-                print(f"     ⏭️ SKIPPING hedge creation - SL already protects position")
-                hedges_skipped_due_to_sl_profit += 1
-                hedge_stats['hedges_skipped_sl_profit'] += 1
-                continue
-            
-            # Print SL status if in loss
-            if position.sl != 0:
-                print(f"     ⚠️ SL STATUS: AT RISK")
-                if position.type == mt5.POSITION_TYPE_BUY:
-                    print(f"     • SL {position.sl} < Entry {position.price_open} → In Loss Territory")
-                else:
-                    print(f"     • SL {position.sl} > Entry {position.price_open} → In Loss Territory")
-            else:
-                print(f"     ⚠️ SL STATUS: NO STOPLOSS SET - RISK UNPROTECTED")
-            
-            # Check if hedge already exists for this position
-            hedge_exists = False
-            for signal in existing_signals:
-                if signal.get('parent_ticket') == position.ticket and signal.get('is_hedge_order'):
-                    hedge_exists = True
-                    print(f"     ⏭️ Hedge already exists for this position")
-                    hedge_stats['hedges_skipped'] = hedge_stats.get('hedges_skipped', 0) + 1
-                    break
-            
-            if hedge_exists:
-                continue
-            
-            # Get trade details from history
-            trade_detail = trade_details_by_ticket.get(position.ticket, {})
-            
-            if trade_detail:
-                print(f"     ✅ Found matching trade record")
-                original_order_type = trade_detail.get('placed_order_type', '')
-                exit_price = trade_detail.get('exit', 0)  # This is the stop loss
-                candle_1_high = trade_detail.get('candle_1_high')
-                candle_1_low = trade_detail.get('candle_1_low')
-                candle_1_type = trade_detail.get('candle_1_type', '').lower()
-                timeframe = trade_detail.get('timeframe', '')
-                risk_reward = trade_detail.get('risk_reward', risk_reward_default)
-                volume = trade_detail.get('placed_volume', position.volume)
-                magic = trade_detail.get('magic', position.magic)
-            else:
-                print(f"     ⚠️ No trade record - using MT5 data")
-                original_order_type = 'buy' if position.type == mt5.ORDER_TYPE_BUY else 'sell'
-                exit_price = 0
-                candle_1_high = None
-                candle_1_low = None
-                candle_1_type = ''
-                timeframe = ''
-                risk_reward = risk_reward_default
-                volume = position.volume
-                magic = position.magic
-            
-            # Create hedge (opposite direction)
-            is_position_buy = (position.type == mt5.ORDER_TYPE_BUY)
-            
-            # Flip order type
-            def flip_order_type(original_type, is_buy_position):
-                if original_type:
-                    original_lower = original_type.lower()
-                else:
-                    original_lower = 'buy' if is_buy_position else 'sell'
-                
-                if original_lower == 'instant_buy':
-                    return 'instant_sell'
-                if original_lower == 'instant_sell':
-                    return 'instant_buy'
-                
-                if '_' in original_lower:
-                    parts = original_lower.split('_', 1)
-                    direction = parts[0]
-                    suffix = parts[1]
-                    new_direction = 'sell' if direction == 'buy' else 'buy'
-                    return f"{new_direction}_{suffix}"
-                else:
-                    if original_lower == 'buy':
-                        return 'sell'
-                    elif original_lower == 'sell':
-                        return 'buy'
-                    return original_lower
-            
-            opposite_order_type = flip_order_type(original_order_type, is_position_buy)
-            is_hedge_buy = 'buy' in opposite_order_type.lower()
-            
-            # Hedge entry = parent's exit (stop loss)
-            if exit_price and exit_price > 0:
-                hedge_entry = exit_price
-                print(f"     🎯 Hedge entry (parent SL): {hedge_entry}")
-            else:
-                tick = mt5.symbol_info_tick(position.symbol)
-                hedge_entry = tick.ask if is_hedge_buy else tick.bid if tick else position.price_current
-                print(f"     ⚠️ No SL found - using current price: {hedge_entry}")
-            
-            # Determine digits
-            digits = 5 if hedge_entry < 1 else len(f"{hedge_entry:.10f}".rstrip('0').split('.')[1]) if '.' in f"{hedge_entry:.10f}" else 2
-            
-            # Hedge stop loss based on candle
-            if candle_1_type == "bearish" and candle_1_high:
-                hedge_exit = candle_1_high
-            elif candle_1_type == "bullish" and candle_1_low:
-                hedge_exit = candle_1_low
-            else:
-                hedge_exit = hedge_entry - (hedge_entry * 0.005) if is_hedge_buy else hedge_entry + (hedge_entry * 0.005)
-            
-            hedge_entry = round(hedge_entry, digits)
-            hedge_exit = round(hedge_exit, digits)
-            
-            # Take profit based on risk/reward
-            risk_amount = abs(hedge_entry - hedge_exit)
-            target_distance = risk_amount * risk_reward
-            hedge_target = round(hedge_entry + target_distance if is_hedge_buy else hedge_entry - target_distance, digits)
-            
-            # Validate volume
-            symbol_info = mt5.symbol_info(position.symbol)
-            if symbol_info:
-                volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
-                volume = round(volume, 2)
-            
-            # Create hedge order
-            hedge_id = f"hedge_{position.ticket}_{position.symbol}_{int(datetime.now().timestamp())}"
-            
-            hedge_order = {
-                "symbol": position.symbol,
-                "timeframe": timeframe,
-                "risk_reward": risk_reward,
-                "order_type": opposite_order_type,
-                "entry": hedge_entry,
-                "exit": hedge_exit,
-                "target": hedge_target,
-                "is_hedge_order": True,
-                "hedge_type": "position_hedge",
-                "candle_1_high": round(candle_1_high, digits) if candle_1_high else None,
-                "candle_1_low": round(candle_1_low, digits) if candle_1_low else None,
-                "candle_1_type": candle_1_type,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "strategy": strategy_name,
-                "magic": magic,
-                "volume": volume,
-                "deriv_volume": volume,
-                "hedge_id": hedge_id,
-                "parent_ticket": position.ticket,
-                "parent_order_type": original_order_type,
-                "parent_entry": position.price_open,
-                "parent_exit": exit_price,
-                "parent_profit": position.profit,
-                "parent_sl_at_creation": position.sl,  # Store current SL for tracking
-                "status": "Calculated",
-                "created_by": "create_position_hedge_function"
-            }
-            
-            # Remove None values
-            hedge_order = {k: v for k, v in hedge_order.items() if v is not None}
-            
-            # Add to signals
-            existing_signals.append(hedge_order)
-            hedges_created_for_investor += 1
-            hedge_stats['hedges_created'] += 1
-            
-            print(f"\n     ✅ HEDGE CREATED: {opposite_order_type.upper()} @ {hedge_entry}")
-            print(f"        • Stop Loss: {hedge_exit} | Target: {hedge_target}")
-            print(f"        • Hedge ID: {hedge_id}")
-        
-        # Step 9: Save updated signals
-        if (hedges_created_for_investor > 0 or hedge_stats['hedges_removed'] > 0 or 
-            orphaned_hedges_removed > 0 or hedges_removed_due_to_sl_profit > 0 or 
-            hedges_skipped_due_to_sl_profit > 0):
-            try:
-                # Save trade history if we made changes
-                if orphaned_hedges_removed > 0 or positions_closed_profit_tickets or positions_closed_loss_tickets:
-                    with open(history_path, 'w', encoding='utf-8') as f:
-                        json.dump(trade_history_list, f, indent=4)
-                
-                # Save limit orders
-                if (hedges_created_for_investor > 0 or hedge_stats['hedges_removed'] > 0 or 
-                    hedges_removed_due_to_sl_profit > 0):
-                    with open(signals_file, 'w', encoding='utf-8') as f:
-                        json.dump(existing_signals, f, indent=4)
-                    
-                    hedge_count = sum(1 for s in existing_signals if s.get('is_hedge_order', False))
-                    print(f"\n  💾 Saved {len(existing_signals)} signals to {signals_file}")
-                    print(f"     • Hedges in file: {hedge_count}")
-                    print(f"     • New hedges added: {hedges_created_for_investor}")
-                    print(f"     • Hedges removed (profit closed): {hedge_stats['hedges_removed']}")
-                    print(f"     • Hedges removed (SL profitable): {hedges_removed_due_to_sl_profit}")
-                    print(f"     • Hedges skipped (SL profitable): {hedges_skipped_due_to_sl_profit}")
-                
-            except Exception as e:
-                print(f"   Error saving signals: {e}")
-                hedge_stats['errors'] += 1
-        
-        # Investor summary
-        print(f"\n  📊 SUMMARY for {user_brokerid}:")
-        print(f"     • Running positions: {len(running_positions)}")
-        print(f"     • Pending orders: {len(pending_orders)}")
-        print(f"     • Closed in profit: {len(positions_closed_profit_tickets)}")
-        print(f"     • Closed in loss: {len(positions_closed_loss_tickets)}")
-        print(f"     • Orphaned hedges removed: {orphaned_hedges_removed}")
-        print(f"     • Hedges created: {hedges_created_for_investor}")
-        print(f"     • Hedges skipped (SL profitable): {hedges_skipped_due_to_sl_profit}")
-        print(f"     • Hedges removed (SL profitable): {hedges_removed_due_to_sl_profit}")
-        print(f"     • Hedges removed from JSON (closed profit): {hedge_stats['hedges_removed']}")
-    
-    # Global summary
-    print("\n" + "="*80)
-    print("📊 GLOBAL HEDGE SUMMARY")
-    print("="*80)
-    print(f"  • Investors processed: {hedge_stats['investors_processed']}")
-    print(f"  • Positions analyzed: {hedge_stats['positions_analyzed']}")
-    print(f"  • Hedges created: {hedge_stats['hedges_created']}")
-    print(f"  • Hedges removed from JSON: {hedge_stats['hedges_removed']}")
-    print(f"  • Hedges skipped (SL profitable): {hedge_stats['hedges_skipped_sl_profit']}")
-    print(f"  • Hedges removed (SL profitable): {hedge_stats['hedges_removed_sl_profit']}")
-    print(f"  • Orphaned hedges closed: {hedge_stats['orphaned_hedges_closed']}")
-    print(f"  • Orphaned hedges cancelled: {hedge_stats['orphaned_hedges_cancelled']}")
-    print(f"  • Positions closed profit: {hedge_stats['positions_closed_profit']}")
-    print(f"  • Positions closed loss: {hedge_stats['positions_closed_loss']}")
-    print(f"  • Errors: {hedge_stats['errors']}")
-    print("="*80)
-    
-    return (hedge_stats['hedges_created'] > 0 or hedge_stats['hedges_removed'] > 0 or 
-            hedge_stats['orphaned_hedges_closed'] > 0 or hedge_stats['orphaned_hedges_cancelled'] > 0 or
-            hedge_stats['hedges_skipped_sl_profit'] > 0 or hedge_stats['hedges_removed_sl_profit'] > 0)
 
 #-------   ###   -------#
 
@@ -9418,6 +8600,399 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
             print(f"  └─ {'='*40}")
 
     print(f"\n{'='*10} USD RISK CALCULATION COMPLETE {'='*10}")
+    return any_orders_processed
+
+def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
+    """
+    Calculates and populates the live USD risk for all orders in pending_orders/limit_orders.json files.
+    Deduplicates orders first, scales volume, and SPLITS orders if they exceed max volume.
+    
+    NEW LOGIC: Uses both default_risk and maximum_risk from accountmanagement.json
+    - tolerance_min = default_risk (target minimum)
+    - tolerance_max = maximum_risk (hard cap)
+    """
+    print(f"\n{'='*10} 💰 CALCULATING LIVE USD RISK WITH DEDUPLICATION & SPLITTING {'='*10}")
+    
+    total_files_updated = 0
+    total_orders_updated = 0
+    total_risk_usd = 0.0
+    total_signals_created = 0
+    total_symbols_normalized = 0
+    inv_base_path = Path(INV_PATH)
+
+    if not inv_base_path.exists():
+        print(f" [!] Error: Investor path {INV_PATH} does not exist.")
+        return False
+
+    if inv_id:
+        inv_folder = inv_base_path / inv_id
+        investor_folders = [inv_folder] if inv_folder.exists() else []
+        if not investor_folders:
+            print(f" [!] Error: Investor folder {inv_id} does not exist.")
+            return False
+    else:
+        investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+    
+    if not investor_folders:
+        print(" └─ 🔘 No investor directories found.")
+        return False
+
+    any_orders_processed = False
+
+    for inv_folder in investor_folders:
+        current_inv_id = inv_folder.name
+        print(f"\n [{current_inv_id}] 🔍 Initializing pre-process cleanup and risk scaling...")
+
+        resolution_cache = {}
+
+        # 1. Load account management data
+        account_mgmt_path = inv_folder / "accountmanagement.json"
+        default_risk_map = {}
+        maximum_risk_map = {}
+        account_balance = None
+        
+        if account_mgmt_path.exists():
+            try:
+                with open(account_mgmt_path, 'r', encoding='utf-8') as f:
+                    account_data = json.load(f)
+                default_risk_map = account_data.get('account_balance_default_risk_management', {})
+                maximum_risk_map = account_data.get('account_balance_maximum_risk_management', {})
+                print(f"  └─ 📊 Loaded risk management:")
+                print(f"      • Default ranges: {len(default_risk_map)}")
+                print(f"      • Maximum ranges: {len(maximum_risk_map)}")
+            except Exception as e:
+                print(f"  └─ ⚠️  Could not load accountmanagement.json: {e}")
+        else:
+            print(f"  └─ ⚠️  No accountmanagement.json found, skipping risk-based scaling")
+            continue
+
+        broker_cfg = usersdictionary.get(current_inv_id)
+        if not broker_cfg:
+            print(f"  └─  No broker config found for {current_inv_id}")
+            continue
+        
+        account_info = mt5.account_info()
+        if account_info:
+            account_balance = account_info.balance
+            print(f"  └─ 💵 Live account balance: ${account_balance:,.2f}")
+        else:
+            print(f"  └─ ⚠️  Could not fetch account balance from broker")
+            continue
+        
+        # Get DEFAULT risk (target minimum)
+        default_risk = None
+        if default_risk_map:
+            for range_str, risk_value in default_risk_map.items():
+                try:
+                    if '_risk' in range_str:
+                        range_part = range_str.replace('_risk', '')
+                        if '-' in range_part:
+                            min_val, max_val = map(float, range_part.split('-'))
+                            if min_val <= account_balance <= max_val:
+                                default_risk = float(risk_value)
+                                print(f"  └─ 🎯 Balance ${account_balance:,.2f} falls in default range {range_part}")
+                                print(f"  └─ 🎯 Default risk (target minimum): ${default_risk:.2f}")
+                                break
+                except Exception as e:
+                    continue
+        
+        # Get MAXIMUM risk (hard cap)
+        maximum_risk = None
+        if maximum_risk_map:
+            for range_str, risk_value in maximum_risk_map.items():
+                try:
+                    if '_risk' in range_str:
+                        range_part = range_str.replace('_risk', '')
+                        if '-' in range_part:
+                            min_val, max_val = map(float, range_part.split('-'))
+                            if min_val <= account_balance <= max_val:
+                                maximum_risk = float(risk_value)
+                                print(f"  └─ 🎯 Balance ${account_balance:,.2f} falls in maximum range {range_part}")
+                                print(f"  └─ 🎯 Maximum risk (hard cap): ${maximum_risk:.2f}")
+                                break
+                except Exception as e:
+                    continue
+        
+        # Apply fallback logic (same as check_pending_orders_risk)
+        if default_risk is None and maximum_risk is None:
+            print(f"  └─ ⚠️  No risk configuration found for balance ${account_balance:,.2f}. Skipping.")
+            continue
+        elif default_risk is None:
+            default_risk = maximum_risk
+            print(f"  └─ ⚠️  Default risk missing. Using maximum (${maximum_risk:.2f}) as both target and cap.")
+        elif maximum_risk is None:
+            maximum_risk = default_risk
+            print(f"  └─ ⚠️  Maximum risk missing. Using default (${default_risk:.2f}) as both target and cap.")
+        
+        # Ensure maximum is at least default
+        if maximum_risk < default_risk:
+            print(f"  └─ ⚠️  Maximum risk (${maximum_risk:.2f}) is less than default (${default_risk:.2f}). Adjusting maximum to match default.")
+            maximum_risk = default_risk
+        
+        # Set tolerance bounds
+        tolerance_min = default_risk  # Target minimum
+        tolerance_max = maximum_risk  # Hard cap maximum
+        
+        print(f"  └─ 🎯 Risk Tolerance Bounds:")
+        print(f"      • Minimum target (default): ${tolerance_min:.2f}")
+        print(f"      • Maximum allowed (cap): ${tolerance_max:.2f}")
+        
+        order_files = list(inv_folder.rglob("*/pending_orders/limit_orders.json"))
+        
+        if not order_files:
+            print(f"  └─ 🔘 No limit order files found")
+            continue
+            
+        investor_files_updated = 0
+        investor_orders_updated = 0
+        investor_risk_usd = 0.0
+        investor_signals_count = 0
+        
+        broker_prefix = broker_cfg.get('BROKER_NAME', '').lower()
+        if not broker_prefix:
+            server = broker_cfg.get('SERVER', '')
+            broker_prefix = server.split('-')[0].split('.')[0].lower() if server else 'broker'
+        
+        print(f"  └─ 🏷️  Using broker prefix: '{broker_prefix}' for field names")
+        
+        for file_path in order_files:
+            try:
+                # --- PRE-PROCESS DEDUPLICATION ---
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw_orders = json.load(f)
+                
+                if not raw_orders:
+                    continue
+
+                # Deduplicate based on symbol, entry, and exit
+                unique_orders = []
+                seen_keys = set()
+                for o in raw_orders:
+                    key = (o.get('symbol'), o.get('entry'), o.get('exit'))
+                    if key not in seen_keys:
+                        unique_orders.append(o)
+                        seen_keys.add(key)
+                
+                if len(unique_orders) < len(raw_orders):
+                    print(f"    └─ 🧹 Cleaned {len(raw_orders) - len(unique_orders)} duplicate orders from {file_path.name}")
+                
+                orders = unique_orders
+
+                # Clear limit_orders.json for this specific folder to prevent stale data mixing with splits
+                signals_path = file_path.parent / "limit_orders.json"
+                if signals_path.exists():
+                    with open(signals_path, 'w', encoding='utf-8') as f:
+                        json.dump([], f)
+                    print(f"    └─ 🚿 Cleared existing limit_orders.json for fresh split generation")
+
+                # --- START PROCESSING ---
+                if callback_function:
+                    try:
+                        callback_function(current_inv_id, file_path, orders)
+                    except Exception as e:
+                        print(f"    └─ ⚠️  Callback error: {e}")
+                
+                orders_modified = False
+                file_risk_total = 0.0
+                file_signals = []
+                
+                for order in orders:
+                    raw_symbol = order.get("symbol", "")
+                    if not raw_symbol:
+                        continue
+                    
+                    if raw_symbol in resolution_cache:
+                        normalized_symbol = resolution_cache[raw_symbol]
+                    else:
+                        normalized_symbol = get_normalized_symbol(raw_symbol)
+                        resolution_cache[raw_symbol] = normalized_symbol
+                        if normalized_symbol != raw_symbol:
+                            print(f"    └─ ✅ {raw_symbol} -> {normalized_symbol} (Mapped & Cached)")
+                            total_symbols_normalized += 1
+                    
+                    symbol = normalized_symbol if normalized_symbol else raw_symbol
+                    order['symbol'] = symbol
+                    
+                    volume_field = f"{broker_prefix}_volume"
+                    tick_size_field = f"{broker_prefix}_tick_size"
+                    tick_value_field = f"{broker_prefix}_tick_value"
+                    
+                    current_volume = order.get(volume_field)
+                    tick_size = order.get(tick_size_field)
+                    tick_value = order.get(tick_value_field)
+                    
+                    if None in (current_volume, tick_size, tick_value):
+                        print(f"    └─ ⚠️  Missing broker fields for {symbol}, skipping")
+                        continue
+                    
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        print(f"    └─ ⚠️  Could not fetch current price for {symbol}, skipping")
+                        continue
+                    
+                    entry_price = order.get("entry")
+                    exit_price = order.get("exit")
+                    
+                    if not entry_price or not exit_price:
+                        continue
+                    
+                    stop_distance_pips = abs(entry_price - exit_price)
+                    ticks_in_stop = stop_distance_pips / tick_size if tick_size > 0 else 0
+                    
+                    volume_step = symbol_info.volume_step
+                    min_volume = symbol_info.volume_min
+                    max_volume = symbol_info.volume_max
+                    
+                    best_volume = current_volume
+                    best_risk = 0
+                    test_volume = current_volume if current_volume >= min_volume else min_volume
+                    test_risk = test_volume * ticks_in_stop * tick_value
+                    
+                    print(f"    └─ 📈 {symbol}: Starting volume {test_volume:.3f} -> risk ${test_risk:.2f}")
+                    
+                    # NEW LOGIC: Scale to be within [tolerance_min, tolerance_max]
+                    if test_risk > tolerance_max:
+                        print(f"      └─ ⬇️  Risk too high (${test_risk:.2f} > ${tolerance_max:.2f}), scaling down...")
+                        while test_risk > tolerance_max and test_volume > min_volume:
+                            test_volume = max(min_volume, test_volume - volume_step)
+                            test_risk = test_volume * ticks_in_stop * tick_value
+                        best_volume = test_volume
+                        best_risk = test_risk
+                        print(f"      └─ ✅ Scaled down to volume {best_volume:.3f} (risk ${best_risk:.2f})")
+                    
+                    elif test_risk < tolerance_min:
+                        print(f"      └─ ⬆️  Risk too low (${test_risk:.2f} < ${tolerance_min:.2f}), scaling up...")
+                        # Try to scale up but ensure we don't exceed tolerance_max
+                        starting_volume = test_volume
+                        starting_risk = test_risk
+                        
+                        # Keep track of the last valid volume that doesn't exceed max
+                        last_valid_volume = test_volume
+                        last_valid_risk = test_risk
+                        
+                        while test_risk < tolerance_min:
+                            previous_volume = test_volume
+                            previous_risk = test_risk
+                            test_volume = min(max_volume, test_volume + volume_step)
+                            test_risk = test_volume * ticks_in_stop * tick_value
+                            
+                            # If we exceed max, revert to previous and break
+                            if test_risk > tolerance_max:
+                                best_volume = previous_volume
+                                best_risk = previous_risk
+                                print(f"      └─ ✅ Using volume: {best_volume:.3f} (risk ${best_risk:.2f}) to avoid exceeding max (would be ${test_risk:.2f})")
+                                break
+                            
+                            # Update last valid
+                            last_valid_volume = test_volume
+                            last_valid_risk = test_risk
+                            
+                            # If we hit max volume, break
+                            if test_volume >= max_volume:
+                                best_volume = test_volume
+                                best_risk = test_risk
+                                print(f"      └─ ✅ Reached max volume: {best_volume:.3f} (risk ${best_risk:.2f})")
+                                break
+                        else:
+                            # Completed loop without break (reached tolerance_min)
+                            best_volume = test_volume
+                            best_risk = test_risk
+                            print(f"      └─ ✅ Scaled up to volume {best_volume:.3f} (risk ${best_risk:.2f})")
+                    
+                    else:
+                        best_volume = test_volume
+                        best_risk = test_risk
+                        print(f"      └─ ✅ Already within tolerance: volume {best_volume:.3f} (risk ${best_risk:.2f})")
+
+                    # Final validation: ensure risk is within bounds
+                    if best_risk < tolerance_min:
+                        print(f"      └─ ⚠️  Warning: Final risk ${best_risk:.2f} below target ${tolerance_min:.2f}")
+                    elif best_risk > tolerance_max:
+                        print(f"      └─ ⚠️  Warning: Final risk ${best_risk:.2f} exceeds max ${tolerance_max:.2f}")
+
+                    order[volume_field] = round(best_volume, 2)
+                    order["risk_in_usd"] = round(best_risk, 2)
+                    order["risk_calculated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    order["required_risk_target"] = round(default_risk, 2)
+                    order["maximum_risk_cap"] = round(maximum_risk, 2)
+                    order["risk_tolerance_min"] = round(tolerance_min, 2)
+                    order["risk_tolerance_max"] = round(tolerance_max, 2)
+                    order["account_balance_at_calc"] = round(account_balance, 2)
+                    order["current_bid"] = round(symbol_info.bid, 6) if hasattr(symbol_info, 'bid') else None
+                    order["current_ask"] = round(symbol_info.ask, 6) if hasattr(symbol_info, 'ask') else None
+                    
+                    orders_modified = True
+                    investor_orders_updated += 1
+                    total_orders_updated += 1
+                    file_risk_total += best_risk
+                    
+                    # --- SPLITTING LOGIC (only for max volume, not risk) ---
+                    if best_risk >= tolerance_min * 0.5 and best_risk > 0:
+                        remaining_volume = best_volume
+                        is_split = best_volume > max_volume
+                        
+                        while remaining_volume > 0.0001:
+                            chunk_volume = min(remaining_volume, max_volume)
+                            if chunk_volume < min_volume and remaining_volume != best_volume:
+                                break
+                                
+                            signal_order = order.copy()
+                            signal_order[volume_field] = round(chunk_volume, 2)
+                            signal_order["split_order"] = is_split
+                            signal_order["moved_to_signals_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            file_signals.append(signal_order)
+                            investor_signals_count += 1
+                            total_signals_created += 1
+                            remaining_volume -= chunk_volume
+
+                        if is_split:
+                            print(f"      └─ 🟢 Qualified & SPLIT (Total Vol: {best_volume:.2f}, Max Vol: {max_volume})")
+                        else:
+                            print(f"      └─ 🟢 Qualified for limit_orders.json (risk ${best_risk:.2f})")
+                
+                # Save cleaned and updated limit orders
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(orders, f, indent=4)
+                
+                investor_files_updated += 1
+                total_files_updated += 1
+                investor_risk_usd += file_risk_total
+                total_risk_usd += file_risk_total
+                any_orders_processed = True
+                
+                if file_signals:
+                    try:
+                        # We already cleared limit_orders.json at the start, so we just write the new ones
+                        with open(signals_path, 'w', encoding='utf-8') as f:
+                            json.dump(file_signals, f, indent=4)
+                        
+                        print(f"  └─ 📊 limit_orders.json: Created {len(file_signals)} clean signals (splits included)")
+                    except Exception as e:
+                        print(f"  └─  Error writing limit_orders.json: {e}")
+                
+            except Exception as e:
+                print(f"  └─  Error processing {file_path}: {e}")
+                continue
+        
+        # Summary for current investor
+        if investor_orders_updated > 0:
+            print(f"\n  └─ {'='*40}")
+            print(f"  └─ ✨ Investor {current_inv_id} Summary:")
+            print(f"  └─     Files Processed:    {investor_files_updated}")
+            print(f"  └─     Orders Risk-Scaled: {investor_orders_updated}")
+            print(f"  └─     Total Risk:         ${investor_risk_usd:,.2f}")
+            print(f"  └─     Signals Generated:  {investor_signals_count}")
+            print(f"  └─ {'='*40}")
+
+    print(f"\n{'='*10} USD RISK CALCULATION COMPLETE {'='*10}")
+    print(f"📊 Overall Statistics:")
+    print(f"  • Files processed: {total_files_updated}")
+    print(f"  • Orders scaled: {total_orders_updated}")
+    print(f"  • Total risk: ${total_risk_usd:,.2f}")
+    print(f"  • Signals created: {total_signals_created}")
+    print(f"  • Symbols normalized: {total_symbols_normalized}")
+    
     return any_orders_processed
 
 def apply_default_prices(inv_id=None, callback_function=None):
@@ -15715,29 +15290,119 @@ def orders_reward_correction(inv_id=None):
             closest = min(sorted_values, key=lambda x: abs(x - current_rr))
             return closest, "closest"
 
-        # --- CHECK AND ADJUST ALL POSITIONS (OPEN MARKET ORDERS) ---
+        # --- HELPER FUNCTION: Calculate risk in USD (from live_usd_risk_and_scaling) ---
+        def calculate_risk_usd(volume, stop_distance_pips, tick_size, tick_value):
+            """
+            Calculate risk in USD using the proven formula from live_usd_risk_and_scaling.
+            
+            Args:
+                volume: Order/position volume
+                stop_distance_pips: Distance from entry to stop loss in price units
+                tick_size: Size of one tick in price units
+                tick_value: Value of one tick in account currency
+            
+            Returns:
+                float: Risk amount in USD
+            """
+            if tick_size <= 0:
+                return 0
+            
+            ticks_in_stop = stop_distance_pips / tick_size
+            risk_usd = volume * ticks_in_stop * tick_value
+            return abs(risk_usd)
+
+        # --- HELPER FUNCTION: Calculate TP price based on risk, RR, and direction ---
+        def calculate_tp_price_from_risk(price_open, risk_usd, target_rr, is_buy, symbol_info, volume, tick_size, tick_value):
+            """
+            Calculate take profit price based on target risk-reward ratio.
+            Uses the reverse calculation from the risk formula.
+            
+            Args:
+                price_open: Entry price
+                risk_usd: Risk amount in USD
+                target_rr: Target Risk-Reward ratio (e.g., 3.0 for 1:3)
+                is_buy: True for BUY orders, False for SELL orders
+                symbol_info: MT5 symbol info object
+                volume: Order/position volume
+                tick_size: Size of one tick in price units
+                tick_value: Value of one tick in account currency
+            
+            Returns:
+                float: Calculated TP price, or None if calculation fails
+            """
+            target_profit_usd = risk_usd * target_rr
+            
+            if tick_size <= 0 or tick_value <= 0:
+                return None
+            
+            # Calculate required ticks for target profit
+            # From formula: target_profit_usd = volume * ticks_needed * tick_value
+            ticks_needed = target_profit_usd / (volume * tick_value)
+            
+            # Convert ticks to price movement
+            price_move_needed = ticks_needed * tick_size
+            
+            # Get symbol digits for rounding
+            digits = symbol_info.digits
+            
+            # Ensure minimum movement (at least 10 points)
+            min_move = symbol_info.point * 10
+            if abs(price_move_needed) < min_move:
+                price_move_needed = min_move if price_move_needed >= 0 else -min_move
+            
+            # Round to symbol digits
+            price_move_needed = round(price_move_needed, digits)
+            
+            # Calculate TP based on direction
+            if is_buy:
+                # For BUY orders: TP is ABOVE entry price
+                new_tp = round(price_open + price_move_needed, digits)
+            else:
+                # For SELL orders: TP is BELOW entry price
+                new_tp = round(price_open - price_move_needed, digits)
+            
+            # Validate the TP is reasonable (not too far - max 50% move)
+            max_move = price_open * 0.5
+            move_abs = abs(new_tp - price_open)
+            if move_abs > max_move:
+                print(f"        ⚠️  Calculated move {move_abs:.{digits}f} exceeds 50% of price, capping...")
+                if is_buy:
+                    new_tp = round(price_open + max_move, digits)
+                else:
+                    new_tp = round(price_open - max_move, digits)
+            
+            return new_tp
+
+        # --- DEFINE ORDER AND POSITION TYPES WITH DIRECTION ---
+        # BUY Orders/Positions (Long)
+        BUY_TYPES = {
+            mt5.POSITION_TYPE_BUY: "BUY (MARKET)",
+            mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT",
+            mt5.ORDER_TYPE_BUY_STOP: "BUY STOP",
+            mt5.ORDER_TYPE_BUY_STOP_LIMIT: "BUY STOP-LIMIT"
+        }
+        
+        # SELL Orders/Positions (Short)
+        SELL_TYPES = {
+            mt5.POSITION_TYPE_SELL: "SELL (MARKET)",
+            mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT",
+            mt5.ORDER_TYPE_SELL_STOP: "SELL STOP",
+            mt5.ORDER_TYPE_SELL_STOP_LIMIT: "SELL STOP-LIMIT"
+        }
+        
+        # All pending order types
+        PENDING_ORDER_TYPES = set(BUY_TYPES.keys()) | set(SELL_TYPES.keys())
+        # Remove position types (they're not orders)
+        PENDING_ORDER_TYPES.discard(mt5.POSITION_TYPE_BUY)
+        PENDING_ORDER_TYPES.discard(mt5.POSITION_TYPE_SELL)
+
+        # --- PROCESS OPEN POSITIONS (MARKET ORDERS) ---
         positions = mt5.positions_get()
         investor_positions_checked = 0
         investor_positions_adjusted = 0
         investor_positions_skipped = 0
         investor_positions_error = 0
 
-        # Define MT5 position/order types for better readability
-        POSITION_TYPES = {
-            mt5.POSITION_TYPE_BUY: "BUY (MARKET)",
-            mt5.POSITION_TYPE_SELL: "SELL (MARKET)"
-        }
-        
-        ORDER_TYPES = {
-            mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT",
-            mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT",
-            mt5.ORDER_TYPE_BUY_STOP: "BUY STOP",
-            mt5.ORDER_TYPE_SELL_STOP: "SELL STOP",
-            mt5.ORDER_TYPE_BUY_STOP_LIMIT: "BUY STOP-LIMIT",
-            mt5.ORDER_TYPE_SELL_STOP_LIMIT: "SELL STOP-LIMIT"
-        }
-
-        # Process OPEN POSITIONS first
         if positions:
             print(f"\n  └─ 🔍 Scanning {len(positions)} open positions (MARKET)...")
             
@@ -15745,7 +15410,9 @@ def orders_reward_correction(inv_id=None):
                 investor_positions_checked += 1
                 stats["positions_checked"] += 1
                 
-                position_type_name = POSITION_TYPES.get(position.type, f"Unknown Type {position.type}")
+                # Determine position direction
+                is_buy = position.type in BUY_TYPES
+                position_type_name = BUY_TYPES.get(position.type, SELL_TYPES.get(position.type, f"Unknown Type {position.type}"))
                 
                 # Get symbol info
                 symbol_info = mt5.symbol_info(position.symbol)
@@ -15754,37 +15421,47 @@ def orders_reward_correction(inv_id=None):
                     investor_positions_skipped += 1
                     stats["orders_skipped"] += 1
                     continue
-
-                # Determine position direction
-                is_buy = position.type == mt5.POSITION_TYPE_BUY
+                
+                # Ensure symbol is selected
+                mt5.symbol_select(position.symbol, True)
+                symbol_info = mt5.symbol_info(position.symbol)
                 
                 print(f"\n    └─ 📋 Position #{position.ticket} | {position_type_name} | {position.symbol}")
                 
-                # Calculate current risk (stop loss distance in money)
+                # Calculate current risk using the proven formula
                 if position.sl == 0:
                     print(f"       ⚠️  No SL set - cannot calculate risk. Skipping TP adjustment.")
                     investor_positions_skipped += 1
                     stats["orders_skipped"] += 1
                     continue
                 
-                # For positions, risk is from entry to SL
+                # Get tick size and tick value from symbol info
+                tick_size = symbol_info.trade_tick_size
+                tick_value = symbol_info.trade_tick_value
+                
+                if tick_size <= 0 or tick_value <= 0:
+                    print(f"       ⚠️  Invalid tick size/value for {position.symbol}")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate stop distance in price units
                 if is_buy:
-                    risk_distance = position.price_open - position.sl
+                    stop_distance = position.price_open - position.sl
                 else:
-                    risk_distance = position.sl - position.price_open
+                    stop_distance = position.sl - position.price_open
                 
-                # Calculate risk in money using MT5 profit calculator for accuracy
-                calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-                sl_profit = mt5.order_calc_profit(calc_type, position.symbol, position.volume, 
-                                                  position.price_open, position.sl)
+                if stop_distance <= 0:
+                    print(f"       ⚠️  Invalid stop distance: {stop_distance}")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
                 
-                if sl_profit is not None:
-                    current_risk_usd = round(abs(sl_profit), 2)
-                else:
-                    # Fallback calculation
-                    risk_points = abs(risk_distance) / symbol_info.point
-                    point_value = symbol_info.trade_tick_value / symbol_info.trade_tick_size * symbol_info.point
-                    current_risk_usd = round(risk_points * point_value * position.volume, 2)
+                # Calculate current risk in USD using the proven formula
+                current_risk_usd = calculate_risk_usd(position.volume, stop_distance, tick_size, tick_value)
+                current_risk_usd = round(current_risk_usd, 2)
+                
+                print(f"       Volume: {position.volume} | Stop distance: {stop_distance:.{symbol_info.digits}f} | Risk: ${current_risk_usd:.2f}")
                 
                 # Calculate current R:R if TP exists
                 current_rr = None
@@ -15794,8 +15471,8 @@ def orders_reward_correction(inv_id=None):
                     else:
                         tp_distance = position.price_open - position.tp
                     
-                    if risk_distance > 0:
-                        current_rr = round(tp_distance / risk_distance, 2)
+                    if stop_distance > 0:
+                        current_rr = round(tp_distance / stop_distance, 2)
                         print(f"       Current R:R: 1:{current_rr}")
                     else:
                         current_rr = None
@@ -15818,144 +15495,83 @@ def orders_reward_correction(inv_id=None):
                         stats["rr_matches"][rr_key] = 0
                     stats["rr_matches"][rr_key] += 1
                 else:
-                    # If no current R:R, use default
                     target_rr = default_rr
                     print(f"       ℹ️  No current R:R found, using default: 1:{target_rr}")
                     stats["rr_mismatches"] += 1
                 
-                # Calculate required take profit based on risk and target R:R ratio
-                target_profit_usd = current_risk_usd * target_rr
+                # Calculate new take profit price using the reverse calculation
+                new_tp = calculate_tp_price_from_risk(position.price_open, current_risk_usd, target_rr, 
+                                                     is_buy, symbol_info, position.volume, tick_size, tick_value)
                 
-                print(f"       Risk: ${current_risk_usd:.2f} | Target Profit: ${target_profit_usd:.2f} (1:{target_rr})")
+                if new_tp is None:
+                    print(f"       ⚠️  Cannot calculate TP price. Skipping.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
                 
-                # Calculate the take profit price that would achieve this profit
-                tick_value = symbol_info.trade_tick_value
-                tick_size = symbol_info.trade_tick_size
+                # Validate TP price makes sense for direction
+                digits = symbol_info.digits
+                if is_buy and new_tp <= position.price_open:
+                    print(f"       ⚠️  Calculated TP {new_tp:.{digits}f} is not above entry {position.price_open:.{digits}f}. Skipping.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                elif not is_buy and new_tp >= position.price_open:
+                    print(f"       ⚠️  Calculated TP {new_tp:.{digits}f} is not below entry {position.price_open:.{digits}f}. Skipping.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
                 
-                if tick_value > 0 and tick_size > 0:
-                    # Calculate how many ticks we need to move to achieve target profit
-                    ticks_needed = target_profit_usd / (position.volume * tick_value)
+                print(f"       Target R:R: 1:{target_rr} | Target Profit: ${current_risk_usd * target_rr:.2f}")
+                
+                # Check if current TP is significantly different from calculated TP
+                if position.tp == 0:
+                    target_move = abs(new_tp - position.price_open)
+                    print(f"       📝 No TP currently set")
+                    print(f"       Target TP: {new_tp:.{digits}f} (Move from entry: {target_move:.{digits}f})")
+                    should_adjust = True
+                else:
+                    current_move = abs(position.tp - position.price_open)
+                    target_move = abs(new_tp - position.price_open)
                     
-                    # Convert ticks to price movement
-                    price_move_needed = ticks_needed * tick_size
+                    # Calculate threshold (10% of target move or 2 pips, whichever is larger)
+                    pip_threshold = max(target_move * 0.1, symbol_info.point * 20)
                     
-                    # Round to symbol digits
-                    digits = symbol_info.digits
-                    price_move_needed = round(price_move_needed, digits)
-                    
-                    # Calculate new take profit price based on position type (from entry price)
-                    if is_buy:
-                        new_tp = round(position.price_open + price_move_needed, digits)
-                    else:
-                        new_tp = round(position.price_open - price_move_needed, digits)
-                    
-                    # Check if current TP is significantly different from calculated TP
-                    if position.tp == 0:
-                        target_move = abs(new_tp - position.price_open)
-                        print(f"       📝 No TP currently set")
-                        print(f"       Target TP: {new_tp:.{digits}f} (Move from entry: {target_move:.{digits}f})")
+                    if abs(current_move - target_move) > pip_threshold:
+                        print(f"       📐 TP needs adjustment")
+                        print(f"       Current TP: {position.tp:.{digits}f} (Move: {current_move:.{digits}f})")
+                        print(f"       Target TP:  {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
                         should_adjust = True
                     else:
-                        current_move = abs(position.tp - position.price_open)
-                        target_move = abs(new_tp - position.price_open)
-                        
-                        # Calculate threshold (10% of target move or 2 pips, whichever is larger)
-                        pip_threshold = max(target_move * 0.1, symbol_info.point * 20)
-                        
-                        if abs(current_move - target_move) > pip_threshold:
-                            print(f"       📐 TP needs adjustment")
-                            print(f"       Current TP: {position.tp:.{digits}f} (Move from entry: {current_move:.{digits}f})")
-                            print(f"       Target TP:  {new_tp:.{digits}f} (Move from entry: {target_move:.{digits}f})")
-                            should_adjust = True
-                        else:
-                            print(f"       ✅ TP already correct")
-                            print(f"       TP: {position.tp:.{digits}f} | Risk: ${current_risk_usd:.2f}")
-                            investor_positions_skipped += 1
-                            stats["orders_skipped"] += 1
-                            continue
+                        print(f"       ✅ TP already correct")
+                        investor_positions_skipped += 1
+                        stats["orders_skipped"] += 1
+                        continue
+                
+                if should_adjust:
+                    # Prepare modification request for position
+                    modify_request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": position.ticket,
+                        "sl": position.sl,
+                        "tp": new_tp,
+                    }
                     
-                    if should_adjust:
-                        # Prepare modification request for position
-                        modify_request = {
-                            "action": mt5.TRADE_ACTION_SLTP,
-                            "position": position.ticket,
-                            "sl": position.sl,
-                            "tp": new_tp,
-                        }
-                        
-                        # Send modification
-                        result = mt5.order_send(modify_request)
-                        
-                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                            investor_positions_adjusted += 1
-                            stats["positions_adjusted"] += 1
-                            stats["orders_adjusted"] += 1
-                            print(f"       ✅ TP adjusted successfully to {new_tp:.{digits}f} (Target R:R: 1:{target_rr})")
-                        else:
-                            investor_positions_error += 1
-                            stats["orders_error"] += 1
-                            error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
-                            print(f"        Modification failed: {error_msg}")
-                else:
-                    print(f"       ⚠️  Invalid tick values - using fallback calculation")
-                    # Fallback method using profit calculation for a small price movement
-                    try:
-                        test_move = symbol_info.point * 10
-                        if is_buy:
-                            test_price = position.price_open + test_move
-                        else:
-                            test_price = position.price_open - test_move
-                            
-                        test_profit = mt5.order_calc_profit(calc_type, position.symbol, position.volume, 
-                                                            position.price_open, test_price)
-                        
-                        if test_profit and test_profit != 0:
-                            point_value = abs(test_profit) / 10
-                            price_move_needed = target_profit_usd / point_value * symbol_info.point
-                            
-                            digits = symbol_info.digits
-                            price_move_needed = round(price_move_needed, digits)
-                            
-                            if is_buy:
-                                new_tp = round(position.price_open + price_move_needed, digits)
-                            else:
-                                new_tp = round(position.price_open - price_move_needed, digits)
-                            
-                            print(f"       Using fallback calculation")
-                            
-                            if position.tp == 0 or abs(position.tp - new_tp) > symbol_info.point * 20:
-                                modify_request = {
-                                    "action": mt5.TRADE_ACTION_SLTP,
-                                    "position": position.ticket,
-                                    "sl": position.sl,
-                                    "tp": new_tp,
-                                }
-                                
-                                result = mt5.order_send(modify_request)
-                                
-                                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                    investor_positions_adjusted += 1
-                                    stats["positions_adjusted"] += 1
-                                    stats["orders_adjusted"] += 1
-                                    print(f"       ✅ TP adjusted using fallback method to {new_tp:.{digits}f}")
-                                else:
-                                    investor_positions_error += 1
-                                    stats["orders_error"] += 1
-                                    print(f"        Fallback modification failed")
-                            else:
-                                investor_positions_skipped += 1
-                                stats["orders_skipped"] += 1
-                                print(f"       ✅ TP already correct (fallback check)")
-                        else:
-                            investor_positions_skipped += 1
-                            stats["orders_skipped"] += 1
-                            print(f"       ⚠️  Cannot calculate using fallback method")
-                    except Exception as e:
+                    # Send modification
+                    result = mt5.order_send(modify_request)
+                    
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        investor_positions_adjusted += 1
+                        stats["positions_adjusted"] += 1
+                        stats["orders_adjusted"] += 1
+                        print(f"       ✅ TP adjusted successfully to {new_tp:.{digits}f}")
+                    else:
                         investor_positions_error += 1
                         stats["orders_error"] += 1
-                        print(f"        Fallback calculation error: {e}")
-        
-        # --- CHECK AND ADJUST ALL PENDING ORDERS (LIMIT AND STOP) ---
+                        error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                        print(f"        Modification failed: {error_msg}")
+
+        # --- PROCESS PENDING ORDERS (LIMIT AND STOP) ---
         pending_orders = mt5.orders_get()
         investor_orders_checked = 0
         investor_orders_adjusted = 0
@@ -15966,14 +15582,16 @@ def orders_reward_correction(inv_id=None):
             print(f"\n  └─ 🔍 Scanning {len(pending_orders)} pending orders (LIMIT & STOP)...")
             
             for order in pending_orders:
-                # Skip if not a pending order (only process pending order types)
-                if order.type not in ORDER_TYPES.keys():
+                # Skip if not a pending order
+                if order.type not in PENDING_ORDER_TYPES:
                     continue
-
+                
                 investor_orders_checked += 1
                 stats["orders_checked"] += 1
                 
-                order_type_name = ORDER_TYPES.get(order.type, f"Unknown Type {order.type}")
+                # Determine order direction
+                is_buy = order.type in BUY_TYPES
+                order_type_name = BUY_TYPES.get(order.type, SELL_TYPES.get(order.type, f"Unknown Type {order.type}"))
                 
                 # Get symbol info
                 symbol_info = mt5.symbol_info(order.symbol)
@@ -15982,31 +15600,44 @@ def orders_reward_correction(inv_id=None):
                     investor_orders_skipped += 1
                     stats["orders_skipped"] += 1
                     continue
-
-                # Determine order direction for calculations
-                is_buy = order.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_BUY_STOP_LIMIT]
-                calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+                
+                # Ensure symbol is selected
+                mt5.symbol_select(order.symbol, True)
+                symbol_info = mt5.symbol_info(order.symbol)
                 
                 print(f"\n    └─ 📋 Order #{order.ticket} | {order_type_name} | {order.symbol}")
                 
-                # Calculate current risk (stop loss distance in money)
+                # Calculate current risk using the proven formula
                 if order.sl == 0:
                     print(f"       ⚠️  No SL set - cannot calculate risk. Skipping TP adjustment.")
                     investor_orders_skipped += 1
                     stats["orders_skipped"] += 1
                     continue
-                    
-                # For pending orders, risk is from entry to SL
-                sl_profit = mt5.order_calc_profit(calc_type, order.symbol, order.volume_initial, 
-                                                  order.price_open, order.sl)
                 
-                if sl_profit is None:
-                    print(f"       ⚠️  Cannot calculate risk. Skipping.")
+                # Get tick size and tick value from symbol info
+                tick_size = symbol_info.trade_tick_size
+                tick_value = symbol_info.trade_tick_value
+                
+                if tick_size <= 0 or tick_value <= 0:
+                    print(f"       ⚠️  Invalid tick size/value for {order.symbol}")
                     investor_orders_skipped += 1
                     stats["orders_skipped"] += 1
                     continue
-
-                current_risk_usd = round(abs(sl_profit), 2)
+                
+                # Calculate stop distance in price units
+                stop_distance = abs(order.price_open - order.sl)
+                
+                if stop_distance <= 0:
+                    print(f"       ⚠️  Invalid stop distance: {stop_distance}")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate current risk in USD using the proven formula
+                current_risk_usd = calculate_risk_usd(order.volume_initial, stop_distance, tick_size, tick_value)
+                current_risk_usd = round(current_risk_usd, 2)
+                
+                print(f"       Volume: {order.volume_initial} | Stop distance: {stop_distance:.{symbol_info.digits}f} | Risk: ${current_risk_usd:.2f}")
                 
                 # Calculate current R:R if TP exists
                 current_rr = None
@@ -16016,9 +15647,8 @@ def orders_reward_correction(inv_id=None):
                     else:
                         tp_distance = order.price_open - order.tp
                     
-                    risk_distance = abs(order.sl - order.price_open)
-                    if risk_distance > 0:
-                        current_rr = round(tp_distance / risk_distance, 2)
+                    if stop_distance > 0:
+                        current_rr = round(tp_distance / stop_distance, 2)
                         print(f"       Current R:R: 1:{current_rr}")
                     else:
                         current_rr = None
@@ -16041,142 +15671,81 @@ def orders_reward_correction(inv_id=None):
                         stats["rr_matches"][rr_key] = 0
                     stats["rr_matches"][rr_key] += 1
                 else:
-                    # If no current R:R, use default
                     target_rr = default_rr
                     print(f"       ℹ️  No current R:R found, using default: 1:{target_rr}")
                     stats["rr_mismatches"] += 1
                 
-                # Calculate required take profit based on risk and target R:R ratio
-                target_profit_usd = current_risk_usd * target_rr
+                # Calculate new take profit price using the reverse calculation
+                new_tp = calculate_tp_price_from_risk(order.price_open, current_risk_usd, target_rr, 
+                                                     is_buy, symbol_info, order.volume_initial, tick_size, tick_value)
                 
-                print(f"       Risk: ${current_risk_usd:.2f} | Target Profit: ${target_profit_usd:.2f} (1:{target_rr})")
+                if new_tp is None:
+                    print(f"       ⚠️  Cannot calculate TP price. Skipping.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
                 
-                # Calculate the take profit price that would achieve this profit
-                tick_value = symbol_info.trade_tick_value
-                tick_size = symbol_info.trade_tick_size
+                # Validate TP price makes sense for direction
+                digits = symbol_info.digits
+                if is_buy and new_tp <= order.price_open:
+                    print(f"       ⚠️  Calculated TP {new_tp:.{digits}f} is not above entry {order.price_open:.{digits}f}. Skipping.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                elif not is_buy and new_tp >= order.price_open:
+                    print(f"       ⚠️  Calculated TP {new_tp:.{digits}f} is not below entry {order.price_open:.{digits}f}. Skipping.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
                 
-                if tick_value > 0 and tick_size > 0:
-                    # Calculate how many ticks we need to move to achieve target profit
-                    ticks_needed = target_profit_usd / (order.volume_initial * tick_value)
-                    
-                    # Convert ticks to price movement
-                    price_move_needed = ticks_needed * tick_size
-                    
-                    # Round to symbol digits
-                    digits = symbol_info.digits
-                    price_move_needed = round(price_move_needed, digits)
-                    
-                    # Calculate new take profit price based on order type
-                    if is_buy:
-                        new_tp = round(order.price_open + price_move_needed, digits)
-                    else:
-                        new_tp = round(order.price_open - price_move_needed, digits)
-                    
-                    # Check if current TP is significantly different from calculated TP
-                    current_move = abs(order.tp - order.price_open) if order.tp != 0 else 0
-                    target_move = abs(new_tp - order.price_open)
-                    
-                    # Calculate threshold (10% of target move or 2 pips, whichever is larger)
-                    pip_threshold = max(target_move * 0.1, symbol_info.point * 20)
-                    
-                    should_adjust = False
-                    
-                    if order.tp == 0:
-                        print(f"       📝 No TP currently set")
-                        print(f"       Target TP: {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
-                        should_adjust = True
-                    elif abs(current_move - target_move) > pip_threshold:
-                        print(f"       📐 TP needs adjustment")
-                        print(f"       Current TP: {order.tp:.{digits}f} (Move: {current_move:.{digits}f})")
-                        print(f"       Target TP:  {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
-                        should_adjust = True
-                    else:
-                        print(f"       ✅ TP already correct")
-                        print(f"       TP: {order.tp:.{digits}f} | Risk: ${current_risk_usd:.2f}")
-                        investor_orders_skipped += 1
-                        stats["orders_skipped"] += 1
-                        continue
-                    
-                    if should_adjust:
-                        # Prepare modification request
-                        modify_request = {
-                            "action": mt5.TRADE_ACTION_MODIFY,
-                            "order": order.ticket,
-                            "price": order.price_open,
-                            "sl": order.sl,
-                            "tp": new_tp,
-                        }
-                        
-                        # Send modification
-                        result = mt5.order_send(modify_request)
-                        
-                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                            investor_orders_adjusted += 1
-                            stats["orders_adjusted"] += 1
-                            print(f"       ✅ TP adjusted successfully to {new_tp:.{digits}f} (Target R:R: 1:{target_rr})")
-                        else:
-                            investor_orders_error += 1
-                            stats["orders_error"] += 1
-                            error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
-                            print(f"        Modification failed: {error_msg}")
+                print(f"       Target R:R: 1:{target_rr} | Target Profit: ${current_risk_usd * target_rr:.2f}")
+                
+                # Check if current TP is significantly different from calculated TP
+                current_move = abs(order.tp - order.price_open) if order.tp != 0 else 0
+                target_move = abs(new_tp - order.price_open)
+                
+                # Calculate threshold (10% of target move or 2 pips, whichever is larger)
+                pip_threshold = max(target_move * 0.1, symbol_info.point * 20)
+                
+                should_adjust = False
+                
+                if order.tp == 0:
+                    print(f"       📝 No TP currently set")
+                    print(f"       Target TP: {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
+                    should_adjust = True
+                elif abs(current_move - target_move) > pip_threshold:
+                    print(f"       📐 TP needs adjustment")
+                    print(f"       Current TP: {order.tp:.{digits}f} (Move: {current_move:.{digits}f})")
+                    print(f"       Target TP:  {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
+                    should_adjust = True
                 else:
-                    print(f"       ⚠️  Invalid tick values - using fallback calculation")
-                    # Fallback method using profit calculation for a small price movement
-                    try:
-                        test_move = symbol_info.point * 10
-                        if is_buy:
-                            test_price = order.price_open + test_move
-                        else:
-                            test_price = order.price_open - test_move
-                            
-                        test_profit = mt5.order_calc_profit(calc_type, order.symbol, order.volume_initial, 
-                                                            order.price_open, test_price)
-                        
-                        if test_profit and test_profit != 0:
-                            point_value = abs(test_profit) / 10
-                            price_move_needed = target_profit_usd / point_value * symbol_info.point
-                            
-                            digits = symbol_info.digits
-                            price_move_needed = round(price_move_needed, digits)
-                            
-                            if is_buy:
-                                new_tp = round(order.price_open + price_move_needed, digits)
-                            else:
-                                new_tp = round(order.price_open - price_move_needed, digits)
-                            
-                            print(f"       Using fallback calculation")
-                            
-                            if order.tp == 0 or abs(order.tp - new_tp) > symbol_info.point * 20:
-                                modify_request = {
-                                    "action": mt5.TRADE_ACTION_MODIFY,
-                                    "order": order.ticket,
-                                    "price": order.price_open,
-                                    "sl": order.sl,
-                                    "tp": new_tp,
-                                }
-                                
-                                result = mt5.order_send(modify_request)
-                                
-                                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                    investor_orders_adjusted += 1
-                                    stats["orders_adjusted"] += 1
-                                    print(f"       ✅ TP adjusted using fallback method to {new_tp:.{digits}f}")
-                                else:
-                                    investor_orders_error += 1
-                                    stats["orders_error"] += 1
-                                    print(f"        Fallback modification failed")
-                            else:
-                                investor_orders_skipped += 1
-                                stats["orders_skipped"] += 1
-                                print(f"       ✅ TP already correct (fallback check)")
-                        else:
-                            investor_orders_skipped += 1
-                            stats["orders_skipped"] += 1
-                            print(f"       ⚠️  Cannot calculate using fallback method")
-                    except Exception as e:
+                    print(f"       ✅ TP already correct")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                if should_adjust:
+                    # Prepare modification request for pending order
+                    modify_request = {
+                        "action": mt5.TRADE_ACTION_MODIFY,
+                        "order": order.ticket,
+                        "price": order.price_open,
+                        "sl": order.sl,
+                        "tp": new_tp,
+                    }
+                    
+                    # Send modification
+                    result = mt5.order_send(modify_request)
+                    
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        investor_orders_adjusted += 1
+                        stats["orders_adjusted"] += 1
+                        print(f"       ✅ TP adjusted successfully to {new_tp:.{digits}f}")
+                    else:
                         investor_orders_error += 1
                         stats["orders_error"] += 1
-                        print(f"        Fallback calculation error: {e}")
+                        error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                        print(f"        Modification failed: {error_msg}")
 
         # --- INVESTOR SUMMARY ---
         total_checked = investor_positions_checked + investor_orders_checked
@@ -16576,7 +16145,7 @@ def apply_dynamic_breakeven(inv_id=None):
 
 
 # real accounts 
-def process_single_investor(inv_folder):
+def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -16644,8 +16213,9 @@ def process_single_investor(inv_folder):
             if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
                 mt5.shutdown()
                 return account_stats
-            
-        place_usd_orders(inv_id=inv_id)
+        live_usd_risk_and_scaling(inv_id=inv_id)   
+        place_usd_orders(inv_id=inv_id)   
+        orders_reward_correction(inv_id=inv_id)
     
         mt5.shutdown()
         account_stats["success"] = True
@@ -16662,7 +16232,7 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def process_single_invest(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -16836,7 +16406,7 @@ def place_orders_parallel():
         results = pool.map(process_single_investor, investor_folders)
 
     #time.sleep(1)
-    #place_orders_parallel()
+    place_orders_parallel()
     return 
 
 
