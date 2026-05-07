@@ -8164,7 +8164,7 @@ def calculate_investor_symbols_orders(inv_id=None, callback_function=None):
     
     return any_orders_calculated
 
-def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
+def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
     """
     Calculates and populates the live USD risk for all orders in pending_orders/limit_orders.json files.
     Uses SMART RISK SCALING with target and maximum thresholds:
@@ -8646,6 +8646,695 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
                     # ============================================
                     
                     # IMPORTANT: Use the SCALED optimal_volume, not the original min_volume
+                    order[f"{broker_prefix}_volume"] = round(optimal_volume, 3)  # More precision for small volumes
+                    order[f"{broker_prefix}_tick_size"] = symbol_info.trade_tick_size
+                    order[f"{broker_prefix}_tick_value"] = symbol_info.trade_tick_value
+                    order["risk_in_usd"] = round(final_risk, 2)
+                    order["risk_calculated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    order["target_risk"] = round(target_risk, 2)
+                    order["max_risk_allowed"] = round(max_risk, 2)
+                    order["account_balance_at_calc"] = round(account_balance, 2)
+                    order["current_bid"] = round(symbol_info.bid, 6) if hasattr(symbol_info, 'bid') else None
+                    order["current_ask"] = round(symbol_info.ask, 6) if hasattr(symbol_info, 'ask') else None
+                    order["stop_distance_pips"] = round(stop_distance, 6)
+                    order["order_is_buy"] = is_buy
+                    order["risk_verified_by_mt5"] = True
+                    order["volume_step_used"] = volume_step
+                    order["scaled_volume"] = round(optimal_volume, 3)  # Track the actual scaled volume
+                    order["scaled_risk"] = round(final_risk, 2)  # Track the actual scaled risk
+                    
+                    # Keep this order (it passed all checks)
+                    kept_orders.append(order)
+                    
+                    orders_modified = True
+                    investor_orders_updated += 1
+                    total_orders_updated += 1
+                    file_risk_total += final_risk
+                    
+                    # ============================================
+                    # SPLITTING LOGIC - ONLY if volume exceeds broker max
+                    # ============================================
+                    need_split = optimal_volume > max_volume
+                    
+                    if need_split:
+                        print(f"\n       🟢 SPLITTING REQUIRED: Optimal volume {optimal_volume:.3f} exceeds broker max {max_volume}")
+                        
+                        remaining_volume = optimal_volume
+                        split_counter = 0
+                        
+                        while remaining_volume > 0.0001:
+                            # Take either max_volume or the remaining, whichever is smaller
+                            chunk_volume = min(remaining_volume, max_volume)
+                            
+                            # Validate chunk volume
+                            valid_chunk = is_valid_broker_volume(symbol_info, chunk_volume)
+                            if valid_chunk is None:
+                                print(f"       ⚠️  Chunk volume {chunk_volume} not valid, trying smaller")
+                                chunk_volume = round(chunk_volume - volume_step, 8)
+                                valid_chunk = is_valid_broker_volume(symbol_info, chunk_volume)
+                                if valid_chunk is None or valid_chunk < min_volume - 0.000001:
+                                    print(f"       ⚠️  Cannot create valid chunk, breaking")
+                                    break
+                            
+                            chunk_volume = valid_chunk
+                            
+                            # Create signal order (copy of original with chunk volume)
+                            signal_order = order.copy()
+                            signal_order[f"{broker_prefix}_volume"] = round(chunk_volume, 3)
+                            signal_order["split_order"] = True
+                            signal_order["parent_volume"] = round(optimal_volume, 3)
+                            signal_order["split_number"] = split_counter + 1
+                            signal_order["total_splits"] = 0  # Will update after loop
+                            signal_order["moved_to_signals_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            # Calculate split risk using MT5
+                            split_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, chunk_volume)
+                            if split_risk is None:
+                                # Fallback: proportional risk
+                                split_risk = final_risk * (chunk_volume / optimal_volume)
+                                print(f"       ⚠️  MT5 risk failed for chunk, using proportional: ${split_risk:.2f}")
+                            
+                            signal_order["split_risk"] = round(split_risk, 2)
+                            signal_order["risk_verified_by_mt5"] = True
+                            
+                            file_signals.append(signal_order)
+                            investor_signals_count += 1
+                            total_signals_created += 1
+                            remaining_volume -= chunk_volume
+                            split_counter += 1
+                            
+                            print(f"       🟢 Split #{split_counter}: vol={chunk_volume:.3f}, risk=${split_risk:.2f}, remaining={remaining_volume:.3f}")
+                        
+                        # Update total_splits in all split orders
+                        for sig in file_signals:
+                            if sig.get("split_order") and sig.get("split_number", 0) <= split_counter:
+                                sig["total_splits"] = split_counter
+                        
+                        print(f"       🟢 SPLIT COMPLETE: {split_counter} orders created")
+                        print(f"          Total Volume: {optimal_volume:.3f}, Total Risk: ${final_risk:.2f}")
+                    else:
+                        # No splitting needed - single order
+                        print(f"\n       🟢 SINGLE ORDER (No split needed)")
+                        print(f"          Volume: {optimal_volume:.3f} (within broker max: {max_volume})")
+                        
+                        # Create single signal order
+                        signal_order = order.copy()
+                        signal_order["split_order"] = False
+                        signal_order["parent_volume"] = round(optimal_volume, 3)
+                        signal_order["split_risk"] = round(final_risk, 2)
+                        signal_order["moved_to_signals_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        signal_order["split_number"] = 1
+                        signal_order["total_splits"] = 1
+                        
+                        file_signals.append(signal_order)
+                        investor_signals_count += 1
+                        total_signals_created += 1
+                        
+                        print(f"       🟢 Signal created: vol={optimal_volume:.3f}, risk=${final_risk:.2f}")
+                
+                # Replace original orders list with only kept orders
+                orders[:] = kept_orders
+                
+                # Save updated limit orders (only kept orders)
+                if orders_modified:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(orders, f, indent=4)
+                    
+                    investor_files_updated += 1
+                    total_files_updated += 1
+                    investor_risk_usd += file_risk_total
+                    total_risk_usd += file_risk_total
+                    any_orders_processed = True
+                    
+                    print(f"\n    └─ 💾 Saved {len(kept_orders)} orders to {file_path.name}")
+                
+                # Save signal orders
+                if file_signals:
+                    try:
+                        with open(signals_path, 'w', encoding='utf-8') as f:
+                            json.dump(file_signals, f, indent=4)
+                        
+                        strategy_folder = file_path.parent.parent.name
+                        print(f"    └─ 📊 {strategy_folder}: Created {len(file_signals)} signals, Rejected: {file_rejected}")
+                        print(f"    └─ 📁 Signals saved to: {signals_path}")
+                    except Exception as e:
+                        print(f"    └─  Error writing limit_orders.json: {e}")
+                
+            except Exception as e:
+                print(f"    └─  Error processing {file_path}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Summary for current investor
+        if investor_orders_updated > 0:
+            print(f"\n  └─ {'='*40}")
+            print(f"  └─ ✨ Investor {current_inv_id} Summary:")
+            print(f"  └─     Files Processed:    {investor_files_updated}")
+            print(f"  └─     Orders Risk-Scaled: {investor_orders_updated}")
+            print(f"  └─     Total Risk:         ${investor_risk_usd:,.2f}")
+            print(f"  └─     Signals Generated:  {investor_signals_count}")
+            print(f"  └─     Signals Rejected:   {investor_signals_rejected}")
+            print(f"  └─ {'='*40}")
+        else:
+            if investor_signals_rejected > 0:
+                print(f"\n  └─ ⚠️  Investor {current_inv_id}: All {investor_signals_rejected} orders were rejected")
+            else:
+                print(f"\n  └─ 🔘 Investor {current_inv_id}: No orders processed")
+
+    # Final summary
+    print(f"\n{'='*10} USD RISK CALCULATION COMPLETE {'='*10}")
+    print(f" Total Files Modified:     {total_files_updated}")
+    print(f" Total Orders Updated:     {total_orders_updated}")
+    print(f" Total Risk USD:           ${total_risk_usd:,.2f}")
+    print(f" Total Signals Created:    {total_signals_created}")
+    print(f" Total Signals Rejected:   {total_signals_rejected}")
+    print(f" Symbols Normalized:       {total_symbols_normalized}")
+    
+    if total_orders_updated > 0:
+        print(f" Average Risk per Order:   ${total_risk_usd / total_orders_updated if total_orders_updated > 0 else 0:.2f}")
+    
+    return any_orders_processed
+
+def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
+    """
+    Calculates and populates the live USD risk for all orders in pending_orders/limit_orders.json files.
+    Uses SMART RISK SCALING with target and maximum thresholds:
+    - Scales volume UP if risk < target_risk
+    - Scales volume DOWN if risk > max_risk
+    - Rejects orders that cannot fit within max_risk constraints
+    - Splits orders ONLY when volume exceeds broker max volume limits
+    
+    USES MT5 order_calc_profit FOR ALL RISK CALCULATIONS - EXACT MATCH with check_pending_orders_risk.
+    Steps through broker-allowed volume increments only.
+    """
+    print(f"\n{'='*10} 💰 CALCULATING LIVE USD RISK WITH SMART SCALING {'='*10}")
+    
+    total_files_updated = 0
+    total_orders_updated = 0
+    total_risk_usd = 0.0
+    total_signals_created = 0
+    total_signals_rejected = 0
+    total_symbols_normalized = 0
+    inv_base_path = Path(INV_PATH)
+
+    if not inv_base_path.exists():
+        print(f" [!] Error: Investor path {INV_PATH} does not exist.")
+        return False
+
+    if inv_id:
+        inv_folder = inv_base_path / inv_id
+        investor_folders = [inv_folder] if inv_folder.exists() else []
+        if not investor_folders:
+            print(f" [!] Error: Investor folder {inv_id} does not exist.")
+            return False
+    else:
+        investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+    
+    if not investor_folders:
+        print(" └─ 🔘 No investor directories found.")
+        return False
+
+    any_orders_processed = False
+
+    # --- RISK SAFETY CHECK SUB-FUNCTION USING MT5 order_calc_profit ---
+    def verify_risk_via_mt5(symbol, order_type_str, entry_price, exit_price, volume):
+        """
+        Verifies the actual USD risk using MT5's order_calc_profit.
+        This is the EXACT same calculation used by check_pending_orders_risk.
+        
+        Args:
+            symbol: Normalized symbol name
+            order_type_str: 'BUY' or 'SELL' string  
+            entry_price: Order entry/trigger price
+            exit_price: Stop loss price
+            volume: Order volume to check
+            
+        Returns:
+            float: Absolute USD risk value, or None if calculation fails
+        """
+        try:
+            # Determine the correct MT5 order type
+            order_type_upper = order_type_str.upper()
+            
+            if "BUY" in order_type_upper:
+                if "STOP" in order_type_upper:
+                    calc_type = mt5.ORDER_TYPE_BUY_STOP
+                elif "LIMIT" in order_type_upper:
+                    calc_type = mt5.ORDER_TYPE_BUY_LIMIT
+                else:
+                    calc_type = mt5.ORDER_TYPE_BUY
+            else:
+                if "STOP" in order_type_upper:
+                    calc_type = mt5.ORDER_TYPE_SELL_STOP
+                elif "LIMIT" in order_type_upper:
+                    calc_type = mt5.ORDER_TYPE_SELL_LIMIT
+                else:
+                    calc_type = mt5.ORDER_TYPE_SELL
+            
+            # Use order_calc_profit to get the EXACT profit/loss at SL
+            profit = mt5.order_calc_profit(calc_type, symbol, volume, entry_price, exit_price)
+            
+            if profit is not None:
+                return abs(profit)
+            else:
+                # Fallback: try with simpler direction-only types
+                if "BUY" in order_type_upper:
+                    profit = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, volume, entry_price, exit_price)
+                else:
+                    profit = mt5.order_calc_profit(mt5.ORDER_TYPE_SELL, symbol, volume, entry_price, exit_price)
+                
+                if profit is not None:
+                    return abs(profit)
+                    
+            return None
+                    
+        except Exception as e:
+            print(f"         ⚠️  MT5 risk verification error: {e}")
+            return None
+
+    # --- CHECK IF VOLUME IS VALID FOR THE BROKER ---
+    def is_valid_broker_volume(symbol_info, volume):
+        """
+        Checks if a volume is valid according to broker constraints.
+        Returns the nearest valid volume or None if impossible.
+        """
+        volume_step = symbol_info.volume_step
+        min_volume = symbol_info.volume_min
+        max_volume = symbol_info.volume_max
+        
+        # Check bounds
+        if volume < min_volume - 0.000001:
+            return None
+        if volume > max_volume + 0.000001:
+            return None
+        
+        # Round to nearest valid step
+        steps = round(volume / volume_step) if volume_step > 0 else 0
+        valid_volume = round(steps * volume_step, 8)
+        
+        # Ensure it's at least min_volume
+        valid_volume = max(valid_volume, min_volume)
+        
+        # Ensure it's at most max_volume
+        valid_volume = min(valid_volume, max_volume)
+        
+        return valid_volume
+
+    for inv_folder in investor_folders:
+        current_inv_id = inv_folder.name
+        print(f"\n [{current_inv_id}] 🔍 Initializing smart risk scaling...")
+
+        # Cache stores: { lower_case_raw_symbol: corrected_mt5_symbol }
+        resolution_cache = {}
+        
+        # Build MT5 symbol map ONCE for this investor (case-insensitive lookup)
+        mt5_symbol_map = {}
+        try:
+            all_symbols = mt5.symbols_get()
+            if all_symbols:
+                mt5_symbol_map = {s.name.lower(): s.name for s in all_symbols}
+                print(f"  └─ 📋 Loaded {len(mt5_symbol_map)} MT5 symbols for case correction")
+        except Exception as e:
+            print(f"  └─ ⚠️  Could not load MT5 symbols: {e}")
+
+        # 1. Load account management data with BOTH risk configurations
+        account_mgmt_path = inv_folder / "accountmanagement.json"
+        default_risk_map = {}
+        maximum_risk_map = {}
+        account_balance = None
+        
+        if account_mgmt_path.exists():
+            try:
+                with open(account_mgmt_path, 'r', encoding='utf-8') as f:
+                    account_data = json.load(f)
+                default_risk_map = account_data.get('account_balance_default_risk_management', {})
+                maximum_risk_map = account_data.get('account_balance_maximum_risk_management', {})
+                print(f"  └─ 📊 Loaded risk configurations:")
+                print(f"      • Default (target) ranges: {len(default_risk_map)}")
+                print(f"      • Maximum (hard cap) ranges: {len(maximum_risk_map)}")
+            except Exception as e:
+                print(f"  └─ ⚠️  Could not load accountmanagement.json: {e}")
+                continue
+        else:
+            print(f"  └─ ⚠️  No accountmanagement.json found, skipping risk-based scaling")
+            continue
+
+        broker_cfg = usersdictionary.get(current_inv_id)
+        if not broker_cfg:
+            print(f"  └─  No broker config found for {current_inv_id}")
+            continue
+        
+        account_info = mt5.account_info()
+        if account_info:
+            account_balance = account_info.balance
+            print(f"  └─ 💵 Live account balance: ${account_balance:,.2f}")
+        else:
+            print(f"  └─ ⚠️  Could not fetch account balance from broker")
+            continue
+        
+        # --- DETERMINE DEFAULT RISK (TARGET) ---
+        target_risk = None
+        if default_risk_map:
+            for range_str, risk_value in default_risk_map.items():
+                try:
+                    range_part = range_str.split('_')[0] if '_' in range_str else range_str
+                    if '-' in range_part:
+                        min_val, max_val = map(float, range_part.split('-'))
+                        if min_val <= account_balance <= max_val:
+                            target_risk = float(risk_value)
+                            print(f"  └─ 🎯 Target risk range: ${min_val:,.2f} - ${max_val:,.2f}")
+                            print(f"  └─ 🎯 Target risk: ${target_risk:.2f}")
+                            break
+                except Exception as e:
+                    continue
+        
+        # --- DETERMINE MAXIMUM RISK (HARD CAP) ---
+        max_risk = None
+        if maximum_risk_map:
+            for range_str, risk_value in maximum_risk_map.items():
+                try:
+                    range_part = range_str.split('_')[0] if '_' in range_str else range_str
+                    if '-' in range_part:
+                        min_val, max_val = map(float, range_part.split('-'))
+                        if min_val <= account_balance <= max_val:
+                            max_risk = float(risk_value)
+                            print(f"  └─ 🔒 Maximum risk (hard cap): ${max_risk:.2f}")
+                            break
+                except Exception as e:
+                    continue
+        
+        # --- APPLY FALLBACK LOGIC (same as check_pending_orders_risk) ---
+        if target_risk is None and max_risk is None:
+            print(f"  └─ ⚠️  No risk configuration found for balance ${account_balance:,.2f}. Skipping.")
+            continue
+        elif target_risk is None:
+            target_risk = max_risk
+            print(f"  └─ ⚠️  Target risk missing. Using maximum (${max_risk:.2f}) as both target and cap.")
+        elif max_risk is None:
+            max_risk = target_risk
+            print(f"  └─ ⚠️  Maximum risk missing. Using target (${target_risk:.2f}) as both target and cap.")
+        
+        # Ensure max_risk >= target_risk
+        if max_risk < target_risk:
+            print(f"  └─ ⚠️  Max risk (${max_risk:.2f}) < target (${target_risk:.2f}). Adjusting max to target.")
+            max_risk = target_risk
+        
+        print(f"\n  └─ 💰 SMART RISK CONFIGURATION:")
+        print(f"      • Target Risk: ${target_risk:.2f}")
+        print(f"      • Maximum Risk (hard cap): ${max_risk:.2f}")
+        print(f"      • Acceptable range: ${target_risk:.2f} - ${max_risk:.2f}")
+        
+        order_files = list(inv_folder.rglob("*/pending_orders/limit_orders.json"))
+        
+        if not order_files:
+            print(f"  └─ 🔘 No limit order files found")
+            continue
+            
+        investor_files_updated = 0
+        investor_orders_updated = 0
+        investor_risk_usd = 0.0
+        investor_signals_count = 0
+        investor_signals_rejected = 0
+        
+        broker_prefix = broker_cfg.get('BROKER_NAME', '').lower()
+        if not broker_prefix:
+            server = broker_cfg.get('SERVER', '')
+            broker_prefix = server.split('-')[0].split('.')[0].lower() if server else 'broker'
+        
+        print(f"  └─ 🏷️  Using broker prefix: '{broker_prefix}' for field names")
+        
+        for file_path in order_files:
+            try:
+                # --- PRE-PROCESS DEDUPLICATION ---
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw_orders = json.load(f)
+                
+                if not raw_orders:
+                    continue
+
+                # Deduplicate based on symbol, entry, and exit
+                unique_orders = []
+                seen_keys = set()
+                for o in raw_orders:
+                    key = (o.get('symbol'), o.get('entry'), o.get('exit'))
+                    if key not in seen_keys:
+                        unique_orders.append(o)
+                        seen_keys.add(key)
+                
+                if len(unique_orders) < len(raw_orders):
+                    print(f"    └─ 🧹 Cleaned {len(raw_orders) - len(unique_orders)} duplicate orders from {file_path.name}")
+                
+                orders = unique_orders
+
+                # Clear limit_orders.json for this specific folder
+                signals_path = file_path.parent / "limit_orders.json"
+                if signals_path.exists():
+                    with open(signals_path, 'w', encoding='utf-8') as f:
+                        json.dump([], f)
+                    print(f"    └─ 🚿 Cleared existing limit_orders.json for fresh split generation")
+
+                # --- START PROCESSING ---
+                if callback_function:
+                    try:
+                        callback_function(current_inv_id, file_path, orders)
+                    except Exception as e:
+                        print(f"    └─ ⚠️  Callback error: {e}")
+                
+                orders_modified = False
+                file_risk_total = 0.0
+                file_signals = []
+                file_rejected = 0
+                
+                # Track which orders to keep (for removing rejected ones)
+                kept_orders = []
+                
+                for order in orders:
+                    raw_symbol = order.get("symbol", "")
+                    if not raw_symbol:
+                        continue
+                    
+                    # --- SYMBOL NORMALIZATION WITH CASE CORRECTION ---
+                    cache_key = raw_symbol.lower()
+                    if cache_key in resolution_cache:
+                        normalized_symbol = resolution_cache[cache_key]
+                    else:
+                        # Step 1: Get initial normalized symbol
+                        normalized_symbol = get_normalized_symbol(raw_symbol)
+                        
+                        # Step 2: CASE CORRECTION - Check against MT5 symbols
+                        if mt5_symbol_map and normalized_symbol:
+                            normalized_lower = normalized_symbol.lower()
+                            if normalized_lower in mt5_symbol_map:
+                                correct_symbol = mt5_symbol_map[normalized_lower]
+                                if correct_symbol != normalized_symbol:
+                                    print(f"    └─ 🔧 Case correction: '{normalized_symbol}' → '{correct_symbol}'")
+                                    normalized_symbol = correct_symbol
+                        
+                        # Store in cache with lowercase key
+                        resolution_cache[cache_key] = normalized_symbol
+                        
+                        if normalized_symbol and normalized_symbol != raw_symbol:
+                            print(f"    └─ ✅ {raw_symbol} -> {normalized_symbol} (Mapped & Cached)")
+                            total_symbols_normalized += 1
+                    
+                    symbol = normalized_symbol if normalized_symbol else raw_symbol
+                    
+                    # Get MT5 symbol info
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        # Try case-insensitive lookup as fallback
+                        if mt5_symbol_map:
+                            symbol_lower = symbol.lower()
+                            if symbol_lower in mt5_symbol_map:
+                                correct_symbol = mt5_symbol_map[symbol_lower]
+                                print(f"    └─ 🔧 Fallback case correction: '{symbol}' → '{correct_symbol}'")
+                                symbol = correct_symbol
+                                symbol_info = mt5.symbol_info(symbol)
+                        
+                        if not symbol_info:
+                            print(f"    └─ ⚠️  Could not fetch symbol info for {symbol}, skipping")
+                            continue
+                    
+                    # Get broker volume constraints
+                    volume_step = symbol_info.volume_step
+                    min_volume = symbol_info.volume_min
+                    max_volume = symbol_info.volume_max
+                    
+                    entry_price = order.get("entry")
+                    exit_price = order.get("exit")
+                    
+                    if not entry_price or not exit_price:
+                        print(f"    └─ ⚠️  Missing entry/exit for {symbol}, skipping")
+                        continue
+                    
+                    # Determine order direction
+                    order_type = str(order.get('order_type', '')).upper()
+                    is_buy = "BUY" in order_type
+                    
+                    # Stop distance in price
+                    stop_distance = abs(entry_price - exit_price)
+                    
+                    print(f"\n    └─ 📈 {symbol}: Calculating optimal volume...")
+                    print(f"       Order type: {'BUY' if is_buy else 'SELL'}")
+                    print(f"       Entry: {entry_price}, Exit/SL: {exit_price}")
+                    print(f"       Stop distance: {stop_distance:.6f}")
+                    print(f"       Broker volume limits: Min={min_volume}, Max={max_volume}, Step={volume_step}")
+                    
+                    # ============================================
+                    # PHASE 1: INITIAL SAFETY CHECK AT MINIMUM VOLUME
+                    # Use MT5's order_calc_profit for accurate risk
+                    # ============================================
+                    print(f"\n       🔍 PHASE 1: INITIAL SAFETY CHECK AT MINIMUM VOLUME")
+                    
+                    # Start at minimum allowed volume
+                    current_volume = min_volume
+                    
+                    # Verify this volume is valid for broker
+                    valid_volume = is_valid_broker_volume(symbol_info, current_volume)
+                    if valid_volume is None:
+                        print(f"       ❌ REJECTED: Minimum volume {min_volume} is not valid for broker")
+                        file_rejected += 1
+                        investor_signals_rejected += 1
+                        total_signals_rejected += 1
+                        continue
+                    
+                    current_volume = valid_volume
+                    
+                    # Get MT5 risk at minimum volume
+                    mt5_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, current_volume)
+                    
+                    if mt5_risk is None:
+                        print(f"       ❌ REJECTED: MT5 could not calculate risk for {symbol}")
+                        file_rejected += 1
+                        investor_signals_rejected += 1
+                        total_signals_rejected += 1
+                        continue
+                    
+                    current_risk = mt5_risk
+                    print(f"       MT5 Risk at min vol ({current_volume}): ${current_risk:.2f}")
+                    
+                    # Check if minimum volume already exceeds max_risk
+                    if current_risk > max_risk:
+                        print(f"       ❌ REJECTED: Minimum risk ${current_risk:.2f} exceeds hard cap ${max_risk:.2f}")
+                        print(f"       🗑️  Order cannot fit within risk constraints at any volume")
+                        file_rejected += 1
+                        investor_signals_rejected += 1
+                        total_signals_rejected += 1
+                        continue
+                    
+                    # ============================================
+                    # PHASE 2: SMART SCALING USING BROKER-ALLOWED STEPS
+                    # Walk through each valid volume step and check with MT5
+                    # ============================================
+                    print(f"\n       🎯 PHASE 2: SMART SCALING WITH BROKER VOLUME STEPS")
+                    
+                    optimal_volume = current_volume
+                    optimal_risk = current_risk
+                    
+                    # Check if we're already at or above target
+                    if current_risk >= target_risk:
+                        print(f"       ✅ Risk already in target range: ${current_risk:.2f} >= ${target_risk:.2f}")
+                    else:
+                        print(f"       ⬆️  Need to scale UP: ${current_risk:.2f} < ${target_risk:.2f}")
+                        print(f"       Walking through broker volume steps...")
+                        
+                        # Track if we found a valid volume that meets target
+                        found_target = False
+                        last_valid_volume = current_volume
+                        last_valid_risk = current_risk
+                        
+                        # Walk through each volume step
+                        test_volume = current_volume
+                        while test_volume < max_volume:
+                            # Calculate next broker-allowed volume
+                            next_volume = round(test_volume + volume_step, 8)
+                            
+                            # Validate with broker
+                            valid_next = is_valid_broker_volume(symbol_info, next_volume)
+                            if valid_next is None or valid_next <= test_volume:
+                                # This step isn't valid, try next
+                                test_volume = next_volume
+                                continue
+                            
+                            test_volume = valid_next
+                            
+                            # Verify risk with MT5 at this volume
+                            test_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, test_volume)
+                            
+                            if test_risk is None:
+                                print(f"       ⚠️  MT5 failed at volume {test_volume}, trying next step")
+                                continue
+                            
+                            print(f"       🔍 Step: vol={test_volume:.3f}, risk=${test_risk:.2f}")
+                            
+                            # Check if this volume exceeds max_risk
+                            if test_risk > max_risk:
+                                print(f"       ⚠️  Volume {test_volume:.3f} exceeds max risk: ${test_risk:.2f} > ${max_risk:.2f}")
+                                print(f"       Using previous valid volume: {last_valid_volume:.3f} (risk: ${last_valid_risk:.2f})")
+                                break
+                            
+                            # This volume is valid - update our best option
+                            last_valid_volume = test_volume
+                            last_valid_risk = test_risk
+                            
+                            # Check if we've reached target
+                            if test_risk >= target_risk:
+                                optimal_volume = test_volume
+                                optimal_risk = test_risk
+                                found_target = True
+                                print(f"       ✅ REACHED TARGET at volume {optimal_volume:.3f}: risk ${optimal_risk:.2f} >= ${target_risk:.2f}")
+                                break
+                        
+                        if not found_target:
+                            # Use the best volume we found (last valid before hitting max risk or max volume)
+                            optimal_volume = last_valid_volume
+                            optimal_risk = last_valid_risk
+                            
+                            if optimal_volume >= max_volume - 0.000001:
+                                print(f"       ⚠️  Reached broker max volume ({max_volume}) without hitting target")
+                                print(f"       Best available: volume {optimal_volume:.3f}, risk ${optimal_risk:.2f} (below target ${target_risk:.2f})")
+                            elif optimal_risk < max_risk:
+                                print(f"       ⚠️  Could not reach target before hitting max risk")
+                                print(f"       Best available: volume {optimal_volume:.3f}, risk ${optimal_risk:.2f} (below target ${target_risk:.2f})")
+                    
+                    # ============================================
+                    # PHASE 3: FINAL CONFIRMATION CHECK
+                    # Re-verify the final volume with MT5
+                    # ============================================
+                    print(f"\n       ✅ PHASE 3: FINAL CONFIRMATION CHECK")
+                    
+                    final_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, optimal_volume)
+                    
+                    if final_risk is None:
+                        print(f"       ❌ REJECTED: MT5 failed to verify final volume {optimal_volume}")
+                        file_rejected += 1
+                        investor_signals_rejected += 1
+                        total_signals_rejected += 1
+                        continue
+                    
+                    print(f"       Final MT5 Risk: ${final_risk:.2f} at volume {optimal_volume:.3f}")
+                    
+                    # Verify it's still within max_risk
+                    if final_risk > max_risk:
+                        print(f"       ❌ FINAL REJECTION: Risk ${final_risk:.2f} exceeds cap ${max_risk:.2f}")
+                        file_rejected += 1
+                        investor_signals_rejected += 1
+                        total_signals_rejected += 1
+                        continue
+                    
+                    # Check if final risk is at least target_risk
+                    if final_risk >= target_risk:
+                        print(f"       ✅ Risk meets target: ${final_risk:.2f} >= ${target_risk:.2f}")
+                    else:
+                        print(f"       ⚠️  Risk below target but acceptable: ${final_risk:.2f} < ${target_risk:.2f}")
+                    
+                    # ============================================
+                    # UPDATE ORDER WITH CORRECT VOLUME AND RISK
+                    # ============================================
+                    
+                    # IMPORTANT: Use the SCALED optimal_volume, not the original min_volume
+                    order['symbol'] = symbol  # Update symbol with correct case
                     order[f"{broker_prefix}_volume"] = round(optimal_volume, 3)  # More precision for small volumes
                     order[f"{broker_prefix}_tick_size"] = symbol_info.trade_tick_size
                     order[f"{broker_prefix}_tick_value"] = symbol_info.trade_tick_value
@@ -17196,7 +17885,7 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def place_orders_parallel_once():
+def place_orders_parallel():
     """
     ORCHESTRATOR: Spawns multiple processes to handle  investors in parallel.
     Uses the  account initialization logic.
@@ -17220,7 +17909,7 @@ def place_orders_parallel_once():
     #place_orders_parallel()
     return 
 
-def place_orders_parallel():
+def place_orders_parallel_():
     """
     ORCHESTRATOR: Runs the investor processing loop indefinitely 
     using a while loop to avoid recursion errors.
