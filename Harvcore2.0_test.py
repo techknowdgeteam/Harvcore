@@ -29,7 +29,6 @@ UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\updated_demo_investors.jso
 INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors\demo_investors.json"
 VERIFIED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\verified_demo_investors.json"
 ISSUES_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\issues_demo_investors.json"
-NORMALIZE_SYMBOLS_PATH = r"C:\xampp\htdocs\harvcore\harvox\symbols_normalization.json"
 DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\harvcore\harvox\default_accountmanagement.json"
 DEFAULT_PATH = r"C:\xampp\htdocs\harvcore\harvox"
 BASE_ERROR_FOLDER = r"C:\xampp\htdocs\harvcore\harvox\usersdata\debugs"
@@ -46,7 +45,7 @@ TIMEFRAME_MAP = {
         "1w": mt5.TIMEFRAME_W1,
         "1mn": mt5.TIMEFRAME_MN1
 }
-    
+NORMALIZE_SYMBOLS_PATH = Path(r"C:\xampp\htdocs\harvcore\harvox\symbols_normalization.json")
 
 def load_investors_dictionary():
     """Load brokers config from JSON file with error handling and fallback."""
@@ -5950,19 +5949,25 @@ def get_normalized_symbol(record_symbol, risk_keys=None):
     If 'US OIL' is passed, it finds the USOIL family, then checks if the broker
     uses USOUSD, USOIL, or WTI.
     """
-    if not record_symbol: return None
+    if not record_symbol: 
+        return None
+    
     def clean(s): 
         return str(s).replace(" ", "").replace("_", "").replace("/", "").replace(".", "").upper()
 
     search_term = clean(record_symbol)
     
+    # Convert NORMALIZE_SYMBOLS_PATH to Path object if it's a string
+    normalize_path = Path(NORMALIZE_SYMBOLS_PATH) if isinstance(NORMALIZE_SYMBOLS_PATH, str) else NORMALIZE_SYMBOLS_PATH
+    
     # 1. Load Normalization Map
     norm_data = {}
-    if NORMALIZE_SYMBOLS_PATH.exists():
+    if normalize_path.exists():
         try:
-            with open(NORMALIZE_SYMBOLS_PATH, 'r', encoding='utf-8') as f:
+            with open(normalize_path, 'r', encoding='utf-8') as f:
                 norm_data = json.load(f).get("NORMALIZATION", {})
-        except: pass
+        except: 
+            pass
 
     # 2. Find the "Family"
     target_family_key = None
@@ -5981,7 +5986,8 @@ def get_normalized_symbol(record_symbol, risk_keys=None):
         if target_family_key and clean(target_family_key) in clean_risk_map:
             return clean_risk_map[clean(target_family_key)]
         for v in all_family_variants:
-            if v in clean_risk_map: return clean_risk_map[v]
+            if v in clean_risk_map: 
+                return clean_risk_map[v]
 
     # 4. IF NO RISK_KEYS (For Populating Order Fields / MT5 Specs)
     # Check what the broker actually has in MarketWatch
@@ -7272,6 +7278,119 @@ def populate_orders_missing_fields(inv_id=None, callback_function=None):
                         symbol_info = res['info']
                     else:
                         # Perform mapping only once
+                        # Perform mapping only once
+                        broker_symbol = get_normalized_symbol(raw_symbol)
+
+                        # CASE-INSENSITIVE FIX: Try to find the symbol with correct case
+                        symbol_info = mt5.symbol_info(broker_symbol)
+                        if symbol_info is None and broker_symbol:
+                            # Try case-insensitive lookup
+                            all_symbols = mt5.symbols_get()
+                            if all_symbols:
+                                symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+                                symbol_lower = broker_symbol.lower()
+                                if symbol_lower in symbols_lower_map:
+                                    correct_symbol = symbols_lower_map[symbol_lower]
+                                    if correct_symbol != broker_symbol:
+                                        print(f"    └─ 🔧 Case correction: '{broker_symbol}' → '{correct_symbol}'")
+                                        broker_symbol = correct_symbol
+                                        symbol_info = mt5.symbol_info(broker_symbol)
+                        
+                        resolution_cache[raw_symbol] = {'broker_sym': broker_symbol, 'info': symbol_info}
+                        
+                        # Detailed Log only on first discovery
+                        if symbol_info:
+                            if broker_symbol != raw_symbol:
+                                print(f"    └─ ✅ {raw_symbol} -> {broker_symbol} (Mapped & Cached)")
+                                total_symbols_normalized += 1
+                        else:
+                            print(f"    └─  MT5: '{broker_symbol}' (from '{raw_symbol}') not found in MarketWatch")
+
+                    if symbol_info:
+                        order['symbol'] = broker_symbol
+                        
+                        # Cleanup and Update
+                        for key in list(order.keys()):
+                            if any(x in key.lower() for x in ['volume', 'tick_size', 'tick_value']) and key not in [v_field, ts_field, tv_field]:
+                                del order[key]
+
+                        order[v_field] = symbol_info.volume_min
+                        order[ts_field] = symbol_info.trade_tick_size
+                        order[tv_field] = symbol_info.trade_tick_value
+                        total_orders_updated += 1
+                        modified = True
+
+                if modified:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(orders, f, indent=4)
+                    total_files_updated += 1
+
+            except Exception as e:
+                print(f"  └─  Error: {e}")
+
+    print(f"\n{'='*10} POPULATION COMPLETE {'='*10}")
+    print(f" Total Orders Updated:      {total_orders_updated}")
+    print(f" Total Symbols Normalized:  {total_symbols_normalized}")
+    return True
+
+def populate_orders_missing_fields_(inv_id=None, callback_function=None):
+    print(f"\n{'='*10} 📊 POPULATING ORDER FIELDS {'='*10}")
+    
+    total_files_updated = 0
+    total_orders_updated = 0
+    total_symbols_normalized = 0
+    inv_base_path = Path(INV_PATH)
+
+    # Ensure we have Path objects, not strings
+    if inv_id:
+        inv_path = inv_base_path / inv_id
+        investor_folders = [inv_path] if inv_path.exists() else []
+    else:
+        investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+    
+    for inv_folder in investor_folders:
+        # Ensure inv_folder is a Path object
+        if isinstance(inv_folder, str):
+            inv_folder = Path(inv_folder)
+        
+        current_inv_id = inv_folder.name
+        print(f" [{current_inv_id}] 🔍 Processing orders...")
+
+        # Local Cache for this investor to prevent redundant lookups
+        # Format: { "raw_symbol": {"broker_sym": "normalized", "info": mt5_obj} }
+        resolution_cache = {}
+
+        order_files = list(inv_folder.rglob("*/pending_orders/limit_orders.json"))
+        if not order_files: 
+            continue
+            
+        broker_cfg = usersdictionary.get(current_inv_id)
+        if not broker_cfg: 
+            continue
+            
+        server = broker_cfg.get('SERVER', '')
+        broker_prefix = server.split('-')[0].split('.')[0].lower() if server else 'broker'
+        v_field, ts_field, tv_field = f"{broker_prefix}_volume", f"{broker_prefix}_tick_size", f"{broker_prefix}_tick_value"
+
+        for file_path in order_files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    orders = json.load(f)
+                if not orders: 
+                    continue
+                
+                modified = False
+                for order in orders:
+                    raw_symbol = order.get("symbol")
+                    if not raw_symbol: 
+                        continue
+
+                    # Check Cache First
+                    if raw_symbol in resolution_cache:
+                        res = resolution_cache[raw_symbol]
+                        broker_symbol = res['broker_sym']
+                        symbol_info = res['info']
+                    else:
                         # Perform mapping only once
                         broker_symbol = get_normalized_symbol(raw_symbol)
 
@@ -16835,7 +16954,7 @@ def apply_dynamic_breakeven(inv_id=None):
 
 
 # real accounts 
-def process_single_investor(inv_folder):
+def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -16906,7 +17025,7 @@ def process_single_investor(inv_folder):
         #calculate_investor_symbols_orders(inv_id=inv_id)
         #live_usd_risk_and_scaling(inv_id=inv_id)
         #place_usd_orders(inv_id=inv_id)   
-        fetch_ohlc_data_for_investor(inv_id=inv_id)
+        populate_orders_missing_fields(inv_id=inv_id)
         #check_pending_orders_risk(inv_id=inv_id)
     
         mt5.shutdown()
@@ -16924,7 +17043,7 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def process_single_invest(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -17077,7 +17196,7 @@ def process_single_invest(inv_folder):
     
     return account_stats
 
-def place_orders_parallel():
+def place_orders_parallel_once():
     """
     ORCHESTRATOR: Spawns multiple processes to handle  investors in parallel.
     Uses the  account initialization logic.
@@ -17100,6 +17219,38 @@ def place_orders_parallel():
     #time.sleep(1)
     #place_orders_parallel()
     return 
+
+def place_orders_parallel():
+    """
+    ORCHESTRATOR: Runs the investor processing loop indefinitely 
+    using a while loop to avoid recursion errors.
+    """
+    inv_base_path = Path(INV_PATH)
+
+    print(f"🚀 Starting Perpetual Trading Loop...")
+
+    while True:  # Use a loop for indefinite execution
+        try:
+            investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            
+            if not investor_folders:
+                print(" └─ 🔘 No investor directories found. Retrying in 10s...")
+                time.sleep(10)
+                continue
+
+            print(f"\n--- Cycle Start: Processing {len(investor_folders)} investors ---")
+            
+            # Use the pool context manager to ensure processes are cleaned up each cycle
+            with mp.Pool(processes=len(investor_folders)) as pool:
+                results = pool.map(process_single_investor, investor_folders)
+            
+            print(f"--- Cycle Complete. Sleeping for 1 second ---")
+            
+        except Exception as e:
+            print(f"❌ Critical Error in Orchestrator: {e}")
+            time.sleep(5) # Wait a bit before retrying if something breaks
+            
+        time.sleep(1) # Controlled delay between cycles
 
 
 if __name__ == "__main__":
