@@ -2100,7 +2100,7 @@ def restricted_timerange(inv_id=None):
 
     # ========== VERIFY EXISTING MT5 CONNECTION ==========
     if not mt5.terminal_info():
-        print(f"  ❌ MT5 not connected")
+        print(f"  MT5 not connected")
         
         # Set alert flag
         restricted_timerange_alert = {
@@ -2318,13 +2318,13 @@ def investor_broker_symbols(inv_id=None):
     
     # Get all symbols from MT5
     if not mt5.terminal_info():
-        print("❌ MT5 is not initialized or not logged in!")
+        print("MT5 is not initialized or not logged in!")
         print("   Make sure MT5 is connected first (call initialize() and login())")
         return result
     
     symbols = mt5.symbols_get()
     if not symbols:
-        print(f"❌ Failed to retrieve symbols: {mt5.last_error()}")
+        print(f"Failed to retrieve symbols: {mt5.last_error()}")
         return result
     
     # Extract symbol names
@@ -2353,7 +2353,7 @@ def investor_broker_symbols(inv_id=None):
         for sym in volatility_symbols:
             print(f"   ✓ {sym}")
     else:
-        print(f"   ❌ No volatility-related symbols found")
+        print(f"   No volatility-related symbols found")
     print()
     
     # If investor ID provided, compare against their symbols
@@ -2452,7 +2452,7 @@ def investor_broker_symbols(inv_id=None):
                                     })
                                     print(f"   💡 SUGGESTION: Try using '{suggestions[0]}' instead of '{inv_sym}'")
                             else:
-                                print(f"   ❌ NO MATCH found for '{inv_sym}'")
+                                print(f"   NO MATCH found for '{inv_sym}'")
                     
                     print()
                     
@@ -2472,11 +2472,11 @@ def investor_broker_symbols(inv_id=None):
                         print(f"      - Need to add suffix like '.m' for mini contracts or '.ecn'")
                     
                 else:
-                    print(f"   ❌ accountmanagement.json not found for investor '{inv_id}'")
+                    print(f"   accountmanagement.json not found for investor '{inv_id}'")
             else:
-                print(f"   ❌ Investor '{inv_id}' not found in demo_investors.json")
+                print(f"   Investor '{inv_id}' not found in demo_investors.json")
         else:
-            print(f"   ❌ demo_investors.json not found")
+            print(f"   demo_investors.json not found")
     
     # Save results to file for reference
     output_dir = r"C:\xampp\htdocs\harvcore\harvox\cache"
@@ -8505,7 +8505,7 @@ def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
                     # Verify this volume is valid for broker
                     valid_volume = is_valid_broker_volume(symbol_info, current_volume)
                     if valid_volume is None:
-                        print(f"       ❌ REJECTED: Minimum volume {min_volume} is not valid for broker")
+                        print(f"       REJECTED: Minimum volume {min_volume} is not valid for broker")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -8517,7 +8517,7 @@ def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
                     mt5_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, current_volume)
                     
                     if mt5_risk is None:
-                        print(f"       ❌ REJECTED: MT5 could not calculate risk for {symbol}")
+                        print(f"       REJECTED: MT5 could not calculate risk for {symbol}")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -8528,7 +8528,7 @@ def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
                     
                     # Check if minimum volume already exceeds max_risk
                     if current_risk > max_risk:
-                        print(f"       ❌ REJECTED: Minimum risk ${current_risk:.2f} exceeds hard cap ${max_risk:.2f}")
+                        print(f"       REJECTED: Minimum risk ${current_risk:.2f} exceeds hard cap ${max_risk:.2f}")
                         print(f"       🗑️  Order cannot fit within risk constraints at any volume")
                         file_rejected += 1
                         investor_signals_rejected += 1
@@ -8619,7 +8619,7 @@ def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
                     final_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, optimal_volume)
                     
                     if final_risk is None:
-                        print(f"       ❌ REJECTED: MT5 failed to verify final volume {optimal_volume}")
+                        print(f"       REJECTED: MT5 failed to verify final volume {optimal_volume}")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -8629,7 +8629,7 @@ def live_usd_risk_and_scaling_(inv_id=None, callback_function=None):
                     
                     # Verify it's still within max_risk
                     if final_risk > max_risk:
-                        print(f"       ❌ FINAL REJECTION: Risk ${final_risk:.2f} exceeds cap ${max_risk:.2f}")
+                        print(f"       FINAL REJECTION: Risk ${final_risk:.2f} exceeds cap ${max_risk:.2f}")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -9193,7 +9193,7 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
                     # Verify this volume is valid for broker
                     valid_volume = is_valid_broker_volume(symbol_info, current_volume)
                     if valid_volume is None:
-                        print(f"       ❌ REJECTED: Minimum volume {min_volume} is not valid for broker")
+                        print(f"       REJECTED: Minimum volume {min_volume} is not valid for broker")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -9205,7 +9205,7 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
                     mt5_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, current_volume)
                     
                     if mt5_risk is None:
-                        print(f"       ❌ REJECTED: MT5 could not calculate risk for {symbol}")
+                        print(f"       REJECTED: MT5 could not calculate risk for {symbol}")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -9216,7 +9216,7 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
                     
                     # Check if minimum volume already exceeds max_risk
                     if current_risk > max_risk:
-                        print(f"       ❌ REJECTED: Minimum risk ${current_risk:.2f} exceeds hard cap ${max_risk:.2f}")
+                        print(f"       REJECTED: Minimum risk ${current_risk:.2f} exceeds hard cap ${max_risk:.2f}")
                         print(f"       🗑️  Order cannot fit within risk constraints at any volume")
                         file_rejected += 1
                         investor_signals_rejected += 1
@@ -9307,7 +9307,7 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
                     final_risk = verify_risk_via_mt5(symbol, order_type, entry_price, exit_price, optimal_volume)
                     
                     if final_risk is None:
-                        print(f"       ❌ REJECTED: MT5 failed to verify final volume {optimal_volume}")
+                        print(f"       REJECTED: MT5 failed to verify final volume {optimal_volume}")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -9317,7 +9317,7 @@ def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
                     
                     # Verify it's still within max_risk
                     if final_risk > max_risk:
-                        print(f"       ❌ FINAL REJECTION: Risk ${final_risk:.2f} exceeds cap ${max_risk:.2f}")
+                        print(f"       FINAL REJECTION: Risk ${final_risk:.2f} exceeds cap ${max_risk:.2f}")
                         file_rejected += 1
                         investor_signals_rejected += 1
                         total_signals_rejected += 1
@@ -15020,7 +15020,7 @@ def place_usd_orders(inv_id=None):
                     
                     # If this was the last signal and it failed
                     if idx == len(sorted_signals) - 1:
-                        print(f"       ❌ All attempts failed for {symbol} {order_type}")
+                        print(f"       All attempts failed for {symbol} {order_type}")
                         stats['orders_failed'] += 1
         
         # Update stats
@@ -16742,10 +16742,10 @@ def apply_dynamic_breakeven(inv_id=None):
     Returns:
         dict: Statistics about the processing
     """
-    print(f"\n{'='*10} 🎯 DYNAMIC BREAKEVEN: MONITORING RUNNING PROFIT REWARDS {'='*10}")
+    print(f"\n{'='*10} 🎯 DYNAMIC BREAKEVEN {'='*10}")
     if inv_id:
-        print(f" Processing single investor: {inv_id}")
-
+        print(f" Processing: {inv_id}")
+    
     # Track statistics
     stats = {
         "investor_id": inv_id if inv_id else "all",
@@ -16756,329 +16756,197 @@ def apply_dynamic_breakeven(inv_id=None):
         "breakeven_events": 0,
         "processing_success": False
     }
-
+    
     # Determine which investors to process
     investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
     total_investors = len(investors_to_process) if not inv_id else 1
+    
     processed = 0
-
     for user_brokerid in investors_to_process:
         processed += 1
-        print(f"\n[{processed}/{total_investors}] {user_brokerid} 🔍 Checking breakeven configurations...")
+        print(f"\n[{processed}/{total_investors}] {user_brokerid}")
         
         # Get broker config
         broker_cfg = usersdictionary.get(user_brokerid)
         if not broker_cfg:
-            print(f"  └─  No broker config found")
+            print(f"  └─  No broker config")
             continue
         
         inv_root = Path(INV_PATH) / user_brokerid
         acc_mgmt_path = inv_root / "accountmanagement.json"
-
         if not acc_mgmt_path.exists():
-            print(f"  └─ ⚠️  Account config missing. Skipping.")
+            print(f"  └─ ⚠️ Account config missing")
             continue
-
+        
         # --- LOAD CONFIG AND CHECK SETTINGS ---
         try:
             with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             
-            # Check if breakeven is enabled
             settings = config.get("settings", {})
             if not settings.get("enable_breakeven", False):
-                print(f"  └─ ⏭️  Breakeven disabled in settings. Skipping.")
+                print(f"  └─ ⏭️ Breakeven disabled")
                 continue
             
-            # Get breakeven dictionary
+            # Get breakeven dictionary and remove duplicates
             breakeven_config = settings.get("breakeven_dictionary", [])
             if not breakeven_config:
-                print(f"  └─ ⚠️  No breakeven configuration found. Using default.")
-                # Default configuration if none provided
                 breakeven_config = [
                     {"reward": 1, "breakeven_at_reward": 0.5},
                     {"reward": 2, "breakeven_at_reward": 1},
                     {"reward": 3, "breakeven_at_reward": 1.5}
                 ]
             
-            # Sort by reward level (ascending) to process in order
+            # Sort and remove duplicates (keep highest reward threshold for same breakeven)
             breakeven_config.sort(key=lambda x: x["reward"])
+            unique_config = []
+            seen_breakevens = set()
+            for rule in reversed(breakeven_config):  # Reverse to keep higher thresholds
+                key = rule["breakeven_at_reward"]
+                if key not in seen_breakevens:
+                    unique_config.insert(0, rule)
+                    seen_breakevens.add(key)
+            breakeven_config = unique_config
             
-            print(f"  └─ ✅ Breakeven enabled with {len(breakeven_config)} reward levels:")
-            for level in breakeven_config:
-                print(f"       • At {level['reward']}R profit → Move SL to {level['breakeven_at_reward']}R")
+            print(f"  └─ ✅ {len(breakeven_config)} levels loaded")
             
         except Exception as e:
-            print(f"  └─  Failed to read config: {e}")
+            print(f"  └─  Config error: {e}")
             stats["positions_error"] += 1
             continue
-
-        # --- ACCOUNT INITIALIZATION ---
-        print(f"  └─ 🔌 Initializing account connection...")
         
+        # --- ACCOUNT INITIALIZATION ---
         login_id = int(broker_cfg['LOGIN_ID'])
         mt5_path = broker_cfg["TERMINAL_PATH"]
         
-        print(f"      • Terminal Path: {mt5_path}")
-        print(f"      • Login ID: {login_id}")
-
-        # Check login status
         acc = mt5.account_info()
         if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
             if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─  login failed: {error}")
+                print(f"  └─  Login failed: {mt5.last_error()}")
                 stats["positions_error"] += 1
                 continue
-            print(f"      ✅ Successfully logged into account")
-        else:
-            print(f"      ✅ Already logged into account")
-
+        
         acc_info = mt5.account_info()
         if not acc_info:
-            print(f"  └─  Failed to get account info")
+            print(f"  └─  No account info")
             stats["positions_error"] += 1
             continue
             
-        balance = acc_info.balance
-        print(f"\n  └─ 📊 Account Balance: ${balance:,.2f}")
-
         # --- CHECK ALL OPEN POSITIONS ---
         positions = mt5.positions_get()
-        investor_positions_checked = 0
         investor_positions_adjusted = 0
-        investor_positions_skipped = 0
-        investor_positions_error = 0
         investor_breakeven_events = 0
-
-        # Define position types for better readability
-        POSITION_TYPES = {
-            mt5.POSITION_TYPE_BUY: "BUY",
-            mt5.POSITION_TYPE_SELL: "SELL"
-        }
-
+        investor_positions_error = 0
+        
         if positions:
-            print(f"\n  └─ 🔍 Scanning {len(positions)} open positions for breakeven opportunities...")
+            positions_to_check = [p for p in positions if p.sl != 0 and p.profit > 0]
             
-            for position in positions:
-                investor_positions_checked += 1
-                stats["positions_checked"] += 1
+            if positions_to_check:
+                print(f"  └─ 🔍 Checking {len(positions_to_check)} profitable positions...")
                 
-                position_type_name = POSITION_TYPES.get(position.type, f"Unknown Type {position.type}")
-                
-                # Skip positions without SL
-                if position.sl == 0:
-                    print(f"\n    └─ 📋 Position #{position.ticket} | {position_type_name} | {position.symbol}")
-                    print(f"       ⚠️  No SL set - cannot manage breakeven. Skipping.")
-                    investor_positions_skipped += 1
-                    stats["positions_skipped"] += 1
-                    continue
-
-                # Get symbol info
-                symbol_info = mt5.symbol_info(position.symbol)
-                if not symbol_info:
-                    print(f"\n    └─ 📋 Position #{position.ticket} | {position.symbol}")
-                    print(f"       ⚠️  Cannot get symbol info. Skipping.")
-                    investor_positions_skipped += 1
-                    stats["positions_skipped"] += 1
-                    continue
-
-                # Determine position direction
-                is_buy = position.type == mt5.POSITION_TYPE_BUY
-                
-                print(f"\n    └─ 📋 Position #{position.ticket} | {position_type_name} | {position.symbol}")
-                
-                # Calculate current risk (from entry to original SL)
-                if is_buy:
-                    risk_distance = position.price_open - position.sl
-                else:
-                    risk_distance = position.sl - position.price_open
-                
-                risk_points = abs(risk_distance) / symbol_info.point
-                
-                # Calculate point value
-                tick_value = symbol_info.trade_tick_value
-                tick_size = symbol_info.trade_tick_size
-                
-                if tick_value > 0 and tick_size > 0:
-                    point_value = tick_value / tick_size * symbol_info.point
-                    risk_usd = round(risk_points * point_value * position.volume, 2)
-                else:
-                    # Fallback: calculate risk using profit calculator
+                for position in positions_to_check:
+                    # Get symbol info
+                    symbol_info = mt5.symbol_info(position.symbol)
+                    if not symbol_info:
+                        continue
+                    
+                    is_buy = position.type == mt5.POSITION_TYPE_BUY
+                    
+                    # Calculate risk
+                    if is_buy:
+                        risk_distance = position.price_open - position.sl
+                    else:
+                        risk_distance = position.sl - position.price_open
+                    
+                    # Calculate risk in USD
                     calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
                     sl_profit = mt5.order_calc_profit(calc_type, position.symbol, position.volume, 
                                                       position.price_open, position.sl)
-                    if sl_profit is not None:
-                        risk_usd = round(abs(sl_profit), 2)
-                    else:
-                        print(f"       ⚠️  Cannot calculate risk. Skipping.")
-                        investor_positions_skipped += 1
-                        stats["positions_skipped"] += 1
+                    if sl_profit is None:
                         continue
-
-                # Calculate current profit in R multiples
-                current_profit_usd = position.profit
-                
-                if risk_usd > 0:
-                    current_r_multiple = current_profit_usd / risk_usd
-                else:
-                    print(f"       ⚠️  Invalid risk value. Skipping.")
-                    investor_positions_skipped += 1
-                    stats["positions_skipped"] += 1
-                    continue
-
-                print(f"       • Risk: ${risk_usd:.2f} | Current P/L: ${current_profit_usd:.2f} ({current_r_multiple:.2f}R)")
-
-                # Skip if position is not in profit
-                if current_profit_usd <= 0:
-                    print(f"       ⏭️  Position not in profit. Skipping.")
-                    investor_positions_skipped += 1
-                    stats["positions_skipped"] += 1
-                    continue
-
-                # Find applicable breakeven rules
-                applicable_rules = []
-                for rule in breakeven_config:
-                    reward_threshold = rule["reward"]
-                    if current_r_multiple >= reward_threshold:
-                        applicable_rules.append(rule)
-                
-                if not applicable_rules:
-                    print(f"       ⏭️  No breakeven threshold reached (current: {current_r_multiple:.2f}R)")
-                    investor_positions_skipped += 1
-                    stats["positions_skipped"] += 1
-                    continue
-
-                # Get the highest applicable rule (last in sorted list)
-                highest_rule = applicable_rules[-1]
-                target_reward = highest_rule["breakeven_at_reward"]
-                
-                print(f"       🎯 Reached {highest_rule['reward']}R threshold")
-                print(f"       Target SL position: {target_reward}R")
-
-                # Calculate target SL price based on target reward
-                if target_reward >= 0:
-                    # For positive target reward, we want SL at entry + (risk_distance * target_reward)
-                    # But direction matters
-                    if is_buy:
-                        # For BUY: entry + (risk * target_reward)
-                        target_sl_price = position.price_open + (risk_distance * target_reward)
-                    else:
-                        # For SELL: entry - (risk * target_reward)
-                        target_sl_price = position.price_open - (risk_distance * target_reward)
                     
-                    # Round to symbol digits
+                    risk_usd = round(abs(sl_profit), 2)
+                    current_r_multiple = position.profit / risk_usd if risk_usd > 0 else 0
+                    
+                    # Find applicable rules
+                    applicable_rules = [rule for rule in breakeven_config if current_r_multiple >= rule["reward"]]
+                    if not applicable_rules:
+                        continue
+                    
+                    # Get highest applicable rule
+                    highest_rule = applicable_rules[-1]
+                    target_reward = highest_rule["breakeven_at_reward"]
+                    
+                    # Get market info for validation
+                    tick = mt5.symbol_info_tick(position.symbol)
+                    if not tick:
+                        continue
+                    
+                    current_price = tick.bid if not is_buy else tick.ask
                     digits = symbol_info.digits
-                    target_sl_price = round(target_sl_price, digits)
+                    stoplevel = max(symbol_info.trade_stops_level, 10) * symbol_info.point
                     
-                    print(f"       Current SL: {position.sl:.{digits}f}")
-                    print(f"       Target SL:  {target_sl_price:.{digits}f} ({target_reward}R)")
+                    # Try fallback levels in order
+                    current_index = breakeven_config.index(highest_rule)
+                    sl_set = False
                     
-                    # Check if SL needs adjustment
-                    current_sl_distance = abs(position.sl - position.price_open) if position.sl != 0 else 0
-                    target_sl_distance = abs(target_sl_price - position.price_open)
-                    
-                    # Calculate threshold (10% of target distance or 2 pips)
-                    pip_threshold = max(target_sl_distance * 0.1, symbol_info.point * 20)
-                    
-                    should_adjust = False
-                    
-                    if position.sl == 0:
-                        print(f"       📝 No SL currently set")
-                        should_adjust = True
-                    elif abs(current_sl_distance - target_sl_distance) > pip_threshold:
-                        print(f"       📐 SL needs adjustment")
-                        should_adjust = True
-                    else:
-                        # Check if we're moving in the right direction (should only move SL towards profit)
-                        if is_buy and target_sl_price > position.sl:
-                            print(f"       ✅ SL already at or beyond target")
-                            investor_positions_skipped += 1
-                            stats["positions_skipped"] += 1
-                            continue
-                        elif not is_buy and target_sl_price < position.sl:
-                            print(f"       ✅ SL already at or beyond target")
-                            investor_positions_skipped += 1
-                            stats["positions_skipped"] += 1
-                            continue
+                    for i in range(current_index, -1, -1):
+                        test_reward = breakeven_config[i]["breakeven_at_reward"]
+                        
+                        # Calculate target SL
+                        if is_buy:
+                            target_sl = position.price_open + (risk_distance * test_reward)
+                            is_valid_direction = target_sl < current_price - stoplevel and target_sl > position.sl
                         else:
-                            should_adjust = True
+                            target_sl = position.price_open - (risk_distance * test_reward)
+                            is_valid_direction = target_sl > current_price + stoplevel and target_sl < position.sl
+                        
+                        if is_valid_direction:
+                            target_sl = round(target_sl, digits)
+                            
+                            # Send modification
+                            modify_request = {
+                                "action": mt5.TRADE_ACTION_SLTP,
+                                "position": position.ticket,
+                                "sl": target_sl,
+                                "tp": position.tp,
+                            }
+                            
+                            result = mt5.order_send(modify_request)
+                            
+                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                                investor_positions_adjusted += 1
+                                investor_breakeven_events += 1
+                                stats["positions_adjusted"] += 1
+                                stats["breakeven_events"] += 1
+                                print(f"     ✅ #{position.ticket} → SL @ {test_reward}R")
+                                sl_set = True
+                                break
                     
-                    if should_adjust:
-                        # Ensure we're only moving SL in the profit direction
-                        if is_buy and target_sl_price <= position.sl:
-                            print(f"       ⚠️  Target SL would not improve position. Skipping.")
-                            investor_positions_skipped += 1
-                            stats["positions_skipped"] += 1
-                            continue
-                        elif not is_buy and target_sl_price >= position.sl:
-                            print(f"       ⚠️  Target SL would not improve position. Skipping.")
-                            investor_positions_skipped += 1
-                            stats["positions_skipped"] += 1
-                            continue
-                        
-                        # Prepare modification request
-                        modify_request = {
-                            "action": mt5.TRADE_ACTION_SLTP,
-                            "position": position.ticket,
-                            "sl": target_sl_price,
-                            "tp": position.tp,  # Keep existing TP
-                        }
-                        
-                        # Send modification
-                        result = mt5.order_send(modify_request)
-                        
-                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                            investor_positions_adjusted += 1
-                            investor_breakeven_events += 1
-                            stats["positions_adjusted"] += 1
-                            stats["breakeven_events"] += 1
-                            print(f"       ✅ SL adjusted successfully to {target_sl_price:.{digits}f} ({target_reward}R)")
-                        else:
-                            investor_positions_error += 1
-                            stats["positions_error"] += 1
-                            error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
-                            print(f"        Modification failed: {error_msg}")
-                else:
-                    print(f"       ⚠️  Invalid target reward: {target_reward}")
-                    investor_positions_skipped += 1
-                    stats["positions_skipped"] += 1
-
-        # --- INVESTOR SUMMARY ---
-        if investor_positions_checked > 0:
-            print(f"\n  └─ 📊 Breakeven Results for {user_brokerid}:")
-            print(f"       • Positions checked: {investor_positions_checked}")
-            print(f"       • Positions adjusted: {investor_positions_adjusted}")
-            print(f"       • Breakeven events: {investor_breakeven_events}")
-            print(f"       • Positions skipped: {investor_positions_skipped}")
-            if investor_positions_error > 0:
-                print(f"       • Errors: {investor_positions_error}")
+                    if not sl_set:
+                        investor_positions_error += 1
+                        stats["positions_error"] += 1
+                        print(f"      #{position.ticket} → fallback failed")
+            
             else:
-                print(f"       ✅ All breakeven checks completed successfully")
-            stats["processing_success"] = True
-        else:
-            print(f"  └─ 🔘 No open positions found.")
-
+                print(f"  └─ 🔘 No profitable positions")
+        
+        stats["positions_checked"] += len(positions_to_check) if positions else 0
+        
+        # --- INVESTOR SUMMARY ---
+        print(f"  └─ 📊 Adjusted: {investor_positions_adjusted} | Errors: {investor_positions_error}")
+        stats["processing_success"] = True
+    
     # --- FINAL SUMMARY ---
-    print(f"\n{'='*10} 📊 DYNAMIC BREAKEVEN SUMMARY {'='*10}")
-    print(f"   Investor ID: {stats['investor_id']}")
-    print(f"   Positions checked: {stats['positions_checked']}")
-    print(f"   Positions adjusted: {stats['positions_adjusted']}")
-    print(f"   Breakeven events: {stats['breakeven_events']}")
-    print(f"   Positions skipped: {stats['positions_skipped']}")
-    print(f"   Errors: {stats['positions_error']}")
+    print(f"\n{'='*10} 📊 SUMMARY {'='*10}")
+    print(f"  Adjusted: {stats['positions_adjusted']}/{stats['positions_checked']}")
+    print(f"  Errors: {stats['positions_error']}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
-    if stats['positions_checked'] > 0:
-        adjustment_rate = (stats['positions_adjusted'] / stats['positions_checked']) * 100
-        print(f"   Adjustment rate: {adjustment_rate:.1f}%")
-    
-    print(f"\n{'='*10} 🏁 DYNAMIC BREAKEVEN MONITORING COMPLETE {'='*10}\n")
     return stats
 
-
 # real accounts 
-def process_single_invest(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -17149,7 +17017,7 @@ def process_single_invest(inv_folder):
         #calculate_investor_symbols_orders(inv_id=inv_id)
         #live_usd_risk_and_scaling(inv_id=inv_id)
         #place_usd_orders(inv_id=inv_id)   
-        populate_orders_missing_fields(inv_id=inv_id)
+        apply_dynamic_breakeven(inv_id=inv_id)
         #check_pending_orders_risk(inv_id=inv_id)
     
         mt5.shutdown()
@@ -17167,7 +17035,7 @@ def process_single_invest(inv_folder):
     
     return account_stats
 
-def process_single_investor(inv_folder):
+def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.
@@ -17371,7 +17239,7 @@ def place_orders_parallel_():
             print(f"--- Cycle Complete. Sleeping for 1 second ---")
             
         except Exception as e:
-            print(f"❌ Critical Error in Orchestrator: {e}")
+            print(f"Critical Error in Orchestrator: {e}")
             time.sleep(5) # Wait a bit before retrying if something breaks
             
         time.sleep(1) # Controlled delay between cycles
