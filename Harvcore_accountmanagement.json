@@ -26,6 +26,7 @@
     "synthetics": []
   },
   "settings": {
+    "create_hedge_order": true,
     "restrict_orders_in_time_range_of": {
       "from": "00:00 am",
       "to": "00:00 pm"
@@ -170,14 +171,17 @@
     "enable_default_account_balance_management": true,
     "enable_maximum_account_balance_management": false
   },
-  "martingale_risk_management": {
-    "1-10000000.99_risk": 4
+  "minimum_balance_risk_distance": {
+    "1-10000000.99_risk": 2
+  },
+  "maximum_balance_risk_distance": {
+    "1-10000000.99_risk": 3
   },
   "account_balance_default_risk_management": {
     "1-10000000.99_risk": 2
   },
   "account_balance_maximum_risk_management": {
-    "1-10000000.99_risk": 3
+    "1-10000000.99_risk": 4
   },
   "grid_prices_setup": {
     "grid_levels": 2,

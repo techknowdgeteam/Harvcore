@@ -22,6 +22,7 @@ import multiprocessing
 from pathlib import Path
 import time
 import random
+import psutil
 
 
 INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors"
@@ -90,6 +91,7 @@ def move_fetched_investors():
     - Missing required fields
     - activate_autotrading is False
     - broker_balance < min_broker_balance (insufficient funds)
+    - demo_account is "0" when account_mode is "demo"
     
     Uses DEFAULT_ACCOUNTMANAGEMENT as fallback for contract_duration and min_broker_balance
     
@@ -117,6 +119,21 @@ def move_fetched_investors():
     def bool_to_db_string(value):
         """Convert boolean to database string format '1' or '0'"""
         return '1' if value else '0'
+    
+    def normalize_date(date_value):
+        """Convert invalid date values (0000-00-00, 0000-00-00 00:00:00, etc.) to empty string"""
+        if date_value is None:
+            return ""
+        if not isinstance(date_value, str):
+            date_value = str(date_value)
+        date_value = date_value.strip()
+        # Check for patterns like 0000-00-00, 0000-00-00 00:00:00, 0000-00-00T00:00:00
+        if date_value.replace('-', '').replace(':', '').replace(' ', '').replace('T', '').strip('0') == '':
+            return ""
+        # Also check if it starts with 0000-00-00
+        if date_value.startswith('0000-00-00'):
+            return ""
+        return date_value
     
     # Helper function to get the last message for a specific section
     def get_last_message(notifications_dict, section_key):
@@ -232,13 +249,6 @@ def move_fetched_investors():
         }
         return True
     
-    # Helper function to track message type change for a specific section
-    def should_add_message(current_type, last_type):
-        """Determine if a new message should be added based on type change"""
-        if last_type is None:
-            return True
-        return current_type != last_type
-    
     # Load default accountmanagement.json for fallbacks
     default_contract_duration = None
     default_min_broker_balance = None
@@ -331,20 +341,27 @@ def move_fetched_investors():
     
     # Track incomplete investors
     incomplete_investors = []
+    # Track demo account restricted investors
+    demo_restricted_investors = []
     
     for inv_id, investor_data in verified_data.items():
         # Extract required fields (case-insensitive)
         invested_with = investor_data.get('invested_with', investor_data.get('INVESTED_WITH', '')).strip()
-        execution_start = investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')).strip()
+        execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
         terminal_path = investor_data.get('TERMINAL_PATH', investor_data.get('terminal_path', '')).strip()
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
         password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
         server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
         
+        # Extract account mode and demo account fields
+        account_mode = investor_data.get('account_mode', investor_data.get('ACCOUNT_MODE', '')).strip().lower()
+        demo_account_raw = investor_data.get('demo_account', investor_data.get('DEMO_ACCOUNT', '0'))
+        demo_account = db_to_bool(demo_account_raw)
+        
         # Required fields check
         missing_required = []
         if not invested_with: missing_required.append('invested_with')
-        if not execution_start or execution_start == '0': missing_required.append('execution_start_date')
+        if not execution_start: missing_required.append('execution_start_date')
         if not terminal_path: missing_required.append('TERMINAL_PATH')
         
         missing_investor_fields = []
@@ -386,6 +403,29 @@ def move_fetched_investors():
                 activities_data['executions_notification'] = {}
             
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Add AccountMode notification for incomplete investors
+            if not account_mode:
+                account_mode_msg = "Account mode is not specified. The system cannot determine if this is a demo or live account. Trading will proceed once account mode is confirmed."
+                add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} has unknown account mode.", 'error', timestamp)
+            elif account_mode == 'demo':
+                if demo_account is False:
+                    account_mode_msg = "This is a demo account but demo trading is disabled. Demo accounts must have demo trading enabled to proceed."
+                    add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
+                    add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} has demo account mode but demo_account is disabled.", 'error', timestamp)
+                elif demo_account is True:
+                    account_mode_msg = "This is a demo account with demo trading enabled. Trading will proceed in demo mode."
+                    add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
+                    add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode confirmed and enabled.", 'success', timestamp)
+                else:
+                    account_mode_msg = "This is a demo account but demo trading status is unknown. Please verify your demo account settings."
+                    add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
+                    add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode but demo_account status unknown.", 'error', timestamp)
+            else:
+                account_mode_msg = f"Account mode is set to '{account_mode}'. Trading will proceed with this configuration."
+                add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} account mode: {account_mode}.", 'success', timestamp)
             
             # Add notifications for missing required fields
             if missing_required:
@@ -432,39 +472,38 @@ def move_fetched_investors():
                     json.dump(accountmanagement_data, f, indent=4)
             
             # Update investors.json if credentials are present
+            investor_entry = {
+                "LOGIN_ID": str(login).strip() if login else "",
+                "PASSWORD": password if password else "",
+                "SERVER": server if server else "",
+                "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
+                "INVESTED_WITH": invested_with if invested_with else "",
+                "TERMINAL_PATH": terminal_path if terminal_path else ""
+            }
+            
             if login and password and server:
-                investors_data[inv_id] = {
-                    "LOGIN_ID": str(login).strip(),
-                    "PASSWORD": password,
-                    "SERVER": server,
-                    "INVESTED_WITH": invested_with if invested_with else "",
-                    "TERMINAL_PATH": terminal_path if terminal_path else ""
-                }
+                investors_data[inv_id] = investor_entry
                 investors_updated.append(inv_id)
             else:
                 # Still add to investors_data but mark as incomplete
-                investors_data[inv_id] = {
-                    "LOGIN_ID": str(login).strip() if login else "",
-                    "PASSWORD": password if password else "",
-                    "SERVER": server if server else "",
-                    "INVESTED_WITH": invested_with if invested_with else "",
-                    "TERMINAL_PATH": terminal_path if terminal_path else "",
-                    "_incomplete": True,
-                    "_missing_fields": missing_required + missing_investor_fields
-                }
+                investor_entry["_incomplete"] = True
+                investor_entry["_missing_fields"] = missing_required + missing_investor_fields
+                investors_data[inv_id] = investor_entry
                 investors_updated.append(inv_id)
             
             continue
         
         valid_investors.add(inv_id)
         
-        investors_data[inv_id] = {
+        investor_entry = {
             "LOGIN_ID": str(login).strip(),
             "PASSWORD": password,
             "SERVER": server,
+            "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
             "INVESTED_WITH": invested_with,
             "TERMINAL_PATH": terminal_path
         }
+        investors_data[inv_id] = investor_entry
         investors_updated.append(inv_id)
     
     # Remove invalid investors
@@ -559,6 +598,7 @@ def move_fetched_investors():
     autotrading_disabled_investors = []
     error_investors_to_delete = []
     balance_insufficient_investors = []
+    demo_restricted_investors = []
     
     for inv_id, investor_data in verified_data.items():
         # Skip incomplete investors
@@ -569,10 +609,15 @@ def move_fetched_investors():
         
         # Extract fields
         invested_with = investor_data.get('invested_with', investor_data.get('INVESTED_WITH', '')).strip()
-        execution_start = investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')).strip()
+        execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
         contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
         terminal_path = investor_data.get('TERMINAL_PATH', investor_data.get('terminal_path', '')).strip()
         accountmanagement_data = investor_data.get('accountmanagement', {})
+        
+        # Extract account mode and demo account fields
+        account_mode = investor_data.get('account_mode', investor_data.get('ACCOUNT_MODE', '')).strip().lower()
+        demo_account_raw = investor_data.get('demo_account', investor_data.get('DEMO_ACCOUNT', '0'))
+        demo_account = db_to_bool(demo_account_raw)
         
         # Get broker_balance (keep as string)
         broker_balance_str = investor_data.get('broker_balance', investor_data.get('BROKER_BALANCE', '0'))
@@ -651,6 +696,36 @@ def move_fetched_investors():
                 balance_check_message = f"💰 BALANCE VERIFICATION: Investor's broker balance of ${broker_balance_val:.2f} meets the minimum requirement of ${min_broker_balance:.2f}. Trading operations can proceed normally."
                 balance_message_type = 'success'
         
+        # Check demo account restriction
+        demo_account_restricted = False
+        demo_account_message = None
+        demo_account_message_type = None
+        
+        if account_mode == 'demo':
+            if demo_account is False:
+                demo_account_restricted = True
+                has_error = True
+                error_messages.append("Demo account mode but demo_account is disabled")
+                demo_account_message = f"🚫 DEMO ACCOUNT RESTRICTION: Demo accounts are not allowed"
+                demo_account_message_type = 'error'
+                demo_restricted_investors.append(inv_id)
+            elif demo_account is True:
+                demo_account_message = f"✅ ACCOUNT VERIFICATION: Trading will proceed in this account. "
+                demo_account_message_type = 'success'
+            elif demo_account is None:
+                demo_account_message = f"⚠️ DEMO ACCOUNT UNKNOWN: Account mode is 'demo' but demo_account status is unknown. Please verify your account configuration."
+                demo_account_message_type = 'error'
+                has_error = True
+                error_messages.append("Demo account mode but demo_account status unknown")
+                demo_restricted_investors.append(inv_id)
+        elif not account_mode:
+            demo_account_message = f"⚠️ ACCOUNT MODE UNKNOWN: Account mode is not specified. Trading will proceed but account type cannot be verified."
+            demo_account_message_type = 'error'
+            # Not adding to demo_restricted since mode is unknown, just warning
+        else:
+            demo_account_message = f"ℹ️ ACCOUNT MODE: This is a '{account_mode}' account. Standard trading rules apply."
+            demo_account_message_type = 'success'
+        
         # Extract strategies
         strategies = [s.strip() for s in invested_with.split(",") if s.strip()]
         strategy_names = []
@@ -665,7 +740,7 @@ def move_fetched_investors():
         formatted_start_date = execution_start
         expiry_date_str = ""
         
-        if execution_start and execution_start != '0':
+        if execution_start:
             try:
                 date_obj = datetime.strptime(execution_start, "%Y-%m-%d")
                 formatted_start_date = date_obj.strftime("%B %d, %Y")
@@ -710,7 +785,7 @@ def move_fetched_investors():
             activities_data["min_broker_balance"] = min_broker_balance
         if broker_balance_val is not None:
             activities_data["broker_balance"] = broker_balance_val
-        if execution_start and execution_start != '0':
+        if execution_start:
             activities_data["execution_start_date"] = formatted_start_date
         if expiry_date_str:
             activities_data["contract_expiry_date"] = expiry_date_str
@@ -725,6 +800,13 @@ def move_fetched_investors():
             activities_data['_meets_balance_requirement'] = meets_balance_requirement
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # ============================================
+        # ADD ACCOUNT MODE NOTIFICATION (NEW SECTION)
+        # ============================================
+        if demo_account_message:
+            add_notification(activities_data['notifications'], 'AccountMode', demo_account_message, demo_account_message_type, timestamp)
+            add_execution_notification(activities_data['executions_notification'], 'AccountMode', demo_account_message, demo_account_message_type, timestamp)
         
         # Add notifications with individual section tracking
         
@@ -742,7 +824,7 @@ def move_fetched_investors():
             activities_data["strategies"] = strategy_names
         
         # 2. START DATE section
-        if not execution_start or execution_start.strip() == '' or execution_start == '0':
+        if not execution_start:
             start_message = "Your program start date is not set. You haven't officially enrolled in the trading program. Please complete your enrollment to activate trading."
             add_notification(activities_data['notifications'], 'StartDate', start_message, 'error', timestamp)
             add_execution_notification(activities_data['executions_notification'], 'StartDate', f"SERVER NOTIFICATION: Investor {inv_id} has no execution start date.", 'error', timestamp)
@@ -852,6 +934,12 @@ def move_fetched_investors():
         if broker_balance_val is not None:
             final_accountmanagement['broker_balance'] = broker_balance_val
         
+        # Add account mode info to accountmanagement
+        if account_mode:
+            final_accountmanagement['account_mode'] = account_mode
+        if demo_account_raw is not None:
+            final_accountmanagement['demo_account'] = str(demo_account_raw)
+        
         with open(accountmanagement_path, 'w', encoding='utf-8') as f:
             json.dump(final_accountmanagement, f, indent=4)
         
@@ -872,6 +960,9 @@ def move_fetched_investors():
         updated_record["executions_notification"] = activities_data.get('executions_notification', {})
         updated_record["strategies"] = strategy_names
         updated_record["execution_start_date"] = formatted_start_date if execution_start and execution_start != '0' else None
+        updated_record["account_mode"] = account_mode if account_mode else "unknown"
+        updated_record["demo_account"] = str(demo_account_raw) if demo_account_raw is not None else "0"
+        updated_record["demo_account_restricted"] = demo_account_restricted
         
         # Convert booleans to database format '1'/'0' for these specific fields
         updated_record["enable_autotrading"] = bool_to_db_string(final_activate) if final_activate is not None else investor_data.get('enable_autotrading', '0')
@@ -884,7 +975,11 @@ def move_fetched_investors():
         updated_investors_data[inv_id] = updated_record
         
         if has_error:
-            error_investors_to_delete.append(inv_id)
+            if demo_account_restricted:
+                # Demo restricted investors are handled separately
+                pass
+            else:
+                error_investors_to_delete.append(inv_id)
         else:
             processed_summary.append(inv_id)
     
@@ -934,6 +1029,37 @@ def move_fetched_investors():
             with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
                 json.dump(investors_data, f, indent=4)
         print(f"   🚫 Removed {removed_count} investors (auto-trading disabled)")
+    
+    # ============================================
+    # HANDLE DEMO RESTRICTED INVESTORS (NEW SECTION)
+    # ============================================
+    if demo_restricted_investors:
+        print(f"\n🚫 Handling demo restricted investors...")
+        removed_count = 0
+        for inv_id in demo_restricted_investors:
+            # Remove from investors.json
+            if inv_id in investors_data:
+                del investors_data[inv_id]
+                removed_count += 1
+                if inv_id in valid_investors:
+                    valid_investors.discard(inv_id)
+            
+            # Delete investor folder
+            inv_folder = Path(INV_PATH) / inv_id
+            if inv_folder.exists():
+                import shutil
+                shutil.rmtree(inv_folder)
+            
+            # Update record
+            if inv_id in updated_investors_data:
+                updated_investors_data[inv_id]["demo_account_restricted"] = True
+                updated_investors_data[inv_id]["removed_from_investors"] = True
+                updated_investors_data[inv_id]["folder_deleted"] = True
+        
+        if removed_count > 0:
+            with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
+                json.dump(investors_data, f, indent=4)
+        print(f"   🚫 Removed {removed_count} investors (demo account restricted)")
     
     # ============================================
     # MOVE INSUFFICIENT BALANCE INVESTORS
@@ -1000,6 +1126,7 @@ def move_fetched_investors():
                         folder_path.name in valid_investors and 
                         folder_path.name not in error_investors_to_delete and
                         folder_path.name not in balance_insufficient_investors and
+                        folder_path.name not in demo_restricted_investors and
                         folder_path.name not in [inv['inv_id'] for inv in incomplete_investors]
                     )
                     
@@ -1021,8 +1148,9 @@ def move_fetched_investors():
     print(f"Incomplete (recorded only): {len(incomplete_investors)} investors")
     print(f"Error investors (removed): {len(error_investors_to_delete)}")
     print(f"Auto-trading disabled (removed): {len(autotrading_disabled_investors)}")
+    print(f"Demo restricted (removed): {len(demo_restricted_investors)}")
     print(f"Insufficient balance (moved to issues): {len(balance_insufficient_investors)}")
-    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)}")
+    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
     print(f"📝 activities.json: {len(processed_summary) + len(incomplete_investors)} updated (including incomplete investors)")
     print(f"💰 accountmanagement.json: {len(processed_summary)} updated")
     print(f"📋 updated_investors.json: {len(updated_investors_data)} investor records")
@@ -1033,7 +1161,7 @@ def move_fetched_investors():
     
     return True
 
-def check_and_record_authorized_actions(inv_id=None):
+def check_and_record_unauthorized_actions(inv_id=None):
     """
     Check and record authorized/unauthorized actions for investors based on Magic Number only.
     
@@ -1724,7 +1852,6 @@ def check_and_record_authorized_actions(inv_id=None):
                 'bypass_active': bypass_active,
                 'autotrading_active': autotrading_active,
                 'type': list(unauthorized_type) if unauthorized_type else [],
-                'unauthorized_trades': unauthorized_trades_list,
                 'unauthorized_withdrawals': [],
                 'unauthorized_orders': unauthorized_orders,
                 'unauthorized_positions': unauthorized_positions
@@ -1777,7 +1904,6 @@ def check_and_record_authorized_actions(inv_id=None):
             'audit_timestamp': datetime.now().isoformat(),
             'application_status': application_status,
             'unauthorized_detected': unauthorized_detected,
-            'unauthorized_trades_count': len(unauthorized_trades_list),
             'unauthorized_orders_count': len(unauthorized_orders),
             'unauthorized_positions_count': len(unauthorized_positions),
             'balance_discrepancy': round(balance_discrepancy, 2) if abs(balance_discrepancy) > 0.01 else 0,
@@ -1862,12 +1988,13 @@ def check_and_record_authorized_actions(inv_id=None):
 #---         ----           --#
 
 #    safety checks  #
+
 def restricted_timerange(inv_id=None):
     """
     Function: Checks if current time falls within the restricted time range
     from accountmanagement.json.
     
-    If no time range is configured or values are 0, there is NO RESTRICTION.
+    If no time range is configured or values are 0/0.00/00:00, there is NO RESTRICTION.
     
     Args:
         inv_id: Optional specific investor ID to process. If None, processes all investors.
@@ -1876,8 +2003,6 @@ def restricted_timerange(inv_id=None):
         dict: Statistics about the time range check
     """
     global restricted_timerange_alert
-    
-    from datetime import datetime
     
     # Helper function to get the last message for a specific section
     def get_last_message(notifications_dict, section_key):
@@ -2062,7 +2187,7 @@ def restricted_timerange(inv_id=None):
         time_range_config = None
         has_restriction = False
         
-        # Load time range from accountmanagement.json ONLY if values exist and are not 0
+        # Load time range from accountmanagement.json ONLY if values exist and are valid (> 0)
         if acc_mgmt_path.exists():
             try:
                 with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
@@ -2075,8 +2200,24 @@ def restricted_timerange(inv_id=None):
                     from_str = time_range["from"]
                     to_str = time_range["to"]
                     
-                    # Check if values are not empty and not "0" or "00:00"
-                    if from_str and to_str and from_str != "0" and to_str != "0" and from_str != "00:00" and to_str != "00:00":
+                    def is_zero_value(time_str):
+                        if not time_str:
+                            return True
+                        # Clean up string to check numerical substance
+                        clean = time_str.lower().strip().replace(" ", "").replace("am", "").replace("pm", "").replace(":", "")
+                        try:
+                            # If it converts cleanly to 0 numeric value (e.g. "0", "0.00", "0000")
+                            if float(clean) == 0.0:
+                                return True
+                        except ValueError:
+                            pass
+                        return False
+
+                    # Check if ANY value acts as a zero setup
+                    if is_zero_value(from_str) or is_zero_value(to_str):
+                        print(f"  ℹ️ Zero value detected in 'from' ({from_str}) or 'to' ({to_str}). Ignoring AM/PM. No restriction will be applied.")
+                        has_restriction = False
+                    elif from_str and to_str:
                         has_restriction = True
                         time_range_config = time_range
                         
@@ -2117,7 +2258,7 @@ def restricted_timerange(inv_id=None):
             except Exception as e:
                 print(f"  Error reading accountmanagement.json: {e}")
         
-        # If no restriction configured, skip and continue
+        # If no restriction configured or zeros stripped it out, skip and continue
         if not has_restriction:
             print(f"  ℹ️ NO RESTRICTION CONFIGURED - All trading allowed")
             stats["no_restriction_configured"] += 1
@@ -2144,7 +2285,7 @@ def restricted_timerange(inv_id=None):
                     json.dump(activities_data, f, indent=4)
                 print(f"  ✅ activities.json updated (no restriction)")
             except Exception as e:
-                print(f"  ❌ Error saving activities.json: {e}")
+                print(f"  Error saving activities.json: {e}")
             
             # Update updated_investors.json
             if user_brokerid in updated_investors_data:
@@ -2161,7 +2302,7 @@ def restricted_timerange(inv_id=None):
             stats["processing_success"] = True
             continue
         
-        # Calculate window status (restriction exists)
+        # Calculate window status (restriction exists and is valid)
         window_start_minutes = window_start_hour * 60 + window_start_minute
         window_end_minutes = window_end_hour * 60 + window_end_minute
         crosses_midnight = window_end_minutes < window_start_minutes
@@ -2169,7 +2310,7 @@ def restricted_timerange(inv_id=None):
         
         if crosses_midnight:
             is_within_window = (current_time_minutes >= window_start_minutes or 
-                               current_time_minutes <= window_end_minutes)
+                                current_time_minutes <= window_end_minutes)
         else:
             is_within_window = window_start_minutes <= current_time_minutes <= window_end_minutes
         
@@ -2183,7 +2324,7 @@ def restricted_timerange(inv_id=None):
         start_12hr = to_12hr(window_start_hour, window_start_minute)
         end_12hr = to_12hr(window_end_hour, window_end_minute)
         
-        print(f"  🕘 Window: {start_12hr} - {end_12hr}")
+        print(f"  Line Window: {start_12hr} - {end_12hr}")
         print(f"  🕐 Now: {current_time.strftime('%I:%M:%S %p')}")
         
         stats["investors_checked"] += 1
@@ -2291,7 +2432,7 @@ def restricted_timerange(inv_id=None):
             print(f"     • Notifications count: {len(activities_data['notifications'])}")
             print(f"     • Executions count: {len(activities_data['executions_notification'])}")
         except Exception as e:
-            print(f"  ❌ Error saving activities.json: {e}")
+            print(f"  Error saving activities.json: {e}")
         
         # ============================================================
         # UPDATE UPDATED_INVESTORS.JSON
@@ -2323,7 +2464,7 @@ def restricted_timerange(inv_id=None):
                 json.dump(updated_investors_data, f, indent=4)
             print(f"\n📝 Updated updated_investors.json")
         except Exception as e:
-            print(f"\n❌ Error saving updated_investors.json: {e}")
+            print(f"\nError saving updated_investors.json: {e}")
 
     restricted_timerange_alert = {
         'is_triggered': any_in_window,
@@ -2446,7 +2587,7 @@ def investor_broker_symbols(inv_id=None):
                     json.dump(activities_data, f, indent=4)
                 print(f"   ✅ Investor {user_brokerid}: Recorded {len(broker_symbols)} broker symbols to activities.json")
             except Exception as e:
-                print(f"   ❌ Investor {user_brokerid}: Error saving activities.json - {e}")
+                print(f"   Investor {user_brokerid}: Error saving activities.json - {e}")
             
             # ============================================================
             # UPDATE UPDATED_INVESTORS.JSON
@@ -2478,7 +2619,7 @@ def investor_broker_symbols(inv_id=None):
                 with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                     json.dump(updated_investors_data, f, indent=4)
             except Exception as e:
-                print(f"\n   ❌ Error saving updated_investors.json: {e}")
+                print(f"\n   Error saving updated_investors.json: {e}")
         
         print(f"\n   📊 Updated {updated_count} investor(s) with broker symbols")
     
@@ -2572,7 +2713,7 @@ def investor_broker_symbols(inv_id=None):
                                     })
                                     print(f"   💡 SUGGESTION: Try using '{suggestions[0]}' instead of '{inv_sym}'")
                             else:
-                                print(f"   ❌ NO MATCH found for '{inv_sym}'")
+                                print(f"   NO MATCH found for '{inv_sym}'")
                     
                     print()
                     
@@ -2586,11 +2727,11 @@ def investor_broker_symbols(inv_id=None):
                         print(f"      - Need to add suffix like '.m' for mini contracts or '.ecn'")
                     
                 else:
-                    print(f"   ❌ accountmanagement.json not found for investor '{inv_id}'")
+                    print(f"   accountmanagement.json not found for investor '{inv_id}'")
             else:
-                print(f"   ❌ Investor '{inv_id}' not found in investors.json")
+                print(f"   Investor '{inv_id}' not found in investors.json")
         else:
-            print(f"   ❌ investors.json not found")
+            print(f"   investors.json not found")
     
     print(f"{'='*80}\n")
     
@@ -2610,8 +2751,7 @@ def delete_all_orders_and_positions(inv_id=None):
     Returns:
         dict: Statistics about the deletion process
     """
-    print(f"\n{'='*10} 🔥 EMERGENCY PURGE: DELETE ALL ORDERS & POSITIONS {'='*10}")
-    print("  WARNING: This will remove ALL pending orders and close ALL positions!")
+    print(f"\n{'='*10} 🔥 EMERGENCY PURGE: DELETING ALL ORDERS & POSITIONS {'='*10}")
     if inv_id:
         print(f" Processing single investor: {inv_id}")
 
@@ -8290,6 +8430,866 @@ def calculate_investor_symbols_orders(inv_id=None, callback_function=None):
         print(" No orders were processed.")
     
     return any_orders_calculated
+
+def padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=None):
+    """
+    Function: Adjusts stoploss levels for LIMIT orders in limit_orders.json files based on
+    minimum risk distance requirements from accountmanagement.json.
+    
+    Uses minimum_balance_risk_distance configuration to ensure each order has
+    at least the minimum risk amount in USD. If order risk is below minimum,
+    stoploss is recalculated to achieve the minimum risk level and the limit_orders.json
+    file is updated with new exit (stoploss) and target (takeprofit) prices.
+    
+    Uses LIVE MT5 calculations to determine current risk and required adjustments.
+    
+    NO FALLBACKS - only uses exact values from minimum_balance_risk_distance.
+    If threshold is missing or not configured for current balance, check is SKIPPED.
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the processing
+    """
+    print(f"\n{'='*10} 🎯 STOPLOSS CORRECTION: MINIMUM RISK DISTANCE {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
+    
+    # Track statistics
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "orders_checked": 0,
+        "orders_adjusted": 0,
+        "orders_skipped": 0,
+        "orders_error": 0,
+        "insufficient_risk_found": 0,
+        "minimum_risk_used": 0,
+        "processing_success": False
+    }
+    
+    # Determine which investors to process
+    investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
+    total_investors = len(investors_to_process) if not inv_id else 1
+    processed = 0
+    
+    for user_brokerid in investors_to_process:
+        processed += 1
+        print(f"\n[{processed}/{total_investors}] {user_brokerid} 🔍 Loading minimum risk configuration...")
+        
+        # Get broker config
+        broker_cfg = usersdictionary.get(user_brokerid)
+        if not broker_cfg:
+            print(f"  └─  No broker config found")
+            continue
+        
+        inv_root = Path(INV_PATH) / user_brokerid
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            print(f"  └─  Account config missing. Skipping.")
+            continue
+        
+        # --- LOAD CONFIG AND GET MINIMUM RISK THRESHOLD ---
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Check if stoploss correction is enabled in settings
+            settings = config.get("settings", {})
+            if not settings.get("enable_stoploss_correction", True):
+                print(f"  └─ ⏭️ Stoploss correction disabled in settings. Skipping.")
+                continue
+            
+            # Get selected risk reward
+            selected_rr = config.get("selected_risk_reward", [3])
+            if isinstance(selected_rr, list) and selected_rr:
+                risk_reward = float(selected_rr[0])
+            else:
+                risk_reward = 3.0
+            
+            # Get minimum balance risk distance (NO FALLBACKS)
+            min_risk_config = config.get("minimum_balance_risk_distance", {})
+            
+            # Get account balance (MT5 should already be initialized)
+            account_info = mt5.account_info()
+            if not account_info:
+                print(f"  └─  Cannot get account info - MT5 not initialized?")
+                stats["orders_error"] += 1
+                continue
+            
+            account_balance = account_info.balance
+            print(f"  └─ 💰 Account Balance: ${account_balance:.2f}")
+            
+            # Find matching minimum risk threshold
+            min_risk_usd = None
+            for range_str, risk_value in min_risk_config.items():
+                try:
+                    range_part = range_str.split('_')[0]
+                    if '-' in range_part:
+                        low, high = map(float, range_part.split('-'))
+                        if low <= account_balance <= high:
+                            min_risk_usd = float(risk_value)
+                            print(f"  └─ 📊 Minimum risk required: ${min_risk_usd:.2f}")
+                            break
+                except (ValueError, IndexError):
+                    continue
+            
+            # Skip if no matching threshold found
+            if min_risk_usd is None:
+                print(f"  └─ ⚠️ No minimum_balance_risk_distance configured for balance ${account_balance:.2f} - SKIPPING")
+                stats["orders_skipped"] += 1
+                continue
+            
+            print(f"  └─ 🎯 Target R:R: 1:{risk_reward}")
+            
+        except Exception as e:
+            print(f"  └─  Failed to read config: {e}")
+            stats["orders_error"] += 1
+            continue
+        
+        # --- HELPER FUNCTION: GET VOLUME FROM SIGNAL ---
+        def get_volume_from_signal(order_data):
+            """Extract volume from signal data dynamically."""
+            for key, value in order_data.items():
+                if key.endswith('_volume'):
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        continue
+            return None
+        
+        # --- HELPER FUNCTION: FIND TRADEABLE SYMBOL ---
+        def find_tradeable_symbol(base_symbol):
+            """Find tradeable symbol by checking MT5 symbols."""
+            all_symbols = mt5.symbols_get()
+            if not all_symbols:
+                return base_symbol
+            
+            symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+            base_lower = base_symbol.lower()
+            
+            if base_lower in symbols_lower_map:
+                return symbols_lower_map[base_lower]
+            
+            # Try common suffixes
+            suffixes = ["", "+", ".m", "pro", ".pro", "c", ".c", "fx", ".fx", "e", ".e"]
+            for suffix in suffixes:
+                test_symbol = base_symbol + suffix
+                test_lower = test_symbol.lower()
+                if test_lower in symbols_lower_map:
+                    return symbols_lower_map[test_lower]
+            
+            return base_symbol
+        
+        # --- HELPER FUNCTION: Calculate current risk using LIVE MT5 ---
+        def calculate_current_risk_usd(symbol, volume, entry_price, stoploss_price, is_buy):
+            """Calculate current risk in USD using MT5's order_calc_profit."""
+            try:
+                # Ensure symbol is selected
+                if not mt5.symbol_select(symbol, True):
+                    print(f"        Failed to select symbol: {symbol}")
+                    return None
+                
+                # Get symbol info for validation
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    print(f"        Cannot get symbol info for: {symbol}")
+                    return None
+                
+                # Validate stoploss distance is acceptable to broker
+                point = symbol_info.point
+                min_stop_distance = max(symbol_info.trade_stops_level, 10) * point
+                
+                if is_buy:
+                    # For buy: SL must be below entry
+                    if stoploss_price >= entry_price - min_stop_distance:
+                        print(f"        SL {stoploss_price} too close to entry {entry_price} (min dist: {min_stop_distance})")
+                        return None
+                else:
+                    # For sell: SL must be above entry
+                    if stoploss_price <= entry_price + min_stop_distance:
+                        print(f"        SL {stoploss_price} too close to entry {entry_price} (min dist: {min_stop_distance})")
+                        return None
+                
+                order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+                risk_profit = mt5.order_calc_profit(order_type, symbol, volume, entry_price, stoploss_price)
+                
+                if risk_profit is None:
+                    print(f"        MT5 order_calc_profit returned None")
+                    return None
+                
+                return abs(risk_profit)
+                
+            except Exception as e:
+                print(f"        Error calculating risk: {e}")
+                return None
+        
+        # --- HELPER FUNCTION: Calculate required stoploss price ---
+        def calculate_required_stoploss(symbol, volume, entry_price, min_risk_usd, is_buy, current_sl):
+            """Calculate required stoploss price to achieve minimum risk."""
+            try:
+                if not mt5.symbol_select(symbol, True):
+                    return None
+                
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    return None
+                
+                digits = symbol_info.digits
+                point = symbol_info.point
+                # Get minimum stop distance in price units
+                min_stop_distance_points = max(symbol_info.trade_stops_level, 10)
+                min_stop_distance = min_stop_distance_points * point
+                
+                # Start with a safe distance that will definitely give us at least min_risk_usd
+                # We'll increase distance until risk is achieved
+                if is_buy:
+                    # For buy: SL below entry - start with reasonable distance
+                    # Start with current SL if it's valid, otherwise start wider
+                    if current_sl and current_sl < entry_price:
+                        test_distance = entry_price - current_sl
+                    else:
+                        test_distance = min_stop_distance * 10
+                    
+                    # Increase distance in steps until we achieve desired risk
+                    max_attempts = 50
+                    for attempt in range(max_attempts):
+                        test_sl = entry_price - test_distance
+                        
+                        # Ensure minimum stop distance
+                        if test_sl >= entry_price - min_stop_distance:
+                            test_sl = entry_price - min_stop_distance - (point * 10)
+                        
+                        # Round to valid digits
+                        test_sl = round(test_sl, digits)
+                        
+                        # Calculate risk with this SL
+                        test_risk = calculate_current_risk_usd(symbol, volume, entry_price, test_sl, is_buy)
+                        
+                        if test_risk is None:
+                            # If MT5 rejects this SL, increase distance
+                            test_distance *= 1.5
+                            continue
+                        
+                        # Check if risk meets or exceeds target
+                        if test_risk >= min_risk_usd - 0.01:
+                            # Found a valid SL
+                            return test_sl
+                        
+                        # Risk too low, increase distance
+                        test_distance *= 1.2
+                    
+                else:
+                    # For sell: SL above entry
+                    if current_sl and current_sl > entry_price:
+                        test_distance = current_sl - entry_price
+                    else:
+                        test_distance = min_stop_distance * 10
+                    
+                    for attempt in range(max_attempts):
+                        test_sl = entry_price + test_distance
+                        
+                        # Ensure minimum stop distance
+                        if test_sl <= entry_price + min_stop_distance:
+                            test_sl = entry_price + min_stop_distance + (point * 10)
+                        
+                        test_sl = round(test_sl, digits)
+                        test_risk = calculate_current_risk_usd(symbol, volume, entry_price, test_sl, is_buy)
+                        
+                        if test_risk is None:
+                            test_distance *= 1.5
+                            continue
+                        
+                        if test_risk >= min_risk_usd - 0.01:
+                            return test_sl
+                        
+                        test_distance *= 1.2
+                
+                print(f"        Could not find valid SL after {max_attempts} attempts")
+                return None
+                        
+            except Exception as e:
+                print(f"        Error calculating required stoploss: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+        
+        # --- HELPER FUNCTION: Calculate new TP ---
+        def calculate_new_tp(entry_price, sl_price, risk_reward, is_buy, symbol_info):
+            """Calculate new TP price based on adjusted SL and risk-reward ratio."""
+            if symbol_info is None:
+                return None
+            
+            if is_buy:
+                risk_distance = entry_price - sl_price
+            else:
+                risk_distance = sl_price - entry_price
+            
+            if risk_distance <= 0:
+                return None
+            
+            profit_distance = risk_distance * risk_reward
+            digits = symbol_info.digits
+            
+            if is_buy:
+                new_tp = round(entry_price + profit_distance, digits)
+            else:
+                new_tp = round(entry_price - profit_distance, digits)
+            
+            return new_tp
+        
+        # --- FIND ALL LIMIT_ORDERS.JSON FILES ---
+        signals_files = list(inv_root.rglob("limit_orders.json"))
+        
+        if not signals_files:
+            print(f"  └─ ℹ️  No limit_orders.json files found")
+            continue
+        
+        print(f"\n  └─ 📁 Found {len(signals_files)} limit_orders.json files")
+        
+        for signals_path in signals_files:
+            strategy_name = signals_path.parent.name
+            print(f"\n    📂 Strategy: {strategy_name}")
+            
+            try:
+                with open(signals_path, 'r', encoding='utf-8') as f:
+                    signals = json.load(f)
+                
+                if not signals:
+                    print(f"       Empty file - skipping")
+                    continue
+                
+                print(f"       Checking {len(signals)} signal(s)...")
+                
+                signals_modified_count = 0
+                
+                for idx, signal in enumerate(signals):
+                    stats["orders_checked"] += 1
+                    
+                    # Only check LIMIT and STOP orders (not instant)
+                    order_type = signal.get('order_type', '').lower()
+                    if order_type in ['instant_buy', 'instant_sell']:
+                        print(f"        ⏭️  Skipping instant order: {order_type}")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Get required fields
+                    raw_symbol = signal.get('symbol', '')
+                    entry_price = signal.get('entry', 0)
+                    current_sl = signal.get('exit', 0)  # This is the stoploss
+                    
+                    if not entry_price or not current_sl:
+                        print(f"        ⏭️  Skipping signal - missing entry ({entry_price}) or exit ({current_sl})")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Get volume
+                    volume = get_volume_from_signal(signal)
+                    if volume is None:
+                        print(f"        ⏭️  Skipping signal - no volume field found")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Find tradeable symbol
+                    tradeable_symbol = find_tradeable_symbol(raw_symbol)
+                    
+                    # Determine direction
+                    is_buy = 'buy' in order_type
+                    is_sell = 'sell' in order_type
+                    
+                    if not is_buy and not is_sell:
+                        print(f"        ⏭️  Skipping signal - unknown direction: {order_type}")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Get symbol info for display
+                    symbol_info = mt5.symbol_info(tradeable_symbol)
+                    if not symbol_info:
+                        print(f"        ⚠️ Cannot get symbol info for {tradeable_symbol}")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    digits = symbol_info.digits
+                    
+                    # Calculate current risk
+                    current_risk_usd = calculate_current_risk_usd(
+                        tradeable_symbol, 
+                        volume, 
+                        float(entry_price), 
+                        float(current_sl), 
+                        is_buy
+                    )
+                    
+                    if current_risk_usd is None:
+                        print(f"        ⚠️ Could not calculate risk for {raw_symbol} {order_type}")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Format numbers safely
+                    entry_display = f"{entry_price:.{digits}f}" if digits > 0 else str(entry_price)
+                    sl_display = f"{current_sl:.{digits}f}" if digits > 0 else str(current_sl)
+                    
+                    print(f"\n        📋 {order_type.upper()} {raw_symbol} @ {entry_display}")
+                    print(f"           Current SL: {sl_display} | Risk: ${current_risk_usd:.2f}")
+                    print(f"           Minimum required risk: ${min_risk_usd:.2f}")
+                    
+                    # Check if current risk meets minimum
+                    if current_risk_usd >= min_risk_usd - 0.01:
+                        print(f"           ✅ Risk meets minimum requirement")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Risk is insufficient
+                    stats["insufficient_risk_found"] += 1
+                    print(f"           ⚠️ INSUFFICIENT RISK: Need to adjust stoploss")
+                    
+                    # Calculate required stoploss
+                    new_sl = calculate_required_stoploss(
+                        tradeable_symbol,
+                        volume,
+                        float(entry_price),
+                        min_risk_usd,
+                        is_buy,
+                        float(current_sl)
+                    )
+                    
+                    if new_sl is None:
+                        print(f"           Cannot calculate required stoploss. Skipping.")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Calculate new TP based on new SL
+                    new_tp = calculate_new_tp(
+                        float(entry_price),
+                        new_sl,
+                        risk_reward,
+                        is_buy,
+                        symbol_info
+                    )
+                    
+                    if new_tp is None:
+                        print(f"           Cannot calculate TP. Skipping.")
+                        stats["orders_skipped"] += 1
+                        continue
+                    
+                    # Verify new risk
+                    new_risk_usd = calculate_current_risk_usd(
+                        tradeable_symbol,
+                        volume,
+                        float(entry_price),
+                        new_sl,
+                        is_buy
+                    )
+                    
+                    if new_risk_usd is None:
+                        print(f"           ⚠️ Warning: Could not verify new risk, but proceeding with calculated SL")
+                        # Still proceed even if verification fails, as we already validated the SL calculation
+                    else:
+                        # Format new values safely
+                        new_sl_display = f"{new_sl:.{digits}f}" if digits > 0 else str(new_sl)
+                        new_tp_display = f"{new_tp:.{digits}f}" if digits > 0 else str(new_tp)
+                        
+                        print(f"           📐 New SL: {new_sl_display} (New risk: ${new_risk_usd:.2f})")
+                        print(f"           📍 New TP: {new_tp_display}")
+                    
+                    # Update the signal
+                    signal['exit'] = new_sl
+                    signal['target'] = new_tp
+                    signals_modified_count += 1
+                    stats["orders_adjusted"] += 1
+                    stats["minimum_risk_used"] += 1
+                    
+                # Save modified signals back to file if any were modified
+                if signals_modified_count > 0:
+                    with open(signals_path, 'w', encoding='utf-8') as f:
+                        json.dump(signals, f, indent=4)
+                    
+                    print(f"\n       📊 Summary for {strategy_name}:")
+                    print(f"          • Total signals checked: {len(signals)}")
+                    print(f"          • Signals adjusted: {signals_modified_count}")
+                    print(f"          • Signals unchanged: {len(signals) - signals_modified_count}")
+                else:
+                    print(f"\n       ✅ No signals needed adjustment")
+                    
+            except json.JSONDecodeError as e:
+                print(f"       Invalid JSON in {signals_path}: {e}")
+                stats["orders_error"] += 1
+                continue
+            except Exception as e:
+                print(f"       Error processing {signals_path}: {e}")
+                import traceback
+                traceback.print_exc()
+                stats["orders_error"] += 1
+                continue
+    
+    # --- FINAL SUMMARY ---
+    print(f"\n{'='*10} 📊 STOPLOSS CORRECTION SUMMARY {'='*10}")
+    print(f"   Investor ID: {stats['investor_id']}")
+    print(f"   Signals checked: {stats['orders_checked']}")
+    print(f"   Signals adjusted: {stats['orders_adjusted']}")
+    print(f"   Signals skipped: {stats['orders_skipped']}")
+    print(f"   Errors: {stats['orders_error']}")
+    
+    if stats["insufficient_risk_found"] > 0:
+        print(f"\n   ⚠️  Insufficient risk signals found: {stats['insufficient_risk_found']}")
+        print(f"   ✅ Corrected to minimum risk: {stats['minimum_risk_used']}")
+    
+    if stats["orders_checked"] > 0:
+        success_rate = (stats['orders_adjusted'] / stats['orders_checked']) * 100
+        print(f"\n   Adjustment rate: {success_rate:.1f}%")
+    
+    print(f"\n{'='*10} 🏁 STOPLOSS CORRECTION COMPLETE {'='*10}\n")
+    
+    stats["processing_success"] = True
+    return stats
+
+def maximum_risk_distance(inv_id=None):
+    """
+    Checks all limit orders for maximum risk distance requirements.
+    Removes signals where the calculated risk in USD is:
+    - GREATER than maximum_risk_distance threshold
+    
+    NO FALLBACKS - only uses exact values from:
+    - maximum_risk_distance
+    
+    If the threshold is missing or not configured for the current balance,
+    the check is SKIPPED entirely for that investor.
+    """
+    
+    # --- SUB-FUNCTION: LOAD MAXIMUM RISK DISTANCE THRESHOLD (NO FALLBACKS) ---
+    def load_maximum_risk_distance_threshold(investor_root, account_balance):
+        """
+        Load maximum risk distance threshold from accountmanagement.json.
+        NO FALLBACKS - only uses exactly what's specified.
+        
+        Returns:
+            float: max_risk_usd, or None if not found or error
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            print(f"    ℹ️  No accountmanagement.json found - maximum risk distance check SKIPPED")
+            return None
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # ONLY get the specified maximum risk distance setting
+            max_risk_config = config.get("maximum_balance_risk_distance", {})
+            
+            max_risk_usd = None
+            
+            # Find matching range for maximum risk distance (EXACT, NO FALLBACK)
+            for range_str, risk_value in max_risk_config.items():
+                try:
+                    # Parse range like "1-10000000.99_risk"
+                    range_part = range_str.split('_')[0]
+                    if '-' in range_part:
+                        low, high = map(float, range_part.split('-'))
+                        if low <= account_balance <= high:
+                            max_risk_usd = float(risk_value)
+                            print(f"        📊 Maximum risk distance: ${max_risk_usd:.2f} (balance: ${account_balance:.2f})")
+                            break
+                except (ValueError, IndexError):
+                    continue
+            
+            # If threshold is missing, skip entirely (NO FALLBACKS)
+            if max_risk_usd is None:
+                print(f"        ⚠️ No maximum_risk_distance configured for balance ${account_balance:.2f} - SKIPPING check")
+            
+            return max_risk_usd
+            
+        except Exception as e:
+            print(f"     Error reading maximum risk distance threshold: {e}")
+            return None
+    
+    # --- SUB-FUNCTION: CALCULATE ORDER RISK IN USD ---
+    def calculate_order_risk_usd(symbol, entry_price, stoploss_price, volume, is_buy):
+        """
+        Calculate the risk in USD for a limit/stop order.
+        Returns risk amount in USD, or None if calculation fails.
+        """
+        if stoploss_price == 0 or stoploss_price is None:
+            return None
+        
+        try:
+            # Ensure symbol is selected
+            if not mt5.symbol_select(symbol, True):
+                return None
+            
+            # Get symbol info for precision
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                return None
+            
+            # Calculate profit/loss between entry and stoploss
+            if is_buy:
+                # For BUY orders: risk = entry - stoploss (if stoploss is below entry)
+                if entry_price <= stoploss_price:
+                    return None  # No risk (stoploss above entry for buy)
+                calc_type = mt5.ORDER_TYPE_BUY
+                risk_profit = mt5.order_calc_profit(calc_type, symbol, volume, entry_price, stoploss_price)
+            else:
+                # For SELL orders: risk = stoploss - entry (if stoploss is above entry)
+                if entry_price >= stoploss_price:
+                    return None  # No risk (stoploss below entry for sell)
+                calc_type = mt5.ORDER_TYPE_SELL
+                risk_profit = mt5.order_calc_profit(calc_type, symbol, volume, entry_price, stoploss_price)
+            
+            return abs(risk_profit) if risk_profit else None
+            
+        except Exception as e:
+            print(f"        Error calculating risk: {e}")
+            return None
+    
+    # --- SUB-FUNCTION: GET VOLUME FROM SIGNAL ---
+    def get_volume_from_signal(order_data):
+        """Extract volume from signal data dynamically."""
+        for key, value in order_data.items():
+            if key.endswith('_volume'):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        return None
+    
+    # --- SUB-FUNCTION: REMOVE SIGNAL FROM LIMIT_ORDERS.JSON ---
+    def remove_signal_from_limit_orders(limit_orders_path, signal_to_remove):
+        """Remove a specific signal from limit_orders.json file."""
+        try:
+            if not limit_orders_path.exists():
+                return False
+            
+            with open(limit_orders_path, 'r', encoding='utf-8') as f:
+                signals = json.load(f)
+            
+            original_count = len(signals)
+            
+            # Find and remove the matching signal
+            filtered_signals = []
+            for signal in signals:
+                # Match by symbol, order_type, entry, and current_candle_time
+                if (signal.get('symbol') == signal_to_remove.get('symbol') and
+                    signal.get('order_type') == signal_to_remove.get('order_type') and
+                    signal.get('entry') == signal_to_remove.get('entry') and
+                    signal.get('current_candle_time') == signal_to_remove.get('current_candle_time')):
+                    print(f"        🗑️ Removing signal due to maximum risk distance violation")
+                    continue
+                filtered_signals.append(signal)
+            
+            if len(filtered_signals) < original_count:
+                with open(limit_orders_path, 'w', encoding='utf-8') as f:
+                    json.dump(filtered_signals, f, indent=4)
+                print(f"        ✅ Removed {original_count - len(filtered_signals)} signal(s) from {limit_orders_path.name}")
+                return True
+            else:
+                return False
+                
+        except Exception as e:
+            print(f"        Error removing signal from limit_orders.json: {e}")
+            return False
+    
+    # --- SUB-FUNCTION: FIND TRADEABLE SYMBOL ---
+    def find_tradeable_symbol(base_symbol):
+        """Find tradeable symbol by checking MT5 symbols."""
+        all_symbols = mt5.symbols_get()
+        if not all_symbols:
+            return base_symbol
+        
+        symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+        base_lower = base_symbol.lower()
+        
+        if base_lower in symbols_lower_map:
+            return symbols_lower_map[base_lower]
+        
+        # Try common suffixes
+        suffixes = ["", "+", ".m", "pro", ".pro", "c", ".c", "fx", ".fx", "e", ".e"]
+        for suffix in suffixes:
+            test_symbol = base_symbol + suffix
+            test_lower = test_symbol.lower()
+            if test_lower in symbols_lower_map:
+                return symbols_lower_map[test_lower]
+        
+        return base_symbol
+    
+    # --- MAIN EXECUTION ---
+    print("\n" + "="*80)
+    print("🔍 MAXIMUM RISK DISTANCE CHECKER (NO FALLBACKS)")
+    print("="*80)
+    
+    investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
+    total_removed = 0
+    total_checked = 0
+    total_skipped = 0
+    
+    for user_brokerid in investor_ids:
+        print(f"\n{'='*60}")
+        print(f"📋 INVESTOR: {user_brokerid}")
+        print(f"{'='*60}")
+        
+        investor_root = Path(INV_PATH) / user_brokerid
+        
+        if not investor_root.exists():
+            print(f"   Investor root not found: {investor_root}")
+            continue
+        
+        # Get account balance for threshold determination
+        account_info = mt5.account_info()
+        if not account_info:
+            print(f"  Cannot get account info for {user_brokerid}")
+            continue
+        
+        account_balance = account_info.balance
+        print(f"  💰 Account Balance: ${account_balance:.2f}")
+        
+        # Load maximum risk distance threshold (NO FALLBACKS)
+        max_risk_usd = load_maximum_risk_distance_threshold(
+            investor_root, account_balance
+        )
+        
+        # Skip if threshold is missing (NO FALLBACKS)
+        if max_risk_usd is None:
+            print(f"  ⚠️ MISSING REQUIRED CONFIGURATION - SKIPPING investor {user_brokerid}")
+            print(f"     maximum_risk_distance must be configured for balance ${account_balance:.2f}")
+            total_skipped += 1
+            continue
+        
+        print(f"\n  🎯 Maximum Risk Distance Rule (EXACT MATCH ONLY, NO FALLBACKS):")
+        print(f"     • Maximum risk allowed: ${max_risk_usd:.2f}")
+        print(f"     • Orders with risk > ${max_risk_usd:.2f} will be REMOVED")
+        
+        # Find all limit_orders.json files
+        signals_files = list(investor_root.rglob("limit_orders.json"))
+        
+        if not signals_files:
+            print(f"  ℹ️  No limit_orders.json files found")
+            continue
+        
+        print(f"\n  📁 Found {len(signals_files)} limit_orders.json files")
+        
+        for signals_path in signals_files:
+            strategy_name = signals_path.parent.name
+            print(f"\n    📂 Strategy: {strategy_name}")
+            
+            try:
+                with open(signals_path, 'r', encoding='utf-8') as f:
+                    signals = json.load(f)
+                
+                if not signals:
+                    print(f"       Empty file - skipping")
+                    continue
+                
+                print(f"       Checking {len(signals)} signal(s)...")
+                
+                signals_to_remove = []
+                
+                for signal in signals:
+                    total_checked += 1
+                    
+                    # Only check LIMIT and STOP orders (not instant)
+                    order_type = signal.get('order_type', '').lower()
+                    if order_type in ['instant_buy', 'instant_sell']:
+                        print(f"        ⏭️  Skipping instant order - not applicable for maximum risk distance check")
+                        continue
+                    
+                    # Get required fields
+                    raw_symbol = signal.get('symbol', '')
+                    entry_price = signal.get('entry', 0)
+                    exit_price = signal.get('exit', 0)  # This is the stoploss
+                    
+                    if not entry_price or not exit_price:
+                        print(f"        ⏭️  Skipping signal - missing entry or exit price")
+                        continue
+                    
+                    # Get volume
+                    volume = get_volume_from_signal(signal)
+                    if volume is None:
+                        print(f"        ⏭️  Skipping signal - no volume field found")
+                        continue
+                    
+                    # Find tradeable symbol
+                    tradeable_symbol = find_tradeable_symbol(raw_symbol)
+                    
+                    # Determine direction
+                    is_buy = 'buy' in order_type
+                    is_sell = 'sell' in order_type
+                    
+                    if not is_buy and not is_sell:
+                        print(f"        ⏭️  Skipping signal - unknown direction: {order_type}")
+                        continue
+                    
+                    # Calculate risk in USD
+                    risk_usd = calculate_order_risk_usd(
+                        tradeable_symbol, 
+                        float(entry_price), 
+                        float(exit_price), 
+                        volume, 
+                        is_buy
+                    )
+                    
+                    if risk_usd is None:
+                        print(f"        ⚠️ Could not calculate risk for {raw_symbol} {order_type}")
+                        continue
+                    
+                    # Check against maximum threshold (REMOVE if risk EXCEEDS maximum)
+                    if risk_usd > max_risk_usd:
+                        print(f"        REMOVING: {order_type.upper()} {raw_symbol} @ {entry_price}")
+                        print(f"           RISK TOO HIGH: ${risk_usd:.2f} > maximum ${max_risk_usd:.2f}")
+                        signals_to_remove.append(signal)
+                    else:
+                        print(f"        ✅ KEEPING: {order_type.upper()} {raw_symbol} @ {entry_price} (risk: ${risk_usd:.2f} ≤ ${max_risk_usd:.2f})")
+                
+                # Remove violating signals
+                if signals_to_remove:
+                    original_count = len(signals)
+                    for signal in signals_to_remove:
+                        remove_signal_from_limit_orders(signals_path, signal)
+                    
+                    # Reload and save updated signals
+                    with open(signals_path, 'r', encoding='utf-8') as f:
+                        updated_signals = json.load(f)
+                    
+                    # Filter out removed signals
+                    final_signals = [s for s in updated_signals if s not in signals_to_remove]
+                    
+                    with open(signals_path, 'w', encoding='utf-8') as f:
+                        json.dump(final_signals, f, indent=4)
+                    
+                    removed_count = len(signals_to_remove)
+                    total_removed += removed_count
+                    print(f"\n       📊 Summary for {strategy_name}:")
+                    print(f"          • Total signals checked: {len(signals)}")
+                    print(f"          • Signals removed (exceeded max risk): {removed_count}")
+                    print(f"          • Signals kept: {len(final_signals)}")
+                else:
+                    print(f"\n       ✅ No signals exceeded maximum risk distance")
+                    
+            except json.JSONDecodeError as e:
+                print(f"       Invalid JSON in {signals_path}: {e}")
+                continue
+            except Exception as e:
+                print(f"       Error processing {signals_path}: {e}")
+                continue
+    
+    # Final summary
+    print("\n" + "="*80)
+    print("  📊 MAXIMUM RISK DISTANCE CHECK SUMMARY (NO FALLBACKS)".ljust(79) + "=")
+    print("="*80)
+    print(f"│  Investors processed:        {len(investor_ids) - total_skipped}")
+    print(f"│  Investors skipped:          {total_skipped}")
+    print(f"│  Total signals checked:      {total_checked}")
+    print(f"│  Total signals removed:      {total_removed}")
+    print("="*80)
+    
+    if total_removed > 0:
+        print(f"✅ Removed {total_removed} signal(s) that exceeded maximum risk distance")
+    else:
+        print("✅ No signals exceeded maximum risk distance")
+    print("="*80 + "\n")
+    
+    return total_removed
 
 def live_usd_risk_and_scaling(inv_id=None, callback_function=None):
     """
@@ -15245,12 +16245,12 @@ def place_usd_orders(inv_id=None):
             # ============================================================
             broker_cfg = usersdictionary.get(user_brokerid)
             if not broker_cfg:
-                print(f"  ❌ No broker config found for {user_brokerid}")
+                print(f"  No broker config found for {user_brokerid}")
                 continue
             
             login_id = broker_cfg.get('LOGIN_ID', '')
             if not login_id:
-                print(f"  ❌ No LOGIN_ID found for {user_brokerid}")
+                print(f"  No LOGIN_ID found for {user_brokerid}")
                 continue
             
             # Construct authorized magic number: LOGIN_ID + USER_ID
@@ -15260,7 +16260,7 @@ def place_usd_orders(inv_id=None):
                 print(f"  🔑 Authorized Magic Number: {authorized_magic_number}")
                 print(f"     (LOGIN_ID: {login_id} + USER_ID: {user_brokerid})")
             except (ValueError, TypeError) as e:
-                print(f"  ❌ Could not create magic number: {e}")
+                print(f"  Could not create magic number: {e}")
                 continue
             
             # ============================================================
@@ -15510,6 +16510,223 @@ def place_usd_orders(inv_id=None):
         
         return any_orders_placed
     main()
+
+def clean_trades_history(inv_id=None):
+    """
+    Clean tradeshistory.json files - remove records older than execution start date.
+    Records without valid dates are ALWAYS removed.
+    If no start date found, ALL records are removed.
+    """
+    import json
+    from pathlib import Path
+    from datetime import datetime
+    
+    print("\n" + "="*60)
+    print("🧹 CLEANING TRADES HISTORY")
+    print("="*60)
+    
+    # Get investors
+    if inv_id:
+        investor_ids = [inv_id] if inv_id in usersdictionary else []
+        if not investor_ids:
+            print(f"Investor {inv_id} not found")
+            return {'error': f'Investor {inv_id} not found'}
+    else:
+        investor_ids = list(usersdictionary.keys())
+    
+    print(f"📋 Investors: {len(investor_ids)}\n")
+    
+    stats = {
+        'investors': 0,
+        'files': 0,
+        'records_removed': 0,
+        'files_deleted': 0,
+        'oldest_removed': None,
+        'newest_removed': None
+    }
+    
+    for user_brokerid in investor_ids:
+        investor_root = Path(INV_PATH) / user_brokerid
+        if not investor_root.exists():
+            continue
+        
+        # Get execution start date
+        start_datetime = None
+        
+        # Check accountmanagement.json
+        acc_mgmt = investor_root / "accountmanagement.json"
+        if acc_mgmt.exists():
+            try:
+                with open(acc_mgmt, 'r') as f:
+                    config = json.load(f)
+                    start_date = config.get('execution_start_date')
+                    if start_date:
+                        for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%d/%m/%Y"]:
+                            try:
+                                start_datetime = datetime.strptime(start_date, fmt)
+                                break
+                            except:
+                                continue
+            except:
+                pass
+        
+        # Check activities.json if not found
+        if not start_datetime:
+            activities = investor_root / "activities.json"
+            if activities.exists():
+                try:
+                    with open(activities, 'r') as f:
+                        data = json.load(f)
+                        start_date = data.get('execution_start_date')
+                        if start_date:
+                            for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%d/%m/%Y"]:
+                                try:
+                                    start_datetime = datetime.strptime(start_date, fmt)
+                                    break
+                                except:
+                                    continue
+                except:
+                    pass
+        
+        delete_all = (start_datetime is None)
+        
+        if delete_all:
+            print(f"📁 Investor {user_brokerid}: NO START DATE - will delete ALL records")
+        else:
+            print(f"📁 Investor {user_brokerid}: Keeping records from {start_datetime.strftime('%Y-%m-%d')}")
+        
+        # Process all tradeshistory.json files
+        for history_path in investor_root.rglob("tradeshistory.json"):
+            if not history_path.exists():
+                continue
+            
+            try:
+                with open(history_path, 'r') as f:
+                    history = json.load(f)
+                
+                if not history:
+                    continue
+                
+                original_count = len(history)
+                kept = []
+                removed_records = []  # Store removed records with their ages
+                
+                for record in history:
+                    keep = False
+                    record_date = None
+                    date_source = None
+                    
+                    # Try multiple date fields in priority order
+                    date_fields = [
+                        ('placed_timestamp', record.get('placed_timestamp')),
+                        ('close_time', record.get('close_time')),
+                        ('current_candle_time', record.get('current_candle_time')),
+                        ('open_time', record.get('open_time')),
+                        ('cancelled_time', record.get('cancelled_time')),
+                        ('generated_at', record.get('generated_at')),
+                        ('calculated_at', record.get('calculated_at')),
+                        ('moved_to_signals_at', record.get('moved_to_signals_at')),
+                        ('timestamp', record.get('timestamp'))
+                    ]
+                    
+                    for field_name, date_str in date_fields:
+                        if date_str and isinstance(date_str, str):
+                            try:
+                                # Handle various formats
+                                if 'T' in date_str:
+                                    # ISO format
+                                    clean_date = date_str.split('.')[0] if '.' in date_str else date_str
+                                    record_date = datetime.strptime(clean_date, '%Y-%m-%dT%H:%M:%S')
+                                else:
+                                    # Standard format
+                                    record_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                                date_source = field_name
+                                break
+                            except:
+                                continue
+                    
+                    if delete_all:
+                        # Remove everything
+                        removed_records.append({'date': record_date, 'source': date_source})
+                    elif record_date:
+                        # Keep if on or after start date
+                        if record_date >= start_datetime:
+                            keep = True
+                        else:
+                            removed_records.append({'date': record_date, 'source': date_source, 'age_days': (datetime.now() - record_date).days})
+                    else:
+                        # No valid date found - remove
+                        removed_records.append({'date': None, 'source': 'no_date', 'age_days': 'unknown'})
+                    
+                    if keep:
+                        kept.append(record)
+                
+                removed_count = len(removed_records)
+                
+                if removed_count > 0:
+                    # Calculate age statistics
+                    ages = []
+                    for r in removed_records:
+                        if r.get('age_days') and isinstance(r['age_days'], int):
+                            ages.append(r['age_days'])
+                    
+                    oldest_days = max(ages) if ages else None
+                    newest_days = min(ages) if ages else None
+                    
+                    # Format age string
+                    age_info = ""
+                    if oldest_days and newest_days:
+                        if oldest_days == newest_days:
+                            age_info = f" (all {oldest_days} days old)"
+                        else:
+                            age_info = f" (oldest: {oldest_days} days, newest: {newest_days} days)"
+                    
+                    if delete_all and len(kept) == 0:
+                        # Delete the file entirely
+                        history_path.unlink()
+                        stats['files_deleted'] += 1
+                        print(f"   🗑️ {history_path.parent.name}: DELETED ({removed_count} records{age_info})")
+                    else:
+                        # Write back kept records
+                        with open(history_path, 'w') as f:
+                            json.dump(kept, f, indent=4)
+                        print(f"   ✅ {history_path.parent.name}: {removed_count} removed{age_info}, {len(kept)} kept")
+                    
+                    stats['records_removed'] += removed_count
+                    stats['files'] += 1
+                    
+                    # Track global oldest/newest
+                    if ages:
+                        if stats['oldest_removed'] is None or max(ages) > stats['oldest_removed']:
+                            stats['oldest_removed'] = max(ages)
+                        if stats['newest_removed'] is None or min(ages) < stats['newest_removed']:
+                            stats['newest_removed'] = min(ages)
+                else:
+                    print(f"   ℹ️ {history_path.parent.name}: No old records")
+                    
+                stats['investors'] += 1
+                
+            except Exception as e:
+                print(f"   {history_path.parent.name}: {str(e)[:50]}")
+    
+    # Summary
+    print("\n" + "="*60)
+    print(f"📊 SUMMARY")
+    print(f"   Investors: {stats['investors']}")
+    print(f"   Files cleaned: {stats['files']}")
+    print(f"   Records removed: {stats['records_removed']}")
+    
+    if stats['records_removed'] > 0:
+        if stats['oldest_removed'] and stats['newest_removed']:
+            if stats['oldest_removed'] == stats['newest_removed']:
+                print(f"   Age of removed: {stats['oldest_removed']} days old")
+            else:
+                print(f"   Age range: {stats['newest_removed']} to {stats['oldest_removed']} days old")
+    
+    print(f"   Files deleted: {stats['files_deleted']}")
+    print("="*60 + "\n")
+    
+    return stats
 
 def update_orders_status_in_tradeshistory(inv_id=None):
     """
@@ -17221,15 +18438,767 @@ def apply_dynamic_breakeven(inv_id=None):
     
     return stats
 
-# real accounts 
-def process_single_investor(inv_folder):
+def trades_analytics(inv_id=None):
+    """
+    Fetch and record all individual trades grouped by risk configurations,
+    segregated into dual chronological windows:
+      - from_execution_start_date: Full lifetime history since broker launch.
+      - last_28_days: A rolling snapshot tracking the immediate trailing 28 days.
+    
+    Reconciles missing profiles and fields between FETCHED_INVESTORS and UPDATED_INVESTORS.
+    """
+    
+    print("\n" + "="*80)
+    print(" 📊 TRADES ANALYTICS SYSTEM DIAGNOSTIC INITIALIZED".ljust(79) + "=")
+    print("="*80)
+    
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_processed": 0,
+        "total_trades_recorded": 0,
+        "processing_success": False
+    }
+    
+    # Check usersdictionary presence (assumed defined globally in your script context)
+    try:
+        active_users_dict = usersdictionary
+    except NameError:
+        active_users_dict = {}
+        print(" ⚠️ Warning: 'usersdictionary' not found globally. Initializing blank fallback context.")
+
+    investor_ids = [inv_id] if inv_id else list(active_users_dict.keys())
+    if not investor_ids:
+        print(" No active investors discovered inside runtime context properties.")
+        print("="*80)
+        return stats
+    
+    # Dictionary to keep track of generated analytics structures for synchronization later
+    generated_analytics_registry = {}
+    
+    # Iterate System Investors
+    for user_brokerid in investor_ids:
+        print(f"\n" + "═"*80)
+        print(f" PROFILE ANALYSIS: INVESTOR ID -> {user_brokerid}".ljust(79) + "═")
+        print("═"*80)
+        
+        # Note: INV_PATH assumed defined globally in your environment
+        try:
+            root_dir_base = INV_PATH
+        except NameError:
+            root_dir_base = r"C:\xampp\htdocs\harvcore\users"
+            
+        inv_root = Path(root_dir_base) / str(user_brokerid)
+        if not inv_root.exists():
+            print(f" │ Operational folder structure missing: {inv_root}")
+            continue
+        
+        activities_path = inv_root / "activities.json"
+        acct_mgmt_path = inv_root / "accountmanagement.json"
+        
+        if not activities_path.exists():
+            print(f" │ Profile tracking state file missing: {activities_path}")
+            continue
+        
+        try:
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities_data = json.load(f)
+        except Exception as e:
+            print(f" │ Error parsing profile tracking state: {e}")
+            continue
+        
+        execution_start_date = activities_data.get('execution_start_date')
+        if not execution_start_date:
+            print(f" │ No operational start boundary 'execution_start_date' flagged inside tracking state.")
+            continue
+
+        broker_cfg = active_users_dict.get(user_brokerid)
+        if not broker_cfg:
+            print(f" │ Critical authorization mapping criteria missing inside system dictionary.")
+            continue
+
+        login_id = broker_cfg.get('LOGIN_ID', '')
+        if not login_id:
+            print(f" │ System environment mapping requires an active 'LOGIN_ID'.")
+            continue
+
+        try:
+            unique_magic_number = int(str(login_id) + str(user_brokerid))
+        except (ValueError, TypeError) as e:
+            print(f" │ Failed to construct transaction cryptographic signature: {e}")
+            continue
+
+        activities_data['authorized_magic_number'] = unique_magic_number
+        activities_data['unique_magicnumber'] = unique_magic_number
+
+        # LOAD CONFIGURATION TARGETS
+        max_allowable_risk_threshold = 0.0
+        be_dict_sorted = []
+
+        if acct_mgmt_path.exists():
+            try:
+                with open(acct_mgmt_path, 'r', encoding='utf-8') as f:
+                    acct_config = json.load(f)
+                    default_risks = acct_config.get("account_balance_default_risk_management", {})
+                    max_risks = acct_config.get("account_balance_maximum_risk_management", {})
+                    
+                    settings = acct_config.get("settings", {})
+                    be_dict = settings.get("breakeven_dictionary", [])
+                    be_dict_sorted = sorted(be_dict, key=lambda x: float(x.get("reward", 0.0)), reverse=True)
+                    
+                    extracted_values = []
+                    for risk_dict in [default_risks, max_risks]:
+                        for k, target_val in risk_dict.items():
+                            try:
+                                extracted_values.append(float(target_val))
+                            except (ValueError, TypeError):
+                                continue
+                    
+                    if extracted_values:
+                        max_allowable_risk_threshold = max(extracted_values)
+            except Exception as e:
+                print(f" │ └── Error parsing accountmanagement.json: {e}")
+
+        start_datetime = None
+        for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d"]:
+            try:
+                start_datetime = datetime.strptime(str(execution_start_date), fmt)
+                break
+            except:
+                continue
+        
+        if not start_datetime:
+            print(f" │ Failed to parse operational start boundary string format: {execution_start_date}")
+            continue
+        
+        # Calculate trailing 28-day boundary floor
+        now_time = datetime.now()
+        trailing_28d_floor = now_time - timedelta(days=28)
+        
+        # Fetch widest window possible to cover both segments
+        query_start_datetime = min(start_datetime, trailing_28d_floor)
+        history_deals = mt5.history_deals_get(query_start_datetime, now_time)
+        if not history_deals:
+            print(f" │ ℹ️ Zero closed trade records detected on account terminal layer history.")
+            continue
+        
+        deals_by_position = {}
+        for deal in history_deals:
+            if deal.type in [0, 1]:
+                position_key = deal.position_id
+                if position_key not in deals_by_position:
+                    deals_by_position[position_key] = []
+                deals_by_position[position_key].append(deal)
+        
+        master_flat_processed_trades = []
+        
+        # EVALUATE INDIVIDUAL POSITION RECORDS
+        for position_id, deals in deals_by_position.items():
+            deals.sort(key=lambda x: x.time)
+            
+            total_profit = sum(deal.profit for deal in deals)
+            total_commission = sum(deal.commission for deal in deals)
+            total_swap = sum(deal.swap for deal in deals)
+            total_pnl = total_profit + total_commission + total_swap
+            
+            entry_deal = deals[0]
+            exit_deal = deals[-1] if len(deals) > 1 else None
+            is_closed = len(deals) > 1 
+            
+            if not is_closed:
+                continue
+                
+            is_authorized = (entry_deal.magic == unique_magic_number)
+            auth_group = "authorized" if is_authorized else "unauthorized"
+            
+            trade_type = "BUY" if entry_deal.type == 0 else "SELL"
+            mt5_action = mt5.ORDER_TYPE_BUY if entry_deal.type == 0 else mt5.ORDER_TYPE_SELL
+            total_volume = entry_deal.volume
+            entry_price = entry_deal.price
+            
+            stoploss = getattr(entry_deal, 'sl', 0.0)
+            takeprofit = getattr(entry_deal, 'tp', 0.0)
+            
+            if stoploss == 0.0 or takeprofit == 0.0:
+                related_orders = mt5.history_orders_get(position=position_id)
+                if related_orders:
+                    for order in related_orders:
+                        if order.sl > 0.0 and stoploss == 0.0:
+                            stoploss = order.sl
+                        if order.tp > 0.0 and takeprofit == 0.0:
+                            takeprofit = order.tp
+            
+            trade_risk = 0.0
+            risk_reward = "N/A"
+            max_possible_r = None
+            
+            if stoploss > 0.0:
+                calculated_risk_pnl = mt5.order_calc_profit(mt5_action, entry_deal.symbol, total_volume, entry_price, stoploss)
+                if calculated_risk_pnl is not None:
+                    trade_risk = abs(calculated_risk_pnl)
+            
+            if stoploss > 0.0 and stoploss != entry_price:
+                price_risk_distance = abs(entry_price - stoploss)
+                if price_risk_distance > 0:
+                    if takeprofit > 0.0:
+                        price_reward_distance = abs(takeprofit - entry_price)
+                        max_possible_r = round(price_reward_distance / price_risk_distance, 2)
+                        risk_reward = max_possible_r
+                    elif total_pnl < 0:
+                        risk_reward = 1.0
+
+            resolved_risk = trade_risk if trade_risk > 0 else abs(total_pnl) if total_pnl < 0 else 0.0
+
+            trade_owned_by_rr = "N/A"
+            trade_owned_by_rr_raw = "N/A"
+            closed_at_reward = 0.0
+            claimed_reason = "N/A"
+            inherited_beneficiaries = []
+            
+            if resolved_risk > 0:
+                realized_r_multiplier = total_pnl / resolved_risk
+                closed_at_reward = round(realized_r_multiplier, 2)
+                
+                is_flat_breakeven = (0.0 <= total_pnl <= 0.10)
+                is_half_risk_breakeven = (total_pnl > 0.10 and total_pnl <= (resolved_risk * 0.50))
+                
+                matched_explicitly = False
+                
+                if (is_flat_breakeven or is_half_risk_breakeven) and be_dict_sorted:
+                    lowest_rule = be_dict_sorted[-1]
+                    target_reward_value = float(lowest_rule.get("reward", 0.0))
+                    trade_owned_by_rr = f"primary target:{lowest_rule.get('reward')}"
+                    
+                    reason_type = "flat market friction noise" if is_flat_breakeven else "structural exit within 50% risk boundary"
+                    claimed_reason = f"claimed because trade qualified as a breakeven exit ({reason_type}) consolidated into lowest tier {target_reward_value}"
+                    trade_owned_by_rr_raw = str(lowest_rule.get("reward"))
+                    matched_explicitly = True
+                else:
+                    for rule in be_dict_sorted:
+                        target_reward_value = float(rule.get("reward", 0.0))
+                        be_trigger_threshold = float(rule.get("breakeven_at_reward", 0.0))
+                        
+                        if max_possible_r is not None and realized_r_multiplier >= be_trigger_threshold and max_possible_r >= target_reward_value:
+                            trade_owned_by_rr = f"primary target:{rule.get('reward')}"
+                            claimed_reason = f"claimed because reward at {target_reward_value} requested to breakeven at {be_trigger_threshold}"
+                            trade_owned_by_rr_raw = str(rule.get("reward"))
+                            matched_explicitly = True
+                            break
+                
+                if matched_explicitly:
+                    primary_value = float(trade_owned_by_rr_raw)
+                    for rule in be_dict_sorted:
+                        loop_val = float(rule.get("reward", 0.0))
+                        if loop_val < primary_value:
+                            inherited_beneficiaries.append(str(rule.get("reward")))
+                    
+                    def internal_sort(v):
+                        try: return float(v)
+                        except: return 0.0
+                    inherited_beneficiaries = sorted(list(set(inherited_beneficiaries)), key=internal_sort)
+                    
+                    if inherited_beneficiaries:
+                        trade_owned_by_rr = f"primary target:{trade_owned_by_rr_raw}"
+                        trade_record_beneficiary_string = ",".join(inherited_beneficiaries)
+                    else:
+                        trade_record_beneficiary_string = "none"
+                else:
+                    if max_possible_r is not None and total_pnl > 0:
+                        trade_owned_by_rr = f"primary target:{max_possible_r}"
+                        trade_owned_by_rr_raw = str(max_possible_r)
+                        claimed_reason = f"claimed by the actual trade risk reward potential of {max_possible_r}"
+                        trade_record_beneficiary_string = "none"
+                    elif total_pnl <= 0:
+                        trade_owned_by_rr = "N/A"
+                        trade_owned_by_rr_raw = "N/A"
+                        claimed_reason = "unclaimed because trade closed out at a loss"
+                        trade_record_beneficiary_string = "none"
+
+            is_within_risk = (0.0 < resolved_risk <= max_allowable_risk_threshold)
+            
+            trade_record = {
+                "ticket": position_id,
+                "symbol": entry_deal.symbol,
+                "type": trade_type,
+                "entry_price": round(entry_price, 5),
+                "stoploss": round(stoploss, 5),
+                "take_profit": round(takeprofit, 5),
+                "trade_risk": resolved_risk,
+                "risk_reward": risk_reward,
+                "trade_owned_by_risk_reward": trade_owned_by_rr,
+                "trade_owned_by_risk_reward_raw_target": trade_owned_by_rr_raw,
+                "beneficiaries": trade_record_beneficiary_string,
+                "closed_at_reward": closed_at_reward,
+                "claimed_reason": claimed_reason,
+                "volume": round(total_volume, 2),
+                "time_open": datetime.fromtimestamp(entry_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
+                "time_close": datetime.fromtimestamp(exit_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
+                "magic": entry_deal.magic,
+                "total_pnl": round(total_pnl, 2),
+                "state": "CLOSED",
+                "raw_close_time": exit_deal.time,
+                "is_within_risk": is_within_risk,
+                "auth_group": auth_group
+            }
+            master_flat_processed_trades.append(trade_record)
+
+        # SEPARATE PIPELINE STATISTICS BUILDER UTILITY
+        def run_segment_analytics(trades_pool, window_start_dt, mode="full"):
+            trades_pool.sort(key=lambda x: x["raw_close_time"])
+            t_count = len(trades_pool)
+            
+            p_list = [t for t in trades_pool if t["total_pnl"] > 0]
+            l_list = [t for t in trades_pool if t["total_pnl"] < 0]
+            
+            p_count, l_count = len(p_list), len(l_list)
+            t_pnl = sum(t["total_pnl"] for t in trades_pool)
+            
+            w_rate = round((p_count / t_count * 100), 2) if t_count > 0 else 0.0
+            l_rate = round((l_count / t_count * 100), 2) if t_count > 0 else 0.0
+            
+            sym_map = {}
+            sl_tp_count, no_sl_tp_count = 0, 0
+            for t in trades_pool:
+                s = t["symbol"]
+                if t["stoploss"] > 0 and t["take_profit"] > 0:
+                    sl_tp_count += 1
+                else:
+                    no_sl_tp_count += 1
+                    
+                if s not in sym_map:
+                    sym_map[s] = {"total_trades": 0, "wins_count": 0, "gross_profit_revenue": 0.0, "gross_loss_revenue": 0.0, "total_pnl": 0.0}
+                m = sym_map[s]
+                m["total_trades"] += 1
+                m["total_pnl"] += t["total_pnl"]
+                if t["total_pnl"] > 0:
+                    m["wins_count"] += 1
+                    m["gross_profit_revenue"] += t["total_pnl"]
+                elif t["total_pnl"] < 0:
+                    m["gross_loss_revenue"] += abs(t["total_pnl"])
+
+            processed_symbols = []
+            for s_name, sm in sym_map.items():
+                denom_rev = sm["gross_profit_revenue"] + sm["gross_loss_revenue"]
+                processed_symbols.append({
+                    "symbol": s_name,
+                    "winrate_by_count": round((sm["wins_count"] / sm["total_trades"] * 100), 2) if sm["total_trades"] > 0 else 0.0,
+                    "winrate_by_revenue": round((sm["gross_profit_revenue"] / denom_rev * 100), 2) if denom_rev > 0 else 0.0,
+                    "pnl": round(sm["total_pnl"], 2)
+                })
+
+            best_c, best_r, poor_c, poor_r = {}, {}, {}, {}
+            if processed_symbols:
+                v_bc = [s for s in processed_symbols if s["winrate_by_count"] >= 20.0]
+                if v_bc: 
+                    top_c = sorted(v_bc, key=lambda x: x["winrate_by_count"], reverse=True)[0]
+                    best_c = {"symbol": top_c["symbol"], "winrate_by_count": top_c["winrate_by_count"], "pnl": top_c["pnl"]}
+                
+                pc = sorted(processed_symbols, key=lambda x: x["winrate_by_count"])[0]
+                poor_c = {"symbol": pc["symbol"], "winrate_by_count": pc["winrate_by_count"], "pnl": pc["pnl"]}
+                
+                if mode == "full":
+                    v_br = [s for s in processed_symbols if s["winrate_by_revenue"] >= 20.0]
+                    if v_br: 
+                        top_r = sorted(v_br, key=lambda x: x["winrate_by_revenue"], reverse=True)[0]
+                        best_r = {"symbol": top_r["symbol"], "winrate_by_revenue": top_r["winrate_by_revenue"], "pnl": top_r["pnl"]}
+                    pr = sorted(processed_symbols, key=lambda x: x["winrate_by_revenue"])[0]
+                    poor_r = {"symbol": pr["symbol"], "winrate_by_revenue": pr["winrate_by_revenue"], "pnl": pr["pnl"]}
+
+            hi_losses = {}
+            curr_streak = []
+            max_loss_streak = 0.0
+            for t in trades_pool:
+                if t["total_pnl"] >= 0.01:
+                    if len(curr_streak) >= 3:
+                        s_loss = abs(sum(x["total_pnl"] for x in curr_streak))
+                        if s_loss > max_loss_streak:
+                            max_loss_streak = s_loss
+                            hi_losses = {"consecutive_losses_count": len(curr_streak), "total_loss_pnl": round(-s_loss, 2), "trades": [{**x} for x in curr_streak]}
+                    curr_streak = []
+                elif t["total_pnl"] < 0:
+                    curr_streak.append(t)
+            if len(curr_streak) >= 3:
+                s_loss = abs(sum(x["total_pnl"] for x in curr_streak))
+                if s_loss > max_loss_streak: hi_losses = {"consecutive_losses_count": len(curr_streak), "total_loss_pnl": round(-s_loss, 2), "trades": [{**x} for x in curr_streak]}
+
+            hi_days = {}
+            d_pnl_map, d_trades_map = {}, {}
+            for t in trades_pool:
+                td = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
+                d_pnl_map[td] = d_pnl_map.get(td, 0.0) + t["total_pnl"]
+                if td not in d_trades_map: d_trades_map[td] = []
+                d_trades_map[td].append(t)
+
+            chron_days = sorted(d_pnl_map.keys())
+            curr_day_streak = []
+            max_day_streak_loss = 0.0
+            
+            def finish_day_streak(streak):
+                nonlocal max_day_streak_loss, hi_days
+                if len(streak) >= 2:
+                    s_loss = abs(sum(d_pnl_map[d] for d in streak))
+                    if s_loss > max_day_streak_loss:
+                        max_day_streak_loss = s_loss
+                        hi_days = {"consecutive_days_count": len(streak), "total_loss_pnl": round(-s_loss, 2), "days": {d: [{**w} for w in d_trades_map[d]] for d in streak}}
+
+            for d in chron_days:
+                if d_pnl_map[d] >= 0.01:
+                    finish_day_streak(curr_day_streak)
+                    curr_day_streak = []
+                elif d_pnl_map[d] < 0:
+                    curr_day_streak.append(d)
+            finish_day_streak(curr_day_streak)
+
+            cal_matrix = {}
+            loop_date = window_start_dt.date()
+            while loop_date <= datetime.now().date():
+                cal_matrix[loop_date.strftime('%Y-%m-%d')] = []
+                loop_date += timedelta(days=1)
+            for t in trades_pool:
+                t_dt = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
+                if t_dt in cal_matrix:
+                    c_trade = {**t}
+                    c_trade.pop("raw_close_time", None)
+                    c_trade.pop("is_within_risk", None)
+                    c_trade.pop("auth_group", None)
+                    c_trade.pop("trade_owned_by_risk_reward_raw_target", None)
+                    cal_matrix[t_dt].append(c_trade)
+
+            for x in hi_losses.get("trades", []): 
+                x.pop("raw_close_time", None)
+                x.pop("is_within_risk", None)
+                x.pop("auth_group", None)
+                x.pop("trade_owned_by_risk_reward_raw_target", None)
+            for d in hi_days.get("days", {}):
+                for x in hi_days["days"][d]: 
+                    x.pop("raw_close_time", None)
+                    x.pop("is_within_risk", None)
+                    x.pop("auth_group", None)
+                    x.pop("trade_owned_by_risk_reward_raw_target", None)
+
+            if mode == "count_only":
+                return {
+                    "total_trades": t_count, "total_pnl": round(t_pnl, 2),
+                    "profit_trades": p_count, "loss_trades": l_count,
+                    "win_rate_by_count": w_rate, "loss_rate_by_count": l_rate,
+                    "symbols_traded": len(sym_map), "closed_deals_with_sl_tp": sl_tp_count, "closed_deals_without_sl_tp": no_sl_tp_count,
+                    "symbols_contest": {"best_symbol_winrate_by_count": best_c, "poorest_symbol_winrate_by_count": poor_c},
+                    "highest_sequential_losses": hi_losses, "highest_sequential_days_in_loss": hi_days, "all_trades": cal_matrix
+                }
+            else:
+                p_rev = sum(t["total_pnl"] for t in p_list)
+                l_rev = sum(t["total_pnl"] for t in l_list)
+                turnover = p_rev + abs(l_rev)
+                w_rev_rate = round((p_rev / turnover * 100), 2) if turnover > 0 else 0.0
+                l_rev_rate = round((abs(l_rev) / turnover * 100), 2) if turnover > 0 else 0.0
+                
+                return {
+                    "total_trades": t_count, "total_pnl": round(t_pnl, 2),
+                    "profit_trades": p_count, "loss_trades": l_count, "profit_amount": p_count, "loss_amount": l_count,
+                    "win_rate_by_count": w_rate, "loss_rate_by_count": l_rate, "win_rate_by_revenue": w_rev_rate, "loss_rate_by_revenue": l_rev_rate,
+                    "symbols_traded": len(sym_map), "closed_deals_with_sl_tp": sl_tp_count, "closed_deals_without_sl_tp": no_sl_tp_count,
+                    "symbols_contest": {"best_symbol_winrate_by_count": best_c, "best_symbol_winrate_by_revenue": best_r, "poorest_symbol_winrate_by_count": poor_c, "poorest_symbol_winrate_by_revenue": poor_r},
+                    "highest_sequential_losses": hi_losses, "highest_sequential_days_in_loss": hi_days, "all_trades": cal_matrix
+                }
+
+        # FINAL ANALYTICS JSON CONTAINER GENERATOR
+        final_analytics_payload = {
+            "from_execution_start_date": {
+                "start_date": execution_start_date,
+                "end_date": now_time.strftime('%Y-%m-%d'),
+                "last_updated": now_time.isoformat()
+            },
+            "last_28_days": {
+                "start_date": trailing_28d_floor.strftime("%B %d, %Y"),
+                "end_date": now_time.strftime('%Y-%m-%d'),
+                "last_updated": now_time.isoformat()
+            }
+        }
+        
+        total_combined_trades = 0
+
+        # EXECUTE MATRIX POPULATION PER TIMELINE ROOT NODE
+        for window_key in ["from_execution_start_date", "last_28_days"]:
+            window_floor_ts = start_datetime.timestamp() if window_key == "from_execution_start_date" else trailing_28d_floor.timestamp()
+            window_start_dt_obj = start_datetime if window_key == "from_execution_start_date" else trailing_28d_floor
+            
+            timeframe_filtered_pool = [t for t in master_flat_processed_trades if t["raw_close_time"] >= window_floor_ts]
+            
+            for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
+                final_analytics_payload[window_key][c_group] = {
+                    "summaries": {
+                        "summaries_of_profits_only": {},
+                        "summaries_of_profits_and_flat_breakeven": {}
+                    },
+                    "regular_data": {}
+                }
+                
+                is_within = (c_group == "trades_within_risks_config")
+                bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
+                
+                all_discovered_rewards = set(str(t["trade_owned_by_risk_reward_raw_target"]) for t in bracket_trades if t["trade_owned_by_risk_reward_raw_target"] != "N/A")
+                
+                def numeric_sort(val):
+                    try: return float(val)
+                    except ValueError: return 999.0
+                sorted_rewards = sorted(list(all_discovered_rewards), key=numeric_sort)
+
+                # --- CATEGORY A: SUMMARIES OF PROFITS ONLY ---
+                total_losses_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] <= 0)
+                total_won_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] > 0)
+                
+                # Revenue Calculations
+                revenue_lost_profits_only = sum(abs(t["total_pnl"]) for t in bracket_trades if t["total_pnl"] <= 0)
+                revenue_won_profits_only = sum(t["total_pnl"] for t in bracket_trades if t["total_pnl"] > 0)
+                
+                for reward_key in sorted_rewards:
+                    claimed_pool = []
+                    for t in bracket_trades:
+                        is_primary = (str(t["trade_owned_by_risk_reward_raw_target"]) == reward_key)
+                        is_beneficiary = (reward_key in [b.strip() for b in t["beneficiaries"].split(",")])
+                        if (is_primary or is_beneficiary) and t["total_pnl"] > 0:
+                            claimed_pool.append(t)
+                            
+                    total_claimed = len(claimed_pool)
+                    denom = total_claimed + total_losses_profits_only
+                    winrate = round((total_claimed / denom * 100), 2) if denom > 0 else 0.0
+                    
+                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"][f"total_claimed_trades_by_risk_reward_{reward_key}"] = total_claimed
+                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"][f"total_claimed_trades_by_risk_reward_{reward_key}_winrate_by_count"] = winrate
+
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_lost_trades_by_count"] = total_losses_profits_only
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_won_trades_by_count"] = total_won_profits_only
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_lost_trades_by_revenue"] = round(revenue_lost_profits_only, 2)
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_won_trades_by_revenue"] = round(revenue_won_profits_only, 2)
+
+                # --- CATEGORY B: SUMMARIES OF PROFITS AND FLAT BREAKEVEN ---
+                total_losses_with_be = 0
+                total_won_with_be = 0
+                
+                revenue_lost_with_be = 0.0
+                revenue_won_with_be = 0.0
+                
+                for t in bracket_trades:
+                    if t["total_pnl"] > 0:
+                        total_won_with_be += 1
+                        revenue_won_with_be += t["total_pnl"]
+                    else:
+                        if t["trade_risk"] > 0 and t["total_pnl"] >= (-0.50 * t["trade_risk"]):
+                            total_won_with_be += 1
+                            # Treat flat/breakeven balance adjustments under won-revenue metrics
+                            revenue_won_with_be += t["total_pnl"]
+                        else:
+                            total_losses_with_be += 1
+                            revenue_lost_with_be += abs(t["total_pnl"])
+
+                for reward_key in sorted_rewards:
+                    claimed_pool = []
+                    for t in bracket_trades:
+                        is_primary = (str(t["trade_owned_by_risk_reward_raw_target"]) == reward_key)
+                        is_beneficiary = (reward_key in [b.strip() for b in t["beneficiaries"].split(",")])
+                        
+                        if is_primary or is_beneficiary:
+                            if t["total_pnl"] > 0:
+                                claimed_pool.append(t)
+                            elif t["total_pnl"] <= 0 and t["trade_risk"] > 0 and t["total_pnl"] >= (-0.50 * t["trade_risk"]):
+                                claimed_pool.append(t)
+                                
+                    total_claimed = len(claimed_pool)
+                    denom = total_claimed + total_losses_with_be
+                    winrate = round((total_claimed / denom * 100), 2) if denom > 0 else 0.0
+                    
+                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"][f"total_claimed_trades_by_risk_reward_{reward_key}"] = total_claimed
+                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"][f"total_claimed_trades_by_risk_reward_{reward_key}_winrate_by_count"] = winrate
+
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_lost_trades_by_count"] = total_losses_with_be
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_won_trades_by_count"] = total_won_with_be
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_lost_trades_by_revenue"] = round(revenue_lost_with_be, 2)
+                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_won_trades_by_revenue"] = round(revenue_won_with_be, 2)
+
+                # 2. Compile standard baseline regular datasets
+                for a_group in ["authorized", "unauthorized"]:
+                    source_trades = [t for t in bracket_trades if t["auth_group"] == a_group]
+                    if window_key == "from_execution_start_date":
+                        total_combined_trades += len(source_trades)
+                    
+                    regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj, mode="full")
+                    final_analytics_payload[window_key][c_group]["regular_data"][a_group] = regular_summary
+
+                    # 3. Dynamic sub-nest creation using Milestone Waterfall Inheritance arrays
+                    for reward_key in sorted_rewards:
+                        reward_nest_key = f"risk_reward_{reward_key}"
+                        if reward_nest_key not in final_analytics_payload[window_key][c_group]:
+                            final_analytics_payload[window_key][c_group][reward_nest_key] = {}
+
+                        allocated_pool = []
+                        for t in source_trades:
+                            is_primary = (str(t["trade_owned_by_risk_reward_raw_target"]) == reward_key)
+                            is_beneficiary = (reward_key in [b.strip() for b in t["beneficiaries"].split(",")])
+                            
+                            if (is_primary or is_beneficiary) and t["total_pnl"] > 0:
+                                allocated_pool.append({**t})
+                            elif t["total_pnl"] <= 0:
+                                allocated_pool.append({**t})
+
+                        final_analytics_payload[window_key][c_group][reward_nest_key][a_group] = run_segment_analytics(allocated_pool, window_start_dt_obj, mode="count_only")
+
+        # Strip internal temporary tracking keys before dumping analytics payload to files
+        for window_key in ["from_execution_start_date", "last_28_days"]:
+            for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
+                for key in list(final_analytics_payload[window_key][c_group].keys()):
+                    if key.startswith("risk_reward_"):
+                        for auth in ["authorized", "unauthorized"]:
+                            if auth in final_analytics_payload[window_key][c_group][key]:
+                                for day in final_analytics_payload[window_key][c_group][key][auth].get("all_trades", {}):
+                                    for trd in final_analytics_payload[window_key][c_group][key][auth]["all_trades"][day]:
+                                        trd.pop("trade_owned_by_risk_reward_raw_target", None)
+
+        # LOCAL DISK ACTIVITIES ENGINE COMMIT
+        for old_key in ['Analytics', 'AnalyticsSummary', 'AllTradesDetailed', 'last_analytics_update']:
+            activities_data.pop(old_key, None)
+            
+        activities_data['analytics'] = final_analytics_payload
+        
+        try:
+            with open(activities_path, 'w', encoding='utf-8') as f:
+                json.dump(activities_data, f, indent=4)
+            print(f" │ ✅ Performance payload successfully updated in: activities.json")
+            # Cache payload internally for cross-file synchronization sequence below
+            generated_analytics_registry[str(user_brokerid)] = final_analytics_payload
+        except Exception as e:
+            print(f" │ Error recording analytics payload to profile file: {e}")
+            continue
+
+        stats["investors_processed"] += 1
+        stats["total_trades_recorded"] += total_combined_trades
+
+    # =========================================================================
+    # 🔄 CROSS-FILE DATABASE SYNCHRONIZATION BACKEND ENGINE
+    # =========================================================================
+    print("\n" + "═"*80)
+    print(" 🔄 INITIATING CROSS-FILE INVESTOR MATRIX RECONCILIATION LAYER".ljust(79) + "═")
+    print("═"*80)
+
+    # 1. Load Primary Source (FETCHED_INVESTORS)
+    fetched_data = {}
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            print(f" │ Loaded {len(fetched_data)} raw profiles from upstream source matrix.")
+        except Exception as e:
+            print(f" │ Error loading FETCHED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ Warning: Upstream source file missing at configured path: {FETCHED_INVESTORS}")
+
+    # 2. Load Destination Storage Matrix (UPDATED_INVESTORS)
+    updated_data = {}
+    if os.path.exists(UPDATED_INVESTORS):
+        try:
+            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                updated_data = json.load(f)
+            print(f" │ Loaded {len(updated_data)} profiles from active destination database.")
+        except Exception as e:
+            print(f" │ Error parsing UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
+            updated_data = {}
+
+    # Define the base universe of user profiles to sync across files
+    all_target_keys = set(list(fetched_data.keys()) + list(updated_data.keys()) + [str(uid) for uid in investor_ids])
+    has_mutated_database = False
+
+    for current_id in sorted(all_target_keys):
+        # Determine tracking reference vectors
+        upstream_source_record = fetched_data.get(current_id)
+        destination_record = updated_data.get(current_id)
+        runtime_broker_config = active_users_dict.get(int(current_id) if current_id.isdigit() else current_id)
+
+        # ACTION A: Record does not exist in destination at all
+        if destination_record is None:
+            print(f" │ ➕ Destination Record '{current_id}' missing entirely. Creating target entry...")
+            has_mutated_database = True
+            
+            if upstream_source_record is not None:
+                # Copy entire object structure cleanly from primary master file
+                destination_record = json.loads(json.dumps(upstream_source_record))
+            else:
+                # Upstream file is missing this ID. Fall back to local investor runtime metadata properties
+                print(f" │   ⚠️ ID '{current_id}' missing from upstream source. Building placeholder structure...")
+                destination_record = {
+                    "id": str(current_id),
+                    "broker": runtime_broker_config.get("BROKER", "NULL") if runtime_broker_config else "NULL",
+                    "email": "NULL",
+                    "fullname": "NULL",
+                    "server": "NULL",
+                    "login": str(runtime_broker_config.get("LOGIN_ID", "NULL")) if runtime_broker_config else "NULL",
+                    "password": "NULL",
+                    "application_status": "Approved",
+                    "broker_balance": "0.00",
+                    "profitandloss": "0.00",
+                    "execution_start_date": datetime.now().strftime('%Y-%m-%d'),
+                    "accountmanagement": {},
+                    "analytics": {}
+                }
+            updated_data[current_id] = destination_record
+
+        # ACTION B: Record exists but may have missing attributes
+        elif upstream_source_record is not None:
+            for field_key, field_value in upstream_source_record.items():
+                if field_key not in destination_record:
+                    print(f" │   ↳ Synchronizing missing schema property: [{field_key}] into record '{current_id}'")
+                    destination_record[field_key] = json.loads(json.dumps(field_value))
+                    has_mutated_database = True
+
+        # ACTION C: Intercept and normalize analytics format states
+        current_analytics_value = destination_record.get("analytics")
+        if isinstance(current_analytics_value, str):
+            # Convert raw SQL placeholder text structures to standard native JSON blocks
+            if current_analytics_value.strip().upper() in ["NULL", '"NULL"', "'NULL'"]:
+                destination_record["analytics"] = {}
+                has_mutated_database = True
+            else:
+                try:
+                    destination_record["analytics"] = json.loads(current_analytics_value)
+                    has_mutated_database = True
+                except Exception:
+                    destination_record["analytics"] = {}
+                    has_mutated_database = True
+
+        # ACTION D: Inject fresh analytics data blocks if generated during this execution run
+        if current_id in generated_analytics_registry:
+            print(f" │   📦 Injecting fresh chronological analytics payload for client profile: {current_id}")
+            destination_record.pop('trades_analytics', None)  # Scrub deprecated keys
+            destination_record["analytics"] = generated_analytics_registry[current_id]
+            has_mutated_database = True
+
+    # 3. Save updates back to disk if modifications occurred
+    if has_mutated_database:
+        try:
+            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(updated_data, f, indent=4)
+            print(f" │\n │ ✅ Synchronization transaction committed to: {UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ Critical failure saving database matrix to storage path: {e}")
+    else:
+        print(" │ ℹ️ Storage verification completed. Destination schema is perfectly synchronized.")
+
+    stats["processing_success"] = True
+    print("\n" + "="*80)
+    print(" ✅ ANALYTICS RUN PROCESSING TASK COMPLETED".ljust(79) + "=")
+    print("="*80)
+    return stats
+
+
+#  accounts 
+
+def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Sequential execution without console output.
+    Dynamically initializes MT5 on whatever instance is globally available
+    on the system, completely decoupled from specific process tracking.
     """
     global restricted_timerange_alert
     
     inv_id = inv_folder.name
+    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
     
     account_stats = {
         "inv_id": inv_id, 
@@ -17267,43 +19236,180 @@ def process_single_investor(inv_folder):
         "spread_warning_details": None,
         "restricted_timerange_purge": False,
         "execution_skipped": False,
-        "skip_reason": None
+        "skip_reason": None,
+        "account_type": "UNKNOWN",
+        "account_mode": "UNKNOWN",  
+        "is_real_account": False 
     }
     
+    # 1. Extract structural demo permission policies from investor JSON log
+    allow_demo_processing = True 
+    try:
+        if Path(INVESTOR_USERS).exists():
+            with open(INVESTOR_USERS, 'r') as f:
+                investor_registry = json.load(f)
+            
+            user_meta = investor_registry.get(str(inv_id))
+            if user_meta:
+                demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
+                if str(demo_rule).strip().lower() in ["0", "false"]:
+                    allow_demo_processing = False
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+                else:
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+    except Exception as json_err:
+        print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
+
     broker_cfg = usersdictionary.get(inv_id)
     if not broker_cfg:
+        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
         return account_stats
 
-    import random
-    import time
-    time.sleep(random.uniform(0.1, 2.0)) 
+    # =====================================================================
+    # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
+    # =====================================================================
+    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
+    fetched_json_path = Path(FETCHED_INVESTORS)
+    inv_str_id = str(inv_id)
+    
+    try:
+        investors_data = {}
+        if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
+            with open(fetched_json_path, 'r') as f_inv:
+                investors_data = json.load(f_inv)
+        
+        if inv_str_id not in investors_data:
+            investors_data[inv_str_id] = {}
+            
+        print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
+    except Exception as io_err:
+        print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
+    
+    # Always fire tracking file-movement tasks regardless of connection state
+    move_fetched_investors()
+
+    # =====================================================================
+    # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
+    # =====================================================================
+    delay = random.uniform(0.2, 1.5)
+    time.sleep(delay) 
     
     login_id = int(broker_cfg['LOGIN_ID'])
-    mt5_path = broker_cfg["TERMINAL_PATH"]
+    password_str = broker_cfg["PASSWORD"]
+    server_str = broker_cfg["SERVER"]
+    
+    configured_path = broker_cfg.get("TERMINAL_PATH", "")
+    init_successful = False
+    
+    # Attempt 1: Dynamic Attachment Strategy
+    print(f"🔗 Attempting dynamic routing connection to any active global MT5 module...")
+    if mt5.initialize(timeout=30000):
+        init_successful = True
+        print(f"✅ Connected seamlessly to an active background MT5 system engine.")
+    
+    # Attempt 2: Fallback to direct pathing routing matrix
+    if not init_successful and configured_path:
+        print(f"⚠️ [WARN] Dynamic routing failed. Falling back to targeted terminal initialization profile...")
+        fallback_path = os.path.abspath(configured_path)
+        if os.path.exists(fallback_path):
+            if mt5.initialize(path=fallback_path, timeout=60000, portable=True):
+                init_successful = True
+                print(f"🧭 Successfully hooked terminal via explicit path matrix shortcut.")
 
+    if not init_successful:
+        print(f"[FAIL] 🛑 System Engine Error: Failed to discover, initialize, or bind to any available MT5 module.")
+        print(f"   Terminal Last Reported Internal Error Context: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Dynamic Initialization Engine Failure"
+        return account_stats
+
+    # =====================================================================
+    # SESSION ACCOUNT RE-AUTHENTICATION GATEWAY
+    # =====================================================================
     try:
-        if not mt5.initialize(path=mt5_path, timeout=180000):
-            return account_stats
-
         acc = mt5.account_info()
+        
         if acc is None or acc.login != login_id:
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
+            print(f"🔐 Account focus shift detected. Swapping session terminal context to ID: {login_id}...")
+            
+            if not mt5.login(login_id, password=password_str, server=server_str):
+                print(f"[FAIL] Server rejected routing authentication parameters for ID: {login_id}.")
+                print(f"       Rejection details from API: {mt5.last_error()}")
                 mt5.shutdown()
                 return account_stats
-        #calculate_investor_symbols_orders(inv_id=inv_id)
-        #live_usd_risk_and_scaling(inv_id=inv_id)
-        #martingale(inv_id=inv_id)
-        create_position_hedge(inv_id=inv_id)   
-        #check_pending_orders_risk(inv_id=inv_id)
-    
+                
+            acc = mt5.account_info()
+            
+        if acc is None:
+            print(f"[FAIL] Critical terminal memory fault. Bound data stream context returned empty parameters.")
+            mt5.shutdown()
+            return account_stats
+
+        # =================================================================
+        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+        # =================================================================
+        is_real = False
+        type_label = "UNKNOWN"
+        mode_label = "demo"
+
+        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            is_real = True
+            type_label = "REAL"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            is_real = False
+            type_label = "DEMO"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            is_real = False
+            type_label = "CONTEST"
+        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+            is_real = False
+            type_label = "DEMO (MONETARY SO FOOTPRINT)"
+        else:
+            server_upper = acc.server.upper() if acc.server else ""
+            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+                is_real = False
+                type_label = "DEMO (SERVER STR MATCH)"
+            else:
+                is_real = True
+                type_label = "REAL (FALLBACK)"
+
+        if is_real:
+            mode_label = "real"
+
+        account_stats["account_type"] = type_label
+        account_stats["account_mode"] = mode_label
+        account_stats["is_real_account"] = is_real
+        
+        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+
+        # Synchronize finalized account authentication parameters with database records
+        try:
+            if fetched_json_path.exists():
+                with open(fetched_json_path, 'r') as f_inv:
+                    investors_data = json.load(f_inv)
+                investors_data[inv_str_id]["account_mode"] = mode_label
+                with open(fetched_json_path, 'w') as f_inv:
+                    json.dump(investors_data, f_inv, indent=2)
+        except Exception as update_err:
+            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
+
+        # Safety policy gate check
+        if not is_real and not allow_demo_processing:
+            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+            account_stats["execution_skipped"] = True
+            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+            mt5.shutdown()
+            return account_stats
+
+        # =====================================================================
+        # Execute here
+        # =====================================================================
+        populate_orders_missing_fields(inv_id=inv_id)
+        maximum_risk_distance(inv_id=inv_id)
+        
         mt5.shutdown()
-        account_stats["success"] = True
-        account_stats["spread_check_skipped"] = False
-        account_stats["spread_warning_details"] = None
-        account_stats["restricted_timerange_purge"] = False
-        account_stats["execution_skipped"] = False
         
     except Exception as e:
+        print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
         try:
             mt5.shutdown()
         except:
@@ -17311,14 +19417,16 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def process_single_invest(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Sequential execution without console output.
+    Dynamically initializes MT5 on whatever instance is globally available
+    on the system, completely decoupled from specific process tracking.
     """
     global restricted_timerange_alert
     
     inv_id = inv_folder.name
+    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
     
     account_stats = {
         "inv_id": inv_id, 
@@ -17356,100 +19464,240 @@ def process_single_invest(inv_folder):
         "spread_warning_details": None,
         "restricted_timerange_purge": False,
         "execution_skipped": False,
-        "skip_reason": None
+        "skip_reason": None,
+        "account_type": "UNKNOWN",
+        "account_mode": "UNKNOWN",  
+        "is_real_account": False 
     }
     
+    # 1. Extract structural demo permission policies from investor JSON log
+    allow_demo_processing = True 
+    try:
+        if Path(INVESTOR_USERS).exists():
+            with open(INVESTOR_USERS, 'r') as f:
+                investor_registry = json.load(f)
+            
+            user_meta = investor_registry.get(str(inv_id))
+            if user_meta:
+                demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
+                if str(demo_rule).strip().lower() in ["0", "false"]:
+                    allow_demo_processing = False
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+                else:
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+    except Exception as json_err:
+        print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
+
     broker_cfg = usersdictionary.get(inv_id)
     if not broker_cfg:
+        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
         return account_stats
 
-    import random
-    import time
-    time.sleep(random.uniform(0.1, 2.0)) 
+    # =====================================================================
+    # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
+    # =====================================================================
+    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
+    fetched_json_path = Path(FETCHED_INVESTORS)
+    inv_str_id = str(inv_id)
+    
+    try:
+        investors_data = {}
+        if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
+            with open(fetched_json_path, 'r') as f_inv:
+                investors_data = json.load(f_inv)
+        
+        if inv_str_id not in investors_data:
+            investors_data[inv_str_id] = {}
+            
+        print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
+    except Exception as io_err:
+        print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
+    
+    # Always fire tracking file-movement tasks regardless of connection state
+    move_fetched_investors()
+
+    # =====================================================================
+    # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
+    # =====================================================================
+    delay = random.uniform(0.2, 1.5)
+    time.sleep(delay) 
     
     login_id = int(broker_cfg['LOGIN_ID'])
-    mt5_path = broker_cfg["TERMINAL_PATH"]
+    password_str = broker_cfg["PASSWORD"]
+    server_str = broker_cfg["SERVER"]
+    
+    configured_path = broker_cfg.get("TERMINAL_PATH", "")
+    init_successful = False
+    
+    # Attempt 1: Dynamic Attachment Strategy
+    print(f"🔗 Attempting dynamic routing connection to any active global MT5 module...")
+    if mt5.initialize(timeout=30000):
+        init_successful = True
+        print(f"✅ Connected seamlessly to an active background MT5 system engine.")
+    
+    # Attempt 2: Fallback to direct pathing routing matrix
+    if not init_successful and configured_path:
+        print(f"⚠️ [WARN] Dynamic routing failed. Falling back to targeted terminal initialization profile...")
+        fallback_path = os.path.abspath(configured_path)
+        if os.path.exists(fallback_path):
+            if mt5.initialize(path=fallback_path, timeout=60000, portable=True):
+                init_successful = True
+                print(f"🧭 Successfully hooked terminal via explicit path matrix shortcut.")
 
+    if not init_successful:
+        print(f"[FAIL] 🛑 System Engine Error: Failed to discover, initialize, or bind to any available MT5 module.")
+        print(f"   Terminal Last Reported Internal Error Context: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Dynamic Initialization Engine Failure"
+        return account_stats
+
+    # =====================================================================
+    # SESSION ACCOUNT RE-AUTHENTICATION GATEWAY
+    # =====================================================================
     try:
-        if not mt5.initialize(path=mt5_path, timeout=180000):
-            return account_stats
-
         acc = mt5.account_info()
+        
         if acc is None or acc.login != login_id:
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
+            print(f"🔐 Account focus shift detected. Swapping session terminal context to ID: {login_id}...")
+            
+            if not mt5.login(login_id, password=password_str, server=server_str):
+                print(f"[FAIL] Server rejected routing authentication parameters for ID: {login_id}.")
+                print(f"       Rejection details from API: {mt5.last_error()}")
                 mt5.shutdown()
                 return account_stats
-        
-        # =====================================================================
-        # STEP 1: CHECK FOR RESTRICTED TIME RANGE PURGE
-        # =====================================================================
-        print(f"🔍 [{inv_id}] Checking restricted time range status...")
-        
-        # Run the restricted timerange check first
-        timerange_result = restricted_timerange(inv_id=inv_id)
-        
-        # Check if purge was triggered
-        if restricted_timerange_alert and restricted_timerange_alert.get('is_triggered', False):
-            print(f"[{inv_id}] RESTRICTED TIME RANGE PURGE EXECUTED - Skipping main trading functions")
-            account_stats["restricted_timerange_purge"] = True
-            account_stats["execution_skipped"] = True
-            account_stats["skip_reason"] = f"Time range purge executed at {restricted_timerange_alert.get('timestamp', 'unknown')}"
-            account_stats["success"] = True  # Mark as success since purge was handled
-            account_stats["orders_removed"] = restricted_timerange_alert.get('total_orders_deleted', 0)
-            account_stats["positions_closed"] = restricted_timerange_alert.get('total_positions_closed', 0)
+                
+            acc = mt5.account_info()
             
-            # Only run essential cleanup functions
-            
-            
+        if acc is None:
+            print(f"[FAIL] Critical terminal memory fault. Bound data stream context returned empty parameters.")
             mt5.shutdown()
             return account_stats
-        
-        # If no purge was triggered, proceed with normal operations
-        print(f"✅ [{inv_id}] No restricted timerange purge - proceeding with normal operations")
-        
-        # =====================================================================
-        # STEP 2: QUICK SPREAD CHECK (LIGHT VERSION THAT SAVES DATA)
-        # =====================================================================
-        print(f"🔍 [{inv_id}] Running quick spread check...")
-        
-        #is_wide, spread_details, saved = symbol_spread_alert(inv_id=inv_id)
-        move_fetched_investors()
-        check_and_record_authorized_actions(inv_id=inv_id)
 
-        delete_unauthorized_symbol_files(inv_id=inv_id)
-        additional_candles_for_orders_limitation(inv_id=inv_id)
-        fetch_ohlc_data_for_investor(inv_id=inv_id)
-        directional_bias(inv_id=inv_id)
-        additional_candles_for_orders_limitation(inv_id=inv_id)
-        create_position_hedge(inv_id=inv_id)
-        #accountmanagement_manager(inv_id=inv_id)
-        deduplicate_orders(inv_id=inv_id)
-        filter_unauthorized_symbols(inv_id=inv_id)
-        filter_unauthorized_timeframes(inv_id=inv_id)
-        backup_limit_orders(inv_id=inv_id)
-        populate_orders_missing_fields(inv_id=inv_id)
-        activate_usd_based_risk_on_empty_pricelevels(inv_id=inv_id)
-        enforce_investor_symbols_specific_risks(inv_id=inv_id)
-        calculate_investor_symbols_orders(inv_id=inv_id)
-        live_usd_risk_and_scaling(inv_id=inv_id)
-        apply_default_prices(inv_id=inv_id)
-        martingale(inv_id=inv_id)
-        place_usd_orders(inv_id=inv_id)
-        close_unauthorized_orders(inv_id=inv_id)
-        orders_reward_correction(inv_id=inv_id)
-        check_pending_orders_risk(inv_id=inv_id)
-        history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
-        apply_dynamic_breakeven(inv_id=inv_id)
-        check_and_record_authorized_actions(inv_id=inv_id)
-    
+        # =================================================================
+        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+        # =================================================================
+        is_real = False
+        type_label = "UNKNOWN"
+        mode_label = "demo"
+
+        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            is_real = True
+            type_label = "REAL"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            is_real = False
+            type_label = "DEMO"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            is_real = False
+            type_label = "CONTEST"
+        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+            is_real = False
+            type_label = "DEMO (MONETARY SO FOOTPRINT)"
+        else:
+            server_upper = acc.server.upper() if acc.server else ""
+            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+                is_real = False
+                type_label = "DEMO (SERVER STR MATCH)"
+            else:
+                is_real = True
+                type_label = "REAL (FALLBACK)"
+
+        if is_real:
+            mode_label = "real"
+
+        account_stats["account_type"] = type_label
+        account_stats["account_mode"] = mode_label
+        account_stats["is_real_account"] = is_real
+        
+        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+
+        # Synchronize finalized account authentication parameters with database records
+        try:
+            if fetched_json_path.exists():
+                with open(fetched_json_path, 'r') as f_inv:
+                    investors_data = json.load(f_inv)
+                investors_data[inv_str_id]["account_mode"] = mode_label
+                with open(fetched_json_path, 'w') as f_inv:
+                    json.dump(investors_data, f_inv, indent=2)
+        except Exception as update_err:
+            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
+
+        # Safety policy gate check
+        if not is_real and not allow_demo_processing:
+            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+            account_stats["execution_skipped"] = True
+            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+            mt5.shutdown()
+            return account_stats
+
+        # =====================================================================
+        # MASTER CONDITIONAL ROUTING (TIME RANGE FILTER)
+        # =====================================================================
+        print(f"🔍 [{inv_id}] Evaluating system run constraints...")
+        
+        timerange_result = restricted_timerange(inv_id=inv_id)
+        
+        # Determine strict truthiness for restriction tracking
+        # If the result points to a true block, or a dictionary indicating true, it's restricted.
+        is_restricted = False
+        if isinstance(timerange_result, dict):
+            is_restricted = timerange_result.get('is_restricted', False)
+        elif str(timerange_result).strip().lower() in ["true", "1"]:
+            is_restricted = True
+            
+        # =====================================================================
+        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
+        # =====================================================================
+        if not is_restricted:
+            print(f"🛡️ [{inv_id}] Validation Clear. Explicitly OUTSIDE restricted window -> Running core trade logic...")
+            
+            # Run security safety tracking
+            check_and_record_unauthorized_actions(inv_id=inv_id)
+            delete_unauthorized_symbol_files(inv_id=inv_id)
+
+            # Core processing sequence execution
+            additional_candles_for_orders_limitation(inv_id=inv_id)
+            fetch_ohlc_data_for_investor(inv_id=inv_id)
+            directional_bias(inv_id=inv_id)
+            additional_candles_for_orders_limitation(inv_id=inv_id)
+            create_position_hedge(inv_id=inv_id)
+            deduplicate_orders(inv_id=inv_id)
+            filter_unauthorized_symbols(inv_id=inv_id)
+            filter_unauthorized_timeframes(inv_id=inv_id)
+            backup_limit_orders(inv_id=inv_id)
+            populate_orders_missing_fields(inv_id=inv_id)
+            activate_usd_based_risk_on_empty_pricelevels(inv_id=inv_id)
+            enforce_investor_symbols_specific_risks(inv_id=inv_id)
+            calculate_investor_symbols_orders(inv_id=inv_id)
+            padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
+            maximum_risk_distance(inv_id=inv_id) 
+            live_usd_risk_and_scaling(inv_id=inv_id)
+            apply_default_prices(inv_id=inv_id)
+            martingale(inv_id=inv_id)
+            clean_trades_history(inv_id=inv_id)
+            place_usd_orders(inv_id=inv_id)
+            close_unauthorized_orders(inv_id=inv_id)
+            orders_reward_correction(inv_id=inv_id)
+            check_pending_orders_risk(inv_id=inv_id)
+            history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
+            apply_dynamic_breakeven(inv_id=inv_id)
+            check_and_record_unauthorized_actions(inv_id=inv_id)
+            trades_analytics(inv_id=inv_id)
+
+            account_stats["success"] = True
+            print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
+
+        # =====================================================================
+        # CONDITION B: INSIDE RESTRICTED TIME RANGE -> SKIP ENGINE
+        # =====================================================================
+        else:
+            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time range block.")
+            print(f"⏭️ in restricted timerange")
+            
+            delete_all_orders_and_positions(inv_id=inv_id)
+        
         mt5.shutdown()
-        account_stats["success"] = True
-        account_stats["spread_check_skipped"] = False
-        account_stats["spread_warning_details"] = None
-        account_stats["restricted_timerange_purge"] = False
-        account_stats["execution_skipped"] = False
         
     except Exception as e:
+        print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
         try:
             mt5.shutdown()
         except:
@@ -17459,62 +19707,169 @@ def process_single_invest(inv_folder):
 
 def place_orders_parallel():
     """
-    ORCHESTRATOR: Spawns multiple processes to handle  investors in parallel.
-    Uses the  account initialization logic.
+    ORCHESTRATOR (Dynamic One-Shot): Spawns a process pool sized dynamically
+    by inspecting live CPU and RAM specs. Deducts resources already consumed 
+    by active MT5 terminals running across other system setups.
     """
     inv_base_path = Path(INV_PATH)
     investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
     
     if not investor_folders:
-        print(" └─ 🔘 No investor directories found.")
-        return False
-
-    print(f" 📋 Found {len(investor_folders)} investors to process")
-    print(f" 🔧 Creating pool with {len(investor_folders)} processes...")
-    
-    # Create a pool based on the number of accounts
-    # This will run 'process_single_investor' for all folders at the same time
-    with mp.Pool(processes=len(investor_folders)) as pool:
-        results = pool.map(process_single_investor, investor_folders)
-
-    #time.sleep(1)
-    #place_orders_parallel()
-    return 
-
-def place_orders_parallel_():
-    """
-    ORCHESTRATOR: Runs the investor processing loop indefinitely 
-    using a while loop to avoid recursion errors.
-    """
-    inv_base_path = Path(INV_PATH)
-
-    print(f"🚀 Starting Perpetual Trading Loop...")
-
-    while True:  # Use a loop for indefinite execution
+        print(" └─ 🔘 No investor directories found. Calling move_fetched_investors() and retrying...")
         try:
-            investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            move_fetched_investors()
+        except Exception as err:
+            print(f"[ERROR] Failed to run move_fetched_investors: {err}")
             
-            if not investor_folders:
-                print(" └─ 🔘 No investor directories found. Retrying in 10s...")
-                time.sleep(10)
+        return place_orders_parallel()
+
+    # --- SENSE RAW HARDWARE SPECS ---
+    cpu_cores = os.cpu_count() or 1
+    available_ram_bytes = psutil.virtual_memory().available
+    available_ram_mb = available_ram_bytes / (1024 * 1024)
+
+    max_by_cpu = cpu_cores * 4  
+    max_by_ram = int(available_ram_mb // 300)  
+    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
+
+    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} (Cap: {max_by_cpu}) | Free RAM: {available_ram_mb:.1f}MB (Cap: {max_by_ram})")
+
+    # --- CROSS-WINDOW SYSTEM DEDUCTION ---
+    active_mt5_count = 0
+    for proc in psutil.process_iter(['name']):
+        try:
+            pname = proc.info['name'].lower() if proc.info['name'] else ""
+            if "terminal.exe" in pname or "terminal64.exe" in pname:
+                active_mt5_count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    remaining_slots_left = max(0, hardware_max_limit - active_mt5_count)
+    
+    print(f"📊 Global System Load -> Active MT5 instances in other windows: {active_mt5_count}")
+    print(f"🔒 Adjusted Safe Limit for THIS Window: {remaining_slots_left} available slots remaining.")
+
+    if remaining_slots_left == 0:
+        print("⚠️  SYSTEM AT MAXIMUM SAFE CAPACITY: No resource slots left. Deferring execution to protect VPS.")
+        return
+
+    # --- BATCH LOAD BALANCING ---
+    total_detected = len(investor_folders)
+    if total_detected > remaining_slots_left:
+        print(f" ⚠️  OVERLOAD PREVENTED: {total_detected} folders detected exceeds adjusted limit of {remaining_slots_left}.")
+        active_batch = investor_folders[:remaining_slots_left]
+        print(f" ⏳ Sliced batch: Processing first {remaining_slots_left} accounts. Deferring remaining {total_detected - remaining_slots_left} folders.")
+    else:
+        active_batch = investor_folders
+
+    if not active_batch:
+        return
+
+    print(f" 📋 Processing batch of {len(active_batch)} investors across {len(active_batch)} execution channels.")
+    
+    # --- EXECUTE ACROSS DYNAMIC POOL ---
+    try:
+        with mp.Pool(processes=len(active_batch)) as pool:
+            results = pool.map(process_single_investor, active_batch)
+    except Exception as pool_err:
+        print(f"[CRITICAL] Error executing multiprocessing pool: {pool_err}")
+
+    return
+
+def place_orders_parallel_loop():
+    """
+    ORCHESTRATOR (Persistent Loop): Senses hardware capabilities at launch to lock 
+    in a safe maximum process pool, then dynamically monitors global background terminal 
+    footprints on EVERY loop cycle to safely adapt execution queues.
+    """
+    try:
+        move_fetched_investors()
+    except:
+        pass
+        
+    inv_base_path = Path(INV_PATH)
+    print(f"🚀 Initializing Self-Sensing Persistent Trading Engine Pool...")
+
+    initial_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+    
+    if not initial_folders:
+        print(" └─ 🔘 No initial investor directories found. Calling fallback and retrying...")
+        time.sleep(5)
+        return place_orders_parallel_loop() 
+
+    # --- SENSE HARDWARE SPECS DYNAMICALLY AT BOOT ---
+    cpu_cores = os.cpu_count() or 1
+    available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+
+    max_by_cpu = cpu_cores * 4
+    max_by_ram = int(available_ram_mb // 300)
+    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
+
+    num_workers = min(len(initial_folders), hardware_max_limit)
+    
+    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+    print(f" 🔧 Hardware Gate: Locking maximum worker pool at {num_workers} processes (Max Engine Capacity: {hardware_max_limit}).")
+
+    pool = mp.Pool(processes=num_workers)
+
+    while True:
+        try:
+            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            
+            if not all_investor_folders:
+                print(" └─ 🔘 No investor directories found during loop. Executing move_fetched_investors() & retrying...")
+                try:
+                    move_fetched_investors()
+                except Exception as inner_err:
+                    print(f" [ERROR] Fallback shift error: {inner_err}")
                 continue
 
-            print(f"\n--- Cycle Start: Processing {len(investor_folders)} investors ---")
+            # --- LIVE GLOBAL RESOURCE AUDIT ON EVERY LOOP CYCLE ---
+            active_mt5_count = 0
             
-            # Use the pool context manager to ensure processes are cleaned up each cycle
-            with mp.Pool(processes=len(investor_folders)) as pool:
-                results = pool.map(process_single_investor, investor_folders)
+            for proc in psutil.process_iter(['name', 'ppid']):
+                try:
+                    pname = proc.info['name'].lower() if proc.info['name'] else ""
+                    if "terminal.exe" in pname or "terminal64.exe" in pname:
+                        # Stripped child process checking to rely purely on active platform presence
+                        active_mt5_count += 1
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+
+            adjusted_capacity = max(0, hardware_max_limit - active_mt5_count)
+            current_safe_cap = min(num_workers, adjusted_capacity)
+
+            # Dynamic Load Balancing Slice
+            if current_safe_cap <= 0:
+                print(f"⏳ [STANDBY] System capacity fully utilized by other windows ({active_mt5_count} active terminals). Waiting for free space...")
+                time.sleep(3)
+                continue
+
+            if len(all_investor_folders) > current_safe_cap:
+                print(f" ⚠️  RESOURCE CEILING APPLIED: {len(all_investor_folders)} investors active. Capping this cycle's slice to {current_safe_cap}.")
+                active_batch = all_investor_folders[:current_safe_cap]
+                deferred_count = len(all_investor_folders) - current_safe_cap
+                print(f" ⏳ Slicing batch: Running first {current_safe_cap} accounts. {deferred_count} deferred to next loop.")
+            else:
+                active_batch = all_investor_folders
+
+            print(f"\n--- Cycle Start: Processing {len(active_batch)} investors within safe limits ---")
             
-            print(f"--- Cycle Complete. Sleeping for 1 second ---")
+            jobs = []
+            for folder in active_batch:
+                job = pool.apply_async(process_single_investor, args=(folder,))
+                jobs.append(job)
+            
+            results = [job.get() for job in jobs]
+            print(f"--- Cycle Complete. Safe execution maintained. Sleeping for 1 second ---")
             
         except Exception as e:
-            print(f"Critical Error in Orchestrator: {e}")
-            time.sleep(5) # Wait a bit before retrying if something breaks
+            print(f"Critical Error in Orchestrator Loop: {e}")
+            time.sleep(5)
             
-        time.sleep(1) # Controlled delay between cycles
-
+        time.sleep(1)
 
 if __name__ == "__main__":
-   place_orders_parallel()
+   move_fetched_investors()
 
 

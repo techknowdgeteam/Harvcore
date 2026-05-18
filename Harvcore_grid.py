@@ -12636,7 +12636,7 @@ def place_instant_stop_orders(inv_id=None):
     
     return stats
 
-def process_single_invest(inv_folder):
+def process_single_real_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Sequential execution without console output.

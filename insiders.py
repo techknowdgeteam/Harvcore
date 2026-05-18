@@ -1,4 +1,5 @@
 import connectwithinfinitydb as db
+from connectwithinfinitydb import initialize_browser
 import json
 import os
 from datetime import datetime
@@ -11,6 +12,7 @@ import shutil
 from datetime import datetime, date
 from decimal import Decimal
 import json
+import psutil
 import re
 from typing import Any, Dict, List, Union
 
@@ -60,7 +62,7 @@ def work_only_in_specific_timerange():
     default_config_path = Path(DEFAULT_ACCOUNTMANAGEMENT)
     
     if not default_config_path.exists():
-        print(f"  ⚠️ Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+        print(f"   Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
         stats["errors"].append(f"Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
         stats["processing_success"] = True  # Still success, just no restriction
         stats["should_work"] = True  # If no config, allow work
@@ -70,7 +72,7 @@ def work_only_in_specific_timerange():
         with open(default_config_path, 'r', encoding='utf-8') as f:
             default_config = json.load(f)
     except Exception as e:
-        print(f"  ⚠️ Error loading default config: {e}")
+        print(f"   Error loading default config: {e}")
         stats["errors"].append(f"Error loading default config: {e}")
         stats["processing_success"] = True
         stats["should_work"] = True  # If error loading, allow work
@@ -170,34 +172,34 @@ def work_only_in_specific_timerange():
                         if is_in_window:
                             is_within_any_window = True
                             matched_window = window_info
-                            print(f"  🕘 Window {idx + 1}: {time_range['from']} - {time_range['to']} ✅ WITHIN")
+                            print(f"  🕘 Window {idx + 1}: {time_range['from']} - {time_range['to']}  WITHIN")
                         else:
                             print(f"  🕘 Window {idx + 1}: {time_range['from']} - {time_range['to']}  OUTSIDE")
                             
                     except Exception as e:
                         stats["errors"].append(f"Failed to parse time range {idx}: {e}")
-                        print(f"  ⚠️ Failed to parse window {idx + 1}: {e}")
+                        print(f"   Failed to parse window {idx + 1}: {e}")
             
             if is_within_any_window and matched_window:
-                print(f"\n  ✅ Current time {current_time.strftime('%I:%M:%S %p')} is WITHIN window {matched_window['index']}: {matched_window['from']} - {matched_window['to']}")
+                print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is WITHIN window {matched_window['index']}: {matched_window['from']} - {matched_window['to']}")
             elif has_time_restriction and not is_within_any_window:
                 print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is NOT within ANY work window")
                 
     except Exception as e:
         stats["errors"].append(f"Error loading time ranges: {e}")
-        print(f"  ⚠️ Error processing time ranges: {e}")
+        print(f"   Error processing time ranges: {e}")
     
     # If no time restriction defined = work always
     if not has_time_restriction:
         is_within_any_window = True
-        print(f"  ℹ️ No time restriction defined - work always allowed")
+        print(f"   No time restriction defined - work always allowed")
     
     # Display current time
     print(f"  🕐 Current time: {current_time.strftime('%I:%M:%S %p')}")
     
     # Final decision
     if is_within_any_window:
-        print(f"  ✅ WITHIN work time window - Function CAN work")
+        print(f"   WITHIN work time window - Function CAN work")
         stats["should_work"] = True
     else:
         print(f"   OUTSIDE work time window - Function CANNOT work")
@@ -233,7 +235,7 @@ def work_only_in_specific_timerange():
     
     return stats
 
-def fetch_insiders_streaming(batch_size=5000):
+def fetch_tables_streaming(batch_size=5000):
     """Stream results directly to file without holding all in memory"""
     
     def repair_json_field(value):
@@ -370,7 +372,7 @@ def fetch_insiders_streaming(batch_size=5000):
         return cleaned
     
     print("\n" + "="*70)
-    print(f"  INSIDERS DATA EXPORT - STREAMING FETCH")
+    print(f"  FETCHING TABLES")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Batch Size  : {batch_size:,} records per batch")
@@ -385,7 +387,7 @@ def fetch_insiders_streaming(batch_size=5000):
         if test_result.get('status') != 'success':
             print(f"   Connection FAILED: {test_result.get('message')}")
             return
-        print(f"  ✅ Connection SUCCESSFUL")
+        print(f"   Connection SUCCESSFUL")
         
         # Get column names from the first row of actual data
         columns = None
@@ -395,7 +397,7 @@ def fetch_insiders_streaming(batch_size=5000):
             columns = list(results[0].keys())
             print(f"  📋 Found {len(columns)} columns from data: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
         else:
-            print(f"  ⚠️  No data rows to determine schema, falling back to SELECT *")
+            print(f"    No data rows to determine schema, falling back to SELECT *")
         
         # Step 2: Get Total Count
         print("\n📊 [2/7] Counting Total Records...")
@@ -413,7 +415,7 @@ def fetch_insiders_streaming(batch_size=5000):
         print(f"  📈 Total Records Found: {total_rows:,}")
         
         if total_rows == 0:
-            print(f"  ⚠️  No records to fetch. Export cancelled.")
+            print(f"    No records to fetch. Export cancelled.")
             return
         
         # Calculate batches needed
@@ -480,17 +482,17 @@ def fetch_insiders_streaming(batch_size=5000):
                 }, f, indent=2, default=str)
             
             if len(suspended_users) > 0:
-                print(f"  ✅ Suspended Accounts Saved: {len(suspended_users)} accounts")
+                print(f"   Suspended Accounts Saved: {len(suspended_users)} accounts")
                 # Show first few suspended users for verification
                 for i, user in enumerate(suspended_users[:3]):
                     print(f"     - ID: {user['id']}, Email: {user['email']}, Status: {user['status_source']}")
                 if len(suspended_users) > 3:
                     print(f"     ... and {len(suspended_users) - 3} more")
             else:
-                print(f"  ℹ️  No suspended/blacklisted accounts found")
+                print(f"    No suspended/blacklisted accounts found")
             print(f"  📁 File: {SUSPENDED_ACCOUNTS}")
         else:
-            print(f"  ⚠️  Failed to fetch suspended accounts: {suspended_result.get('message')}")
+            print(f"    Failed to fetch suspended accounts: {suspended_result.get('message')}")
         
         # Step 4: Fetch Server Account Management and Requirements (Updated)
         print(f"\n⚙️ [4/7] Fetching Default Server Account Management & Requirements...")
@@ -535,7 +537,7 @@ def fetch_insiders_streaming(batch_size=5000):
                                 # Create new dict with original data
                                 parsed_management = {'value': parsed_management}
                     except Exception as e:
-                        print(f"  ⚠️  Failed to parse accountmanagement: {str(e)}")
+                        print(f"    Failed to parse accountmanagement: {str(e)}")
                         parsed_management = {}
                 else:
                     parsed_management = {}
@@ -552,7 +554,7 @@ def fetch_insiders_streaming(batch_size=5000):
                     requirements['contract_duration'] = contract_duration
                 else:
                     requirements['contract_duration'] = None
-                    print(f"  ⚠️  contract_duration is NULL in server_account")
+                    print(f"    contract_duration is NULL in server_account")
                 
                 # Add min_broker_balance if not None
                 if min_broker_balance is not None:
@@ -563,7 +565,7 @@ def fetch_insiders_streaming(batch_size=5000):
                         requirements['min_broker_balance'] = min_broker_balance
                 else:
                     requirements['min_broker_balance'] = None
-                    print(f"  ⚠️  min_broker_balance is NULL in server_account")
+                    print(f"    min_broker_balance is NULL in server_account")
                 
                 # Add requirements to the parsed management data
                 parsed_management['requirements'] = requirements
@@ -576,7 +578,7 @@ def fetch_insiders_streaming(batch_size=5000):
                 with open(DEFAULT_ACCOUNTMANAGEMENT, 'w', encoding='utf-8') as f:
                     json.dump(parsed_management, f, indent=2, default=str)
                 
-                print(f"  ✅ Default Server Account Management Loaded with Requirements")
+                print(f"   Default Server Account Management Loaded with Requirements")
                 print(f"  📁 File: {DEFAULT_ACCOUNTMANAGEMENT}")
                 print(f"  📋 Type: {type(parsed_management).__name__}")
                 
@@ -590,18 +592,18 @@ def fetch_insiders_streaming(batch_size=5000):
                 if existing_keys:
                     print(f"  🔍 Existing Keys: {existing_keys[:3]}{'...' if len(existing_keys) > 3 else ''}")
             else:
-                print(f"  ⚠️  No server_account records found")
+                print(f"    No server_account records found")
                 default_accountmanagement = {'requirements': {'contract_duration': None, 'min_broker_balance': None}}
                 with open(DEFAULT_ACCOUNTMANAGEMENT, 'w', encoding='utf-8') as f:
                     json.dump(default_accountmanagement, f, indent=2)
         else:
-            print(f"  ⚠️  Failed to fetch server account management: {server_result.get('message')}")
+            print(f"    Failed to fetch server account management: {server_result.get('message')}")
             default_accountmanagement = {'requirements': {'contract_duration': None, 'min_broker_balance': None}}
         
         # Step 5: Prepare Output Directory for Insiders Data
         print(f"\n📁 [5/7] Preparing Output Directory for Insiders Data...")
         os.makedirs(os.path.dirname(FETCHED_INVESTORS), exist_ok=True)
-        print(f"  ✅ Directory ready: {os.path.dirname(FETCHED_INVESTORS)}")
+        print(f"   Directory ready: {os.path.dirname(FETCHED_INVESTORS)}")
         
         # Step 6: Count records with empty accountmanagement (for reporting)
         print(f"\n📊 [6/7] Analyzing Account Management Data...")
@@ -634,7 +636,7 @@ def fetch_insiders_streaming(batch_size=5000):
                 print(f"     - contract_duration: {reqs.get('contract_duration')} days")
                 print(f"     - min_broker_balance: ${reqs.get('min_broker_balance')}")
         elif empty_acct_count > 0 and not default_accountmanagement:
-            print(f"  ⚠️  No default account management available - will leave empty")
+            print(f"    No default account management available - will leave empty")
         
         # Step 7: Stream Insiders Data with JSON Repair and AccountManagement Filling
         print(f"\n📥 [7/7] Streaming Insiders Records to File (with JSON repair & account management fill)...")
@@ -671,7 +673,7 @@ def fetch_insiders_streaming(batch_size=5000):
                     
                 rows = result.get('results', [])
                 if not rows:
-                    print(f"\n  ⚠️  No rows returned at offset {offset:,}. Stopping.")
+                    print(f"\n    No rows returned at offset {offset:,}. Stopping.")
                     break
                 
                 # Write batch to file with pretty formatting
@@ -749,16 +751,16 @@ def fetch_insiders_streaming(batch_size=5000):
         print("-"*70)
         print(f"\n📋 EXPORT SUMMARY")
         print("="*70)
-        print(f"  ✅ Status           : SUCCESS")
+        print(f"   Status           : SUCCESS")
         print(f"  📊 Records Exported : {offset:,} / {total_rows:,}")
         print(f"  📦 Batches Used     : {current_batch}")
         print(f"  📋 Schema Columns   : {len(columns) if columns else 'Dynamic (SELECT *)'}")
         print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
-        print(f"  🔄 Account Mgmt Filled: {accountmanagement_filled_count:,} users")
+        print(f"   Account Mgmt Filled: {accountmanagement_filled_count:,} users")
         print(f"     - Empty Users Found: {empty_acct_count:,}")
         print(f"     - Successfully Filled: {accountmanagement_filled_count:,}")
         if empty_acct_count > 0 and accountmanagement_filled_count < empty_acct_count:
-            print(f"     ⚠️  Warning: {empty_acct_count - accountmanagement_filled_count} users could not be filled")
+            print(f"       Warning: {empty_acct_count - accountmanagement_filled_count} users could not be filled")
         print(f"  💾 File Size        : {bytes_written/1024:,.1f} KB ({bytes_written/1048576:.2f} MB)")
         print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
         print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
@@ -795,16 +797,12 @@ def fetch_insiders_streaming(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-        
-    finally:
-        db.shutdown()
-        print(f"\n🔒 Database connection closed.")
-        
-def update_insiders_streaming(batch_size=5000):
+     
+def update_tables_streaming(batch_size=5000):
     """Stream updates from UPDATED_INVESTORS JSON to database without holding all in memory"""
     
     print("\n" + "="*70)
-    print(f"  INSIDERS DATA UPDATE - STREAMING UPDATE")
+    print(f"  UPDATING TABLES")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Batch Size  : {batch_size:,} records per batch")
@@ -812,228 +810,397 @@ def update_insiders_streaming(batch_size=5000):
     
     try:
         # Step 1: Check if update file exists
-        print("\n📁 [1/5] Checking Update File...")
-        if not os.path.exists(UPDATED_INVESTORS):
-            print(f"   Update file not found: {UPDATED_INVESTORS}")
-            return
+        print("\n📁 [1/7] Checking Update File...")
+        file_exists = os.path.exists(UPDATED_INVESTORS)
         
-        file_size = os.path.getsize(UPDATED_INVESTORS)
-        print(f"  ✅ Update file found: {UPDATED_INVESTORS}")
-        print(f"  📦 File Size: {file_size/1024:,.1f} KB ({file_size/1048576:.2f} MB)")
+        if file_exists:
+            file_size = os.path.getsize(UPDATED_INVESTORS)
+            print(f"   Update file found: {UPDATED_INVESTORS}")
+            print(f"  📦 File Size: {file_size/1024:,.1f} KB ({file_size/1048576:.2f} MB)")
+        else:
+            print(f"    Update file not found: {UPDATED_INVESTORS}")
         
-        # Step 2: Test Database Connection
-        print("\n📡 [2/5] Testing Database Connection...")
+        # Step 2: Test Database Connection and get table columns
+        print("\n📡 [2/7] Testing Database Connection...")
         test_query = "SELECT id FROM insiders LIMIT 1"
         test_result = db.execute_query(test_query)
         
         if test_result.get('status') != 'success':
             print(f"   Connection FAILED: {test_result.get('message')}")
             return
-        print(f"  ✅ Connection SUCCESSFUL")
+        print(f"   Connection SUCCESSFUL")
         
-        # Step 3: Get existing IDs for validation
-        print("\n🔍 [3/5] Fetching Existing Record IDs...")
-        existing_ids_query = "SELECT id FROM insiders"
-        existing_result = db.execute_query(existing_ids_query)
+        # Get all column names from insiders table
+        print("\n🔍 Fetching insiders table columns...")
+        get_columns_query = """
+        SELECT COLUMN_NAME 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'insiders'
+        """
         
-        existing_ids = set()
-        if existing_result.get('status') == 'success':
-            for row in existing_result.get('results', []):
-                existing_ids.add(str(row.get('id')))
+        columns_result = db.execute_query(get_columns_query)
+        existing_columns = set()
         
-        print(f"  📊 Existing Records in DB: {len(existing_ids):,}")
+        if columns_result.get('status') == 'success' and columns_result.get('results'):
+            for row in columns_result['results']:
+                column_name = row.get('COLUMN_NAME', '')
+                if column_name:
+                    existing_columns.add(column_name.lower())
+            print(f"   Found {len(existing_columns)} columns in insiders table")
+            print(f"  📋 Columns: {', '.join(sorted(existing_columns))}")
+        else:
+            print(f"    Could not fetch column information")
+            existing_columns = set()
         
-        # Step 4: Parse JSON and identify records to process
-        print(f"\n📖 [4/5] Reading Update File...")
-        
-        # Read entire JSON
-        with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-            investors_data = json.load(f)
-        
-        total_investors = len(investors_data)
-        print(f"  📊 Total Investors in File: {total_investors:,}")
-        
-        # Identify which records need updating (exist in DB) and which to remove
+        # Initialize variables for insiders update
+        investors_data = {}
+        total_investors = 0
         investors_to_update = {}
-        investors_to_remove = []  # Non-existing records
-        successfully_updated_ids = []  # Will be populated after successful updates
+        investors_to_remove = []
+        successfully_updated_ids = []
+        updated_count = 0
+        failed_count = 0
+        elapsed_time = 0
+        avg_speed = 0
+        unmapped_fields = set()
         
-        for investor_id, investor_data in investors_data.items():
-            if investor_id in existing_ids:
-                investors_to_update[investor_id] = investor_data
-            else:
-                investors_to_remove.append(investor_id)
-        
-        print(f"  ✅ Records to Update: {len(investors_to_update):,}")
-        print(f"  🗑️  Records Not in DB: {len(investors_to_remove):,}")
-        
-        if not investors_to_update and not investors_to_remove:
-            print(f"  ⚠️  File is empty. Nothing to process.")
-            return
-        
-        # Step 5: Update Database in Batches
-        if investors_to_update:
-            print(f"\n📤 [5/5] Updating Database Records...")
-            print("-"*70)
+        # Step 3: Process insiders data only if file exists and is not empty
+        if file_exists:
+            # Get file size to check if empty
+            file_size = os.path.getsize(UPDATED_INVESTORS)
             
-            start_time = datetime.now()
-            updated_count = 0
-            failed_count = 0
-            current_batch = 0
-            
-            investor_ids = list(investors_to_update.keys())
-            total_batches = (len(investor_ids) + batch_size - 1) // batch_size
-            
-            for i in range(0, len(investor_ids), batch_size):
-                current_batch += 1
-                batch_start = datetime.now()
+            if file_size > 0:
+                # Step 3: Get existing IDs for validation
+                print("\n🔍 [3/7] Fetching Existing Record IDs...")
+                existing_ids_query = "SELECT id FROM insiders"
+                existing_result = db.execute_query(existing_ids_query)
                 
-                batch_ids = investor_ids[i:i + batch_size]
-                batch_updates = 0
-                batch_failed = 0
+                existing_ids = set()
+                if existing_result.get('status') == 'success':
+                    for row in existing_result.get('results', []):
+                        existing_ids.add(str(row.get('id')))
                 
-                for investor_id in batch_ids:
-                    investor = investors_to_update[investor_id]
-                    
-                    # Build UPDATE query dynamically based on available fields
-                    update_parts = []
-                    
-                    # Map JSON fields to database columns with proper escaping
-                    field_mappings = {
-                        'server': 'server',
-                        'login': 'login',
-                        'password': 'password',
-                        'application_status': 'application_status',
-                        'broker_balance': 'broker_balance',
-                        'profitandloss': 'profitandloss',
-                        'contract_days_left': 'contract_days_left',
-                        'execution_start_date': 'execution_start_date',
-                    }
-                    
-                    # Handle special fields that need JSON encoding
-                    json_fields = {
-                        'trades': 'trades',
-                        'unauthorized_actions': 'unauthorized_actions',
-                    }
-                    
-                    # Process direct mappings
-                    for json_field, db_column in field_mappings.items():
-                        if json_field in investor and investor[json_field] is not None:
-                            value = investor[json_field]
-                            
-                            # Escape single quotes and format value based on type
-                            if isinstance(value, (int, float)):
-                                # Numeric values - no quotes needed
-                                escaped_value = str(value)
-                            else:
-                                # String values - wrap in quotes and escape single quotes
-                                escaped_value = "'" + str(value).replace("'", "\\'") + "'"
-                            
-                            update_parts.append(f"`{db_column}` = {escaped_value}")
-                    
-                    # Process JSON fields (convert to JSON strings)
-                    for json_field, db_column in json_fields.items():
-                        if json_field in investor and investor[json_field] is not None:
-                            # Convert to JSON string and escape properly
-                            json_str = json.dumps(investor[json_field])
-                            escaped_json = json_str.replace("'", "\\'")
-                            update_parts.append(f"`{db_column}` = '{escaped_json}'")
-                    
-                    # Skip if no fields to update
-                    if not update_parts:
-                        continue
-                    
-                    # Build complete query with embedded values
-                    set_clause = ", ".join(update_parts)
-                    query = f"UPDATE insiders SET {set_clause} WHERE id = {int(investor_id)}"
-                    
-                    # Execute the query
-                    result = db.execute_query(query)
-                    
-                    if result.get('status') == 'success':
-                        batch_updates += 1
-                        updated_count += 1
-                        successfully_updated_ids.append(investor_id)  # Track successful updates
+                print(f"  📊 Existing Records in DB: {len(existing_ids):,}")
+                
+                # Step 4: Parse JSON and identify records to process
+                print(f"\n📖 [4/7] Reading Update File...")
+                
+                # Read entire JSON
+                with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                    investors_data = json.load(f)
+                
+                total_investors = len(investors_data)
+                print(f"  📊 Total Investors in File: {total_investors:,}")
+                
+                # Identify which records need updating (exist in DB) and which to remove
+                for investor_id, investor_data in investors_data.items():
+                    if investor_id in existing_ids:
+                        investors_to_update[investor_id] = investor_data
                     else:
-                        batch_failed += 1
-                        failed_count += 1
+                        investors_to_remove.append(investor_id)
                 
-                # Batch progress
-                batch_time = (datetime.now() - batch_start).total_seconds()
-                records_per_sec = len(batch_ids) / batch_time if batch_time > 0 else 0
+                print(f"   Records to Update: {len(investors_to_update):,}")
+                print(f"  🗑️  Records Not in DB: {len(investors_to_remove):,}")
                 
-                # Progress bar
-                progress = ((i + len(batch_ids)) / len(investor_ids)) * 100
-                bar_length = 30
-                filled = int(bar_length * (i + len(batch_ids)) // len(investor_ids))
-                bar = '█' * filled + '░' * (bar_length - filled)
+                # Step 5: Update Database in Batches (only if there are records to update)
+                if investors_to_update:
+                    print(f"\n📤 [5/7] Updating Database Records...")
+                    print("-"*70)
+                    
+                    start_time = datetime.now()
+                    updated_count = 0
+                    failed_count = 0
+                    current_batch = 0
+                    
+                    investor_ids = list(investors_to_update.keys())
+                    total_batches = (len(investor_ids) + batch_size - 1) // batch_size
+                    
+                    for i in range(0, len(investor_ids), batch_size):
+                        current_batch += 1
+                        batch_start = datetime.now()
+                        
+                        batch_ids = investor_ids[i:i + batch_size]
+                        batch_updates = 0
+                        batch_failed = 0
+                        
+                        for investor_id in batch_ids:
+                            investor = investors_to_update[investor_id]
+                            
+                            # Build UPDATE query dynamically based on available fields
+                            update_parts = []
+                            
+                            # Process ALL fields from the investor JSON
+                            for json_field, value in investor.items():
+                                # Skip the id field as it's used in WHERE clause
+                                if json_field == 'id':
+                                    continue
+                                
+                                # Check if this column exists in the database
+                                if json_field.lower() not in existing_columns:
+                                    unmapped_fields.add(json_field)
+                                    continue
+                                
+                                # Handle different value types
+                                if value is None:
+                                    # Set to NULL
+                                    update_parts.append(f"`{json_field}` = NULL")
+                                    
+                                elif isinstance(value, (dict, list)):
+                                    # Complex JSON object - store as JSON string
+                                    json_str = json.dumps(value, ensure_ascii=False)
+                                    escaped_json = json_str.replace("'", "\\'")
+                                    update_parts.append(f"`{json_field}` = '{escaped_json}'")
+                                    
+                                elif isinstance(value, bool):
+                                    # Boolean values
+                                    db_value = '1' if value else '0'
+                                    update_parts.append(f"`{json_field}` = {db_value}")
+                                    
+                                elif isinstance(value, (int, float)):
+                                    # Numeric values - no quotes needed
+                                    update_parts.append(f"`{json_field}` = {value}")
+                                    
+                                elif isinstance(value, str):
+                                    # String values - escape single quotes
+                                    escaped_value = value.replace("'", "\\'")
+                                    update_parts.append(f"`{json_field}` = '{escaped_value}'")
+                                    
+                                else:
+                                    # Any other type - convert to string
+                                    str_value = str(value)
+                                    escaped_value = str_value.replace("'", "\\'")
+                                    update_parts.append(f"`{json_field}` = '{escaped_value}'")
+                            
+                            # Skip if no fields to update
+                            if not update_parts:
+                                print(f"       No valid fields to update for investor {investor_id}")
+                                continue
+                            
+                            # Build complete query with embedded values
+                            set_clause = ", ".join(update_parts)
+                            query = f"UPDATE insiders SET {set_clause} WHERE id = {int(investor_id)}"
+                            
+                            # Execute the query
+                            result = db.execute_query(query)
+                            
+                            if result.get('status') == 'success':
+                                batch_updates += 1
+                                updated_count += 1
+                                successfully_updated_ids.append(investor_id)
+                            else:
+                                batch_failed += 1
+                                failed_count += 1
+                                print(f"      Failed to update investor {investor_id}: {result.get('message')}")
+                        
+                        # Batch progress
+                        batch_time = (datetime.now() - batch_start).total_seconds()
+                        records_per_sec = len(batch_ids) / batch_time if batch_time > 0 else 0
+                        
+                        # Progress bar
+                        progress = ((i + len(batch_ids)) / len(investor_ids)) * 100
+                        bar_length = 30
+                        filled = int(bar_length * (i + len(batch_ids)) // len(investor_ids))
+                        bar = '█' * filled + '░' * (bar_length - filled)
+                        
+                        print(f"  Batch {current_batch:>3}/{total_batches:<3} [{bar}] {progress:5.1f}% | "
+                              f"Updated: {batch_updates:>4} | Failed: {batch_failed:>3} | "
+                              f"Speed: {records_per_sec:>6,.0f} rec/s | "
+                              f"Total: {updated_count:>{len(str(len(investor_ids)))},}/{len(investor_ids):,}")
+                    
+                    # Show unmapped fields warning
+                    if unmapped_fields:
+                        print(f"\n    Unmapped/Non-existent fields found (skipped):")
+                        for field in sorted(unmapped_fields):
+                            print(f"     - {field}")
+                    
+                    # Update timing
+                    elapsed_time = (datetime.now() - start_time).total_seconds()
+                    avg_speed = updated_count / elapsed_time if elapsed_time > 0 else 0
+                else:
+                    print(f"\n📤 [5/7] No records to update - skipping insiders update")
                 
-                print(f"  Batch {current_batch:>3}/{total_batches:<3} [{bar}] {progress:5.1f}% | "
-                      f"Updated: {batch_updates:>4} | Failed: {batch_failed:>3} | "
-                      f"Speed: {records_per_sec:>6,.0f} rec/s | "
-                      f"Total: {updated_count:>{len(str(len(investor_ids)))},}/{len(investor_ids):,}")
-            
-            # Update timing
-            elapsed_time = (datetime.now() - start_time).total_seconds()
-            avg_speed = updated_count / elapsed_time if elapsed_time > 0 else 0
+                # Step 6: Clean JSON file - Remove ALL processed records
+                print(f"\n🧹 [6/7] Cleaning JSON File...")
+                
+                # Combine all IDs to remove: non-existing + successfully updated
+                all_ids_to_remove = investors_to_remove + successfully_updated_ids
+                total_removed = len(all_ids_to_remove)
+                
+                if all_ids_to_remove and investors_data:
+                    # Remove all processed records from the dictionary
+                    for investor_id in all_ids_to_remove:
+                        if investor_id in investors_data:
+                            del investors_data[investor_id]
+                    
+                    # Write the cleaned data back to the file
+                    with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                        json.dump(investors_data, f, indent=2, ensure_ascii=False)
+                    
+                    print(f"   Cleaned JSON file successfully")
+                    print(f"  🗑️  Total Removed: {total_removed:,}")
+                    print(f"     - Non-existing records: {len(investors_to_remove):,}")
+                    print(f"     - Successfully updated: {len(successfully_updated_ids):,}")
+                    print(f"  📊 Remaining in File: {len(investors_data):,}")
+                    
+                    # Recalculate file size
+                    new_file_size = os.path.getsize(UPDATED_INVESTORS)
+                    print(f"  📦 New File Size: {new_file_size/1024:,.1f} KB ({new_file_size/1048576:.2f} MB)")
+                else:
+                    print(f"    No records to remove from file")
+            else:
+                print(f"\n  Update file is empty (0 bytes)")
+                print(f"  Skipping insiders update - no data to process")
         else:
-            elapsed_time = 0
-            avg_speed = 0
-            updated_count = 0
-            failed_count = 0
+            print(f"\n  No update file found")
+            print(f"  Skipping insiders update")
         
-        # Step 6: Clean JSON file - Remove ALL processed records
-        print(f"\n🧹 [6/6] Cleaning JSON File...")
+        # Step 7: Update account management data in server_account table
+        # THIS RUNS REGARDLESS OF INSIDERS UPDATE
+        print(f"\n📋 [7/7] Updating Server Account Management Data...")
+        print("-"*70)
         
-        # Combine all IDs to remove: non-existing + successfully updated
-        all_ids_to_remove = investors_to_remove + successfully_updated_ids
-        total_removed = len(all_ids_to_remove)
-        
-        if all_ids_to_remove:
-            # Remove all processed records from the dictionary
-            for investor_id in all_ids_to_remove:
-                if investor_id in investors_data:
-                    del investors_data[investor_id]
-            
-            # Write the cleaned data back to the file
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(investors_data, f, indent=2, ensure_ascii=False)
-            
-            print(f"  ✅ Cleaned JSON file successfully")
-            print(f"  🗑️  Total Removed: {total_removed:,}")
-            print(f"     - Non-existing records: {len(investors_to_remove):,}")
-            print(f"     - Successfully updated: {len(successfully_updated_ids):,}")
-            print(f"  📊 Remaining in File: {len(investors_data):,}")
-            
-            # Recalculate file size
-            new_file_size = os.path.getsize(UPDATED_INVESTORS)
-            print(f"  📦 New File Size: {new_file_size/1024:,.1f} KB ({new_file_size/1048576:.2f} MB)")
-        else:
-            print(f"  ℹ️  No records to remove from file")
+        try:
+            # Read the DEFAULT_ACCOUNTMANAGEMENT JSON file
+            if os.path.exists(DEFAULT_ACCOUNTMANAGEMENT):
+                with open(DEFAULT_ACCOUNTMANAGEMENT, 'r', encoding='utf-8') as f:
+                    account_management_data = json.load(f)
+                
+                file_size_kb = os.path.getsize(DEFAULT_ACCOUNTMANAGEMENT)/1024
+                print(f"   Found account management file: {DEFAULT_ACCOUNTMANAGEMENT}")
+                print(f"  📦 File Size: {file_size_kb:,.1f} KB")
+                
+                # Get server_account table columns
+                get_server_columns_query = """
+                SELECT COLUMN_NAME 
+                FROM information_schema.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'server_account'
+                """
+                
+                server_columns_result = db.execute_query(get_server_columns_query)
+                server_columns = set()
+                
+                if server_columns_result.get('status') == 'success' and server_columns_result.get('results'):
+                    for row in server_columns_result['results']:
+                        column_name = row.get('COLUMN_NAME', '')
+                        if column_name:
+                            server_columns.add(column_name.lower())
+                    print(f"  📋 Server account columns: {', '.join(sorted(server_columns))}")
+                
+                # STORE THE EXACT JSON DATA AS IS - NO MODIFICATIONS
+                # Convert to JSON string exactly as read
+                account_management_json = json.dumps(account_management_data, ensure_ascii=False)
+                
+                # Escape single quotes for SQL safety
+                escaped_json = account_management_json.replace("'", "\\'")
+                
+                # Check if accountmanagement column exists
+                if 'accountmanagement' not in server_columns:
+                    print(f"    'accountmanagement' column not found in server_account table")
+                    print(f"    Skipping account management update")
+                else:
+                    # Check if there are any records in server_account
+                    check_records_query = "SELECT COUNT(*) as record_count FROM server_account"
+                    records_check = db.execute_query(check_records_query)
+                    
+                    if records_check.get('status') == 'success' and records_check.get('results'):
+                        try:
+                            record_count_value = records_check['results'][0].get('record_count', 0)
+                            if isinstance(record_count_value, str):
+                                record_count_value = int(record_count_value)
+                            record_count = record_count_value
+                            print(f"  📊 Found {record_count:,} record(s) in server_account")
+                        except (ValueError, TypeError):
+                            print(f"    Could not determine record count")
+                            record_count = 0
+                        
+                        if record_count > 0:
+                            # Update existing records
+                            update_account_query = f"""
+                            UPDATE server_account 
+                            SET accountmanagement = '{escaped_json}'
+                            """
+                            
+                            update_result = db.execute_query(update_account_query)
+                            
+                            if update_result.get('status') == 'success':
+                                rows_affected = update_result.get('affected_rows', 0)
+                                print(f"   Updated accountmanagement for {rows_affected:,} record(s)")
+                            else:
+                                print(f"   Failed to update: {update_result.get('message')}")
+                        else:
+                            # Insert new record if table is empty
+                            insert_account_query = f"""
+                            INSERT INTO server_account (accountmanagement) 
+                            VALUES ('{escaped_json}')
+                            """
+                            
+                            insert_result = db.execute_query(insert_account_query)
+                            
+                            if insert_result.get('status') == 'success':
+                                print(f"   Inserted accountmanagement data into server_account")
+                            else:
+                                print(f"   Failed to insert: {insert_result.get('message')}")
+                    else:
+                        print(f"    Could not check records in server_account")
+            else:
+                print(f"    Default account management file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+                print(f"    Skipping account management update")
+                
+        except Exception as e:
+            print(f"   Error updating account management: {str(e)}")
+            import traceback
+            traceback.print_exc()
         
         # Final Summary
         print("-"*70)
         print(f"\n📋 UPDATE SUMMARY")
         print("="*70)
-        print(f"  ✅ Status              : {'SUCCESS' if failed_count == 0 else 'COMPLETED WITH ERRORS'}")
-        print(f"  📊 Original in File    : {total_investors:,}")
-        print(f"  🗑️  Total Removed       : {total_removed:,}")
-        print(f"     - Non-existing      : {len(investors_to_remove):,}")
-        print(f"     - Successfully Updated: {len(successfully_updated_ids):,}")
-        print(f"  Failed Updates      : {failed_count:,} (kept in file)")
-        print(f"  📊 Final in File       : {len(investors_data):,}")
-        print(f"  ⏱️  Total Time          : {elapsed_time:.1f} seconds")
-        print(f"  ⚡ Average Speed       : {avg_speed:,.0f} records/second")
-        print(f"  📁 Source File         : {UPDATED_INVESTORS}")
-        print(f"  🕐 Completion Time     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Show remaining failed IDs if any
-        if failed_count > 0:
-            failed_ids = [id for id in investors_to_update.keys() if id not in successfully_updated_ids]
-            print(f"\n⚠️  Failed Updates (kept in file, first 10): {failed_ids[:10]}")
-            if len(failed_ids) > 10:
-                print(f"  ... and {len(failed_ids) - 10} more")
+        # Insiders Summary
+        print(f"\n  📊 INSIDERS UPDATE:")
+        if file_exists and 'total_investors' in locals() and total_investors > 0:
+            print(f"     Status              : {'SUCCESS' if failed_count == 0 else 'COMPLETED WITH ERRORS'}")
+            print(f"     Original in File    : {total_investors:,}")
+            if 'total_removed' in locals():
+                print(f"     Total Removed       : {total_removed:,}")
+                print(f"        - Non-existing   : {len(investors_to_remove):,}")
+                print(f"        - Successfully Updated: {len(successfully_updated_ids):,}")
+            print(f"     Failed Updates      : {failed_count:,}")
+            if 'investors_data' in locals():
+                print(f"     Final in File       : {len(investors_data):,}")
+            print(f"     Time                : {elapsed_time:.1f} seconds")
+            print(f"     Speed               : {avg_speed:,.0f} records/second")
+            
+            if unmapped_fields:
+                print(f"\n       Skipped Fields (not in DB):")
+                for field in sorted(unmapped_fields)[:10]:
+                    print(f"        - {field}")
+                if len(unmapped_fields) > 10:
+                    print(f"        ... and {len(unmapped_fields) - 10} more")
+        else:
+            print(f"     Status              : SKIPPED (no data to process)")
         
+        # Account Management Summary
+        print(f"\n  📋 ACCOUNT MANAGEMENT UPDATE:")
+        if os.path.exists(DEFAULT_ACCOUNTMANAGEMENT):
+            # Check if update or insert was successful
+            account_status = "CHECKED"
+            if 'update_result' in locals() and update_result.get('status') == 'success':
+                account_status = "UPDATED"
+            elif 'insert_result' in locals() and insert_result.get('status') == 'success':
+                account_status = "INSERTED"
+            
+            print(f"     Status              : {account_status}")
+            print(f"     Source File         : {DEFAULT_ACCOUNTMANAGEMENT}")
+            print(f"     File Size           : {os.path.getsize(DEFAULT_ACCOUNTMANAGEMENT)/1024:,.1f} KB")
+            print(f"     Target Column       : accountmanagement")
+            print(f"     Data Type           : JSON (stored exactly as provided)")
+        else:
+            print(f"     Status              : SKIPPED (file not found)")
+        
+        print(f"\n  🕐 Completion Time     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
         
     except json.JSONDecodeError as e:
@@ -1055,11 +1222,11 @@ def update_insiders_streaming(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-        
-    finally:
-        db.shutdown()
-        print(f"\n🔒 Database connection closed.")
 
+def close_db_browser():
+    db.shutdown()
+    print(f"\n🔒 Database connection closed.")
+    
 def create_investor_mt5_files(inv_id=None):
     """
     Creates MT5 terminal folders for investors by copying from DEFAULT_MT5_PATH
@@ -1068,18 +1235,11 @@ def create_investor_mt5_files(inv_id=None):
         inv_id: Optional - specific investor ID to process. If None, processes all investors.
     
     Logic:
-        1. If user is suspended/blacklisted -> IGNORE completely (no folder creation/deletion)
-        2. If folder doesn't exist and user NOT suspended -> CREATE new folder
-        3. If folder exists and user NOT suspended -> ENSURE TERMINAL_PATH is set in record
-        4. If folder exists and user IS suspended -> DELETE folder immediately (storage cleanup)
-    
-    For each investor in the fetched investors file (FETCHED_INVESTORS), this function:
-        1. Checks if investor is suspended (by checking suspended_accounts.json)
-        2. Based on suspension status and folder existence, decides action:
-           - Suspended users: Always skip creation, delete existing folders
-           - Non-suspended users: Create if missing, ensure TERMINAL_PATH exists if folder exists
-        3. Updates TERMINAL_PATH and application_status for newly created folders
-        4. Always ensures TERMINAL_PATH is set for clean users with existing folders
+        1. If user is suspended/blacklisted -> IGNORE completely (skip immediately)
+        2. If folder doesn't exist and user NOT suspended -> CREATE folder, update TERMINAL_PATH,
+           and if application_status is 'pending', change it to 'just-joined'.
+        3. If folder exists and user NOT suspended -> ENSURE TERMINAL_PATH is set in record,
+           and if application_status is 'pending', change it to 'just-joined'.
     
     Returns:
         tuple: (created_count, deleted_count, skipped_count, error_count)
@@ -1117,9 +1277,9 @@ def create_investor_mt5_files(inv_id=None):
             if suspended_ids:
                 print(f"🚫 Loaded {len(suspended_ids)} suspended/blacklisted accounts")
         except Exception as e:
-            print(f"⚠️ Error loading suspended accounts: {e}")
+            print(f" Error loading suspended accounts: {e}")
     else:
-        print(f"ℹ️ No suspended accounts file found - all users will be processed normally")
+        print(f" No suspended accounts file found - all users will be processed normally")
     
     # Load fetched investors data
     try:
@@ -1149,23 +1309,44 @@ def create_investor_mt5_files(inv_id=None):
     skipped = 0
     errors = 0
     suspended_skipped = 0
-    path_updates = 0  # Track path updates for existing users
+    path_updates = 0  
+    status_updates = 0  # Track applications turned from pending -> just-joined
     investors_modified = False
     
     for investor_id, investor_data in investors_to_process.items():
         investor_id_str = str(investor_id)
         
-        # Extract broker and id
+        # RULE 1: If user is suspended/blacklisted -> Skip immediately (or clean up files if present)
+        if investor_id_str in suspended_ids:
+            broker = investor_data.get('broker', '').strip()
+            investor_id_value = investor_data.get('id', '').strip()
+            folder_name = f"MetaTrader 5 {broker} {investor_id_value}" if broker and investor_id_value else ""
+            target_folder = os.path.join(MT5_DESTINATION_PATH, folder_name) if folder_name else None
+            
+            if target_folder and os.path.exists(target_folder):
+                try:
+                    print(f"🗑️  SUSPENDED ID:{investor_id} - Deleting active folder for blacklisted user...")
+                    shutil.rmtree(target_folder, ignore_errors=True)
+                    deleted += 1
+                    if 'TERMINAL_PATH' in investors_data[investor_id]:
+                        investors_data[investor_id]['TERMINAL_PATH'] = ''
+                        investors_modified = True
+                except Exception as e:
+                    errors += 1
+                    print(f"    Failed to delete folder: {str(e)[:100]}")
+            else:
+                print(f"🚫 SUSPENDED ID:{investor_id} - Blacklisted, skipping immediately")
+                suspended_skipped += 1
+            continue
+        
+        # Extract broker and id for valid accounts
         broker = investor_data.get('broker', '').strip()
         investor_id_value = investor_data.get('id', '').strip()
         
         if not broker or not investor_id_value:
-            print(f"⚠️ Investor {investor_id} missing broker or id, skipping")
+            print(f" Investor {investor_id} missing broker or id, skipping")
             skipped += 1
             continue
-        
-        # Check if user is suspended/blacklisted
-        is_suspended = investor_id_str in suspended_ids
         
         # Create target paths
         folder_name = f"MetaTrader 5 {broker} {investor_id_value}"
@@ -1174,94 +1355,80 @@ def create_investor_mt5_files(inv_id=None):
         normalized_path = target_exe.replace('\\', '\\')
         
         folder_exists = os.path.exists(target_folder)
+        current_status = investor_data.get('application_status', '')
         
-        # LOGIC: Handle based on suspension status and folder existence
-        if is_suspended:
-            # SUSPENDED USER: Delete folder if exists, always skip creation
-            if folder_exists:
-                try:
-                    print(f"🗑️  SUSPENDED ID:{investor_id} ({broker} {investor_id_value}) - Deleting folder...")
-                    shutil.rmtree(target_folder, ignore_errors=True)
-                    deleted += 1
-                    print(f"   ✅ Folder deleted (suspended account cleanup)")
-                    
-                    # Update investor data to reflect deletion
-                    if 'TERMINAL_PATH' in investors_data[investor_id]:
-                        investors_data[investor_id]['TERMINAL_PATH'] = ''
-                        investors_modified = True
-                except Exception as e:
-                    errors += 1
-                    print(f"    Failed to delete folder: {str(e)[:100]}")
-            else:
-                print(f"🚫 SUSPENDED ID:{investor_id} ({broker} {investor_id_value}) - No folder exists, skipping")
-                suspended_skipped += 1
-            continue  # Skip to next investor (no creation for suspended users)
-        
-        # NON-SUSPENDED USER (CLEAN USER): Handle based on folder existence
+        # RULE 2: If folder exists and user is NOT suspended
         if folder_exists:
-            # Existing user with folder - ALWAYS ensure TERMINAL_PATH is set correctly
             current_path = investor_data.get('TERMINAL_PATH', '')
             
-            # Check if path needs to be set or updated
+            # Ensure TERMINAL_PATH is set correctly
             if not current_path or current_path != normalized_path:
-                # Path is missing or incorrect - update it
                 investors_data[investor_id]['TERMINAL_PATH'] = normalized_path
                 investors_modified = True
                 path_updates += 1
-                
-                if not current_path:
-                    print(f"🔧 ID:{investor_id} → TERMINAL_PATH was MISSING, now set to: {normalized_path[:80]}...")
-                else:
-                    print(f"🔧 ID:{investor_id} → TERMINAL_PATH updated (was incorrect)")
+                print(f"🔧 ID:{investor_id} → TERMINAL_PATH fixed to: {normalized_path[:60]}...")
             else:
-                # Path exists and is correct
-                print(f"✓ ID:{investor_id} → TERMINAL_PATH verified, folder exists")
+                print(f"✓ ID:{investor_id} → TERMINAL_PATH verified")
+            
+            # Check application_status: only change if it is exactly "pending"
+            if current_status == "pending":
+                investors_data[investor_id]['application_status'] = 'just-joined'
+                investors_modified = True
+                status_updates += 1
+                print(f"🔄 ID:{investor_id} → application_status converted from 'pending' to 'just-joined'")
             
             skipped += 1
             continue
         
-        # Create new folder for non-suspended user (folder doesn't exist)
-        print(f"🆕 ID:{investor_id} ({broker} {investor_id_value}) - Creating new folder...")
+        # RULE 3: If folder is missing and user is NOT suspended -> Create missing setup
+        print(f"🆕 ID:{investor_id} ({broker} {investor_id_value}) - Folder missing. Recreating...")
         
         try:
-            # Copy the entire MT5 folder
+            # Copy default files
             shutil.copytree(DEFAULT_MT5_PATH, target_folder, 
-                          ignore_dangling_symlinks=True,
-                          ignore=shutil.ignore_patterns('*.lock', '*.log'))
+                            ignore_dangling_symlinks=True,
+                            ignore=shutil.ignore_patterns('*.lock', '*.log'))
             
-            # Update investor data
+            # Assign structural data
             investors_data[investor_id]['TERMINAL_PATH'] = normalized_path
-            investors_data[investor_id]['application_status'] = 'just-joined'
+            
+            # Handle application status condition
+            if current_status == "pending":
+                investors_data[investor_id]['application_status'] = 'just-joined'
+                status_updates += 1
+                print(f"   application_status converted from 'pending' to 'just-joined'")
+            else:
+                print(f"   application_status kept intact as '{current_status}'")
+                
             investors_modified = True
             created += 1
-            print(f"   ✅ Folder created and application_status set to 'just-joined'")
-            print(f"   📍 TERMINAL_PATH: {normalized_path[:80]}...")
+            print(f"   📍 Target: {normalized_path[:60]}...")
             
         except Exception as e:
             errors += 1
             print(f"    Failed to copy folder: {str(e)[:100]}")
-            # Clean up partial copy if exists
             if os.path.exists(target_folder):
                 shutil.rmtree(target_folder, ignore_errors=True)
     
-    # Save updated data
+    # Save updated JSON state cleanly back to disk
     if investors_modified:
         try:
             with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(investors_data, f, indent=2)
-            print(f"\n💾 Saved investor data to {FETCHED_INVESTORS}")
+            print(f"\n💾 Saved investor adjustments to {FETCHED_INVESTORS}")
         except Exception as e:
             print(f" Failed to save investor data: {e}")
     
-    # Final Summary
+    # Summary Output Data
     print(f"\n{'='*60}")
     print(f"📊 SUMMARY")
     print(f"{'='*60}")
-    print(f"  ✅ Created folders      : {created}")
-    print(f"  🗑️  Deleted folders      : {deleted}")
-    print(f"  ⏭️  Skipped (existing)   : {skipped}")
-    print(f"  🔧 Path updates         : {path_updates}")
-    print(f"  🚫 Suspended (ignored)  : {suspended_skipped}")
+    print(f"   Created folders      : {created}")
+    print(f"   🗑️  Deleted folders      : {deleted}")
+    print(f"   ⏭️  Skipped (existing)   : {skipped}")
+    print(f"   🔧 Path updates         : {path_updates}")
+    print(f"   🔄 Status transitions   : {status_updates} (pending -> just-joined)")
+    print(f"   🚫 Suspended (ignored)  : {suspended_skipped}")
     print(f"   Errors               : {errors}")
     print(f"{'='*60}")
     
@@ -1313,7 +1480,7 @@ def get_investors_balance():
                 updated_investors_data = json.load(f)
             print(f"📋 Loaded {len(updated_investors_data)} investors from updated_investors.json")
         except Exception as e:
-            print(f"⚠️ Warning: Could not load updated_investors.json: {e}")
+            print(f" Warning: Could not load updated_investors.json: {e}")
     
     # Statistics
     processed = 0
@@ -1345,7 +1512,7 @@ def get_investors_balance():
         terminal_path = investor_data.get('TERMINAL_PATH', '')
         
         if not all([login_id, password, server, terminal_path]):
-            print(f"⚠️ ID:{investor_id} → Missing credentials")
+            print(f" ID:{investor_id} → Missing credentials")
             skipped += 1
             continue
         
@@ -1353,7 +1520,7 @@ def get_investors_balance():
         try:
             login_id_int = int(login_id)
         except (ValueError, TypeError):
-            print(f"⚠️ ID:{investor_id} → Invalid LOGIN_ID: {login_id}")
+            print(f" ID:{investor_id} → Invalid LOGIN_ID: {login_id}")
             skipped += 1
             continue
         
@@ -1363,7 +1530,7 @@ def get_investors_balance():
             errors += 1
             continue
         
-        print(f"\n🔄 ID:{investor_id} (Login:{login_id_int}) - Processing...")
+        print(f"\n ID:{investor_id} (Login:{login_id_int}) - Processing...")
         
         # Step 1: Check if MT5 is already running and logged in with this account
         mt5_already_running = False
@@ -1377,7 +1544,7 @@ def get_investors_balance():
                     already_logged_in_account = account_info.login
                     if account_info.login == login_id_int:
                         # CASE 1: Already logged in with this exact account
-                        print(f"   ✅ ALREADY LOGGED IN STATUS: Investor {login_id_int} is already logged into MT5")
+                        print(f"    ALREADY LOGGED IN STATUS: Investor {login_id_int} is already logged into MT5")
                         print(f"      → No initialization or login needed, using existing session")
                         
                         # Get account info directly
@@ -1390,7 +1557,7 @@ def get_investors_balance():
                         
                         if current_balance != balance_str:
                             investor_data['broker_balance'] = balance_str
-                            print(f"   ✅ Balance (already logged in): {currency} {balance:,.2f}")
+                            print(f"    Balance (already logged in): {currency} {balance:,.2f}")
                             updated += 1
                         
                         # Update status
@@ -1405,17 +1572,17 @@ def get_investors_balance():
                         continue
                     else:
                         # Different account is logged in
-                        print(f"   ℹ️ WARNING: Different investor {already_logged_in_account} is currently logged into MT5")
+                        print(f"    WARNING: Different investor {already_logged_in_account} is currently logged into MT5")
                         mt5.shutdown()
                 else:
                     # MT5 initialized but no account info (not logged in)
-                    print(f"   ℹ️ MT5 is running but no account is logged in")
+                    print(f"    MT5 is running but no account is logged in")
                     mt5.shutdown()
             else:
                 # MT5 not running, need fresh initialization
-                print(f"   ℹ️ MT5 is not running - will need fresh initialization")
+                print(f"    MT5 is not running - will need fresh initialization")
         except Exception as e:
-            print(f"   ⚠️ Could not check MT5 status: {e}")
+            print(f"    Could not check MT5 status: {e}")
         
         # Step 2: If not already logged in, try fresh login
         if already_logged_in_account != login_id_int:
@@ -1451,7 +1618,7 @@ def get_investors_balance():
                     continue
                 
                 # Successful fresh login
-                print(f"   ✅ FRESH LOGIN SUCCESS: Successfully logged in as {login_id_int}")
+                print(f"    FRESH LOGIN SUCCESS: Successfully logged in as {login_id_int}")
                 fresh_login_count += 1
                 
                 # Get account info
@@ -1472,10 +1639,10 @@ def get_investors_balance():
                 
                 if current_balance != balance_str:
                     investor_data['broker_balance'] = balance_str
-                    print(f"   ✅ Balance (fresh login): {currency} {balance:,.2f}")
+                    print(f"    Balance (fresh login): {currency} {balance:,.2f}")
                     updated += 1
                 else:
-                    print(f"   ℹ️ Balance unchanged: {currency} {balance:,.2f}")
+                    print(f"    Balance unchanged: {currency} {balance:,.2f}")
                 
                 # Update status
                 old_status = investor_data.get('application_status', 'unknown')
@@ -1530,7 +1697,7 @@ def get_investors_balance():
             # Copy to updated_investors.json (overwrite if exists)
             updated_investors_data[investor_id] = investor_data.copy()
             copied_count += 1
-            print(f"✅ COPIED ID:{investor_id} to updated_investors.json")
+            print(f" COPIED ID:{investor_id} to updated_investors.json")
     
     # Save updated_investors.json
     if copied_count > 0:
@@ -1550,7 +1717,7 @@ def get_investors_balance():
         except Exception as e:
             print(f"Failed to save updated_investors.json: {e}")
     else:
-        print(f"⚠️ No investors with 'just-joined-and-valid_credentials' status found to copy")
+        print(f" No investors with 'just-joined-and-valid_credentials' status found to copy")
     
     
     # Final cleanup
@@ -1632,10 +1799,14 @@ def process_single_investor(inv_id):
     
     try:
         # Execute the operations only if within time range
-        fetch_insiders_streaming()
+        update_tables_streaming()
+        fetch_tables_streaming()
         create_investor_mt5_files(inv_id=inv_id)
         get_investors_balance()
-        update_insiders_streaming()
+        #
+        close_db_browser()
+        initialize_browser(force_new=True)
+        update_tables_streaming()
         
         account_stats["success"] = True
         
@@ -1645,10 +1816,12 @@ def process_single_investor(inv_id):
     
     return account_stats
 
+
 def place_orders_parallel():
     """
     ORCHESTRATOR: Processes all investors from fetched_investors.json
-    No INV_PATH dependency - just uses the JSON file
+    No INV_PATH dependency - dynamically gauges global system RAM and CPU capabilities
+    to adjust batch sizing and prevent server resource exhaustion.
     """
     # Check if fetched investors file exists
     if not os.path.exists(FETCHED_INVESTORS):
@@ -1665,21 +1838,63 @@ def place_orders_parallel():
         return False
     
     if not investors_data:
-        print(" └─ 🔘 No investors found in fetched_investors.json")
+        update_tables_streaming()
+        fetch_tables_streaming()
         return False
 
-    # Get list of investor IDs
     investor_ids = list(investors_data.keys())
-    print(f" 📋 Processing investors: {investor_ids}")
-    print(f" 🔧 Creating pool with {len(investor_ids)} processes...")
+
+    # --- SENSE HARDWARE SPECS DYNAMICALLY ---
+    cpu_cores = os.cpu_count() or 1
+    available_ram_bytes = psutil.virtual_memory().available
+    available_ram_mb = available_ram_bytes / (1024 * 1024)
+
+    # Base capacity limits based on raw resources
+    max_by_cpu = cpu_cores * 4  
+    max_by_ram = int(available_ram_mb // 300)  
+    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
+
+    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} (Cap: {max_by_cpu}) | Free RAM: {available_ram_mb:.1f}MB (Cap: {max_by_ram})")
+
+    # --- CROSS-WINDOW SYSTEM DEDUCTION ---
+    active_mt5_count = 0
+    for proc in psutil.process_iter(['name']):
+        try:
+            pname = proc.info['name'].lower() if proc.info['name'] else ""
+            if "terminal.exe" in pname or "terminal64.exe" in pname:
+                active_mt5_count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    # Subtract active background terminals running in other VS Code instances
+    remaining_slots_left = max(0, hardware_max_limit - active_mt5_count)
+    
+    print(f"📊 Global System Load -> Active MT5 instances in other windows: {active_mt5_count}")
+    print(f"🔒 Adjusted Safe Limit for THIS Window: {remaining_slots_left} available slots remaining.")
+
+    if remaining_slots_left == 0:
+        print("  SYSTEM AT MAXIMUM SAFE CAPACITY: No resource slots left. Standby to protect VPS.")
+        return False
+
+    # --- BATCH LOAD BALANCING SLICE ---
+    total_detected = len(investor_ids)
+    if total_detected > remaining_slots_left:
+        print(f"   OVERLOAD PREVENTED: {total_detected} investors exceeds adjusted limit of {remaining_slots_left}.")
+        active_batch = investor_ids[:remaining_slots_left]
+        print(f" ⏳ Sliced batch: Processing first {remaining_slots_left} accounts. Deferring remaining {total_detected - remaining_slots_left} accounts.")
+    else:
+        active_batch = investor_ids
+
+    print(f" 📋 Processing investors: {active_batch}")
+    print(f" 🔧 Creating pool with {len(active_batch)} processes...")
     
     # Use a process pool
     try:
         # Use multiprocessing with spawn context (more reliable on Windows)
         mp.set_start_method('spawn', force=True)
         
-        with mp.Pool(processes=len(investor_ids)) as pool:
-            results = pool.map(process_single_investor, investor_ids)
+        with mp.Pool(processes=len(active_batch)) as pool:
+            results = pool.map(process_single_investor, active_batch)
         
         # Print summary
         successful = sum(1 for r in results if r.get("success", False))
@@ -1698,64 +1913,131 @@ def place_orders_parallel():
     except Exception as e:
         print(f"Error in parallel processing: {e}")
         # Fallback to sequential processing
-        print("🔄 Falling back to sequential processing...")
+        print(" Falling back to sequential processing...")
         results = []
-        for inv_id in investor_ids:
+        for inv_id in active_batch:
             result = process_single_investor(inv_id)
             results.append(result)
         
         successful = sum(1 for r in results if r.get("success", False))
-        print(f"✅ Sequential: {successful}/{len(results)} successful")
+        print(f" Sequential: {successful}/{len(results)} successful")
         
         return True
-
-def place_orders_parallel_():
+    
+def place_orders_parallel_loop():
     """
     ORCHESTRATOR: Processes all investors from fetched_investors.json
-    Runs in a continuous loop until manually terminated
+    Runs in a continuous loop. Measures external system terminal loads on every cycle 
+    to dynamically scale worker pool slices down if hardware resources become tight.
     """
     print(f"🚀 Starting Perpetual Trading Loop (using fetched_investors.json)...")
     
-    while True:  # Run indefinitely until Ctrl+C
-        try:
-            # Check if fetched investors file exists
-            if not os.path.exists(FETCHED_INVESTORS):
-                print(f"⚠️  Fetched investors file not found: {FETCHED_INVESTORS}")
-                print("   Retrying in 10 seconds...")
-                time.sleep(10)
-                continue
-            
-            # Load investors from JSON
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                investors_data = json.load(f)
-            
-            if not investors_data:
-                print(" └─ 🔘 No investors found in fetched_investors.json")
-                print("   Retrying in 10 seconds...")
-                time.sleep(10)
-                continue
-            
-            investor_ids = list(investors_data.keys())
-            print(f"\n--- Cycle Start: Processing {len(investor_ids)} investors ---")
-            print(f"   Investors: {investor_ids}")
-            
-            # Use process pool to process all investors in parallel
-            with mp.Pool(processes=len(investor_ids)) as pool:
-                results = pool.map(process_single_investor, investor_ids)
-            
-            # Quick summary
-            successful = sum(1 for r in results if r.get("success", False))
-            print(f"--- Cycle Complete: {successful}/{len(results)} successful ---")
-            
-        except KeyboardInterrupt:
-            print("\n🛑 Received shutdown signal. Exiting gracefully...")
-            break
-        except Exception as e:
-            print(f" Critical Error in Orchestrator: {e}")
-            print("   Retrying in 5 seconds...")
-            time.sleep(5)
-        
+    # --- BOOT SENSE HARDWARE CAPACITY SPECS ---
+    cpu_cores = os.cpu_count() or 1
+    available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+
+    max_by_cpu = cpu_cores * 4
+    max_by_ram = int(available_ram_mb // 300)
+    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
+
+    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+    print(f" 🔧 Hardware Gate: Pre-configuring maximum capacity cap to {hardware_max_limit} accounts.")
+
+    # Initialize pool context safely on Windows
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Context already set
+
+    # Open permanent worker process slots matching hardware capacity limits
+    pool = mp.Pool(processes=hardware_max_limit)
+    my_pid = os.getpid()
+
+    try:
+        while True:
+            try:
+                # Check if fetched investors file exists
+                if not os.path.exists(FETCHED_INVESTORS):
+                    print(f"  Fetched investors file not found: {FETCHED_INVESTORS}")
+                    print("   Retrying in 10 seconds...")
+                    time.sleep(10)
+                    continue
+                
+                # Load investors from JSON
+                with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                    investors_data = json.load(f)
+                
+                if not investors_data:
+                    update_tables_streaming()
+                    fetch_tables_streaming()
+                    continue
+                
+                investor_ids = list(investors_data.keys())
+
+                # --- LIVE RUNTIME HARDWARE AUDIT ---
+                active_mt5_count = 0
+                for proc in psutil.process_iter(['name', 'ppid']):
+                    try:
+                        pname = proc.info['name'].lower() if proc.info['name'] else ""
+                        if "terminal.exe" in pname or "terminal64.exe" in pname:
+                            # Exclude processes spawned by this specific script execution channel
+                            try:
+                                parent = proc.parent()
+                                if parent and (parent.pid == my_pid or parent.ppid() == my_pid):
+                                    continue
+                            except:
+                                pass
+                            active_mt5_count += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+
+                # Derive current remaining execution room
+                adjusted_capacity = max(0, hardware_max_limit - active_mt5_count)
+                current_safe_cap = min(hardware_max_limit, adjusted_capacity)
+
+                if current_safe_cap <= 0:
+                    print(f"⏳ [STANDBY] System fully utilized by other terminal instances ({active_mt5_count} running). Retrying pool slice in 3 seconds...")
+                    time.sleep(3)
+                    continue
+
+                # --- DYNAMIC BATCH ALLOCATION ---
+                if len(investor_ids) > current_safe_cap:
+                    print(f"   RESOURCE CEILING CEILING APPLIED: Capping active slice loop execution to {current_safe_cap} rows.")
+                    active_batch = investor_ids[:current_safe_cap]
+                    deferred_count = len(investor_ids) - current_safe_cap
+                    print(f" ⏳ Slicing batch: Processing first {current_safe_cap} accounts. {deferred_count} deferred to next loop cycle.")
+                else:
+                    active_batch = investor_ids
+
+                print(f"\n--- Cycle Start: Processing {len(active_batch)} investors within safe limits ---")
+                print(f"   Investors: {active_batch}")
+                
+                # Use permanent worker channel execution hooks (Async Mapping)
+                jobs = []
+                for inv_id in active_batch:
+                    job = pool.apply_async(process_single_investor, args=(inv_id,))
+                    jobs.append(job)
+                
+                # Resolve active execution batches concurrently
+                results = [job.get() for job in jobs]
+                
+                successful = sum(1 for r in results if r and r.get("success", False))
+                print(f"--- Cycle Complete: {successful}/{len(results)} successful ---")
+                
+            except Exception as e:
+                print(f" Critical Error in Orchestrator Loop: {e}")
+                print("   Retrying in 5 seconds...")
+                time.sleep(5)
+                
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n🛑 Received shutdown signal. Disposing worker process tree gracefully...")
+    finally:
+        pool.close()
+        pool.join()
+
         
 # Example usage
 if __name__ == "__main__":
-    place_orders_parallel()
+    place_orders_parallel_loop()

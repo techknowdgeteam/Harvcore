@@ -17,9 +17,10 @@ from datetime import datetime
 import psutil
 import shutil
 import traceback
+import threading
 
 # ==============================================================================
-# ⚠️ CRITICAL CONFIGURATION
+#  CRITICAL CONFIGURATION
 # ==============================================================================
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
@@ -42,10 +43,12 @@ admin_password = '@ciphercircleadminauthenticator#'
 temp_download_dir = r'C:\xampp\htdocs\CIPHER\temp_downloads'
 json_log_path = r'C:\xampp\htdocs\CIPHER\cipher trader\market\dbserver\connectwithdb.json'
 
-# Global driver and session
+# Global driver and session - SINGLE PERSISTENT INSTANCE
 driver = None
 session = None
 current_servers = primary_servers
+_browser_lock = threading.Lock()  # Thread safety for concurrent calls
+_is_shutdown = False  # Track if shutdown was explicitly called
 # ==============================================================================
 
 
@@ -55,151 +58,179 @@ def print_header(title, width=70):
     print(f"  {title}")
     print(f"{'='*width}")
 
-
 def print_step(step_num, total_steps, description):
     """Print a formatted step indicator."""
-    print(f"\n  📌 [{step_num}/{total_steps}] {description}")
-
+    print(f"\n   [{step_num}/{total_steps}] {description}")
 
 def print_success(message):
     """Print a success message."""
-    print(f"  ✅ {message}")
-
+    print(f"   {message}")
 
 def print_error(message, details=None):
     """Print an error message with optional details."""
-    print(f"  ❌ {message}")
+    print(f"   {message}")
     if details:
         print(f"     └─ Details: {details}")
 
-
 def print_warning(message):
     """Print a warning message."""
-    print(f"  ⚠️  {message}")
-
+    print(f"    {message}")
 
 def print_info(message):
     """Print an info message."""
-    print(f"  ℹ️  {message}")
-
+    print(f"    {message}")
 
 def print_divider(char="─", width=70):
     """Print a divider line."""
     print(f"  {char*width}")
 
-
-def initialize_browser():
-    """
-    Initialize Chrome using ChromeDriverManager to automatically match 
-    the driver version to the installed browser version.
-    """
-    global driver, session, current_servers
+def is_browser_alive():
+    """Check if the browser instance is still alive and responsive."""
+    global driver
     
-    print_header("BROWSER INITIALIZATION")
+    if driver is None:
+        return False
     
-    # Check if existing session is alive
-    if driver is not None:
-        print_info("Checking existing browser session...")
-        try:
-            driver.get(current_servers['query_page'])
-            # Re-sync session cookies
-            session = requests.Session()
-            for cookie in driver.get_cookies():
-                session.cookies.set(cookie['name'], cookie['value'])
-            print_success("Existing session valid - reconnected")
-            return True
-        except Exception as e:
-            print_warning(f"Session invalid, restarting...")
-            try: driver.quit()
-            except: pass
-            driver = None
-
-    # Step 1: Profile Setup
-    print_step(1, 3, "Setting Up Chrome Environment")
-    
-    real_user_data = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-    source_profile = os.path.join(real_user_data, "Profile 1")
-    selenium_profile = os.path.expanduser(r"~\.chrome_selenium_profile")
-
-    if not os.path.exists(selenium_profile) and os.path.exists(source_profile):
-        print_info("Creating Selenium Chrome profile copy...")
-        try:
-            shutil.copytree(source_profile, selenium_profile, dirs_exist_ok=True)
-            print_success("Profile copied successfully")
-        except Exception as e:
-            print_warning(f"Profile copy failed: {e}")
-
-    # Chrome Options
-    chrome_options = Options()
-    if os.path.exists(CHROME_PATH):
-        chrome_options.binary_location = CHROME_PATH
-        print_info(f"Chrome binary: {CHROME_PATH}")
-    else:
-        print_warning(f"Chrome binary not found at: {CHROME_PATH}")
-    
-    chrome_options.add_argument(f"--user-data-dir={selenium_profile}")
-    chrome_options.add_argument("--profile-directory=Default")
-    chrome_options.add_argument("--headless=new") 
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--log-level=3")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
-
-    # Step 2: Initialize ChromeDriver
-    print_step(2, 3, "Initializing ChromeDriver")
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        print_success("ChromeDriver initialized successfully")
-    except Exception as e:
-        print_error("Failed to initialize ChromeDriver", str(e))
+        # Try to get current URL as a heartbeat check
+        current_url = driver.current_url
+        if current_url and "data:" not in current_url:
+            return True
+        return False
+    except Exception:
         return False
 
-    # Step 3: Authenticate
-    print_step(3, 3, "Authenticating and Accessing Query Page")
+def initialize_browser(force_new=False):
+    """
+    Initialize Chrome browser - REUSES existing instance if available.
     
-    server_attempts = [
-        (primary_servers, "Primary"),
-        (backup_servers, "Backup"),
-        (server3, "Server 3")
-    ]
+    Args:
+        force_new (bool): If True, creates a new instance even if one exists
     
-    for servers, server_type in server_attempts:
-        current_servers = servers
-        print_info(f"Trying {server_type} server: {servers['query_page']}")
+    Returns:
+        bool: True if browser is ready, False otherwise
+    """
+    global driver, session, current_servers, _is_shutdown
+    
+    with _browser_lock:
+        # If shutdown was explicitly called, don't reuse
+        if _is_shutdown and not force_new:
+            print_warning("Browser was explicitly shut down. Create new instance by calling with force_new=True")
+            return False
         
+        # Check if we can reuse existing browser
+        if not force_new and is_browser_alive():
+            print_info("Reusing existing browser session...")
+            try:
+                # Verify session is still valid
+                driver.get(current_servers['query_page'])
+                # Re-sync session cookies
+                if session:
+                    session.close()
+                session = requests.Session()
+                for cookie in driver.get_cookies():
+                    session.cookies.set(cookie['name'], cookie['value'])
+                print_success("Existing browser session reused successfully")
+                return True
+            except Exception as e:
+                print_warning(f"Existing session invalid, restarting...: {str(e)[:100]}")
+                try: 
+                    driver.quit()
+                except: 
+                    pass
+                driver = None
+                session = None
+        
+        print_header("BROWSER INITIALIZATION")
+        
+        # Step 1: Profile Setup
+        print_step(1, 3, "Setting Up Chrome Environment")
+        
+        real_user_data = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+        source_profile = os.path.join(real_user_data, "Profile 1")
+        selenium_profile = os.path.expanduser(r"~\.chrome_selenium_profile")
+
+        if not os.path.exists(selenium_profile) and os.path.exists(source_profile):
+            print_info("Creating Selenium Chrome profile copy...")
+            try:
+                shutil.copytree(source_profile, selenium_profile, dirs_exist_ok=True)
+                print_success("Profile copied successfully")
+            except Exception as e:
+                print_warning(f"Profile copy failed: {e}")
+
+        # Chrome Options
+        chrome_options = Options()
+        if os.path.exists(CHROME_PATH):
+            chrome_options.binary_location = CHROME_PATH
+            print_info(f"Chrome binary: {CHROME_PATH}")
+        else:
+            print_warning(f"Chrome binary not found at: {CHROME_PATH}")
+        
+        chrome_options.add_argument(f"--user-data-dir={selenium_profile}")
+        chrome_options.add_argument("--profile-directory=Default")
+        chrome_options.add_argument("--headless=new") 
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--log-level=3")
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
+
+        # Step 2: Initialize ChromeDriver
+        print_step(2, 3, "Initializing ChromeDriver")
         try:
-            driver.get(servers['query_page'])
-            
-            # Inject credentials via LocalStorage
-            driver.execute_script(f"localStorage.setItem('admin_email', '{admin_email}');")
-            driver.execute_script(f"localStorage.setItem('admin_password', '{admin_password}');")
-            
-            # Reload to apply credentials
-            driver.get(servers['query_page'])
-            
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.ID, "sql-query"))
-            )
-            
-            print_success(f"Authenticated on {server_type} server")
-            
-            # Sync requests session
-            session = requests.Session()
-            for cookie in driver.get_cookies():
-                session.cookies.set(cookie['name'], cookie['value'])
-            
-            append_to_json_log(server_type, servers['query_page'])
-            return True
-            
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            print_success("ChromeDriver initialized successfully")
         except Exception as e:
-            print_warning(f"{server_type} server failed: {str(e)[:100]}")
-            continue
+            print_error("Failed to initialize ChromeDriver", str(e))
+            return False
 
-    print_error("All servers failed authentication")
-    return False
+        # Step 3: Authenticate
+        print_step(3, 3, "Authenticating and Accessing Query Page")
+        
+        server_attempts = [
+            (primary_servers, "Primary"),
+            (backup_servers, "Backup"),
+            (server3, "Server 3")
+        ]
+        
+        for servers, server_type in server_attempts:
+            current_servers = servers
+            print_info(f"Trying {server_type} server: {servers['query_page']}")
+            
+            try:
+                driver.get(servers['query_page'])
+                
+                # Inject credentials via LocalStorage
+                driver.execute_script(f"localStorage.setItem('admin_email', '{admin_email}');")
+                driver.execute_script(f"localStorage.setItem('admin_password', '{admin_password}');")
+                
+                # Reload to apply credentials
+                driver.get(servers['query_page'])
+                
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.ID, "sql-query"))
+                )
+                
+                print_success(f"Authenticated on {server_type} server")
+                
+                # Sync requests session
+                if session:
+                    session.close()
+                session = requests.Session()
+                for cookie in driver.get_cookies():
+                    session.cookies.set(cookie['name'], cookie['value'])
+                
+                append_to_json_log(server_type, servers['query_page'])
+                _is_shutdown = False  # Reset shutdown flag on successful init
+                return True
+                
+            except Exception as e:
+                print_warning(f"{server_type} server failed: {str(e)[:100]}")
+                continue
 
+        print_error("All servers failed authentication")
+        return False
 
 def append_to_json_log(server_type, server_url):
     """Append the server used to the JSON log file."""
@@ -232,36 +263,44 @@ def append_to_json_log(server_type, server_url):
     except Exception as e:
         print_warning(f"Failed to write JSON log: {str(e)[:100]}")
 
-
 def signal_handler(sig, frame):
     """Handle script interruption (Ctrl+C)."""
     print_warning("\nScript interrupted by user. Cleaning up...")
     cleanup()
     sys.exit(0)
 
-
 def cleanup():
-    """Clean up resources before exiting."""
-    global driver, session
+    """Clean up resources before exiting - ONLY closes browser if not already shut down."""
+    global driver, session, _is_shutdown
+    
+    if _is_shutdown:
+        print_info("Browser already shut down")
+        return
     
     print_header("CLEANUP")
     
     if driver:
         print_info("Clearing browser localStorage...")
         try:
-            if "data:" not in driver.current_url:
+            if driver and "data:" not in driver.current_url:
                 driver.execute_script("localStorage.clear();")
                 print_success("LocalStorage cleared")
         except Exception as e:
             print_warning(f"Failed to clear localStorage: {e}")
         
         print_info("Closing browser...")
-        driver.quit()
+        try:
+            driver.quit()
+        except:
+            pass
         driver = None
         print_success("Browser closed")
 
     if session:
-        session.close()
+        try:
+            session.close()
+        except:
+            pass
         session = None
         print_success("HTTP session closed")
 
@@ -271,12 +310,20 @@ def cleanup():
         try:
             for temp_file in os.listdir(temp_download_dir):
                 file_path = os.path.join(temp_download_dir, temp_file)
-                os.remove(file_path)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
             os.rmdir(temp_download_dir)
             print_success("Temp directory removed")
         except Exception as e:
             print_warning(f"Failed to clean temp directory: {e}")
+    
+    _is_shutdown = True
 
+def shutdown():
+    """Explicitly shut down the browser and cleanup - call this when you want to close Chrome."""
+    global _is_shutdown
+    print_info("Explicit shutdown requested...")
+    cleanup()
 
 def check_server_availability(url):
     """Check if a server is available."""
@@ -292,13 +339,17 @@ def check_server_availability(url):
     except requests.RequestException:
         return False
 
-
-def execute_query(sql_query, params=None):
+def execute_query(sql_query, params=None, reuse_browser=True):
     """Execute SQL query via Selenium browser automation.
     
     Args:
         sql_query (str): SQL query string (can contain %s placeholders)
         params (tuple, optional): Parameters to substitute for placeholders
+        reuse_browser (bool): If True, reuse existing browser instance; 
+                             if False, create new instance
+    
+    Returns:
+        dict: Query results
     """
     global driver, session
     
@@ -344,8 +395,8 @@ def execute_query(sql_query, params=None):
     print_divider()
     
     try:
-        # Initialize browser
-        if not initialize_browser():
+        # Initialize browser (reuse existing if available and reuse_browser=True)
+        if not initialize_browser(force_new=not reuse_browser):
             return {
                 'status': 'error', 
                 'message': 'Browser initialization failed', 
@@ -503,12 +554,8 @@ def execute_query(sql_query, params=None):
             'results': []
         }
 
-def shutdown():
-    """Explicitly shut down the browser and cleanup."""
-    cleanup()
-
-
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
+
 
 

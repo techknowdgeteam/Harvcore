@@ -1,220 +1,35 @@
 {
-  "10": {
-    "id": "10",
+  "1": {
+    "id": "1",
     "broker": "Deriv",
     "email": "knnyking12@gmail.com",
-    "fullname": "Kenny",
+    "fullname": "Arobieke Kehinde Adeyemi",
     "server": "Deriv-Demo",
     "login": "5996427",
     "password": "@Techknowdge12#",
-    "application_status": "Approved",
-    "broker_balance": "8766.53",
+    "application_status": "just-joined-and-valid_credentials",
+    "broker_balance": "9024.15",
     "profitandloss": "0.00",
-    "passkey": "$2y$10$uUBAHacXyNIfFg5xGM7SJe6CwSHOsM3uiacSFoHrvU7d6GtQXdLmK",
-    "submitted_at": "NULL",
+    "passkey": "NULL",
+    "submitted_at": "0000-00-00 00:00:00",
     "balance_display": "NULL",
-    "execution_start_date": "2026-05-14",
-    "tradeshistory": "NULL",
+    "execution_start_date": "0000-00-00",
+    "analytics_history": "NULL",
     "loyalties": "NULL",
     "contract_days_left": "0",
     "paymentdetails": "NULL",
     "message": "NULL",
-    "unauthorized_actions": "\"NULL\"",
+    "unauthorized_actions": "NULL",
     "notifications": "NULL",
     "executions_notification": "NULL",
     "server_decision": "NULL",
-    "accountmanagement": {
-      "selected_risk_reward": [
-        3
-      ],
-      "hedge_orders_risk_reward": [
-        2
-      ],
-      "timeframe": [
-        "15m"
-      ],
-      "bars": 3,
-      "symbols_dictionary": {
-        "xxxjpy": [],
-        "xxxusd": [
-          "volatility 75 index"
-        ],
-        "xxxaud": [],
-        "xxxnzd": [],
-        "usdxxx": [],
-        "xxxchf": [],
-        "xxxcad": [],
-        "xxxbasket": [],
-        "indices": [],
-        "metals": [],
-        "energies": [],
-        "synthetics": []
-      },
-      "settings": {
-        "restrict_orders_in_time_range_of": {
-          "from": "00:00 am",
-          "to": "00:00 pm"
-        },
-        "execute_function_in_time_range_of": [
-          {
-            "from": "8:00 am",
-            "to": "12:30 am"
-          },
-          {
-            "from": "12:00 pm",
-            "to": "12:30 pm"
-          },
-          {
-            "from": "2:00 pm",
-            "to": "2:30 pm"
-          },
-          {
-            "from": "4:00 pm",
-            "to": "4:30 pm"
-          },
-          {
-            "from": "6:00 pm",
-            "to": "6:30 pm"
-          },
-          {
-            "from": "10:00 pm",
-            "to": "10:30 pm"
-          },
-          {
-            "from": "12:00 am",
-            "to": "12:30 am"
-          },
-          {
-            "from": "4:00 am",
-            "to": "4:30 am"
-          },
-          {
-            "from": "6:00 am",
-            "to": "6:30 am"
-          }
-        ],
-        "enable_latest_fallback_to_older_order": true,
-        "skip_orders_close_to_position": false,
-        "switch_invalid_to_instant_order": true,
-        "remove_orders_if_additonal_candles_is_more_than": 1,
-        "enable_single_position_and_pending": false,
-        "harvester_2": false,
-        "martingale_config": {
-          "enable_martingale": false,
-          "maximum_martingale_lookback": 10,
-          "martingale_days_lookback": 1,
-          "martingale_for_position_order_scale": true,
-          "martingale_loss_recovery_adder_percentage": "10%",
-          "pre_scaling": {
-            "martingale_pre_scaling": true,
-            "martingale_pre_scale_highest_risk_adder": true,
-            "highest_risk_reduction_percentage": "0%",
-            "martingale_pre_scale_expected_loss_adder": true,
-            "expected_loss_reduction_percentage": "0%"
-          }
-        },
-        "enable_auto_trading": true,
-        "place_grid_trades": true,
-        "enable_breakeven": true,
-        "breakeven_dictionary": [
-          {
-            "reward": 1,
-            "breakeven_at_reward": 0.01
-          },
-          {
-            "reward": 1.8,
-            "breakeven_at_reward": 0.5
-          },
-          {
-            "reward": 2,
-            "breakeven_at_reward": 0.5
-          },
-          {
-            "reward": 2.8,
-            "breakeven_at_reward": 1
-          },
-          {
-            "reward": 3,
-            "breakeven_at_reward": 1.5
-          },
-          {
-            "reward": 3.8,
-            "breakeven_at_reward": 1.7
-          },
-          {
-            "reward": 4,
-            "breakeven_at_reward": 2
-          },
-          {
-            "reward": 4.8,
-            "breakeven_at_reward": 2.2
-          },
-          {
-            "reward": 5,
-            "breakeven_at_reward": 2.5
-          },
-          {
-            "reward": 5.8,
-            "breakeven_at_reward": 2.8
-          },
-          {
-            "reward": 6,
-            "breakeven_at_reward": 3
-          },
-          {
-            "reward": 7,
-            "breakeven_at_reward": 3.5
-          },
-          {
-            "reward": 7.8,
-            "breakeven_at_reward": 3.8
-          },
-          {
-            "reward": 8,
-            "breakeven_at_reward": 4
-          },
-          {
-            "reward": 8.8,
-            "breakeven_at_reward": 4.2
-          },
-          {
-            "reward": 9,
-            "breakeven_at_reward": 4.5
-          },
-          {
-            "reward": 10,
-            "breakeven_at_reward": 5
-          }
-        ],
-        "restrict_order_from_timeframe": "none",
-        "default_price": false,
-        "risk_reward_correction": true,
-        "opposite_order_restriction": true,
-        "enable_order_type_conversion": false,
-        "enable_martingale": false,
-        "enable_default_account_balance_management": true,
-        "enable_maximum_account_balance_management": false
-      },
-      "martingale_risk_management": {
-        "1-10000000.99_risk": 4
-      },
-      "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 2
-      },
-      "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 3
-      },
-      "grid_prices_setup": {
-        "grid_levels": 2,
-        "grid_multiplier": 50,
-        "bid_prices_order_type": "buy_stop",
-        "ask_prices_order_type": "sell_stop"
-      }
-    },
-    "statistics": "NULL",
-    "invested_with": "deriv_prices",
-    "enable_autotrading": "1",
-    "bypass_restriction": "1",
-    "TERMINAL_PATH": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 10\\terminal64.exe"
+    "accountmanagement": "NULL",
+    "analytics": "NULL",
+    "invested_with": "NULL",
+    "enable_autotrading": "0",
+    "bypass_restriction": "0",
+    "demo_account": "0",
+    "account_mode": "NULL",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe"
   }
 }
