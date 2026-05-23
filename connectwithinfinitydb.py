@@ -339,7 +339,7 @@ def check_server_availability(url):
     except requests.RequestException:
         return False
 
-def execute_query(sql_query, params=None, reuse_browser=True):
+def execute_query_(sql_query, params=None, reuse_browser=True):
     """Execute SQL query via Selenium browser automation.
     
     Args:
@@ -554,6 +554,208 @@ def execute_query(sql_query, params=None, reuse_browser=True):
             'results': []
         }
 
+def execute_query(sql_query, params=None, reuse_browser=True):
+    """Execute SQL query via Selenium browser automation with proper parameter handling.
+    
+    Args:
+        sql_query (str): SQL query string (can contain %s placeholders)
+        params (tuple/list, optional): Parameters to substitute for placeholders
+        reuse_browser (bool): If True, reuse existing browser instance
+    
+    Returns:
+        dict: Query results with status, message, results, and affected_rows
+    """
+    global driver, session
+    
+    # Handle parameters properly
+    if params:
+        # Convert single param to tuple for consistent handling
+        if not isinstance(params, (tuple, list)):
+            params = (params,)
+        
+        # Build final query with proper escaping
+        final_sql = sql_query
+        for param in params:
+            # Find first %s placeholder
+            if '%s' not in final_sql:
+                break
+                
+            if param is None:
+                final_sql = final_sql.replace('%s', 'NULL', 1)
+            elif isinstance(param, bool):
+                final_sql = final_sql.replace('%s', '1' if param else '0', 1)
+            elif isinstance(param, (int, float)):
+                final_sql = final_sql.replace('%s', str(param), 1)
+            elif isinstance(param, (dict, list)):
+                # Convert dict/list to JSON string
+                json_str = json.dumps(param, ensure_ascii=False)
+                # Escape for SQL
+                escaped = json_str.replace("'", "''").replace("\\", "\\\\")
+                final_sql = final_sql.replace('%s', f"'{escaped}'", 1)
+            else:
+                # String parameter - escape properly
+                escaped = str(param).replace("'", "''").replace("\\", "\\\\")
+                final_sql = final_sql.replace('%s', f"'{escaped}'", 1)
+    else:
+        final_sql = sql_query
+    
+    print_divider()
+    
+    try:
+        # Initialize browser
+        if not initialize_browser(force_new=not reuse_browser):
+            return {
+                'status': 'error', 
+                'message': 'Browser initialization failed', 
+                'results': [],
+                'affected_rows': 0
+            }
+
+        # Step 4: Inject SQL Query
+        print_step(4, 6, "Injecting SQL Query")
+        try:
+            query_textarea = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "sql-query"))
+            )
+            # Clear previous content
+            driver.execute_script("arguments[0].value = '';", query_textarea)
+            
+            # Set the final SQL query
+            driver.execute_script("arguments[0].value = arguments[1];", query_textarea, final_sql)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", query_textarea)
+            
+            # Small delay to ensure UI updates
+            time.sleep(0.5)
+            
+            execute_button = driver.find_element(By.XPATH, "//button[text()='Execute Query']")
+            execute_button.click()
+            print_success("Query injected and executed")
+        except Exception as e:
+            print_error("Failed to inject query", str(e))
+            return {
+                'status': 'error', 
+                'message': f"Query input failed: {str(e)}", 
+                'results': [],
+                'affected_rows': 0
+            }
+
+        # Step 5: Wait for Results
+        print_step(5, 6, "Waiting for Server Response")
+        results = []
+        affected_rows = 0
+        
+        try:
+            is_select = final_sql.strip().upper().startswith("SELECT")
+            
+            if is_select:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#query-result table, #column-data table"))
+                )
+                print_success("Result table detected")
+            else:
+                # For UPDATE, INSERT, DELETE - wait for message
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "message"))
+                    )
+                    print_success("Server response received")
+                except:
+                    print_info("No explicit response message (may be normal for this query)")
+                    
+        except Exception as e:
+            print_warning(f"Timeout waiting for results: {str(e)[:100]}")
+            try:
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                error_msg = soup.find('div', class_='error') or soup.find('div', id='error')
+                if error_msg:
+                    return {
+                        'status': 'error',
+                        'message': error_msg.text.strip(),
+                        'results': [],
+                        'affected_rows': 0
+                    }
+            except:
+                pass
+            
+            return {
+                'status': 'success', 
+                'results': [{'message': 'Query executed (no visible results)'}],
+                'affected_rows': 0
+            }
+
+        # Step 6: Parse Results
+        print_step(6, 6, "Parsing Query Results")
+        
+        try:
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            
+            # Check for affected rows message first
+            msg_element = soup.find('div', id='message')
+            if msg_element:
+                msg_text = msg_element.get_text().strip()
+                # Extract affected rows count
+                import re
+                match = re.search(r'(\d+)\s+row\(s\) affected', msg_text)
+                if match:
+                    affected_rows = int(match.group(1))
+                    print_success(f"Query affected {affected_rows} row(s)")
+            
+            container = soup.find('div', id='query-result') or soup.find('div', id='column-data')
+            table = container.find('table') if container else soup.find('table')
+
+            if table:
+                headers = [th.text.strip() for th in table.find_all('th')]
+                
+                for row in table.find_all('tr')[1:]:
+                    cols = row.find_all('td')
+                    if len(cols) > 0:
+                        row_dict = {}
+                        for i in range(len(cols)):
+                            if i < len(headers):
+                                row_dict[headers[i]] = cols[i].text.strip()
+                        results.append(row_dict)
+                
+                print_success(f"Parsed {len(results)} rows with {len(headers)} columns")
+                
+                if headers:
+                    print_info(f"Columns: {', '.join(headers[:5])}{'...' if len(headers) > 5 else ''}")
+                
+            elif not msg_element:
+                print_warning("No result table or message found in response")
+                results = [{'status': 'executed', 'message': 'Query completed'}]
+
+        except Exception as e:
+            print_error("Failed to parse results", str(e))
+            return {
+                'status': 'error', 
+                'message': f"Parse error: {str(e)}", 
+                'results': [],
+                'affected_rows': 0
+            }
+
+        # Summary
+        print_divider()
+        print_success(f"Query execution complete - {len(results)} results returned")
+        print_divider("═")
+        
+        return {
+            'status': 'success', 
+            'results': results,
+            'affected_rows': affected_rows,
+            'message': 'Query executed successfully'
+        }
+
+    except Exception as e:
+        print_error("Critical error during query execution", str(e))
+        print_divider()
+        traceback.print_exc()
+        return {
+            'status': 'error', 
+            'message': str(e), 
+            'results': [],
+            'affected_rows': 0
+        }
+    
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
 

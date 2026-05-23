@@ -26,6 +26,8 @@
     "synthetics": []
   },
   "settings": {
+    "symbols_grid_strategy": true,
+    "fetch_ohlc_data_and_directional_bias_for_investor": true,
     "create_hedge_order": true,
     "restrict_orders_in_time_range_of": {
       "from": "00:00 am",
@@ -70,10 +72,14 @@
       }
     ],
     "enable_latest_fallback_to_older_order": true,
-    "skip_orders_close_to_position": false,
-    "switch_invalid_to_instant_order": true,
+    "skip_orders_close_to_position": true,
+    "opposite_order_restriction": false,
+    "switch_invalid_to_instant_order": false,
     "remove_orders_if_additonal_candles_is_more_than": 1,
     "enable_single_position_and_pending": false,
+    "manage_position_and_pending_orders": {
+      "count": 2
+    },
     "harvester_2": false,
     "martingale_config": {
       "enable_martingale": false,
@@ -165,7 +171,6 @@
     "restrict_order_from_timeframe": "none",
     "default_price": false,
     "risk_reward_correction": true,
-    "opposite_order_restriction": true,
     "enable_order_type_conversion": false,
     "enable_martingale": false,
     "enable_default_account_balance_management": true,

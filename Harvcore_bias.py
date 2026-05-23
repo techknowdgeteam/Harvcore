@@ -348,7 +348,7 @@ def move_fetched_investors():
         # Extract required fields (case-insensitive)
         invested_with = investor_data.get('invested_with', investor_data.get('INVESTED_WITH', '')).strip()
         execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
-        terminal_path = investor_data.get('TERMINAL_PATH', investor_data.get('terminal_path', '')).strip()
+        Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
         password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
         server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
@@ -362,7 +362,7 @@ def move_fetched_investors():
         missing_required = []
         if not invested_with: missing_required.append('invested_with')
         if not execution_start: missing_required.append('execution_start_date')
-        if not terminal_path: missing_required.append('TERMINAL_PATH')
+        if not Terminal_path: missing_required.append('Terminal_path')
         
         missing_investor_fields = []
         if not login: missing_investor_fields.append('login')
@@ -423,14 +423,14 @@ def move_fetched_investors():
                     add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
                     add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode but demo_account status unknown.", 'error', timestamp)
             else:
-                account_mode_msg = f"Account mode is set to '{account_mode}'. Trading will proceed with this configuration."
+                account_mode_msg = f"Account mode is {account_mode}. Trading will be paused until the account mode is identified with this configuration."
                 add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} account mode: {account_mode}.", 'success', timestamp)
             
             # Add notifications for missing required fields
             if missing_required:
                 missing_fields_str = ', '.join(missing_required)
-                missing_message = f" Please contact support for terminal configuration"
+                missing_message = f" You have not yet enrolled or your configuration is incomplete. Please contact support if you experience any issues."
                 add_notification(activities_data['notifications'], 'RegistrationRequired', missing_message, 'error', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'RegistrationRequired', f"SERVER NOTIFICATION: Investor {inv_id} has missing required fields: {missing_fields_str}", 'error', timestamp)
             
@@ -478,7 +478,7 @@ def move_fetched_investors():
                 "SERVER": server if server else "",
                 "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
                 "INVESTED_WITH": invested_with if invested_with else "",
-                "TERMINAL_PATH": terminal_path if terminal_path else ""
+                "Terminal_path": Terminal_path if Terminal_path else ""
             }
             
             if login and password and server:
@@ -501,7 +501,7 @@ def move_fetched_investors():
             "SERVER": server,
             "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
             "INVESTED_WITH": invested_with,
-            "TERMINAL_PATH": terminal_path
+            "Terminal_path": Terminal_path
         }
         investors_data[inv_id] = investor_entry
         investors_updated.append(inv_id)
@@ -611,7 +611,7 @@ def move_fetched_investors():
         invested_with = investor_data.get('invested_with', investor_data.get('INVESTED_WITH', '')).strip()
         execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
         contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
-        terminal_path = investor_data.get('TERMINAL_PATH', investor_data.get('terminal_path', '')).strip()
+        Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
         accountmanagement_data = investor_data.get('accountmanagement', {})
         
         # Extract account mode and demo account fields
@@ -871,7 +871,7 @@ def move_fetched_investors():
             add_execution_notification(activities_data['executions_notification'], 'ContractDuration', f"SERVER NOTIFICATION: Investor {inv_id} contract duration configured: {contract_duration_val} days.", 'success', timestamp)
         
         # 6. TERMINAL PATH section
-        if not terminal_path or terminal_path.strip() == '':
+        if not Terminal_path or Terminal_path.strip() == '':
             terminal_message = "Your terminal path is missing. Please contact support to resolve your account status."
             add_notification(activities_data['notifications'], 'TerminalPath', terminal_message, 'error', timestamp)
             add_execution_notification(activities_data['executions_notification'], 'TerminalPath', f"SERVER NOTIFICATION: Investor {inv_id} has NO TERMINAL PATH.", 'error', timestamp)
@@ -914,8 +914,16 @@ def move_fetched_investors():
         accountmanagement_path = inv_root / "accountmanagement.json"
         final_accountmanagement = {}
         
+        # Handle accountmanagement_data - could be dict, string, or None
         if accountmanagement_data:
-            final_accountmanagement.update(accountmanagement_data)
+            if isinstance(accountmanagement_data, dict):
+                final_accountmanagement.update(accountmanagement_data)
+            else:
+                # Not a dictionary - log the issue and treat as missing data
+                print(f"   ⚠️ Accountmanagement data for {inv_id} is invalid format: {type(accountmanagement_data)}")
+                error_messages.append(f"Invalid accountmanagement format - expected JSON object, got {type(accountmanagement_data).__name__}")
+                has_error = True
+                # Don't update, leave as empty dict
         
         if contract_duration_val is not None:
             if 'requirements' not in final_accountmanagement:
@@ -1448,7 +1456,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
         # ============================================================
         # CONNECT TO MT5
         # ============================================================
-        mt5_path = broker_cfg.get("TERMINAL_PATH", "")
+        mt5_path = broker_cfg.get("Terminal_path", "")
         password = broker_cfg.get("PASSWORD", "")
         server = broker_cfg.get("SERVER", "")
         
@@ -1988,7 +1996,6 @@ def check_and_record_unauthorized_actions(inv_id=None):
 #---         ----           --#
 
 #    safety checks  #
-
 def restricted_timerange(inv_id=None):
     """
     Function: Checks if current time falls within the restricted time range
@@ -2923,7 +2930,7 @@ def delete_all_orders_and_positions(inv_id=None):
 #         --        #
 
 
-#---   ##STRATEGY##  ----#   
+#---DIRECTONAL BIAS STRATEGY---#   
 def fetch_ohlc_data_for_investor(inv_id):
     """
     Fetch OHLCV data and generate charts for a specific investor.
@@ -3382,14 +3389,42 @@ def fetch_ohlc_data_for_investor(inv_id):
             result['errors'].append("Investor config not found")
             return result
         
-        # Step 3: Get target folder from INVESTED_WITH
+        # Step 3: Load accountmanagement.json to check settings
+        accountmanagement_path = os.path.join(INV_PATH, inv_id, "accountmanagement.json")
+        if os.path.exists(accountmanagement_path):
+            try:
+                with open(accountmanagement_path, 'r', encoding='utf-8') as f:
+                    am_data = json.load(f)
+                
+                # Check if fetch_ohlc_data_for_investor is enabled
+                settings = am_data.get("settings", {})
+                fetch_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
+                
+                if not fetch_enabled:
+                    print(f"  ⏭️  Investor {inv_id} | SKIPPED - fetch_ohlc_data_for_investor is disabled in settings")
+                    result['errors'].append("fetch_ohlc_data_for_investor is disabled")
+                    return result
+                else:
+                    print(f"  ✅ Investor {inv_id} | fetch_ohlc_data_for_investor is enabled, proceeding...")
+                    
+            except Exception as e:
+                print(f"  ⚠️  Investor {inv_id} | Could not read settings from accountmanagement.json: {e}")
+                # Continue processing if we can't read settings? Or skip? Let's skip to be safe
+                result['errors'].append(f"Failed to read accountmanagement.json: {e}")
+                return result
+        else:
+            print(f"  ⚠️  Investor {inv_id} | accountmanagement.json not found, cannot check fetch_ohlc_data_for_investor setting")
+            result['errors'].append("accountmanagement.json not found")
+            return result
+        
+        # Step 4: Get target folder from INVESTED_WITH
         target_folder = investor_cfg.get("TARGET_FOLDER")
         if not target_folder:
             print(f"    Investor {inv_id} | SKIPPED - No TARGET_FOLDER extracted from INVESTED_WITH")
             result['errors'].append("No TARGET_FOLDER found")
             return result
         
-        # Step 4: Load bars and timeframes from accountmanagement.json
+        # Step 5: Load bars and timeframes from accountmanagement.json
         bars, timeframes = load_accountmanagement(inv_id)
         
         if bars is None or timeframes is None:
@@ -3397,7 +3432,7 @@ def fetch_ohlc_data_for_investor(inv_id):
             result['errors'].append("Missing bars or timeframe configuration")
             return result
         
-        # Step 5: Load symbols from accountmanagement.json
+        # Step 6: Load symbols from accountmanagement.json
         symbol_list = load_investor_symbols(inv_id)
         
         if not symbol_list:
@@ -3407,21 +3442,21 @@ def fetch_ohlc_data_for_investor(inv_id):
         
         result['total_symbols'] = len(symbol_list)
         
-        # Step 6: Build dynamic timeframe map for this investor
+        # Step 7: Build dynamic timeframe map for this investor
         investor_timeframe_map = {}
         for tf in timeframes:
             if tf in TIMEFRAME_MAP:
                 investor_timeframe_map[tf] = TIMEFRAME_MAP[tf]
         
-        # Step 7: Create base output directory
+        # Step 8: Create base output directory
         base_output_dir = os.path.join(INV_PATH, inv_id, target_folder)
         os.makedirs(base_output_dir, exist_ok=True)
         result['output_directory'] = base_output_dir
         
-        # Step 8: MT5 is already initialized and logged in by process_single_investor
+        # Step 9: MT5 is already initialized and logged in by process_single_investor
         print(f"  ✅ Using existing MT5 connection (initialized by process_single_investor)")
 
-        # Step 9: Validate symbols against MT5 availability (CASE-INSENSITIVE FIX)
+        # Step 10: Validate symbols against MT5 availability (CASE-INSENSITIVE FIX)
         mt5_symbols, _ = get_symbols_from_mt5()
         mt5_symbols_lower_map = {s.lower(): s for s in mt5_symbols}  # Create lookup map
 
@@ -3451,7 +3486,7 @@ def fetch_ohlc_data_for_investor(inv_id):
             result['errors'].append("No valid symbols found on MT5")
             return result
 
-        # Step 10: Process the symbols
+        # Step 11: Process the symbols
         processed_count = process_account_worker(
             inv_id, 
             valid_symbols,  # Now contains exact broker symbols like "Volatility 75 Index"
@@ -3472,7 +3507,7 @@ def fetch_ohlc_data_for_investor(inv_id):
         traceback.print_exc()
         result['errors'].append(str(e))
         return result
-
+    
 def delete_unauthorized_symbol_files(inv_id):
     """
     Delete files for symbols not listed in the investor's accountmanagement.json.
@@ -3826,6 +3861,16 @@ def directional_bias(inv_id=None):
             with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             
+            # FIRST CHECK: Verify fetch_ohlc_data_for_investor is enabled
+            settings = config.get("settings", {})
+            fetch_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
+            
+            if not fetch_enabled:
+                print(f" [{investor_id}] ⏭️ SKIPPED - fetch_ohlc_data_for_investor is disabled in settings")
+                return None, None, None, None, None
+            else:
+                print(f" [{investor_id}] ✅ fetch_ohlc_data_for_investor is enabled, proceeding...")
+            
             # Get symbols dictionary
             symbols_dict = config.get("symbols_dictionary", {})
             if not symbols_dict:
@@ -3889,12 +3934,14 @@ def directional_bias(inv_id=None):
                 except Exception as e:
                     print(f" [{investor_id}] Error reading verified investors: {e}")
             
-            if not target_folder:
-                print(f" [{investor_id}] No TARGET_FOLDER found, using 'prices'")
-                target_folder = "prices"
-                strategy_name = "prices"
+            # CRITICAL CHECK: If strategy name/folder is missing, skip immediately
+            if not target_folder or not strategy_name:
+                print(f" [{investor_id}] ❌ SKIPPED - No strategy name/folder found from INVESTED_WITH")
+                print(f" [{investor_id}]    Expected format: 'broker_strategyname' in INVESTED_WITH field")
+                return None, None, None, None, None
             
             print(f" [{investor_id}] 📁 Strategy name: {strategy_name}")
+            print(f" [{investor_id}] 📁 Target folder: {target_folder}")
             
             return symbols_dict, valid_timeframes, target_folder, risk_reward, strategy_name
             
@@ -4335,8 +4382,10 @@ def directional_bias(inv_id=None):
         # Load investor configuration
         symbols_dict, timeframes, target_folder, risk_reward, strategy_name = load_investor_config(inv_id)
         
-        if not symbols_dict or not timeframes:
-            print(f" [{inv_id}]  Failed to load configuration")
+        # Check if config loading failed (returns None values)
+        if not symbols_dict or not timeframes or not target_folder or not strategy_name:
+            print(f" [{inv_id}] SKIPPED - Missing required configuration")
+            print(f" [{inv_id}]    Either fetch_ohlc_data_for_investor is disabled, or strategy name/folder is missing")
             return stats
         
         print(f"\n  ⏰ Timeframes: {timeframes}")
@@ -5332,718 +5381,6 @@ def additional_candles_for_orders_limitation(inv_id=None):
     
     return stats
 
-def create_position_hedge_old(inv_id=None):
-    """
-    Creates hedge orders for existing running positions by analyzing MT5 positions AND tradeshistory.json.
-    
-    Process:
-    1. Gets ALL running positions directly from MT5 terminal
-    2. Checks MT5 history for any closed positions that were previously running
-    3. REMOVES ORPHANED HEDGES: If hedge's parent is NOT in running positions AND NOT in pending orders
-       -> Parent has been closed -> Remove hedge using same logic as close_unauthorized_orders
-    4. If closed position found in profit -> removes associated hedge from limit_orders.json
-    5. For each remaining MT5 position, creates hedge order using parent's exit price as entry
-    6. Updates trade history with status tracking
-    7. Saves hedge orders to limit_orders.json
-    """
-    
-    print("\n" + "="*80)
-    print("🔒 CREATING HEDGE ORDERS FOR RUNNING POSITIONS")
-    print("="*80)
-    
-    # Ensure MT5 is initialized
-    if not mt5.terminal_info():
-        print("  Initializing MT5 connection...")
-        if not mt5.initialize():
-            print("   Failed to initialize MT5")
-            return False
-    
-    investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
-    hedge_stats = {
-        'investors_processed': 0,
-        'positions_analyzed': 0,
-        'hedges_created': 0,
-        'hedges_removed': 0,
-        'orphaned_hedges_closed': 0,
-        'orphaned_hedges_cancelled': 0,
-        'positions_closed_profit': 0,
-        'positions_closed_loss': 0,
-        'errors': 0
-    }
-    
-    # --- HELPER: Dynamic broker volume extraction ---
-    def get_broker_volume_field(trade_record):
-        """
-        Find ANY *_volume field in a trade record and return (field_name, value).
-        Returns (None, None) if no volume field found.
-        """
-        for key, value in trade_record.items():
-            if key.endswith('_volume'):
-                try:
-                    return key, float(value)
-                except (ValueError, TypeError):
-                    continue
-        return None, None
-    
-    for user_brokerid in investor_ids:
-        print(f"\n{'='*60}")
-        print(f"📋 INVESTOR: {user_brokerid}")
-        print(f"{'='*60}")
-        
-        investor_root = Path(INV_PATH) / user_brokerid
-        
-        if not investor_root.exists():
-            print(f"   Investor root not found: {investor_root}")
-            continue
-        
-        # Step 1: Get strategy name using GLOBAL FETCHED_INVESTORS (same as directional_bias)
-        acc_mgmt_path = investor_root / "accountmanagement.json"
-        strategy_name = "prices"
-        target_folder = "prices"
-        
-        if acc_mgmt_path.exists():
-            try:
-                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                # Use the global FETCHED_INVESTORS variable (same as directional_bias)
-                if FETCHED_INVESTORS:
-                    try:
-                        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                            investor_users = json.load(f)
-                        
-                        investor_cfg = investor_users.get(user_brokerid)
-                        if investor_cfg:
-                            invested_with = investor_cfg.get("INVESTED_WITH", "")
-                            if "_" in invested_with:
-                                target_folder = invested_with.split("_", 1)[1]
-                                strategy_name = target_folder
-                            else:
-                                target_folder = invested_with
-                                strategy_name = invested_with
-                    except Exception as e:
-                        print(f"  Error reading verified investors: {e}")
-                
-                # Also get risk_reward from config if needed
-                selected_risk_reward = config.get("selected_risk_reward", [3])
-                if isinstance(selected_risk_reward, list) and len(selected_risk_reward) > 0:
-                    risk_reward_default = selected_risk_reward[0]
-                else:
-                    risk_reward_default = 3
-                    
-            except Exception as e:
-                print(f"  Error reading config: {e}")
-                risk_reward_default = 3
-        else:
-            risk_reward_default = 3
-        
-        print(f"  📁 Strategy name: {strategy_name}")
-        print(f"  📁 Target folder: {target_folder}")
-        
-        # Connect to MT5 account
-        broker_cfg = usersdictionary.get(user_brokerid)
-        if not broker_cfg:
-            print(f"  No broker configuration found for {user_brokerid}")
-            continue
-        
-        login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
-        
-        # Check if already connected to correct account
-        acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"  Not logged into correct account. Expected: {login_id}")
-            if not mt5.initialize(path=mt5_path, login=login_id, 
-                                   password=broker_cfg["PASSWORD"], 
-                                   server=broker_cfg["SERVER"]):
-                print(f"   Failed to initialize MT5 for {user_brokerid}")
-                continue
-        else:
-            print(f"  ✅ Connected to account: {acc.login}")
-        
-        # Step 2: Load tradeshistory.json
-        history_path = investor_root / "tradeshistory.json"
-        trade_details_by_ticket = {}
-        trade_history_list = []
-        
-        if history_path.exists():
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    trade_history_list = json.load(f)
-                
-                for trade in trade_history_list:
-                    ticket = trade.get('ticket')
-                    if ticket:
-                        trade_details_by_ticket[ticket] = trade
-                
-                print(f"  📋 Loaded {len(trade_details_by_ticket)} trade records from tradeshistory.json")
-            except Exception as e:
-                print(f"  Error reading tradeshistory.json: {e}")
-        
-        # Step 3: Get MT5 running positions AND pending orders
-        print(f"  🔍 Fetching running positions from MT5 terminal...")
-        mt5_positions = mt5.positions_get()
-        mt5_pending_orders = mt5.orders_get()
-        
-        if mt5_positions is None:
-            print(f"  No MT5 positions found or error retrieving positions")
-        
-        # Filter by magic numbers
-        investor_magics = set()
-        for trade in trade_history_list:
-            magic = trade.get('magic')
-            if magic:
-                investor_magics.add(int(magic))
-        
-        if investor_magics:
-            running_positions = [p for p in mt5_positions if p.magic in investor_magics] if mt5_positions else []
-            pending_orders = [o for o in mt5_pending_orders if o.magic in investor_magics] if mt5_pending_orders else []
-            print(f"  📊 Found {len(running_positions)} running positions in MT5")
-            print(f"  📊 Found {len(pending_orders)} pending orders in MT5")
-        else:
-            running_positions = list(mt5_positions) if mt5_positions else []
-            pending_orders = list(mt5_pending_orders) if mt5_pending_orders else []
-            print(f"  📊 Found {len(running_positions)} running positions in MT5")
-            print(f"  📊 Found {len(pending_orders)} pending orders in MT5")
-        
-        # Create sets of ALL active tickets (running + pending)
-        running_tickets = {p.ticket for p in running_positions} if running_positions else set()
-        pending_tickets = {o.ticket for o in pending_orders} if pending_orders else set()
-        all_active_tickets = running_tickets | pending_tickets
-        
-        print(f"  🎫 All active tickets (running + pending): {len(all_active_tickets)}")
-        
-        # ============================================================
-        # NEW STEP: CLEANUP ORPHANED HEDGE ORDERS
-        # Check if hedge's parent ticket is NOT in active positions/pending orders
-        # If parent is gone -> close/cancel the hedge using close_unauthorized_orders logic
-        # ============================================================
-        print(f"\n  🧹 CHECKING FOR ORPHANED HEDGE ORDERS...")
-        
-        orphaned_hedges_removed = 0
-        
-        # Check running positions that are hedges
-        if running_positions:
-            for position in running_positions:
-                # Check if this position is a hedge order
-                # Look for it in trade history
-                pos_ticket = position.ticket
-                trade_record = trade_details_by_ticket.get(pos_ticket, {})
-                
-                if trade_record.get('is_hedge_order'):
-                    parent_ticket = trade_record.get('parent_ticket')
-                    
-                    if parent_ticket and parent_ticket not in all_active_tickets:
-                        # Parent is no longer active - close this hedge position
-                        print(f"\n    🚨 ORPHANED HEDGE FOUND: Position #{pos_ticket}")
-                        print(f"       • Symbol: {position.symbol}")
-                        print(f"       • Type: {'BUY' if position.type == mt5.POSITION_TYPE_BUY else 'SELL'}")
-                        print(f"       • Parent ticket {parent_ticket} is NOT active anymore")
-                        print(f"       → Closing this orphaned hedge...")
-                        
-                        # Get current market price
-                        tick = mt5.symbol_info_tick(position.symbol)
-                        if not tick:
-                            print(f"         Cannot get price for {position.symbol} - cannot close")
-                            hedge_stats['errors'] += 1
-                            continue
-                        
-                        # Determine closing order type
-                        if position.type == mt5.POSITION_TYPE_BUY:
-                            close_type = mt5.ORDER_TYPE_SELL
-                            close_price = tick.bid
-                        else:
-                            close_type = mt5.ORDER_TYPE_BUY
-                            close_price = tick.ask
-                        
-                        close_request = {
-                            "action": mt5.TRADE_ACTION_DEAL,
-                            "symbol": position.symbol,
-                            "volume": position.volume,
-                            "type": close_type,
-                            "position": pos_ticket,
-                            "price": close_price,
-                            "deviation": 20,
-                            "magic": position.magic if hasattr(position, 'magic') else 0,
-                            "comment": "ORPHANED HEDGE - Parent closed",
-                            "type_time": mt5.ORDER_TIME_GTC,
-                            "type_filling": mt5.ORDER_FILLING_IOC,
-                        }
-                        
-                        try:
-                            result = mt5.order_send(close_request)
-                            
-                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                print(f"         ✅ SUCCESS: Orphaned hedge #{pos_ticket} CLOSED")
-                                orphaned_hedges_removed += 1
-                                hedge_stats['orphaned_hedges_closed'] += 1
-                                
-                                # Update trade history
-                                trade_record['status'] = 'closed'
-                                trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                trade_record['closed_reason'] = 'orphaned_hedge_parent_closed'
-                            else:
-                                error_msg = result.comment if result else "No response"
-                                error_code = result.retcode if result else "Unknown"
-                                print(f"          FAILED: {error_msg} (code: {error_code})")
-                                
-                                # Try alternative closure
-                                print(f"         🔄 Attempting alternative closure...")
-                                alt_close_request = {
-                                    "action": mt5.TRADE_ACTION_DEAL,
-                                    "symbol": position.symbol,
-                                    "volume": position.volume,
-                                    "type": close_type,
-                                    "position": pos_ticket,
-                                    "price": close_price,
-                                    "deviation": 50,
-                                    "comment": "ORPHANED HEDGE - Retry",
-                                    "type_filling": mt5.ORDER_FILLING_RETURN,
-                                }
-                                
-                                alt_result = mt5.order_send(alt_close_request)
-                                if alt_result and alt_result.retcode == mt5.TRADE_RETCODE_DONE:
-                                    print(f"         ✅ SUCCESS (alt): Orphaned hedge #{pos_ticket} CLOSED")
-                                    orphaned_hedges_removed += 1
-                                    hedge_stats['orphaned_hedges_closed'] += 1
-                                    
-                                    trade_record['status'] = 'closed'
-                                    trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                    trade_record['closed_reason'] = 'orphaned_hedge_parent_closed'
-                                else:
-                                    alt_error = alt_result.comment if alt_result else "No response"
-                                    print(f"          Alternative also FAILED: {alt_error}")
-                                    hedge_stats['errors'] += 1
-                        except Exception as e:
-                            print(f"          EXCEPTION: {e}")
-                            hedge_stats['errors'] += 1
-        
-        # Check pending orders that are hedges
-        if pending_orders:
-            for order in pending_orders:
-                order_ticket = order.ticket
-                trade_record = trade_details_by_ticket.get(order_ticket, {})
-                
-                if trade_record.get('is_hedge_order'):
-                    parent_ticket = trade_record.get('parent_ticket')
-                    
-                    if parent_ticket and parent_ticket not in all_active_tickets:
-                        # Parent is no longer active - cancel this hedge pending order
-                        print(f"\n    🚨 ORPHANED HEDGE PENDING ORDER: #{order_ticket}")
-                        print(f"       • Symbol: {order.symbol}")
-                        print(f"       • Type: {order.type}")
-                        print(f"       • Parent ticket {parent_ticket} is NOT active anymore")
-                        print(f"       → Cancelling this orphaned hedge order...")
-                        
-                        cancel_request = {
-                            "action": mt5.TRADE_ACTION_REMOVE,
-                            "order": order_ticket
-                        }
-                        
-                        try:
-                            result = mt5.order_send(cancel_request)
-                            
-                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                print(f"         ✅ SUCCESS: Orphaned hedge order #{order_ticket} CANCELLED")
-                                orphaned_hedges_removed += 1
-                                hedge_stats['orphaned_hedges_cancelled'] += 1
-                                
-                                # Update trade history
-                                trade_record['status'] = 'cancelled'
-                                trade_record['cancelled_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                trade_record['cancelled_reason'] = 'orphaned_hedge_parent_closed'
-                            else:
-                                error_msg = result.comment if result else "No response"
-                                error_code = result.retcode if result else "Unknown"
-                                print(f"          FAILED: {error_msg} (code: {error_code})")
-                                hedge_stats['errors'] += 1
-                        except Exception as e:
-                            print(f"          EXCEPTION: {e}")
-                            hedge_stats['errors'] += 1
-        
-        if orphaned_hedges_removed > 0:
-            print(f"\n  ✅ Removed {orphaned_hedges_removed} orphaned hedge(s) from MT5")
-        
-        # Step 4: CRITICAL - Check for closed positions in MT5 history
-        print(f"\n  🔍 Checking MT5 history for closed positions...")
-        
-        # Get history deals from last 7 days
-        from_date = datetime.now() - timedelta(days=7)
-        to_date = datetime.now()
-        
-        # Get all closed positions from MT5 history
-        history_deals = mt5.history_deals_get(from_date, to_date)
-        
-        # Track which positions we've processed for hedging
-        positions_to_hedge = []
-        positions_closed_profit_tickets = []
-        positions_closed_loss_tickets = []
-        
-        if history_deals:
-            # Group deals by position_id to find closed positions
-            closed_positions = {}
-            for deal in history_deals:
-                if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]:
-                    pos_id = deal.position_id
-                    if pos_id not in closed_positions:
-                        closed_positions[pos_id] = []
-                    closed_positions[pos_id].append(deal)
-            
-            # Check each closed position against our trade history
-            for pos_id, deals in closed_positions.items():
-                # Find the closing deal (profit/loss)
-                closing_deal = None
-                total_profit = 0
-                
-                for deal in deals:
-                    if deal.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL]:
-                        total_profit += deal.profit
-                        # The last deal in the sequence is usually the closing one
-                        closing_deal = deal
-                
-                # Check if this position exists in our trade history
-                if pos_id in trade_details_by_ticket:
-                    trade_record = trade_details_by_ticket[pos_id]
-                    current_status = trade_record.get('status')
-                    
-                    # If position is not running in MT5 but was previously running
-                    if pos_id not in running_tickets and current_status == 'running_position':
-                        is_profitable = total_profit > 0
-                        
-                        print(f"\n    📍 Closed position found: Ticket {pos_id}")
-                        print(f"       • Profit/Loss: ${total_profit:.2f}")
-                        print(f"       • Profitable: {is_profitable}")
-                        
-                        # Update trade history
-                        trade_record['status'] = 'closed'
-                        trade_record['closed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        trade_record['closed_profit'] = total_profit
-                        trade_record['closed_profitable'] = is_profitable
-                        
-                        if is_profitable:
-                            positions_closed_profit_tickets.append(pos_id)
-                            print(f"       ✅ Closed in PROFIT - will remove hedge")
-                        else:
-                            positions_closed_loss_tickets.append(pos_id)
-                            print(f"        Closed in LOSS - keeping hedge for protection")
-            
-            # Save updated trade history
-            if positions_closed_profit_tickets or positions_closed_loss_tickets:
-                try:
-                    with open(history_path, 'w', encoding='utf-8') as f:
-                        json.dump(trade_history_list, f, indent=4)
-                    print(f"\n  💾 Updated trade history with closed position statuses")
-                except Exception as e:
-                    print(f"   Error saving trade history: {e}")
-        
-        # Step 5: Remove hedges for positions that closed in profit
-        if positions_closed_profit_tickets:
-            print(f"\n  🗑️ REMOVING HEDGES FOR PROFITABLE CLOSED POSITIONS...")
-            
-            strategy_base_dir = investor_root / strategy_name
-            signals_file = strategy_base_dir / "pending_orders" / "limit_orders.json"
-            
-            if signals_file.exists():
-                try:
-                    with open(signals_file, 'r', encoding='utf-8') as f:
-                        limit_orders = json.load(f)
-                    
-                    original_count = len(limit_orders)
-                    orders_to_keep = []
-                    removed_count = 0
-                    
-                    for order in limit_orders:
-                        # Check if this order is a hedge for a closed profitable position
-                        parent_ticket = order.get('parent_ticket')
-                        is_hedge = order.get('is_hedge_order', False)
-                        
-                        if is_hedge and parent_ticket in positions_closed_profit_tickets:
-                            # Remove this hedge order
-                            print(f"    🗑️ Removing hedge for ticket {parent_ticket}: {order.get('order_type', 'unknown')} {order.get('symbol', 'unknown')} @ {order.get('entry', 'unknown')}")
-                            removed_count += 1
-                            hedge_stats['hedges_removed'] += 1
-                            continue
-                        else:
-                            # Keep this order
-                            orders_to_keep.append(order)
-                    
-                    if removed_count > 0:
-                        # Save the filtered orders
-                        with open(signals_file, 'w', encoding='utf-8') as f:
-                            json.dump(orders_to_keep, f, indent=4)
-                        
-                        print(f"\n  ✅ Removed {removed_count} hedge(s) from limit_orders.json")
-                        print(f"  📊 Remaining orders: {len(orders_to_keep)}")
-                        hedge_stats['positions_closed_profit'] += len(positions_closed_profit_tickets)
-                    else:
-                        print(f"  ℹ️ No hedge orders found for closed profitable positions")
-                        
-                except Exception as e:
-                    print(f"   Error processing limit_orders.json: {e}")
-                    hedge_stats['errors'] += 1
-        
-        # Update statistics for loss positions
-        if positions_closed_loss_tickets:
-            hedge_stats['positions_closed_loss'] += len(positions_closed_loss_tickets)
-            print(f"\n  ℹ️ {len(positions_closed_loss_tickets)} position(s) closed in loss - hedges kept as protection")
-        
-        # Step 6: Only process positions that are still running AND not yet hedged
-        if not running_positions:
-            print(f"\n  ℹ️ No running positions found for {user_brokerid}")
-            continue
-        
-        hedge_stats['investors_processed'] += 1
-        hedge_stats['positions_analyzed'] += len(running_positions)
-        
-        # Step 7: Load existing signals to check for existing hedges
-        strategy_base_dir = investor_root / strategy_name
-        pending_orders_dir = strategy_base_dir / "pending_orders"
-        signals_file = pending_orders_dir / "limit_orders.json"
-        pending_orders_dir.mkdir(parents=True, exist_ok=True)
-        
-        existing_signals = []
-        if signals_file.exists():
-            try:
-                with open(signals_file, 'r', encoding='utf-8') as f:
-                    existing_signals = json.load(f)
-                print(f"\n  📋 Loaded {len(existing_signals)} existing signals from limit_orders.json")
-            except Exception as e:
-                print(f"  Error reading existing signals: {e}")
-        
-        # Step 8: Create hedges for remaining running positions
-        hedges_created_for_investor = 0
-        
-        for position in running_positions:
-            # Skip if this position itself is a hedge order
-            pos_ticket = position.ticket
-            pos_trade = trade_details_by_ticket.get(pos_ticket, {})
-            if pos_trade.get('is_hedge_order'):
-                print(f"\n  ⏭️ Position #{pos_ticket} is a hedge order - skipping")
-                continue
-            
-            print(f"\n  🔍 Analyzing MT5 position: Ticket {position.ticket}")
-            print(f"     • Symbol: {position.symbol}")
-            print(f"     • Type: {'BUY' if position.type == mt5.ORDER_TYPE_BUY else 'SELL'}")
-            print(f"     • Entry: {position.price_open}")
-            print(f"     • Current: {position.price_current}")
-            print(f"     • Volume: {position.volume}")
-            print(f"     • Profit: ${position.profit:.2f}")
-            
-            # Check if hedge already exists for this position
-            hedge_exists = False
-            for signal in existing_signals:
-                if signal.get('parent_ticket') == position.ticket and signal.get('is_hedge_order'):
-                    hedge_exists = True
-                    print(f"     ⏭️ Hedge already exists for this position")
-                    hedge_stats['hedges_skipped'] = hedge_stats.get('hedges_skipped', 0) + 1
-                    break
-            
-            if hedge_exists:
-                continue
-            
-            # Get trade details from history
-            trade_detail = trade_details_by_ticket.get(position.ticket, {})
-            
-            if trade_detail:
-                print(f"     ✅ Found matching trade record")
-                original_order_type = trade_detail.get('placed_order_type', '')
-                exit_price = trade_detail.get('exit', 0)  # This is the stop loss
-                candle_1_high = trade_detail.get('candle_1_high')
-                candle_1_low = trade_detail.get('candle_1_low')
-                candle_1_type = trade_detail.get('candle_1_type', '').lower()
-                timeframe = trade_detail.get('timeframe', '')
-                risk_reward = trade_detail.get('risk_reward', risk_reward_default)
-                magic = trade_detail.get('magic', position.magic)
-                
-                # ========== DYNAMIC BROKER VOLUME EXTRACTION ==========
-                # Find the broker-specific volume field from the parent trade
-                volume_field_name, volume = get_broker_volume_field(trade_detail)
-                
-                if volume_field_name:
-                    print(f"     📊 Found broker volume field '{volume_field_name}': {volume}")
-                else:
-                    # Fallback to standardized 'volume' field or position volume
-                    volume = trade_detail.get('volume', trade_detail.get('placed_volume', position.volume))
-                    print(f"     No *_volume field found, using fallback volume: {volume}")
-                # ========== END DYNAMIC VOLUME EXTRACTION ==========
-            else:
-                print(f"     No trade record - using MT5 data")
-                original_order_type = 'buy' if position.type == mt5.ORDER_TYPE_BUY else 'sell'
-                exit_price = 0
-                candle_1_high = None
-                candle_1_low = None
-                candle_1_type = ''
-                timeframe = ''
-                risk_reward = risk_reward_default
-                volume = position.volume
-                volume_field_name = None  # No broker field to preserve
-                magic = position.magic
-            
-            # Create hedge (opposite direction)
-            is_position_buy = (position.type == mt5.ORDER_TYPE_BUY)
-            
-            # Flip order type
-            def flip_order_type(original_type, is_buy_position):
-                if original_type:
-                    original_lower = original_type.lower()
-                else:
-                    original_lower = 'buy' if is_buy_position else 'sell'
-                
-                if original_lower == 'instant_buy':
-                    return 'instant_sell'
-                if original_lower == 'instant_sell':
-                    return 'instant_buy'
-                
-                if '_' in original_lower:
-                    parts = original_lower.split('_', 1)
-                    direction = parts[0]
-                    suffix = parts[1]
-                    new_direction = 'sell' if direction == 'buy' else 'buy'
-                    return f"{new_direction}_{suffix}"
-                else:
-                    if original_lower == 'buy':
-                        return 'sell'
-                    elif original_lower == 'sell':
-                        return 'buy'
-                    return original_lower
-            
-            opposite_order_type = flip_order_type(original_order_type, is_position_buy)
-            is_hedge_buy = 'buy' in opposite_order_type.lower()
-            
-            # Hedge entry = parent's exit (stop loss)
-            if exit_price and exit_price > 0:
-                hedge_entry = exit_price
-                print(f"     🎯 Hedge entry (parent SL): {hedge_entry}")
-            else:
-                tick = mt5.symbol_info_tick(position.symbol)
-                hedge_entry = tick.ask if is_hedge_buy else tick.bid if tick else position.price_current
-                print(f"     No SL found - using current price: {hedge_entry}")
-            
-            # Determine digits
-            digits = 5 if hedge_entry < 1 else len(f"{hedge_entry:.10f}".rstrip('0').split('.')[1]) if '.' in f"{hedge_entry:.10f}" else 2
-            
-            # Hedge stop loss based on candle
-            if candle_1_type == "bearish" and candle_1_high:
-                hedge_exit = candle_1_high
-            elif candle_1_type == "bullish" and candle_1_low:
-                hedge_exit = candle_1_low
-            else:
-                hedge_exit = hedge_entry - (hedge_entry * 0.005) if is_hedge_buy else hedge_entry + (hedge_entry * 0.005)
-            
-            hedge_entry = round(hedge_entry, digits)
-            hedge_exit = round(hedge_exit, digits)
-            
-            # Take profit based on risk/reward
-            risk_amount = abs(hedge_entry - hedge_exit)
-            target_distance = risk_amount * risk_reward
-            hedge_target = round(hedge_entry + target_distance if is_hedge_buy else hedge_entry - target_distance, digits)
-            
-            # Validate volume against symbol limits (NO ROUNDING)
-            symbol_info = mt5.symbol_info(position.symbol)
-            if symbol_info:
-                volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
-            
-            # Create hedge order
-            hedge_id = f"hedge_{position.ticket}_{position.symbol}_{int(datetime.now().timestamp())}"
-            
-            hedge_order = {
-                "symbol": position.symbol,
-                "timeframe": timeframe,
-                "risk_reward": risk_reward,
-                "order_type": opposite_order_type,
-                "entry": hedge_entry,
-                "exit": hedge_exit,
-                "target": hedge_target,
-                "is_hedge_order": True,
-                "hedge_type": "position_hedge",
-                "candle_1_high": round(candle_1_high, digits) if candle_1_high else None,
-                "candle_1_low": round(candle_1_low, digits) if candle_1_low else None,
-                "candle_1_type": candle_1_type,
-                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "strategy": strategy_name,
-                "magic": magic,
-                "volume": volume,
-                "hedge_id": hedge_id,
-                "parent_ticket": position.ticket,
-                "parent_order_type": original_order_type,
-                "parent_entry": position.price_open,
-                "parent_exit": exit_price,
-                "parent_profit": position.profit,
-                "status": "Calculated",
-                "created_by": "create_position_hedge_function"
-            }
-            
-            # ========== PRESERVE BROKER VOLUME FIELD ==========
-            # If parent had a broker-specific volume field (e.g., deriv_volume, bybit_volume),
-            # add the same field to the hedge order
-            if volume_field_name:
-                hedge_order[volume_field_name] = volume
-                print(f"     📊 Preserved broker volume field: {volume_field_name} = {volume}")
-            # ========== END BROKER VOLUME PRESERVATION ==========
-            
-            # Remove None values
-            hedge_order = {k: v for k, v in hedge_order.items() if v is not None}
-            
-            # Add to signals
-            existing_signals.append(hedge_order)
-            hedges_created_for_investor += 1
-            hedge_stats['hedges_created'] += 1
-            
-            print(f"\n     ✅ HEDGE CREATED: {opposite_order_type.upper()} @ {hedge_entry}")
-            print(f"        • Stop Loss: {hedge_exit} | Target: {hedge_target}")
-            print(f"        • Hedge ID: {hedge_id}")
-            print(f"        • Volume: {volume}" + (f" (via {volume_field_name})" if volume_field_name else ""))
-        
-        # Step 9: Save updated signals
-        if hedges_created_for_investor > 0 or hedge_stats['hedges_removed'] > 0 or orphaned_hedges_removed > 0:
-            try:
-                # Save trade history if we made changes
-                if orphaned_hedges_removed > 0 or positions_closed_profit_tickets or positions_closed_loss_tickets:
-                    with open(history_path, 'w', encoding='utf-8') as f:
-                        json.dump(trade_history_list, f, indent=4)
-                
-                # Save limit orders
-                if hedges_created_for_investor > 0 or hedge_stats['hedges_removed'] > 0:
-                    with open(signals_file, 'w', encoding='utf-8') as f:
-                        json.dump(existing_signals, f, indent=4)
-                    
-                    hedge_count = sum(1 for s in existing_signals if s.get('is_hedge_order', False))
-                    print(f"\n  💾 Saved {len(existing_signals)} signals to {signals_file}")
-                    print(f"     • Hedges in file: {hedge_count}")
-                    print(f"     • New hedges added: {hedges_created_for_investor}")
-                    print(f"     • Hedges removed: {hedge_stats['hedges_removed']}")
-                
-            except Exception as e:
-                print(f"   Error saving signals: {e}")
-                hedge_stats['errors'] += 1
-        
-        # Investor summary
-        print(f"\n  📊 SUMMARY for {user_brokerid}:")
-        print(f"     • Running positions: {len(running_positions)}")
-        print(f"     • Pending orders: {len(pending_orders)}")
-        print(f"     • Closed in profit: {len(positions_closed_profit_tickets)}")
-        print(f"     • Closed in loss: {len(positions_closed_loss_tickets)}")
-        print(f"     • Orphaned hedges removed: {orphaned_hedges_removed}")
-        print(f"     • Hedges created: {hedges_created_for_investor}")
-        print(f"     • Hedges removed from JSON: {hedge_stats['hedges_removed']}")
-    
-    # Global summary
-    print("\n" + "="*80)
-    print("📊 GLOBAL HEDGE SUMMARY")
-    print("="*80)
-    print(f"  • Investors processed: {hedge_stats['investors_processed']}")
-    print(f"  • Positions analyzed: {hedge_stats['positions_analyzed']}")
-    print(f"  • Hedges created: {hedge_stats['hedges_created']}")
-    print(f"  • Hedges removed from JSON: {hedge_stats['hedges_removed']}")
-    print(f"  • Orphaned hedges closed: {hedge_stats['orphaned_hedges_closed']}")
-    print(f"  • Orphaned hedges cancelled: {hedge_stats['orphaned_hedges_cancelled']}")
-    print(f"  • Positions closed profit: {hedge_stats['positions_closed_profit']}")
-    print(f"  • Positions closed loss: {hedge_stats['positions_closed_loss']}")
-    print(f"  • Errors: {hedge_stats['errors']}")
-    print("="*80)
-    
-    return hedge_stats['hedges_created'] > 0 or hedge_stats['hedges_removed'] > 0 or hedge_stats['orphaned_hedges_closed'] > 0 or hedge_stats['orphaned_hedges_cancelled'] > 0
-
 def create_position_hedge(inv_id=None):
     """
     Creates hedge orders for existing running positions by analyzing MT5 positions AND tradeshistory.json.
@@ -6180,7 +5517,7 @@ def create_position_hedge(inv_id=None):
             continue
         
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         # Check if already connected to correct account
         acc = mt5.account_info()
@@ -6777,7 +6114,3100 @@ def create_position_hedge(inv_id=None):
     print("="*80)
     
     return hedge_stats['hedges_created'] > 0 or hedge_stats['hedges_removed'] > 0 or hedge_stats['orphaned_hedges_closed'] > 0 or hedge_stats['orphaned_hedges_cancelled'] > 0
-#-------   ###   -------#
+#-------   ###   --------#
+
+
+# GRID STRATEGY #
+def symbols_dynamic_grid_prices(inv_id=None):
+    """
+    DYNAMIC grid price collection - Single function to rule them all!
+    
+    Reads from accountmanagement.json:
+    {
+        "grid_prices_setup": {
+            "grid_levels": 6,              # Number of levels per side (bid/ask)
+            "grid_multiplier": 25,         # Pattern increment (25, 50, 250, etc.)
+            "bid_prices_order_type": "buy_stop",
+            "ask_prices_order_type": "sell_stop"
+        }
+    }
+    
+    Grid patterns are automatically generated based on multiplier:
+    - Multiplier 25: Patterns end in 000, 025, 050, 075, 100, 125
+    - Multiplier 50: Patterns end in 000, 050, 100, 150, 200, 250...
+    - Multiplier 250: Patterns end in 000, 250, 500, 750, 1000...
+    
+    Args:
+        inv_id: Optional specific investor ID to process
+        
+    Returns:
+        dict: Statistics about the processing
+    """
+    print(f"\n{'='*10} 💰  DYNAMIC SYMBOL PRICE COLLECTION {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
+    
+    # Statistics for this run
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "total_symbols": 0,
+        "successful_symbols": 0,
+        "failed_symbols": 0,
+        "total_categories": 0,
+        "symbols_mapped": 0,
+        "symbols_unchanged": 0,
+        "signals_generated": False,
+        "grid_configuration": {}
+    }
+
+    def clean(s): 
+        """Clean symbol string by removing special chars and converting to uppercase"""
+        if s is None:
+            return ""
+        return str(s).replace(" ", "").replace("_", "").replace("/", "").replace(".", "").upper()
+    
+    def get_grid_configuration(config):
+        """
+        Extract dynamic grid configuration from account management.
+        
+        Args:
+            config: Loaded account management configuration
+            
+        Returns:
+            tuple: (grid_levels, grid_multiplier, bid_order_type, ask_order_type, risk_reward_value)
+        """
+        grid_prices_setup = config.get("grid_prices_setup", {})
+        selected_risk_reward = config.get("selected_risk_reward", [2])
+        
+        # REQUIRED: grid_levels and grid_multiplier must be present
+        grid_levels = grid_prices_setup.get("grid_levels")
+        grid_multiplier = grid_prices_setup.get("grid_multiplier")
+        
+        # Validation - if missing, don't process
+        if grid_levels is None:
+            raise ValueError("❌ CRITICAL: 'grid_levels' not defined in grid_prices_setup. Cannot process.")
+        if grid_multiplier is None:
+            raise ValueError("❌ CRITICAL: 'grid_multiplier' not defined in grid_prices_setup. Cannot process.")
+        
+        # Optional with defaults
+        bid_order_type = grid_prices_setup.get("bid_prices_order_type", "buy_stop")
+        ask_order_type = grid_prices_setup.get("ask_prices_order_type", "sell_stop")
+        
+        risk_reward_value = selected_risk_reward[0] if isinstance(selected_risk_reward, list) and selected_risk_reward else 2
+        
+        print(f"  📋 DYNAMIC Grid Configuration:")
+        print(f"    • Grid Levels: {grid_levels} (per side)")
+        print(f"    • Grid Multiplier: {grid_multiplier}")
+        print(f"    • Pattern Unit: {grid_multiplier}")
+        print(f"    • Bid Prices Order Type: {bid_order_type}")
+        print(f"    • Ask Prices Order Type: {ask_order_type}")
+        print(f"    • Selected Risk/Reward: {risk_reward_value}")
+        
+        # Store in stats for return
+        stats["grid_configuration"] = {
+            "levels": grid_levels,
+            "multiplier": grid_multiplier,
+            "bid_order_type": bid_order_type,
+            "ask_order_type": ask_order_type,
+            "risk_reward": risk_reward_value
+        }
+        
+        return grid_levels, grid_multiplier, bid_order_type, ask_order_type, risk_reward_value
+    
+    def get_risk_requirement(config, account_balance):
+        """
+        Get risk requirement based on account balance from account_balance_default_risk_management.
+        
+        Args:
+            config: Loaded account management configuration
+            account_balance: Current account balance
+            
+        Returns:
+            tuple: (target_risk_min, target_risk_max, target_risk_value)
+        """
+        risk_management = config.get("account_balance_default_risk_management", {})
+        
+        if not risk_management:
+            print(f"        ⚠️  No risk management configuration found - using default 10 USD risk")
+            return 10.0, 10.99, 10.0  # Default fallback
+        
+        # Find matching range for account balance
+        target_risk_value = None
+        target_risk_min = None
+        target_risk_max = None
+        
+        for range_str, risk_value in risk_management.items():
+            if "_risk" in range_str:
+                # Parse range like "100-109.99_risk"
+                range_part = range_str.replace("_risk", "")
+                if "-" in range_part:
+                    min_val, max_val = range_part.split("-")
+                    try:
+                        min_balance = float(min_val)
+                        max_balance = float(max_val)
+                        
+                        if min_balance <= account_balance <= max_balance:
+                            target_risk_value = float(risk_value)
+                            target_risk_min = float(risk_value)
+                            target_risk_max = float(risk_value) + 0.99  # Add 99 cents tolerance
+                            break
+                    except ValueError:
+                        continue
+        
+        if target_risk_value is None:
+            print(f"        ⚠️  No matching risk range found for balance {account_balance} - using default")
+            return 10.0, 10.99, 10.0  # Default fallback
+        
+        print(f"        📊 Risk requirement from account management:")
+        print(f"          • Account balance: ${account_balance:.2f}")
+        print(f"          • Target risk: ${target_risk_min:.2f} - ${target_risk_max:.2f}")
+        print(f"          • Base risk value: {target_risk_value}")
+        
+        return target_risk_min, target_risk_max, target_risk_value
+    
+    def fetch_current_prices(symbol, resolution_cache):
+        """
+        Fetch current bid/ask prices for a symbol using external helper for normalization
+        and cache for efficiency.
+        
+        Args:
+            symbol: Raw symbol to fetch prices for
+            resolution_cache: Cache dictionary for symbol resolution
+            
+        Returns:
+            tuple: (success, normalized_symbol, current_bid, current_ask, current_price, tick, symbol_info, error_message)
+        """
+        try:
+            # Check Cache First
+            if symbol in resolution_cache:
+                res = resolution_cache[symbol]
+                normalized_symbol = res['broker_sym']
+                symbol_info = res['info']
+                
+                if symbol_info is None:
+                    return False, None, None, None, None, None, None, f"Symbol '{symbol}' previously failed to resolve"
+            else:
+                normalized_symbol = get_normalized_symbol(symbol)
+                symbol_info = mt5.symbol_info(normalized_symbol)
+                resolution_cache[symbol] = {'broker_sym': normalized_symbol, 'info': symbol_info}
+                
+                if symbol_info:
+                    if normalized_symbol != symbol:
+                        print(f"    └─ ✅ {symbol} -> {normalized_symbol} (Mapped & Cached)")
+                        stats["symbols_mapped"] += 1
+                    else:
+                        print(f"    └─ ✅ {symbol} (Direct match, cached)")
+                        stats["symbols_unchanged"] += 1
+                else:
+                    print(f"    └─  MT5: '{normalized_symbol}' (from '{symbol}') not found in MarketWatch")
+                    return False, None, None, None, None, None, None, f"Symbol '{normalized_symbol}' not found in MarketWatch"
+            
+            if not symbol_info:
+                return False, None, None, None, None, None, None, f"Symbol info not available for {normalized_symbol}"
+            
+            if not mt5.symbol_select(normalized_symbol, True):
+                return False, normalized_symbol, None, None, None, None, None, f"Failed to select symbol: {normalized_symbol}"
+            
+            tick = mt5.symbol_info_tick(normalized_symbol)
+            if not tick:
+                return False, normalized_symbol, None, None, None, None, None, "Tick data not available"
+            
+            current_bid = tick.bid
+            current_ask = tick.ask
+            current_price = (current_bid + current_ask) / 2
+            
+            digits = symbol_info.digits
+            print(f"✅ {normalized_symbol} (Bid: {current_bid:.{digits}f}, Ask: {current_ask:.{digits}f})")
+            
+            return True, normalized_symbol, current_bid, current_ask, current_price, tick, symbol_info, None
+            
+        except Exception as e:
+            return False, None, None, None, None, None, None, str(e)
+    
+    def get_min_volume(symbol_info):
+        """Get the minimum allowed volume for a symbol from the broker."""
+        try:
+            volume_min = symbol_info.volume_min
+            volume_step = symbol_info.volume_step
+            
+            print(f"        📊 Live volume information:")
+            print(f"          • Minimum volume: {volume_min}")
+            print(f"          • Volume step: {volume_step}")
+            print(f"          • Maximum volume: {symbol_info.volume_max}")
+            
+            return volume_min, volume_step
+            
+        except Exception as e:
+            print(f"        ⚠️  Could not get minimum volume: {e}")
+            return 0.01, 0.01
+    
+    def calculate_risk_in_usd(symbol_info, entry_price, exit_price, volume, account_currency):
+        """Calculate the risk amount in USD for a given trade level."""
+        try:
+            risk_distance_points = abs(exit_price - entry_price)
+            tick_size = symbol_info.trade_tick_size
+            tick_value = symbol_info.trade_tick_value
+            risk_in_account_currency = (risk_distance_points / tick_size) * tick_value * volume
+            
+            if account_currency != 'USD':
+                usd_symbol = f"{account_currency}USD"
+                if mt5.symbol_select(usd_symbol, True):
+                    usd_tick = mt5.symbol_info_tick(usd_symbol)
+                    if usd_tick:
+                        conversion_rate = usd_tick.bid or 1.0
+                        risk_in_usd = risk_in_account_currency * conversion_rate
+                    else:
+                        risk_in_usd = risk_in_account_currency
+                else:
+                    usd_symbol = f"USD{account_currency}"
+                    if mt5.symbol_select(usd_symbol, True):
+                        usd_tick = mt5.symbol_info_tick(usd_symbol)
+                        if usd_tick:
+                            conversion_rate = 1.0 / usd_tick.ask if usd_tick.ask > 0 else 1.0
+                            risk_in_usd = risk_in_account_currency * conversion_rate
+                        else:
+                            risk_in_usd = risk_in_account_currency
+                    else:
+                        risk_in_usd = risk_in_account_currency
+            else:
+                risk_in_usd = risk_in_account_currency
+            
+            return risk_in_usd
+            
+        except Exception as e:
+            print(f"        ⚠️  Could not calculate risk in USD: {e}")
+            return 0.0
+    
+    def scale_volume_to_target_risk(symbol_info, entry_price, exit_price, min_volume, volume_step, 
+                                   account_currency, target_risk_min, target_risk_max, max_iterations=100):
+        """Scale volume to achieve target risk range."""
+        print(f"        📊 Scaling volume to match target risk range:")
+        print(f"          • Target risk range: ${target_risk_min:.2f} - ${target_risk_max:.2f}")
+        print(f"          • Starting volume: {min_volume}")
+        
+        current_volume = min_volume
+        best_volume = min_volume
+        best_risk = 0
+        scaling_attempts = []
+        
+        for iteration in range(max_iterations):
+            current_risk = calculate_risk_in_usd(
+                symbol_info, entry_price, exit_price, current_volume, account_currency
+            )
+            
+            scaling_attempts.append({
+                "volume": current_volume,
+                "risk_usd": round(current_risk, 2)
+            })
+            
+            print(f"          • Attempt {iteration + 1}: Volume={current_volume}, Risk=${current_risk:.2f}")
+            
+            if target_risk_min <= current_risk <= target_risk_max:
+                print(f"          ✅ Target risk achieved with volume {current_volume} (${current_risk:.2f})")
+                return current_volume, round(current_risk, 2), scaling_attempts
+            elif current_risk > target_risk_max:
+                if iteration == 0:
+                    print(f"          ⚠️  Minimum volume already exceeds target range")
+                    return min_volume, round(current_risk, 2), scaling_attempts
+                else:
+                    print(f"          ✅ Using previous volume {best_volume} (${best_risk:.2f}) - below target")
+                    return best_volume, round(best_risk, 2), scaling_attempts
+            else:
+                best_volume = current_volume
+                best_risk = current_risk
+                current_volume = round(current_volume + volume_step, 2)
+        
+        print(f"          ⚠️  Max iterations reached. Using best volume {best_volume} (${best_risk:.2f})")
+        return best_volume, round(best_risk, 2), scaling_attempts
+    
+    def generate_pattern_levels(price, direction, num_levels, multiplier, price_digits=None):
+        """
+        DYNAMIC pattern level generator based on multiplier.
+        
+        Args:
+            price: Current price
+            direction: 'below' or 'above'
+            num_levels: Number of levels to generate
+            multiplier: Pattern increment (25, 50, 250, etc.)
+            price_digits: Price digits for rounding
+            
+        Returns:
+            list: Generated price levels
+        """
+        # Determine if integer-based (>=1000) or fractional-based
+        if price >= 1000:
+            # Integer-based prices (Gold, indices)
+            price_int = int(price)
+            base_int = (price_int // multiplier) * multiplier
+            
+            print(f"        📊 Generating integer-based patterns (multiplier={multiplier}):")
+            print(f"          • Original price: {price}")
+            print(f"          • Integer value: {price_int}")
+            print(f"          • Base integer: {base_int}")
+            print(f"          • Pattern unit: {multiplier}")
+            
+            pattern_levels = []
+            if direction == 'below':
+                for i in range(num_levels):
+                    level_int = base_int - (i * multiplier)
+                    pattern_levels.append(float(level_int))
+            else:  # above
+                for i in range(num_levels):
+                    level_int = base_int + ((i + 1) * multiplier)
+                    pattern_levels.append(float(level_int))
+            
+            return pattern_levels
+            
+        else:
+            # Fractional-based prices (Forex)
+            # Determine multiplier based on price digits
+            if price_digits and price_digits >= 5:
+                scale = 100000  # 5-digit forex
+            elif price_digits and price_digits == 4:
+                scale = 10000   # 4-digit forex
+            else:
+                scale = 10000   # Default
+            
+            price_scaled = int(round(price * scale))
+            base_scaled = (price_scaled // multiplier) * multiplier
+            
+            print(f"        📊 Generating fractional-based patterns (multiplier={multiplier}):")
+            print(f"          • Original price: {price}")
+            print(f"          • Scaled integer: {price_scaled}")
+            print(f"          • Base scaled: {base_scaled}")
+            print(f"          • Scale factor: {scale}")
+            print(f"          • Pattern unit: {multiplier}")
+            
+            pattern_levels = []
+            if direction == 'below':
+                for i in range(num_levels):
+                    level_int = base_scaled - (i * multiplier)
+                    level_price = level_int / scale
+                    pattern_levels.append(level_price)
+            else:  # above
+                for i in range(num_levels):
+                    level_int = base_scaled + ((i + 1) * multiplier)
+                    level_price = level_int / scale
+                    pattern_levels.append(level_price)
+            
+            return pattern_levels
+    
+    def generate_exit_and_tp_prices(entry_price, order_type, risk_reward, multiplier, price_digits):
+        """
+        Generate exit and TP prices based on order type, risk/reward ratio, and multiplier.
+        """
+        if entry_price >= 1000:  # Integer-based
+            pattern_unit = multiplier
+            entry_scaled = int(entry_price)
+            base_scaled = (entry_scaled // pattern_unit) * pattern_unit
+            
+            if order_type in ["sell_stop", "sell_limit"]:
+                exit_scaled = base_scaled + pattern_unit
+                exit_price = float(exit_scaled)
+                risk_distance = exit_price - entry_price
+                tp_price = entry_price - (risk_distance * risk_reward)
+            elif order_type in ["buy_stop", "buy_limit"]:
+                exit_scaled = base_scaled - pattern_unit
+                exit_price = float(exit_scaled)
+                risk_distance = entry_price - exit_price
+                tp_price = entry_price + (risk_distance * risk_reward)
+            else:
+                exit_price = entry_price
+                tp_price = entry_price
+                
+        else:  # Fractional-based
+            if price_digits >= 5:
+                scale = 100000
+                pattern_unit = multiplier
+            elif price_digits == 4:
+                scale = 10000
+                pattern_unit = multiplier // 10 if multiplier >= 10 else multiplier
+            else:
+                scale = 10000
+                pattern_unit = multiplier
+            
+            entry_scaled = int(round(entry_price * scale))
+            base_scaled = (entry_scaled // pattern_unit) * pattern_unit
+            
+            if order_type in ["sell_stop", "sell_limit"]:
+                exit_scaled = base_scaled + pattern_unit
+                exit_price = exit_scaled / scale
+                risk_distance = exit_price - entry_price
+                tp_price = entry_price - (risk_distance * risk_reward)
+            elif order_type in ["buy_stop", "buy_limit"]:
+                exit_scaled = base_scaled - pattern_unit
+                exit_price = exit_scaled / scale
+                risk_distance = entry_price - exit_price
+                tp_price = entry_price + (risk_distance * risk_reward)
+            else:
+                exit_price = entry_price
+                tp_price = entry_price
+        
+        # Round appropriately
+        if entry_price >= 1000:
+            exit_price = round(exit_price, 2)
+            tp_price = round(tp_price, 2)
+        else:
+            exit_price = round(exit_price, price_digits)
+            tp_price = round(tp_price, price_digits)
+        
+        return exit_price, tp_price
+    
+    def invert_order_type(order_type):
+        """Invert order type (buy <-> sell, stop/limit preserved)."""
+        order_type_map = {
+            "buy_stop": "sell_stop",
+            "sell_stop": "buy_stop",
+            "buy_limit": "sell_limit",
+            "sell_limit": "buy_limit"
+        }
+        return order_type_map.get(order_type, order_type)
+    
+    def calculate_counter_tp(entry_price, exit_price, order_type, risk_reward, price_digits):
+        """Calculate TP for counter order based on inverted position."""
+        if order_type in ["sell_stop", "sell_limit"]:
+            risk_distance = exit_price - entry_price
+            tp_price = entry_price - (risk_distance * risk_reward)
+        elif order_type in ["buy_stop", "buy_limit"]:
+            risk_distance = entry_price - exit_price
+            tp_price = entry_price + (risk_distance * risk_reward)
+        else:
+            tp_price = entry_price
+        
+        if entry_price >= 1000:
+            tp_price = round(tp_price, 2)
+        else:
+            tp_price = round(tp_price, price_digits)
+        
+        return tp_price
+    
+    def generate_order_counter(level_data, price_digits):
+        """Generate a counter order for a given grid level."""
+        original_order_type = level_data.get("order_type", "")
+        inverted_order_type = invert_order_type(original_order_type)
+        counter_entry = level_data.get("exit")
+        counter_exit = level_data.get("entry")
+        risk_reward = level_data.get("risk_reward", 1)
+        counter_tp = calculate_counter_tp(
+            counter_entry, counter_exit, inverted_order_type, risk_reward, price_digits
+        )
+        
+        counter_order = {
+            "entry": counter_entry,
+            "exit": counter_exit,
+            "tp": counter_tp,
+            "volume": level_data.get("volume"),
+            "risk_in_usd": level_data.get("risk_in_usd"),
+            "min_volume_risk": level_data.get("min_volume_risk"),
+            "order_type": inverted_order_type,
+            "risk_reward": risk_reward
+        }
+        
+        if "scaling_attempts" in level_data:
+            counter_order["scaling_attempts"] = level_data["scaling_attempts"]
+        
+        return counter_order
+    
+    def add_order_counters_to_grid_levels(grid_bid_levels, grid_ask_levels, digits):
+        """Add order counters to both bid and ask grid levels."""
+        print(f"\n      📊 GENERATING ORDER COUNTERS:")
+        
+        for level in grid_bid_levels:
+            level["order_counter"] = generate_order_counter(level, digits)
+        
+        for level in grid_ask_levels:
+            level["order_counter"] = generate_order_counter(level, digits)
+        
+        print(f"        • Added counters to {len(grid_bid_levels)} sell levels")
+        print(f"        • Added counters to {len(grid_ask_levels)} buy levels")
+        
+        return grid_bid_levels, grid_ask_levels
+
+    def create_grid_orders_structure(bid_pattern_levels, ask_pattern_levels, bid_order_type, ask_order_type, 
+                                    risk_reward_value, digits, min_volume, volume_step, symbol_info, 
+                                    account_currency, target_risk_min, target_risk_max, multiplier):
+        """
+        Create enhanced grid orders structure with dynamic configuration.
+        """
+        print(f"\n      📊 Creating grid orders structure with exit/TP prices:")
+        print(f"      📊 Using multiplier: {multiplier} for pattern generation")
+        print(f"      📊 Adding live broker volume: min={min_volume}, step={volume_step}")
+        print(f"      📊 Calculating risk in USD for each level")
+        print(f"      📊 Target risk range: ${target_risk_min:.2f} - ${target_risk_max:.2f}")
+        
+        # Create sell levels (below bid)
+        grid_bid_levels = []
+        for level_price in bid_pattern_levels:
+            exit_price, tp_price = generate_exit_and_tp_prices(
+                level_price, ask_order_type, risk_reward_value, multiplier, digits
+            )
+            
+            optimal_volume, actual_risk, scaling_attempts = scale_volume_to_target_risk(
+                symbol_info, level_price, exit_price, min_volume, volume_step,
+                account_currency, target_risk_min, target_risk_max
+            )
+            
+            grid_bid_levels.append({
+                "entry": level_price,
+                "exit": exit_price,
+                "tp": tp_price,
+                "volume": optimal_volume,
+                "risk_in_usd": actual_risk,
+                "min_volume_risk": scaling_attempts[0]["risk_usd"] if scaling_attempts else 0,
+                "scaling_attempts": scaling_attempts,
+                "order_type": ask_order_type,
+                "risk_reward": risk_reward_value
+            })
+        
+        # Create buy levels (above ask)
+        grid_ask_levels = []
+        for level_price in ask_pattern_levels:
+            exit_price, tp_price = generate_exit_and_tp_prices(
+                level_price, bid_order_type, risk_reward_value, multiplier, digits
+            )
+            
+            optimal_volume, actual_risk, scaling_attempts = scale_volume_to_target_risk(
+                symbol_info, level_price, exit_price, min_volume, volume_step,
+                account_currency, target_risk_min, target_risk_max
+            )
+            
+            grid_ask_levels.append({
+                "entry": level_price,
+                "exit": exit_price,
+                "tp": tp_price,
+                "volume": optimal_volume,
+                "risk_in_usd": actual_risk,
+                "min_volume_risk": scaling_attempts[0]["risk_usd"] if scaling_attempts else 0,
+                "scaling_attempts": scaling_attempts,
+                "order_type": bid_order_type,
+                "risk_reward": risk_reward_value
+            })
+        
+        # Selection flags
+        if grid_bid_levels:
+            max_entry_bid = max(level["entry"] for level in grid_bid_levels)
+            for level in grid_bid_levels:
+                level["selected_bid"] = (level["entry"] == max_entry_bid)
+                if level["selected_bid"]:
+                    print(f"        • Selected BID level at {max_entry_bid:.{digits}f} as oldest")
+        
+        if grid_ask_levels:
+            min_entry_ask = min(level["entry"] for level in grid_ask_levels)
+            for level in grid_ask_levels:
+                level["selected_ask"] = (level["entry"] == min_entry_ask)
+                if level["selected_ask"]:
+                    print(f"        • Selected ASK level at {min_entry_ask:.{digits}f} as youngest")
+        
+        # Add counters
+        grid_bid_levels, grid_ask_levels = add_order_counters_to_grid_levels(
+            grid_bid_levels, grid_ask_levels, digits
+        )
+        
+        print(f"        • Grid sell levels: {len(grid_bid_levels)} levels (with counters)")
+        print(f"        • Grid buy levels: {len(grid_ask_levels)} levels (with counters)")
+        print(f"        • Risk/Reward: {risk_reward_value}:1 for all levels")
+        
+        return grid_bid_levels, grid_ask_levels
+   
+    def save_individual_symbol_price(prices_dir, symbol, price_data):
+        """Save individual symbol price data to JSON file."""
+        symbol_file = prices_dir / f"{symbol}.json"
+        with open(symbol_file, 'w', encoding='utf-8') as f:
+            json.dump(price_data, f, indent=4)
+    
+    def save_all_symbols_prices(prices_dir, all_symbols_price_data, acc_info, bid_order_type, ask_order_type, 
+                                risk_reward_value, target_risk_range, total_categories, total_symbols, 
+                                successful_symbols, failed_symbols, category_results, grid_levels, grid_multiplier):
+        """Save all symbols' price data to a single symbols_prices.json file."""
+        symbols_file = prices_dir / "symbols_prices.json"
+        
+        final_data = {
+            "account_type": "",
+            "account_login": acc_info.login,
+            "account_server": acc_info.server,
+            "account_balance": acc_info.balance,
+            "account_currency": acc_info.currency,
+            "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "grid_configuration": {
+                "levels": grid_levels,
+                "multiplier": grid_multiplier,
+                "bid_order_type": bid_order_type,
+                "ask_order_type": ask_order_type,
+                "risk_reward": risk_reward_value
+            },
+            "target_risk_range_usd": {
+                "min": target_risk_range[0],
+                "max": target_risk_range[1],
+                "base": target_risk_range[2]
+            },
+            "total_categories": total_categories,
+            "total_symbols": total_symbols,
+            "successful_symbols": successful_symbols,
+            "failed_symbols": failed_symbols,
+            "success_rate_percent": round((successful_symbols/total_symbols*100), 1) if total_symbols > 0 else 0,
+            "categories": category_results,
+            **all_symbols_price_data
+        }
+        
+        with open(symbols_file, 'w', encoding='utf-8') as f:
+            json.dump(final_data, f, indent=4, default=str)
+        
+        print(f"    📁 Saved all symbol prices to: {symbols_file}")
+        print(f"    📊 Total symbols in file: {len(all_symbols_price_data)}")
+    
+    def save_category_summary(prices_dir, category, symbols, category_price_data, 
+                             category_symbols_success, category_symbols_failed, 
+                             login_id, bid_order_type, ask_order_type, risk_reward_value, 
+                             target_risk_range, grid_levels, grid_multiplier):
+        """Save category summary with all symbols data."""
+        category_file = prices_dir / f"{category}_prices.json"
+        category_summary = {
+            "category": category,
+            "account_type": "",
+            "account_login": login_id,
+            "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_symbols": len(symbols),
+            "successful_symbols": category_symbols_success,
+            "failed_symbols": category_symbols_failed,
+            "grid_configuration": {
+                "levels": grid_levels,
+                "multiplier": grid_multiplier,
+                "bid_order_type": bid_order_type,
+                "ask_order_type": ask_order_type,
+                "risk_reward": risk_reward_value
+            },
+            "target_risk_range_usd": {
+                "min": target_risk_range[0],
+                "max": target_risk_range[1],
+                "base": target_risk_range[2]
+            },
+            "symbols": category_price_data
+        }
+        with open(category_file, 'w', encoding='utf-8') as f:
+            json.dump(category_summary, f, indent=4)
+    
+    def filter_signals_with_counters(prices_dir, category_price_data, symbols_dict, 
+                                     target_risk_min, target_risk_max, 
+                                     bid_order_type, ask_order_type, risk_reward_value, 
+                                     account_balance, account_currency, grid_levels, grid_multiplier):
+        """Filter orders that meet the risk requirement and save them to limit_orders.json."""
+        print(f"\n      📊 FILTERING SIGNALS WITH COUNTERS - Risk Requirement: ≤ ${target_risk_max:.2f} AND > $0")
+        
+        signals_data = {
+            "account_type": "",
+            "account_balance": account_balance,
+            "account_currency": account_currency,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "risk_requirement": {
+                "min_usd": target_risk_min,
+                "max_usd": target_risk_max,
+                "filter_criteria": f"$0 < risk_in_usd ≤ ${target_risk_max:.2f}"
+            },
+            "grid_configuration": {
+                "levels": grid_levels,
+                "multiplier": grid_multiplier,
+                "bid_order_type": bid_order_type,
+                "ask_order_type": ask_order_type,
+                "risk_reward": risk_reward_value
+            },
+            "categories": {},
+            "summary": {
+                "total_symbols_with_signals": 0,
+                "total_bid_orders": 0,
+                "total_ask_orders": 0,
+                "total_counter_orders": 0,
+                "total_orders": 0
+            }
+        }
+        
+        total_bid_orders = 0
+        total_ask_orders = 0
+        total_counter_orders = 0
+        symbols_with_signals = 0
+        
+        for category, symbols in symbols_dict.items():
+            category_signals = {}
+            category_bid_count = 0
+            category_ask_count = 0
+            category_counter_count = 0
+            
+            for raw_symbol in symbols:
+                normalized_symbol = get_normalized_symbol(raw_symbol)
+                if normalized_symbol in category_price_data:
+                    price_data = category_price_data[normalized_symbol]
+                    
+                    filtered_bid_levels = []
+                    for level in price_data["grid_orders"]["bid_levels"]:
+                        if level["risk_in_usd"] <= target_risk_max and level["risk_in_usd"] > 0:
+                            filtered_level = {
+                                "entry": level["entry"],
+                                "exit": level["exit"],
+                                "tp": level["tp"],
+                                "volume": level["volume"],
+                                "risk_in_usd": level["risk_in_usd"],
+                                "min_volume_risk": level["min_volume_risk"],
+                                "order_type": level["order_type"],
+                                "risk_reward": level["risk_reward"],
+                                "order_counter": level["order_counter"]
+                            }
+                            filtered_bid_levels.append(filtered_level)
+                    
+                    filtered_ask_levels = []
+                    for level in price_data["grid_orders"]["ask_levels"]:
+                        if level["risk_in_usd"] <= target_risk_max and level["risk_in_usd"] > 0:
+                            filtered_level = {
+                                "entry": level["entry"],
+                                "exit": level["exit"],
+                                "tp": level["tp"],
+                                "volume": level["volume"],
+                                "risk_in_usd": level["risk_in_usd"],
+                                "min_volume_risk": level["min_volume_risk"],
+                                "order_type": level["order_type"],
+                                "risk_reward": level["risk_reward"],
+                                "order_counter": level["order_counter"]
+                            }
+                            filtered_ask_levels.append(filtered_level)
+                    
+                    if filtered_bid_levels or filtered_ask_levels:
+                        category_signals[raw_symbol] = {
+                            "digits": price_data["digits"],
+                            "current_prices": price_data["current_prices"],
+                            "bid_orders": filtered_bid_levels,
+                            "ask_orders": filtered_ask_levels
+                        }
+                        
+                        symbols_with_signals += 1
+                        category_bid_count += len(filtered_bid_levels)
+                        category_ask_count += len(filtered_ask_levels)
+                        category_counter_count += len(filtered_bid_levels) + len(filtered_ask_levels)
+                        
+                        total_bid_orders += len(filtered_bid_levels)
+                        total_ask_orders += len(filtered_ask_levels)
+                        total_counter_orders += len(filtered_bid_levels) + len(filtered_ask_levels)
+            
+            if category_signals:
+                signals_data["categories"][category] = {
+                    "symbols": category_signals,
+                    "summary": {
+                        "symbols_with_signals": len(category_signals),
+                        "bid_orders": category_bid_count,
+                        "ask_orders": category_ask_count,
+                        "counter_orders": category_counter_count,
+                        "total_orders": category_bid_count + category_ask_count + category_counter_count
+                    }
+                }
+        
+        signals_data["summary"]["total_symbols_with_signals"] = symbols_with_signals
+        signals_data["summary"]["total_bid_orders"] = total_bid_orders
+        signals_data["summary"]["total_ask_orders"] = total_ask_orders
+        signals_data["summary"]["total_counter_orders"] = total_counter_orders
+        signals_data["summary"]["total_orders"] = total_bid_orders + total_ask_orders + total_counter_orders
+        
+        # Create pending directory inside prices
+        pending_dir = prices_dir / "pending_orders" 
+        pending_dir.mkdir(exist_ok=True)
+
+        # Save limit_orders.json inside pending directory
+        signals_file = pending_dir / "limit_orders.json"
+        with open(signals_file, 'w', encoding='utf-8') as f:
+            json.dump(signals_data, f, indent=4)
+        
+        print(f"      📊 SIGNALS WITH COUNTERS SUMMARY:")
+        print(f"        • Symbols with signals: {symbols_with_signals}")
+        print(f"        • Total bid orders: {total_bid_orders}")
+        print(f"        • Total ask orders: {total_ask_orders}")
+        print(f"        • Total counter orders: {total_counter_orders}")
+        print(f"        • Total orders: {total_bid_orders + total_ask_orders + total_counter_orders}")
+        print(f"        • Filter criteria: $0 < risk_in_usd ≤ ${target_risk_max:.2f}")
+        
+        stats["signals_generated"] = True
+        return signals_data, signals_file
+    
+    def rearrange_orders_with_counters(signals_file_path):
+        """
+        Rearrange orders by extracting order_counter entries and placing them as separate order objects.
+        
+        This function takes the limit_orders.json structure and transforms it so that each
+        order_counter is moved out of its parent order and becomes a standalone order
+        at the same level as the original order.
+        
+        Args:
+            signals_file_path: Path to limit_orders.json file
+            
+        Returns:
+            dict: Transformed signals data with rearranged orders
+        """
+        print(f"\n      🔄 REARRANGING ORDERS - Extracting counter orders...")
+        
+        # Load the signals data
+        with open(signals_file_path, 'r', encoding='utf-8') as f:
+            signals_data = json.load(f)
+        
+        # Create a deep copy to avoid modifying original
+        rearranged_signals = {
+            "account_type": signals_data.get("account_type", ""),
+            "account_balance": signals_data.get("account_balance", 0),
+            "account_currency": signals_data.get("account_currency", "USD"),
+            "generated_at": signals_data.get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "risk_requirement": signals_data.get("risk_requirement", {}),
+            "grid_configuration": signals_data.get("grid_configuration", {}),
+            "categories": {},
+            "summary": {
+                "total_symbols_with_signals": 0,
+                "total_bid_orders": 0,
+                "total_ask_orders": 0,
+                "total_orders": 0
+            }
+        }
+        
+        # Process each category
+        for category_name, category_data in signals_data.get("categories", {}).items():
+            rearranged_category = {
+                "symbols": {},
+                "summary": {
+                    "symbols_with_signals": 0,
+                    "bid_orders": 0,
+                    "ask_orders": 0,
+                    "total_orders": 0
+                }
+            }
+            
+            category_bid_total = 0
+            category_ask_total = 0
+            category_symbols_count = 0
+            
+            for symbol, symbol_data in category_data.get("symbols", {}).items():
+                # Process bid_orders
+                new_bid_orders = []
+                if "bid_orders" in symbol_data:
+                    for order in symbol_data["bid_orders"]:
+                        # Add the original order without order_counter
+                        order_copy = {k: v for k, v in order.items() if k != "order_counter"}
+                        new_bid_orders.append(order_copy)
+                        
+                        # Add the counter order as a separate order if it exists
+                        if "order_counter" in order:
+                            counter_order = order["order_counter"]
+                            new_bid_orders.append(counter_order)
+                
+                # Process ask_orders
+                new_ask_orders = []
+                if "ask_orders" in symbol_data:
+                    for order in symbol_data["ask_orders"]:
+                        # Add the original order without order_counter
+                        order_copy = {k: v for k, v in order.items() if k != "order_counter"}
+                        new_ask_orders.append(order_copy)
+                        
+                        # Add the counter order as a separate order if it exists
+                        if "order_counter" in order:
+                            counter_order = order["order_counter"]
+                            new_ask_orders.append(counter_order)
+                
+                # Only include symbol if it has orders
+                if new_bid_orders or new_ask_orders:
+                    rearranged_category["symbols"][symbol] = {
+                        "digits": symbol_data.get("digits", 0),
+                        "current_prices": symbol_data.get("current_prices", {}),
+                        "bid_orders": new_bid_orders,
+                        "ask_orders": new_ask_orders
+                    }
+                    
+                    category_symbols_count += 1
+                    category_bid_total += len(new_bid_orders)
+                    category_ask_total += len(new_ask_orders)
+            
+            # Update category summary
+            rearranged_category["summary"]["symbols_with_signals"] = category_symbols_count
+            rearranged_category["summary"]["bid_orders"] = category_bid_total
+            rearranged_category["summary"]["ask_orders"] = category_ask_total
+            rearranged_category["summary"]["total_orders"] = category_bid_total + category_ask_total
+            
+            rearranged_signals["categories"][category_name] = rearranged_category
+        
+        # Update main summary
+        total_symbols = 0
+        total_bid_orders = 0
+        total_ask_orders = 0
+        
+        for category_data in rearranged_signals["categories"].values():
+            total_symbols += category_data["summary"]["symbols_with_signals"]
+            total_bid_orders += category_data["summary"]["bid_orders"]
+            total_ask_orders += category_data["summary"]["ask_orders"]
+        
+        rearranged_signals["summary"]["total_symbols_with_signals"] = total_symbols
+        rearranged_signals["summary"]["total_bid_orders"] = total_bid_orders
+        rearranged_signals["summary"]["total_ask_orders"] = total_ask_orders
+        rearranged_signals["summary"]["total_orders"] = total_bid_orders + total_ask_orders
+        
+        # Save rearranged file
+        rearranged_path = signals_file_path.parent / f"limit_orders.json"
+        with open(rearranged_path, 'w', encoding='utf-8') as f:
+            json.dump(rearranged_signals, f, indent=4)
+        
+        print(f"      ✅ Rearranged signals saved to: {rearranged_path}")
+        print(f"      📊 REARRANGED SUMMARY:")
+        print(f"        • Symbols with signals: {total_symbols}")
+        print(f"        • Total bid orders: {total_bid_orders}")
+        print(f"        • Total ask orders: {total_ask_orders}")
+        print(f"        • Total orders: {total_bid_orders + total_ask_orders}")
+        print(f"        • Note: Counter orders have been extracted as standalone orders")
+        
+        return rearranged_signals
+    
+    def print_investor_summary(user_brokerid, total_categories, total_symbols, successful_symbols, 
+                              failed_symbols, bid_order_type, ask_order_type, risk_reward_value, 
+                              target_risk_range, prices_dir, grid_levels, grid_multiplier):
+        """Print summary for an investor."""
+        print(f"\n  📊  INVESTOR SUMMARY: {user_brokerid}")
+        print(f"    • Grid Configuration: {grid_levels} levels, multiplier={grid_multiplier}")
+        print(f"    • Categories processed: {total_categories}")
+        print(f"    • Total symbols: {total_symbols}")
+        print(f"    • Successful: {successful_symbols}")
+        print(f"    • Failed: {failed_symbols}")
+        print(f"    • Success rate: {(successful_symbols/total_symbols*100):.1f}%")
+        print(f"    • Order Types: Bid={bid_order_type}, Ask={ask_order_type}, R:R={risk_reward_value}")
+        print(f"    • Target Risk Range: ${target_risk_range[0]:.2f} - ${target_risk_range[1]:.2f} USD")
+        print(f"    • Price files saved to: {prices_dir}")
+    
+    # Main processing
+    if inv_id:
+        broker_cfg = usersdictionary.get(inv_id)
+        if not broker_cfg:
+            print(f" [{inv_id}]  No broker config found")
+            return stats
+        
+        inv_root = Path(INV_PATH) / inv_id
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            print(f" [{inv_id}] ⚠️ Account management file not found")
+            return stats
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # ========== ADDED: Check if symbols_grid_strategy is enabled ==========
+            settings = config.get("settings", {})
+            symbols_grid_strategy_enabled = settings.get("symbols_grid_strategy", False)
+            
+            if not symbols_grid_strategy_enabled:
+                print(f"\n  {'='*10} ⏭️  SKIPPING DYNAMIC PRICE COLLECTION {'='*10}")
+                print(f"  Investor: {inv_id}")
+                print(f"  Reason: 'symbols_grid_strategy' is set to FALSE in accountmanagement.json")
+                print(f"  Action: Set to TRUE to enable automatic grid price generation")
+                print(f"  {'='*55}\n")
+                return stats
+            # ======================================================================
+            
+            # Extract symbols dictionary
+            symbols_dict = config.get("symbols_dictionary", {})
+            if not symbols_dict:
+                print(f" [{inv_id}] ⚠️ No symbols_dictionary found")
+                return stats
+            
+            # Get dynamic grid configuration (REQUIRED)
+            try:
+                grid_levels, grid_multiplier, bid_order_type, ask_order_type, risk_reward_value = get_grid_configuration(config)
+            except ValueError as e:
+                print(f" [{inv_id}] {e}")
+                return stats
+            
+            # Get account info
+            acc_info = mt5.account_info()
+            if not acc_info:
+                print(f" [{inv_id}]  Failed to get account info - MT5 not initialized?")
+                return stats
+            
+            account_currency = acc_info.currency
+            account_balance = acc_info.balance
+            
+            # Get risk requirement
+            target_risk_min, target_risk_max, target_risk_base = get_risk_requirement(config, account_balance)
+            target_risk_range = (target_risk_min, target_risk_max, target_risk_base)
+            
+            print(f"\n  📊  Account Details:")
+            print(f"    • Balance: ${account_balance:,.2f}")
+            print(f"    • Equity: ${acc_info.equity:,.2f}")
+            print(f"    • Server: {acc_info.server}")
+            print(f"    • Currency: {account_currency}")
+            print(f"    • Target Risk Range: ${target_risk_min:.2f} - ${target_risk_max:.2f}")
+            
+            # Create prices directory
+            prices_dir = inv_root / "prices"
+            prices_dir.mkdir(exist_ok=True)
+            print(f"\n  📁 Prices will be saved to: {prices_dir}")
+            
+            # Track statistics
+            total_categories = len(symbols_dict)
+            total_symbols = 0
+            successful_symbols = 0
+            failed_symbols = 0
+            category_results = {}
+            all_category_price_data = {}
+            all_symbols_price_data = {}
+            resolution_cache = {}
+            
+            # Generate pattern descriptions for logging
+            pattern_desc = []
+            for i in range(grid_levels):
+                pattern_desc.append(f"{i * grid_multiplier:03d}")
+            print(f"\n  🎯 DYNAMIC PATTERN: Levels will end in: {', '.join(pattern_desc)}")
+            
+            # Process each category
+            for category, symbols in symbols_dict.items():
+                print(f"\n  📂 Category: {category.upper()} ({len(symbols)} symbols)")
+                category_symbols_success = 0
+                category_symbols_failed = 0
+                category_price_data = {}
+                
+                for raw_symbol in symbols:
+                    total_symbols += 1
+                    print(f"    🔍 Processing: {raw_symbol}...", end=" ")
+                    
+                    success, normalized_symbol, current_bid, current_ask, current_price, tick, symbol_info, error = fetch_current_prices(
+                        raw_symbol, resolution_cache
+                    )
+                    
+                    if not success:
+                        print(f" {error[:50] if error else 'Unknown error'}")
+                        failed_symbols += 1
+                        category_symbols_failed += 1
+                        continue
+                    
+                    digits = symbol_info.digits
+                    
+                    # Generate pattern levels dynamically
+                    print(f"\n      📊 Generating pattern-based levels (multiplier={grid_multiplier}, {grid_levels} levels):")
+                    bid_pattern_levels = generate_pattern_levels(current_bid, 'below', grid_levels, grid_multiplier, digits)
+                    ask_pattern_levels = generate_pattern_levels(current_ask, 'above', grid_levels, grid_multiplier, digits)
+                    
+                    if not bid_pattern_levels or not ask_pattern_levels:
+                        print(f"        ⚠️  Could not generate pattern levels for {normalized_symbol}")
+                        failed_symbols += 1
+                        category_symbols_failed += 1
+                        continue
+                    
+                    # Log generated levels
+                    if bid_pattern_levels:
+                        print(f"        SELL levels below BID {current_bid:.{digits}f}:")
+                        for i, level in enumerate(bid_pattern_levels[:5]):  # Show first 5
+                            if level >= 1000:
+                                print(f"          {i+1}. {level:.{digits if digits < 3 else 2}f}")
+                            else:
+                                print(f"          {i+1}. {level:.{digits}f}")
+                    
+                    if ask_pattern_levels:
+                        print(f"        BUY levels above ASK {current_ask:.{digits}f}:")
+                        for i, level in enumerate(ask_pattern_levels[:5]):  # Show first 5
+                            if level >= 1000:
+                                print(f"          {i+1}. {level:.{digits if digits < 3 else 2}f}")
+                            else:
+                                print(f"          {i+1}. {level:.{digits}f}")
+                    
+                    # Get minimum volume
+                    min_volume, volume_step = get_min_volume(symbol_info)
+                    
+                    # Create grid orders structure
+                    grid_bid_levels, grid_ask_levels = create_grid_orders_structure(
+                        bid_pattern_levels, ask_pattern_levels, bid_order_type, ask_order_type, 
+                        risk_reward_value, digits, min_volume, volume_step, symbol_info, 
+                        account_currency, target_risk_min, target_risk_max, grid_multiplier
+                    )
+                    
+                    # Create complete price data structure
+                    price_data = {
+                        "original_symbol": raw_symbol,
+                        "symbol": normalized_symbol,
+                        "digits": digits,
+                        "tick_size": symbol_info.trade_tick_size,
+                        "tick_value": symbol_info.trade_tick_value,
+                        "contract_size": symbol_info.trade_contract_size,
+                        "account_type": "",
+                        "account_login": int(broker_cfg['LOGIN_ID']),
+                        "account_server": acc_info.server,
+                        "account_balance": account_balance,
+                        "account_currency": account_currency,
+                        "category": category,
+                        "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "current_prices": {
+                            "bid": current_bid,
+                            "ask": current_ask,
+                            "mid": current_price,
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        },
+                        "generated_levels": {
+                            "levels_below_bid": [round(price, digits) for price in bid_pattern_levels],
+                            "levels_above_ask": [round(price, digits) for price in ask_pattern_levels],
+                            "generation_method": f"dynamic_pattern_multiplier_{grid_multiplier}",
+                            "levels_requested": grid_levels,
+                            "multiplier": grid_multiplier,
+                            "patterns": pattern_desc,
+                            "price_type": "integer_based" if bid_pattern_levels and bid_pattern_levels[0] >= 1000 else "fractional_based"
+                        },
+                        "risk_requirements": {
+                            "target_risk_range_usd": {
+                                "min": target_risk_min,
+                                "max": target_risk_max,
+                                "base": target_risk_base
+                            },
+                            "account_balance": account_balance,
+                            "source_range": "account_balance_default_risk_management"
+                        },
+                        "grid_orders": {
+                            "bid_levels": grid_bid_levels,
+                            "ask_levels": grid_ask_levels,
+                            "configuration": {
+                                "bid_order_type": bid_order_type,
+                                "ask_order_type": ask_order_type,
+                                "risk_reward": risk_reward_value,
+                                "min_volume": min_volume,
+                                "volume_step": volume_step,
+                                "account_currency": account_currency,
+                                "target_risk_range_usd": {
+                                    "min": target_risk_min,
+                                    "max": target_risk_max
+                                },
+                                "source": "accountmanagement.json & live broker",
+                                "levels": grid_levels,
+                                "multiplier": grid_multiplier
+                            }
+                        }
+                    }
+                    
+                    category_price_data[normalized_symbol] = price_data
+                    all_symbols_price_data[normalized_symbol] = price_data
+                    save_individual_symbol_price(prices_dir, normalized_symbol, price_data)
+                    
+                    successful_symbols += 1
+                    category_symbols_success += 1
+                
+                if category_price_data:
+                    save_category_summary(
+                        prices_dir, category, symbols, category_price_data, 
+                        category_symbols_success, category_symbols_failed, 
+                        int(broker_cfg['LOGIN_ID']), bid_order_type, ask_order_type, 
+                        risk_reward_value, target_risk_range, grid_levels, grid_multiplier
+                    )
+                    
+                    category_results[category] = {
+                        "total": len(symbols),
+                        "success": category_symbols_success,
+                        "failed": category_symbols_failed
+                    }
+                    
+                    print(f"    📁 Saved category file: {category}_prices.json ({category_symbols_success}/{len(symbols)} symbols)")
+                    all_category_price_data.update(category_price_data)
+            
+            # Save master price file and generate signals
+            if successful_symbols > 0:
+                save_all_symbols_prices(
+                    prices_dir, all_symbols_price_data, acc_info,
+                    bid_order_type, ask_order_type, risk_reward_value, target_risk_range,
+                    total_categories, total_symbols, successful_symbols, failed_symbols,
+                    category_results, grid_levels, grid_multiplier
+                )
+                
+                # Generate signals and get the signals file path
+                signals_data, signals_file = filter_signals_with_counters(
+                    prices_dir, all_category_price_data, symbols_dict, 
+                    target_risk_min, target_risk_max, 
+                    bid_order_type, ask_order_type, risk_reward_value,
+                    account_balance, account_currency, grid_levels, grid_multiplier
+                )
+                
+                # FINAL STEP: Rearrange orders by extracting counter orders
+                rearrange_orders_with_counters(signals_file)
+                
+                print_investor_summary(
+                    inv_id, total_categories, total_symbols, successful_symbols,
+                    failed_symbols, bid_order_type, ask_order_type, risk_reward_value,
+                    target_risk_range, prices_dir, grid_levels, grid_multiplier
+                )
+                
+                stats["total_symbols"] = total_symbols
+                stats["successful_symbols"] = successful_symbols
+                stats["failed_symbols"] = failed_symbols
+                stats["total_categories"] = total_categories
+            
+        except Exception as e:
+            print(f" [{inv_id}]  Error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+    return stats
+
+def manage_position_and_pending_orders_in_signals(inv_id=None):
+    """
+    Function: Manages positions and pending orders in limit_orders.json file
+    
+    Dynamic count management - filters limit_orders.json directly:
+    - count = 0: Default to strict 2-item management (original behavior with SL matching)
+    - count = 1: Keep ONLY the closest order (either BUY or SELL) to current price, delete all others
+    - count = 2: Strict SL price matching between position and opposite pending order
+    - count >= 3: 
+        * First 2 items: Strict SL matching (position + opposite pending OR closest BUY/SELL pair with SL match)
+        * Remaining items (count-2): Keep additional orders closest to current price, no relationship checks
+        * Delete any orders beyond the count limit
+    
+    This version works with limit_orders.json instead of live MT5 orders.
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the processing including 'upload_orders' flag
+    """
+    print(f"\n{'='*10} 🎯 DYNAMIC SIGNALS FILTERING (PER SYMBOL) {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
+
+    # Track statistics
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_processed": 0,
+        "symbols_processed": 0,
+        "bid_orders_kept": 0,
+        "ask_orders_kept": 0,
+        "bid_orders_removed": 0,
+        "ask_orders_removed": 0,
+        "total_orders_kept": 0,
+        "total_orders_removed": 0,
+        "errors": 0,
+        "processing_success": False,
+        "upload_orders": True,
+        "symbol_status": {},
+        "management_counts": {}
+    }
+
+    # Determine which investors to process
+    investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
+    total_investors = len(investors_to_process) if not inv_id else 1
+    processed = 0
+
+    for user_brokerid in investors_to_process:
+        processed += 1
+        print(f"\n[{processed}/{total_investors}] {user_brokerid} 🔍 Filtering signals with dynamic configuration...")
+        
+        # Reset per-investor flags
+        investor_has_valid_pair = False
+        management_count = 2  # Default count
+        
+        # Get broker config
+        broker_cfg = usersdictionary.get(user_brokerid)
+        if not broker_cfg:
+            print(f"  └─  No broker config found")
+            continue
+        
+        inv_root = Path(INV_PATH) / user_brokerid
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+        signals_path = inv_root / "prices" / "pending_orders" / "limit_orders.json"
+
+        if not acc_mgmt_path.exists():
+            print(f"  └─ ⚠️  Account config missing. Skipping.")
+            continue
+        
+        if not signals_path.exists():
+            print(f"  └─ ⚠️  limit_orders.json not found. Skipping.")
+            continue
+
+        # --- LOAD CONFIG AND CHECK SETTINGS ---
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Check management configuration
+            settings = config.get("settings", {})
+            manage_config = settings.get("manage_position_and_pending_orders", {})
+            management_count = manage_config.get("count", 2)
+            
+            # Validate count (0, 1, 2, or higher)
+            if management_count < 0:
+                management_count = 2
+            
+            print(f"  └─ ✅ Dynamic signals filtering ENABLED with count = {management_count}")
+            print(f"      • count=0: Default strict 2-item management (SL matching)")
+            print(f"      • count=1: Keep single closest order")
+            print(f"      • count=2: Strict SL price matching")
+            print(f"      • count={management_count}: {management_count - 2} additional order(s) beyond strict pair")
+            
+        except Exception as e:
+            print(f"  └─  Failed to read config: {e}")
+            stats["errors"] += 1
+            continue
+
+        # --- LOAD SIGNALS DATA ---
+        try:
+            with open(signals_path, 'r', encoding='utf-8') as f:
+                signals_data = json.load(f)
+            
+            print(f"  └─ ✅ Loaded limit_orders.json")
+            print(f"      • Account balance: ${signals_data.get('account_balance', 0):,.2f}")
+            print(f"      • Categories: {len(signals_data.get('categories', {}))}")
+            
+        except Exception as e:
+            print(f"  └─  Failed to load limit_orders.json: {e}")
+            stats["errors"] += 1
+            continue
+        
+        # --- FILTER EACH SYMBOL'S ORDERS ---
+        filtered_categories = {}
+        total_symbols_processed = 0
+        total_bid_kept = 0
+        total_ask_kept = 0
+        total_bid_removed = 0
+        total_ask_removed = 0
+        
+        for category_name, category_data in signals_data.get("categories", {}).items():
+            print(f"\n  └─ 📂 Processing category: {category_name}")
+            
+            filtered_symbols = {}
+            symbols_data = category_data.get("symbols", {})
+            
+            for symbol, symbol_data in symbols_data.items():
+                total_symbols_processed += 1
+                
+                bid_orders = symbol_data.get("bid_orders", [])
+                ask_orders = symbol_data.get("ask_orders", [])
+                current_prices = symbol_data.get("current_prices", {})
+                current_price = current_prices.get("mid") or current_prices.get("ask") or current_prices.get("bid")
+                digits = symbol_data.get("digits", 5)
+                
+                print(f"\n      🔄 Processing symbol: {symbol}")
+                print(f"        • Bid orders: {len(bid_orders)}")
+                print(f"        • Ask orders: {len(ask_orders)}")
+                print(f"        • Current price: {current_price}")
+                
+                # Combine all orders with their type
+                all_orders = []
+                for order in bid_orders:
+                    all_orders.append({**order, "_order_type": "bid", "_original_list": "bid"})
+                for order in ask_orders:
+                    all_orders.append({**order, "_order_type": "ask", "_original_list": "ask"})
+                
+                # Determine management strategy based on count
+                filtered_bid_orders = []
+                filtered_ask_orders = []
+                orders_to_keep = []
+                orders_to_remove = []
+                
+                if management_count == 0:
+                    # Count 0: Default to strict 2-item management
+                    print(f"        📍 Count=0 mode: Using default strict 2-item management")
+                    
+                    # Look for SL-matched pairs
+                    # Group by order_type (buy/sell) and check SL relationships
+                    buy_orders = [o for o in all_orders if o.get("order_type", "").startswith("buy_")]
+                    sell_orders = [o for o in all_orders if o.get("order_type", "").startswith("sell_")]
+                    
+                    # Try to find a valid pair with SL matching
+                    valid_pairs = []
+                    for buy in buy_orders:
+                        for sell in sell_orders:
+                            buy_sl = buy.get("exit")
+                            sell_sl = sell.get("exit")
+                            
+                            # Check if buy.sl matches sell.entry OR sell.sl matches buy.entry
+                            if buy_sl and abs(buy_sl - sell.get("entry", 0)) < 0.00001:
+                                valid_pairs.append((buy, sell))
+                            elif sell_sl and abs(sell_sl - buy.get("entry", 0)) < 0.00001:
+                                valid_pairs.append((buy, sell))
+                    
+                    if valid_pairs:
+                        # Keep the first valid pair
+                        keep_buy, keep_sell = valid_pairs[0]
+                        orders_to_keep = [keep_buy, keep_sell]
+                        orders_to_remove = [o for o in all_orders if o not in orders_to_keep]
+                        investor_has_valid_pair = True
+                        print(f"        ✅ Found valid SL-matched pair")
+                    else:
+                        # No valid pair - remove all
+                        orders_to_remove = all_orders
+                        print(f"        ⚠️  No valid SL-matched pair found - removing all orders")
+                
+                elif management_count == 1:
+                    # Count 1: Keep ONLY the single closest order to current price
+                    print(f"        📍 Count=1 mode: Keeping single closest order to current price")
+                    
+                    if not current_price:
+                        print(f"        ⚠️  Cannot get current price - removing ALL orders")
+                        orders_to_remove = all_orders
+                    else:
+                        # Find the single order closest to current price
+                        for order in all_orders:
+                            order["_distance"] = abs(order.get("entry", 0) - current_price)
+                        
+                        all_orders.sort(key=lambda o: o.get("_distance", float('inf')))
+                        orders_to_keep = [all_orders[0]]
+                        orders_to_remove = all_orders[1:]
+                        
+                        kept_type = orders_to_keep[0].get("_order_type", "unknown")
+                        kept_entry = orders_to_keep[0].get("entry", 0)
+                        kept_distance = orders_to_keep[0].get("_distance", 0)
+                        print(f"        🎯 Keeping closest order: {kept_type} @ {kept_entry:.{digits}f} (distance: {kept_distance:.{digits}f})")
+                        investor_has_valid_pair = True
+                
+                elif management_count == 2:
+                    # Count 2: Strict SL matching (original behavior)
+                    print(f"        📍 Count=2 mode: Strict SL price matching")
+                    
+                    buy_orders = [o for o in all_orders if o.get("order_type", "").startswith("buy_")]
+                    sell_orders = [o for o in all_orders if o.get("order_type", "").startswith("sell_")]
+                    
+                    # Try to find a valid pair with SL matching
+                    valid_pairs = []
+                    for buy in buy_orders:
+                        for sell in sell_orders:
+                            buy_sl = buy.get("exit")
+                            sell_sl = sell.get("exit")
+                            
+                            if buy_sl and abs(buy_sl - sell.get("entry", 0)) < 0.00001:
+                                valid_pairs.append((buy, sell))
+                            elif sell_sl and abs(sell_sl - buy.get("entry", 0)) < 0.00001:
+                                valid_pairs.append((buy, sell))
+                    
+                    if valid_pairs:
+                        # Keep the first valid pair
+                        keep_buy, keep_sell = valid_pairs[0]
+                        orders_to_keep = [keep_buy, keep_sell]
+                        orders_to_remove = [o for o in all_orders if o not in orders_to_keep]
+                        investor_has_valid_pair = True
+                        print(f"        ✅ Found valid SL-matched pair")
+                    else:
+                        orders_to_remove = all_orders
+                        print(f"        ⚠️  No valid SL-matched pair found - removing all orders")
+                
+                else:  # management_count >= 3
+                    # Count >= 3: Strict pair for first 2 items, then keep additional closest orders
+                    print(f"        📍 Count={management_count} mode: Strict pair + {management_count - 2} additional closest orders")
+                    
+                    # Step 1: Try to find strict SL-matched pair
+                    buy_orders = [o for o in all_orders if o.get("order_type", "").startswith("buy_")]
+                    sell_orders = [o for o in all_orders if o.get("order_type", "").startswith("sell_")]
+                    
+                    strict_orders_to_keep = []
+                    valid_pairs = []
+                    
+                    for buy in buy_orders:
+                        for sell in sell_orders:
+                            buy_sl = buy.get("exit")
+                            sell_sl = sell.get("exit")
+                            
+                            if buy_sl and abs(buy_sl - sell.get("entry", 0)) < 0.00001:
+                                valid_pairs.append((buy, sell))
+                            elif sell_sl and abs(sell_sl - buy.get("entry", 0)) < 0.00001:
+                                valid_pairs.append((buy, sell))
+                    
+                    if valid_pairs:
+                        keep_buy, keep_sell = valid_pairs[0]
+                        strict_orders_to_keep = [keep_buy, keep_sell]
+                        investor_has_valid_pair = True
+                        print(f"        ✅ Found valid strict pair")
+                    else:
+                        print(f"        ⚠️  No valid strict pair found - will keep only closest orders")
+                    
+                    # Remove strict orders from consideration for additional slots
+                    strict_tickets = [id(o) for o in strict_orders_to_keep]
+                    remaining_orders = [o for o in all_orders if id(o) not in strict_tickets]
+                    
+                    # Step 2: Calculate how many additional orders we can keep
+                    additional_needed = management_count - len(strict_orders_to_keep)
+                    
+                    if additional_needed > 0 and remaining_orders and current_price:
+                        # Sort remaining orders by distance to current price
+                        for order in remaining_orders:
+                            order["_distance"] = abs(order.get("entry", 0) - current_price)
+                        
+                        remaining_orders.sort(key=lambda o: o.get("_distance", float('inf')))
+                        additional_to_keep = remaining_orders[:additional_needed]
+                        orders_to_keep = strict_orders_to_keep + additional_to_keep
+                        orders_to_remove = [o for o in all_orders if o not in orders_to_keep]
+                        
+                        print(f"        • Keeping {len(additional_to_keep)} additional order(s) closest to price")
+                    else:
+                        orders_to_keep = strict_orders_to_keep
+                        orders_to_remove = remaining_orders
+                    
+                    # Final check: ensure we don't exceed management count
+                    if len(orders_to_keep) > management_count:
+                        if current_price:
+                            # Sort by distance, but prioritize strict orders
+                            strict_ids = [id(o) for o in strict_orders_to_keep]
+                            non_strict = [o for o in orders_to_keep if id(o) not in strict_ids]
+                            if non_strict:
+                                non_strict.sort(key=lambda o: abs(o.get("entry", 0) - current_price))
+                                orders_to_keep = strict_orders_to_keep + non_strict[:management_count - len(strict_orders_to_keep)]
+                                orders_to_remove = [o for o in all_orders if o not in orders_to_keep]
+                
+                # Separate kept orders back into bid/ask lists
+                for order in orders_to_keep:
+                    if order.get("_original_list") == "bid":
+                        # Remove internal fields before saving
+                        clean_order = {k: v for k, v in order.items() if not k.startswith("_")}
+                        filtered_bid_orders.append(clean_order)
+                    elif order.get("_original_list") == "ask":
+                        clean_order = {k: v for k, v in order.items() if not k.startswith("_")}
+                        filtered_ask_orders.append(clean_order)
+                
+                # Count statistics
+                bid_kept = len(filtered_bid_orders)
+                ask_kept = len(filtered_ask_orders)
+                bid_removed = len(bid_orders) - bid_kept
+                ask_removed = len(ask_orders) - ask_kept
+                
+                total_bid_kept += bid_kept
+                total_ask_kept += ask_kept
+                total_bid_removed += bid_removed
+                total_ask_removed += ask_removed
+                
+                # Only include symbol if it has any orders left
+                if filtered_bid_orders or filtered_ask_orders:
+                    filtered_symbols[symbol] = {
+                        "digits": symbol_data.get("digits"),
+                        "current_prices": symbol_data.get("current_prices"),
+                        "bid_orders": filtered_bid_orders,
+                        "ask_orders": filtered_ask_orders
+                    }
+                
+                # Display per-symbol summary
+                print(f"        📊 {symbol} Summary:")
+                print(f"          • Management Type: count={management_count}")
+                print(f"          • Bid orders: kept={bid_kept}, removed={bid_removed}")
+                print(f"          • Ask orders: kept={ask_kept}, removed={ask_removed}")
+                
+                # Store status
+                status = f"COUNT{management_count}"
+                if management_count == 2:
+                    status += "_VALID" if investor_has_valid_pair else "_NO_MATCH"
+                elif management_count >= 3:
+                    status += "_WITH_PAIR" if investor_has_valid_pair else "_NO_PAIR"
+                stats["symbol_status"][f"{category_name}/{symbol}"] = status
+            
+            # Only include category if it has symbols with orders
+            if filtered_symbols:
+                filtered_categories[category_name] = {
+                    "symbols": filtered_symbols,
+                    "summary": {
+                        "symbols_with_signals": len(filtered_symbols),
+                        "bid_orders": sum(len(s["bid_orders"]) for s in filtered_symbols.values()),
+                        "ask_orders": sum(len(s["ask_orders"]) for s in filtered_symbols.values()),
+                        "total_orders": sum(len(s["bid_orders"]) + len(s["ask_orders"]) for s in filtered_symbols.values())
+                    }
+                }
+        
+        # --- UPDATE SIGNALS DATA WITH FILTERED ORDERS ---
+        stats["investors_processed"] += 1
+        stats["symbols_processed"] = total_symbols_processed
+        stats["bid_orders_kept"] = total_bid_kept
+        stats["ask_orders_kept"] = total_ask_kept
+        stats["bid_orders_removed"] = total_bid_removed
+        stats["ask_orders_removed"] = total_ask_removed
+        stats["total_orders_kept"] = total_bid_kept + total_ask_kept
+        stats["total_orders_removed"] = total_bid_removed + total_ask_removed
+        
+        # Update the signals data with filtered categories
+        signals_data["categories"] = filtered_categories
+        
+        # Update summary
+        total_symbols_with_signals = sum(cat["summary"]["symbols_with_signals"] for cat in filtered_categories.values())
+        total_bid_orders = sum(cat["summary"]["bid_orders"] for cat in filtered_categories.values())
+        total_ask_orders = sum(cat["summary"]["ask_orders"] for cat in filtered_categories.values())
+        
+        signals_data["summary"] = {
+            "total_symbols_with_signals": total_symbols_with_signals,
+            "total_bid_orders": total_bid_orders,
+            "total_ask_orders": total_ask_orders,
+            "total_orders": total_bid_orders + total_ask_orders
+        }
+        
+        # --- DETERMINE FINAL upload_orders FLAG ---
+        if investor_has_valid_pair and management_count >= 2:
+            stats["upload_orders"] = False
+            print(f"\n  └─ 🚩 upload_orders = False (At least one symbol has valid SL match)")
+        else:
+            stats["upload_orders"] = True
+            print(f"\n  └─ 🚩 upload_orders = True (No valid SL matches or count<2 mode)")
+        
+        # --- SAVE FILTERED SIGNALS ---
+        try:
+            # Create backup of original signals
+            backup_path = signals_path.parent / f"signals_backup_.json"
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                json.dump(json.load(open(signals_path, 'r', encoding='utf-8')), f, indent=4)
+            print(f"  └─ ✅ Created backup: {backup_path.name}")
+            
+            # Save filtered signals
+            with open(signals_path, 'w', encoding='utf-8') as f:
+                json.dump(signals_data, f, indent=4)
+            
+            print(f"  └─ ✅ Saved filtered signals to: {signals_path}")
+            
+        except Exception as e:
+            print(f"  └─  Failed to save filtered signals: {e}")
+            stats["errors"] += 1
+        
+        stats["management_counts"][user_brokerid] = management_count
+        stats["processing_success"] = True
+        
+        # --- INVESTOR SUMMARY ---
+        print(f"\n  └─ 📊 Filtering Results for {user_brokerid}:")
+        print(f"      • Management count: {management_count}")
+        print(f"      • Symbols processed: {total_symbols_processed}")
+        print(f"      • Bid orders kept: {total_bid_kept}, removed: {total_bid_removed}")
+        print(f"      • Ask orders kept: {total_ask_kept}, removed: {total_ask_removed}")
+        print(f"      • Total orders kept: {total_bid_kept + total_ask_kept}")
+        print(f"      • Total orders removed: {total_bid_removed + total_ask_removed}")
+        print(f"      • upload_orders flag: {stats['upload_orders']}")
+        
+        if stats['errors'] > 0:
+            print(f"      • Errors: {stats['errors']}")
+        else:
+            print(f"      ✅ Filtering completed successfully")
+
+    # --- FINAL SUMMARY ---
+    print(f"\n{'='*10} 📊 DYNAMIC SIGNALS FILTERING SUMMARY {'='*10}")
+    print(f"   Investor ID: {stats['investor_id']}")
+    print(f"   Investors processed: {stats['investors_processed']}")
+    print(f"   Symbols processed: {stats['symbols_processed']}")
+    print(f"   Bid orders kept: {stats['bid_orders_kept']}, removed: {stats['bid_orders_removed']}")
+    print(f"   Ask orders kept: {stats['ask_orders_kept']}, removed: {stats['ask_orders_removed']}")
+    print(f"   Total orders kept: {stats['total_orders_kept']}")
+    print(f"   Total orders removed: {stats['total_orders_removed']}")
+    print(f"   Errors: {stats['errors']}")
+    print(f"   FINAL upload_orders flag: {stats['upload_orders']}")
+    
+    # Show management counts used
+    if stats['management_counts']:
+        print(f"\n   Management Counts by Investor:")
+        for inv_id, count in stats['management_counts'].items():
+            print(f"      • {inv_id}: count={count}")
+    
+    # Show symbol status summary
+    if stats['symbol_status']:
+        print(f"\n   Symbol Status Summary:")
+        for symbol, status in stats['symbol_status'].items():
+            print(f"      • {symbol}: {status}")
+    
+    if stats['total_orders_removed'] > 0:
+        print(f"\n   Filtering Action: {'✅ COMPLETED' if stats['processing_success'] else '⚠️  PARTIAL'}")
+    else:
+        print(f"\n   Filtering Action: ℹ️  No orders needed filtering")
+    
+    print(f"\n{'='*10} 🏁 DYNAMIC SIGNALS FILTERING COMPLETE {'='*10}\n")
+    return stats
+
+def manage_position_and_pending_orders(inv_id=None):
+    """
+    Function: Manages positions and pending orders to ensure controlled number of items PER SYMBOL
+    
+    Dynamic count management:
+    - count = 0: Default to strict 2-item management (original behavior with SL matching)
+    - count = 1: Keep ONLY the closest order (either BUY or SELL) to current price, delete all others
+    - count = 2: Strict SL price matching between position and opposite pending order
+    - count >= 3: 
+        * First 2 items: Strict SL matching (position + opposite pending OR closest BUY/SELL pair with SL match)
+        * Remaining items (count-2): Keep additional orders closest to current price, no relationship checks
+        * Delete any orders beyond the count limit
+    
+    INTEGRITY RULE: upload_orders = False ONLY IF (positions + pending orders) == count for EACH symbol
+                    Otherwise upload_orders = True
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the processing including 'upload_orders' flag
+    """
+    print(f"\n{'='*10} 🎯 DYNAMIC POSITION & PENDING ORDER MANAGEMENT (PER SYMBOL) {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
+
+    # Track statistics
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_processed": 0,
+        "positions_found": 0,
+        "pending_orders_found": 0,
+        "symbols_processed": 0,
+        "orders_kept": 0,
+        "orders_deleted": 0,
+        "errors": 0,
+        "processing_success": False,
+        "upload_orders": True,
+        "symbol_status": {},
+        "management_counts": {}
+    }
+
+    # Determine which investors to process
+    investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
+    total_investors = len(investors_to_process) if not inv_id else 1
+    processed = 0
+
+    for user_brokerid in investors_to_process:
+        processed += 1
+        print(f"\n[{processed}/{total_investors}] {user_brokerid} 🔍 Checking dynamic position/pending configuration...")
+        
+        # Reset per-investor flags
+        investor_has_valid_integrity = True  # Start with True, becomes False if any symbol violates
+        management_count = 2  # Default count
+        
+        # Get broker config
+        broker_cfg = usersdictionary.get(user_brokerid)
+        if not broker_cfg:
+            print(f"  └─  No broker config found")
+            continue
+        
+        inv_root = Path(INV_PATH) / user_brokerid
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+
+        if not acc_mgmt_path.exists():
+            print(f"  └─ ⚠️  Account config missing. Skipping.")
+            continue
+
+        # --- LOAD CONFIG AND CHECK SETTINGS ---
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Check management configuration
+            settings = config.get("settings", {})
+            manage_config = settings.get("manage_position_and_pending_orders", {})
+            management_count = manage_config.get("count", 2)
+            
+            # Validate count (0, 1, 2, or higher)
+            if management_count < 0:
+                management_count = 2
+            
+            print(f"  └─ ✅ Dynamic management ENABLED with count = {management_count}")
+            print(f"      • count=0: Default strict 2-item management (SL matching)")
+            print(f"      • count=1: Keep single closest order")
+            print(f"      • count=2: Strict SL price matching")
+            print(f"      • count={management_count}: {management_count - 2} additional order(s) beyond strict pair")
+            print(f"      • INTEGRITY RULE: upload_orders = False ONLY IF total items == {management_count} for EACH symbol")
+            
+        except Exception as e:
+            print(f"  └─  Failed to read config: {e}")
+            stats["errors"] += 1
+            continue
+
+        # --- ACCOUNT INITIALIZATION ---
+        print(f"  └─ 🔌 Initializing account connection...")
+        
+        login_id = int(broker_cfg['LOGIN_ID'])
+        mt5_path = broker_cfg["TERMINAL_PATH"]
+        
+        print(f"      • Terminal Path: {mt5_path}")
+        print(f"      • Login ID: {login_id}")
+
+        # Initialize MT5 connection if needed
+        if not mt5.initialize(path=mt5_path):
+            print(f"  └─  MT5 initialization failed")
+            stats["errors"] += 1
+            continue
+
+        # Check login status
+        acc = mt5.account_info()
+        if acc is None or acc.login != login_id:
+            print(f"      🔑 Logging into account...")
+            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
+                error = mt5.last_error()
+                print(f"  └─  Login failed: {error}")
+                stats["errors"] += 1
+                continue
+            print(f"      ✅ Successfully logged into account")
+        else:
+            print(f"      ✅ Already logged into account")
+
+        # --- GET ALL POSITIONS AND PENDING ORDERS ---
+        positions = mt5.positions_get()
+        pending_orders = mt5.orders_get()
+        
+        stats["investors_processed"] += 1
+        stats["positions_found"] += len(positions) if positions else 0
+        stats["pending_orders_found"] += len(pending_orders) if pending_orders else 0
+        
+        # Count total trading items (positions + pending orders)
+        total_positions = len(positions) if positions else 0
+        total_pending = len(pending_orders) if pending_orders else 0
+        total_items = total_positions + total_pending
+        
+        print(f"\n  └─ 📊 Account Summary:")
+        print(f"      • Positions: {total_positions}")
+        print(f"      • Pending Orders: {total_pending}")
+        print(f"      • Total Items: {total_items}")
+        
+        # CRITICAL RULE: If there's only ONE item total (either one position OR one pending order)
+        if total_items == 1:
+            print(f"\n  └─ 🚩 Only 1 trading item found (total positions + pending orders = 1)")
+            print(f"  └─ 🚩 upload_orders = True (insufficient items for management)")
+            stats["upload_orders"] = True
+            stats["processing_success"] = True
+            continue
+        
+        # --- GROUP POSITIONS BY SYMBOL ---
+        positions_by_symbol = {}
+        if positions:
+            for pos in positions:
+                symbol = pos.symbol
+                if symbol not in positions_by_symbol:
+                    positions_by_symbol[symbol] = []
+                positions_by_symbol[symbol].append(pos)
+        
+        # Group pending orders by symbol
+        orders_by_symbol = {}
+        if pending_orders:
+            for order in pending_orders:
+                symbol = order.symbol
+                if symbol not in orders_by_symbol:
+                    orders_by_symbol[symbol] = []
+                orders_by_symbol[symbol].append(order)
+        
+        print(f"\n  └─ 📊 Symbols with positions: {list(positions_by_symbol.keys())}")
+        print(f"  └─ 📊 Symbols with pending orders: {list(orders_by_symbol.keys())}")
+        
+        # --- GET CURRENT PRICES FOR ALL SYMBOLS ---
+        current_prices = {}
+        all_symbols = set(positions_by_symbol.keys()) | set(orders_by_symbol.keys())
+        for symbol in all_symbols:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                current_prices[symbol] = tick.ask
+            else:
+                print(f"      ⚠️  Could not get current price for {symbol}")
+                current_prices[symbol] = None
+        
+        # --- PROCESS EACH SYMBOL INDEPENDENTLY ---
+        symbol_results = []
+        
+        # Process ALL symbols that have pending orders (with or without positions)
+        all_symbols_with_items = set(positions_by_symbol.keys()) | set(orders_by_symbol.keys())
+        
+        for symbol in all_symbols_with_items:
+            print(f"\n  └─ 🔄 Processing symbol: {symbol}")
+            
+            symbol_positions = positions_by_symbol.get(symbol, [])
+            symbol_orders = orders_by_symbol.get(symbol, [])
+            current_price = current_prices.get(symbol)
+            
+            total_symbol_items = len(symbol_positions) + len(symbol_orders)
+            
+            symbol_stats = {
+                "symbol": symbol,
+                "positions_count": len(symbol_positions),
+                "pending_orders_count": len(symbol_orders),
+                "total_items": total_symbol_items,
+                "target_count": management_count,
+                "management_count": management_count,
+                "has_valid_pair": False,
+                "orders_kept": 0,
+                "orders_deleted": 0,
+                "action_taken": False,
+                "management_type": "",
+                "additional_orders_kept": 0,
+                "integrity_valid": False  # Track if this symbol meets the count requirement
+            }
+            
+            # Check integrity BEFORE any deletion
+            if total_symbol_items == management_count:
+                symbol_stats["integrity_valid"] = True
+                print(f"      ✅ INTEGRITY OK: {total_symbol_items} items == target count {management_count}")
+            else:
+                print(f"      ⚠️  INTEGRITY VIOLATION: {total_symbol_items} items != target count {management_count}")
+                investor_has_valid_integrity = False
+            
+            # Determine management strategy based on count
+            if management_count == 0:
+                # Count 0: Default to strict 2-item management
+                symbol_stats["management_type"] = "COUNT0_DEFAULT_STRICT_2"
+                print(f"      📍 Count=0 mode: Using default strict 2-item management")
+                
+                orders_to_keep = []
+                orders_to_delete = []
+                
+                if symbol_positions:
+                    position = symbol_positions[0]
+                    
+                    is_buy_position = position.type == mt5.POSITION_TYPE_BUY
+                    position_type_str = "BUY" if is_buy_position else "SELL"
+                    
+                    if position.sl is None or position.sl == 0:
+                        print(f"      ⚠️  Position has no SL - deleting ALL pending orders")
+                        orders_to_delete = symbol_orders.copy()
+                    else:
+                        opposite_order_types = [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP] if is_buy_position else [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]
+                        target_sl_price = position.sl
+                        
+                        matching_orders = []
+                        other_orders = []
+                        
+                        for order in symbol_orders:
+                            if order.type in opposite_order_types:
+                                if abs(order.price_open - target_sl_price) < 0.00001:
+                                    matching_orders.append(order)
+                                else:
+                                    other_orders.append(order)
+                            else:
+                                other_orders.append(order)
+                        
+                        if matching_orders:
+                            orders_to_keep = [matching_orders[0]]
+                            orders_to_delete = matching_orders[1:] + other_orders
+                            symbol_stats["has_valid_pair"] = True
+                        else:
+                            orders_to_delete = symbol_orders.copy()
+                
+                else:
+                    # No position: find closest BUY and SELL with SL match
+                    buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
+                    sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
+                    
+                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    
+                    if closest_buy and closest_sell:
+                        valid_match = False
+                        if closest_buy.sl and abs(closest_buy.sl - closest_sell.price_open) < 0.00001:
+                            valid_match = True
+                        elif closest_sell.sl and abs(closest_sell.sl - closest_buy.price_open) < 0.00001:
+                            valid_match = True
+                        
+                        if valid_match:
+                            orders_to_keep = [closest_buy, closest_sell]
+                            orders_to_delete = [o for o in symbol_orders if o.ticket not in [closest_buy.ticket, closest_sell.ticket]]
+                            symbol_stats["has_valid_pair"] = True
+                        else:
+                            orders_to_delete = symbol_orders.copy()
+                    else:
+                        orders_to_delete = symbol_orders.copy()
+            
+            elif management_count == 1:
+                # Count 1: Keep ONLY the single closest order to current price (BUY or SELL)
+                symbol_stats["management_type"] = "COUNT1_SINGLE_CLOSEST"
+                print(f"      📍 Count=1 mode: Keeping single closest order to current price")
+                
+                if not current_price:
+                    print(f"      ⚠️  Cannot get current price - deleting ALL orders")
+                    orders_to_delete = symbol_orders.copy()
+                    orders_to_keep = []
+                else:
+                    # Find the single order closest to current price
+                    closest_order = min(symbol_orders, key=lambda o: abs(o.price_open - current_price))
+                    closest_distance = abs(closest_order.price_open - current_price)
+                    
+                    order_type_name = "BUY" if closest_order.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP] else "SELL"
+                    print(f"      🎯 Closest order: {order_type_name} #{closest_order.ticket} @ {closest_order.price_open} (distance: {closest_distance:.5f})")
+                    
+                    orders_to_keep = [closest_order]
+                    orders_to_delete = [o for o in symbol_orders if o.ticket != closest_order.ticket]
+                    symbol_stats["has_valid_pair"] = True  # Count 1 always considered valid
+            
+            elif management_count == 2:
+                # Count 2: Strict SL matching (original behavior)
+                symbol_stats["management_type"] = "COUNT2_STRICT_SL_MATCHING"
+                print(f"      📍 Count=2 mode: Strict SL price matching")
+                
+                orders_to_keep = []
+                orders_to_delete = []
+                
+                if symbol_positions:
+                    position = symbol_positions[0]
+                    
+                    is_buy_position = position.type == mt5.POSITION_TYPE_BUY
+                    position_type_str = "BUY" if is_buy_position else "SELL"
+                    
+                    if position.sl is None or position.sl == 0:
+                        print(f"      ⚠️  Position has no SL - deleting ALL pending orders")
+                        orders_to_delete = symbol_orders.copy()
+                    else:
+                        opposite_order_types = [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP] if is_buy_position else [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]
+                        target_sl_price = position.sl
+                        
+                        matching_orders = []
+                        other_orders = []
+                        
+                        for order in symbol_orders:
+                            if order.type in opposite_order_types:
+                                if abs(order.price_open - target_sl_price) < 0.00001:
+                                    matching_orders.append(order)
+                                else:
+                                    other_orders.append(order)
+                            else:
+                                other_orders.append(order)
+                        
+                        if matching_orders:
+                            orders_to_keep = [matching_orders[0]]
+                            orders_to_delete = matching_orders[1:] + other_orders
+                            symbol_stats["has_valid_pair"] = True
+                        else:
+                            orders_to_delete = symbol_orders.copy()
+                
+                else:
+                    # No position: find closest BUY/SELL pair with SL match
+                    buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
+                    sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
+                    
+                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    
+                    if closest_buy and closest_sell:
+                        valid_match = False
+                        if closest_buy.sl and abs(closest_buy.sl - closest_sell.price_open) < 0.00001:
+                            valid_match = True
+                        elif closest_sell.sl and abs(closest_sell.sl - closest_buy.price_open) < 0.00001:
+                            valid_match = True
+                        
+                        if valid_match:
+                            orders_to_keep = [closest_buy, closest_sell]
+                            orders_to_delete = [o for o in symbol_orders if o.ticket not in [closest_buy.ticket, closest_sell.ticket]]
+                            symbol_stats["has_valid_pair"] = True
+                        else:
+                            orders_to_delete = symbol_orders.copy()
+                    else:
+                        orders_to_delete = symbol_orders.copy()
+            
+            else:  # management_count >= 3
+                # Count >= 3: Strict pair for first 2 items, then keep additional closest orders
+                symbol_stats["management_type"] = f"COUNT{management_count}_HYBRID"
+                print(f"      📍 Count={management_count} mode: Strict pair + {management_count - 2} additional closest orders")
+                
+                # Step 1: Identify the strict pair (same logic as count=2)
+                strict_orders_to_keep = []
+                remaining_orders = symbol_orders.copy()
+                
+                if symbol_positions:
+                    # Try to find SL-matching pair with position
+                    position = symbol_positions[0]
+                    
+                    is_buy_position = position.type == mt5.POSITION_TYPE_BUY
+                    
+                    if position.sl and position.sl != 0:
+                        opposite_order_types = [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP] if is_buy_position else [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]
+                        target_sl_price = position.sl
+                        
+                        for order in symbol_orders:
+                            if order.type in opposite_order_types:
+                                if abs(order.price_open - target_sl_price) < 0.00001:
+                                    strict_orders_to_keep.append(order)
+                                    break
+                    
+                    # If no SL match found with position, try to find BUY/SELL pair among orders
+                    if not strict_orders_to_keep:
+                        buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
+                        sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
+                        
+                        closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                        closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                        
+                        if closest_buy and closest_sell:
+                            valid_match = False
+                            if closest_buy.sl and abs(closest_buy.sl - closest_sell.price_open) < 0.00001:
+                                valid_match = True
+                            elif closest_sell.sl and abs(closest_sell.sl - closest_buy.price_open) < 0.00001:
+                                valid_match = True
+                            
+                            if valid_match:
+                                strict_orders_to_keep = [closest_buy, closest_sell]
+                else:
+                    # No position: find BUY/SELL pair with SL match
+                    buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
+                    sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
+                    
+                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    
+                    if closest_buy and closest_sell:
+                        valid_match = False
+                        if closest_buy.sl and abs(closest_buy.sl - closest_sell.price_open) < 0.00001:
+                            valid_match = True
+                        elif closest_sell.sl and abs(closest_sell.sl - closest_buy.price_open) < 0.00001:
+                            valid_match = True
+                        
+                        if valid_match:
+                            strict_orders_to_keep = [closest_buy, closest_sell]
+                
+                # Remove strict orders from remaining list
+                if strict_orders_to_keep:
+                    strict_tickets = [o.ticket for o in strict_orders_to_keep]
+                    remaining_orders = [o for o in symbol_orders if o.ticket not in strict_tickets]
+                    symbol_stats["has_valid_pair"] = True
+                    print(f"      • Strict pair found: {len(strict_orders_to_keep)} order(s)")
+                else:
+                    print(f"      • No valid strict pair found - will keep only closest orders")
+                
+                # Step 2: Calculate how many additional orders we can keep
+                additional_needed = management_count - len(strict_orders_to_keep)
+                
+                if additional_needed > 0 and remaining_orders:
+                    # Sort remaining orders by distance to current price
+                    if current_price:
+                        remaining_orders.sort(key=lambda o: abs(o.price_open - current_price))
+                        additional_to_keep = remaining_orders[:additional_needed]
+                        orders_to_keep = strict_orders_to_keep + additional_to_keep
+                        orders_to_delete = [o for o in symbol_orders if o.ticket not in [k.ticket for k in orders_to_keep]]
+                        
+                        symbol_stats["additional_orders_kept"] = len(additional_to_keep)
+                        print(f"      • Keeping {len(additional_to_keep)} additional order(s) closest to price")
+                    else:
+                        orders_to_keep = strict_orders_to_keep
+                        orders_to_delete = remaining_orders
+                else:
+                    orders_to_keep = strict_orders_to_keep
+                    orders_to_delete = remaining_orders
+                
+                # Final check: ensure we don't exceed management count
+                if len(orders_to_keep) > management_count:
+                    # Trim to management count (keep the strict ones first, then closest)
+                    if current_price:
+                        # Sort by distance, but prioritize strict orders
+                        strict_tickets = [o.ticket for o in strict_orders_to_keep]
+                        non_strict = [o for o in orders_to_keep if o.ticket not in strict_tickets]
+                        if non_strict:
+                            non_strict.sort(key=lambda o: abs(o.price_open - current_price))
+                            orders_to_keep = strict_orders_to_keep + non_strict[:management_count - len(strict_orders_to_keep)]
+                            orders_to_delete = [o for o in symbol_orders if o.ticket not in [k.ticket for k in orders_to_keep]]
+                
+                # If no valid pair found and count>=3, just keep closest orders up to count
+                if not strict_orders_to_keep and current_price:
+                    symbol_orders_sorted = sorted(symbol_orders, key=lambda o: abs(o.price_open - current_price))
+                    orders_to_keep = symbol_orders_sorted[:management_count]
+                    orders_to_delete = symbol_orders_sorted[management_count:]
+                    print(f"      • No valid pair - keeping {len(orders_to_keep)} closest order(s)")
+            
+            # --- DELETE ORDERS ---
+            if orders_to_delete:
+                print(f"      🗑️  Deleting {len(orders_to_delete)} order(s)...")
+                symbol_stats["action_taken"] = True
+                
+                for order in orders_to_delete:
+                    order_type_name = "UNKNOWN"
+                    if order.type == mt5.ORDER_TYPE_BUY_LIMIT:
+                        order_type_name = "BUY LIMIT"
+                    elif order.type == mt5.ORDER_TYPE_SELL_LIMIT:
+                        order_type_name = "SELL LIMIT"
+                    elif order.type == mt5.ORDER_TYPE_BUY_STOP:
+                        order_type_name = "BUY STOP"
+                    elif order.type == mt5.ORDER_TYPE_SELL_STOP:
+                        order_type_name = "SELL STOP"
+                    
+                    print(f"        • Deleting order #{order.ticket} ({order_type_name} @ {order.price_open})...")
+                    
+                    delete_request = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": order.ticket,
+                    }
+                    
+                    result = mt5.order_send(delete_request)
+                    
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        symbol_stats["orders_deleted"] += 1
+                        stats["orders_deleted"] += 1
+                        print(f"          ✅ Deleted successfully")
+                    else:
+                        stats["errors"] += 1
+                        error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                        print(f"           Deletion failed: {error_msg}")
+            
+            symbol_stats["orders_kept"] = len(orders_to_keep) if orders_to_keep else 0
+            stats["orders_kept"] += symbol_stats["orders_kept"]
+            
+            symbol_results.append(symbol_stats)
+            stats["symbols_processed"] += 1
+            
+            # Display per-symbol summary
+            print(f"      📊 {symbol} Summary:")
+            print(f"      • Management Type: {symbol_stats['management_type']}")
+            print(f"      • Target count: {management_count}")
+            print(f"      • Initial items: {total_symbol_items}")
+            print(f"      • Orders kept: {symbol_stats['orders_kept']}")
+            print(f"      • Orders deleted: {symbol_stats['orders_deleted']}")
+            print(f"      • Integrity valid: {'✅ YES' if symbol_stats['integrity_valid'] else '❌ NO'}")
+            if symbol_stats.get('additional_orders_kept', 0) > 0:
+                print(f"      • Additional orders kept: {symbol_stats['additional_orders_kept']}")
+            
+            # Store status
+            if management_count == 0:
+                stats["symbol_status"][symbol] = "COUNT0_DEFAULT_STRICT" + ("_VALID" if symbol_stats["has_valid_pair"] else "_NO_MATCH")
+            elif management_count == 1:
+                stats["symbol_status"][symbol] = "COUNT1_SINGLE_ORDER"
+            elif management_count == 2:
+                stats["symbol_status"][symbol] = "COUNT2_STRICT" + ("_VALID" if symbol_stats["has_valid_pair"] else "_NO_MATCH")
+            else:
+                stats["symbol_status"][symbol] = f"COUNT{management_count}_HYBRID" + ("_WITH_PAIR" if symbol_stats["has_valid_pair"] else "_NO_PAIR")
+        
+        # --- DETERMINE FINAL upload_orders FLAG BASED ON INTEGRITY ---
+        # upload_orders = False ONLY IF every symbol has total_items == management_count
+        if investor_has_valid_integrity and len(symbol_results) > 0:
+            stats["upload_orders"] = False
+            print(f"\n  └─ 🚩 upload_orders = False (All symbols have exactly {management_count} items)")
+        else:
+            stats["upload_orders"] = True
+            if not investor_has_valid_integrity:
+                print(f"\n  └─ 🚩 upload_orders = True (Some symbols violate the count requirement)")
+            elif len(symbol_results) == 0:
+                print(f"\n  └─ 🚩 upload_orders = True (No symbols with items to check)")
+        
+        stats["management_counts"][user_brokerid] = management_count
+        stats["processing_success"] = True
+        
+        # --- INVESTOR SUMMARY ---
+        print(f"\n  └─ 📊 Management Results for {user_brokerid}:")
+        print(f"      • Management count: {management_count}")
+        print(f"      • Symbols processed: {len(symbol_results)}")
+        print(f"      • Total positions: {total_positions}")
+        print(f"      • Total pending orders: {total_pending}")
+        print(f"      • Orders kept: {stats['orders_kept']}")
+        print(f"      • Orders deleted: {stats['orders_deleted']}")
+        print(f"      • upload_orders flag: {stats['upload_orders']}")
+        
+        # Show per-symbol breakdown
+        if symbol_results:
+            print(f"      • Per-symbol breakdown:")
+            for sym_result in symbol_results:
+                integrity_status = "✅" if sym_result['integrity_valid'] else "❌"
+                status = f"{sym_result['management_type']} (items: {sym_result['total_items']}/{sym_result['target_count']} {integrity_status}, kept: {sym_result['orders_kept']}, deleted: {sym_result['orders_deleted']})"
+                print(f"        - {sym_result['symbol']}: {status}")
+        
+        if stats['errors'] > 0:
+            print(f"      • Errors: {stats['errors']}")
+        else:
+            print(f"      ✅ Management completed successfully")
+
+    # --- FINAL SUMMARY ---
+    print(f"\n{'='*10} 📊 DYNAMIC POSITION & PENDING ORDER MANAGEMENT SUMMARY {'='*10}")
+    print(f"   Investor ID: {stats['investor_id']}")
+    print(f"   Investors processed: {stats['investors_processed']}")
+    print(f"   Total positions found: {stats['positions_found']}")
+    print(f"   Total pending orders found: {stats['pending_orders_found']}")
+    print(f"   Symbols processed: {stats['symbols_processed']}")
+    print(f"   Orders kept: {stats['orders_kept']}")
+    print(f"   Orders deleted: {stats['orders_deleted']}")
+    print(f"   Errors: {stats['errors']}")
+    print(f"   FINAL upload_orders flag: {stats['upload_orders']}")
+    
+    # Show management counts used
+    if stats['management_counts']:
+        print(f"\n   Management Counts by Investor:")
+        for inv_id, count in stats['management_counts'].items():
+            print(f"      • {inv_id}: count={count}")
+    
+    # Show symbol status summary
+    if stats['symbol_status']:
+        print(f"\n   Symbol Status Summary:")
+        for symbol, status in stats['symbol_status'].items():
+            print(f"      • {symbol}: {status}")
+    
+    if stats['orders_deleted'] > 0 or stats['orders_kept'] > 0:
+        print(f"\n   Management Action: {'✅ COMPLETED' if stats['processing_success'] else '⚠️  PARTIAL'}")
+    else:
+        print(f"\n   Management Action: ℹ️  No action needed")
+    
+    print(f"\n{'='*10} 🏁 DYNAMIC POSITION & PENDING ORDER MANAGEMENT COMPLETE {'='*10}\n")
+    return stats
+
+def manage_single_position_and_pending(inv_id=None):
+    """
+    Function: Manages positions and pending orders to ensure only one position exists PER SYMBOL
+    and only the opposite pending order with entry price matching the position's SL price remains.
+    
+    If enable_single_position_and_pending is True:
+    - For each symbol with a position:
+        - For a SELL position: Keeps only the BUY order with entry price EQUAL to the SELL position's SL price
+        - For a BUY position: Keeps only the SELL order with entry price EQUAL to the BUY position's SL price
+        - Deletes all other pending orders for that symbol
+    
+    - For each symbol WITHOUT a position but WITH pending orders:
+        - First, identify the closest BUY order to current price and closest SELL order to current price
+        - Then, check if these two orders have a valid SL relationship:
+          * BUY entry price equals SELL SL price, OR
+          * SELL entry price equals BUY SL price
+        - If valid SL relationship exists: keep these two orders, delete all others
+        - If no valid SL relationship: delete ALL pending orders
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the processing including 'upload_orders' flag
+    """
+    print(f"\n{'='*10} 🎯 SINGLE POSITION & PENDING ORDER MANAGEMENT (PER SYMBOL) {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
+
+    # Track statistics
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_processed": 0,
+        "positions_found": 0,
+        "pending_orders_found": 0,
+        "symbols_processed": 0,
+        "orders_kept": 0,
+        "orders_deleted": 0,
+        "errors": 0,
+        "processing_success": False,
+        "upload_orders": True,  # Will be set to False ONLY if ANY symbol has valid SL match
+        "symbol_status": {}  # Track per symbol status for debugging
+    }
+
+    # Determine which investors to process
+    investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
+    total_investors = len(investors_to_process) if not inv_id else 1
+    processed = 0
+
+    for user_brokerid in investors_to_process:
+        processed += 1
+        print(f"\n[{processed}/{total_investors}] {user_brokerid} 🔍 Checking single position/pending configuration...")
+        
+        # Reset per-investor flags
+        investor_has_valid_pair = False
+        
+        # Get broker config
+        broker_cfg = usersdictionary.get(user_brokerid)
+        if not broker_cfg:
+            print(f"  └─  No broker config found")
+            continue
+        
+        inv_root = Path(INV_PATH) / user_brokerid
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+
+        if not acc_mgmt_path.exists():
+            print(f"  └─ ⚠️  Account config missing. Skipping.")
+            continue
+
+        # --- LOAD CONFIG AND CHECK SETTINGS ---
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Check if single position and pending management is enabled
+            settings = config.get("settings", {})
+            if not settings.get("enable_single_position_and_pending", False):
+                print(f"  └─ ⏭️  Single position/pending management disabled in settings. Skipping.")
+                continue
+            
+            print(f"  └─ ✅ Single position/pending management ENABLED (SL PRICE MATCHING MODE)")
+            
+        except Exception as e:
+            print(f"  └─  Failed to read config: {e}")
+            stats["errors"] += 1
+            continue
+
+        # --- ACCOUNT INITIALIZATION ---
+        print(f"  └─ 🔌 Initializing account connection...")
+        
+        login_id = int(broker_cfg['LOGIN_ID'])
+        mt5_path = broker_cfg["TERMINAL_PATH"]
+        
+        print(f"      • Terminal Path: {mt5_path}")
+        print(f"      • Login ID: {login_id}")
+
+        # Initialize MT5 connection if needed
+        if not mt5.initialize(path=mt5_path):
+            print(f"  └─  MT5 initialization failed")
+            stats["errors"] += 1
+            continue
+
+        # Check login status
+        acc = mt5.account_info()
+        if acc is None or acc.login != login_id:
+            print(f"      🔑 Logging into account...")
+            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
+                error = mt5.last_error()
+                print(f"  └─  Login failed: {error}")
+                stats["errors"] += 1
+                continue
+            print(f"      ✅ Successfully logged into account")
+        else:
+            print(f"      ✅ Already logged into account")
+
+        # --- GET ALL POSITIONS AND PENDING ORDERS ---
+        positions = mt5.positions_get()
+        pending_orders = mt5.orders_get()
+        
+        stats["investors_processed"] += 1
+        stats["positions_found"] += len(positions) if positions else 0
+        stats["pending_orders_found"] += len(pending_orders) if pending_orders else 0
+        
+        # Count total trading items (positions + pending orders)
+        total_positions = len(positions) if positions else 0
+        total_pending = len(pending_orders) if pending_orders else 0
+        total_items = total_positions + total_pending
+        
+        print(f"\n  └─ 📊 Account Summary:")
+        print(f"      • Positions: {total_positions}")
+        print(f"      • Pending Orders: {total_pending}")
+        print(f"      • Total Items: {total_items}")
+        
+        # CRITICAL RULE: If there's only ONE item total (either one position OR one pending order)
+        if total_items == 1:
+            print(f"\n  └─ 🚩 Only 1 trading item found (total positions + pending orders = 1)")
+            print(f"  └─ 🚩 upload_orders = True (insufficient items for management)")
+            stats["upload_orders"] = True
+            stats["processing_success"] = True
+            continue
+        
+        # --- GROUP POSITIONS BY SYMBOL ---
+        positions_by_symbol = {}
+        if positions:
+            for pos in positions:
+                symbol = pos.symbol
+                if symbol not in positions_by_symbol:
+                    positions_by_symbol[symbol] = []
+                positions_by_symbol[symbol].append(pos)
+        
+        # Group pending orders by symbol
+        orders_by_symbol = {}
+        if pending_orders:
+            for order in pending_orders:
+                symbol = order.symbol
+                if symbol not in orders_by_symbol:
+                    orders_by_symbol[symbol] = []
+                orders_by_symbol[symbol].append(order)
+        
+        print(f"\n  └─ 📊 Symbols with positions: {list(positions_by_symbol.keys())}")
+        print(f"  └─ 📊 Symbols with pending orders: {list(orders_by_symbol.keys())}")
+        
+        # --- GET CURRENT PRICES FOR ALL SYMBOLS ---
+        current_prices = {}
+        all_symbols = set(positions_by_symbol.keys()) | set(orders_by_symbol.keys())
+        for symbol in all_symbols:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                current_prices[symbol] = tick.ask  # Use ask for calculations
+            else:
+                print(f"      ⚠️  Could not get current price for {symbol}")
+                current_prices[symbol] = None
+        
+        # --- PROCESS EACH SYMBOL INDEPENDENTLY ---
+        symbol_results = []
+        
+        # Process ALL symbols that have pending orders (with or without positions)
+        all_symbols_with_orders = set(orders_by_symbol.keys())
+        
+        for symbol in all_symbols_with_orders:
+            print(f"\n  └─ 🔄 Processing symbol: {symbol}")
+            
+            has_position = symbol in positions_by_symbol
+            symbol_orders = orders_by_symbol.get(symbol, [])
+            current_price = current_prices.get(symbol)
+            
+            symbol_stats = {
+                "symbol": symbol,
+                "has_position": has_position,
+                "positions_count": len(positions_by_symbol.get(symbol, [])),
+                "pending_orders_count": len(symbol_orders),
+                "has_valid_pair": False,
+                "orders_kept": 0,
+                "orders_deleted": 0,
+                "action_taken": False,
+                "management_type": "WITH_POSITION" if has_position else "NO_POSITION"
+            }
+            
+            if has_position:
+                # --- CASE 1: Symbol HAS a position ---
+                print(f"      📍 Symbol has a position - checking for opposite order with matching SL price")
+                
+                symbol_positions = positions_by_symbol[symbol]
+                
+                # Check if multiple positions exist for this symbol
+                if len(symbol_positions) > 1:
+                    print(f"      ⚠️  WARNING: Found {len(symbol_positions)} open positions for {symbol}!")
+                    print(f"      This function expects a single position per symbol. Processing based on the first position only.")
+                
+                # Get the first position for this symbol
+                position = symbol_positions[0]
+                
+                # Determine position type
+                is_buy_position = position.type == mt5.POSITION_TYPE_BUY
+                position_type_str = "BUY" if is_buy_position else "SELL"
+                
+                print(f"      • Position Ticket: {position.ticket}")
+                print(f"      • Type: {position_type_str}")
+                print(f"      • Volume: {position.volume}")
+                print(f"      • Entry Price: {position.price_open}")
+                print(f"      • SL Price: {position.sl}")
+                print(f"      • Current Price: {position.price_current}")
+                print(f"      • Found {len(symbol_orders)} pending orders for {symbol}")
+                
+                # Check if position has SL
+                if position.sl is None or position.sl == 0:
+                    print(f"      ⚠️  Position has no SL price set. Deleting ALL pending orders.")
+                    # Delete all pending orders for this symbol
+                    orders_to_delete = symbol_orders.copy()
+                    symbol_stats["has_valid_pair"] = False
+                else:
+                    # Define opposite order type based on position direction
+                    opposite_order_types = []
+                    target_sl_price = position.sl
+                    
+                    if is_buy_position:
+                        # For BUY position, look for SELL orders with entry price EQUAL to BUY SL
+                        opposite_order_types = [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]
+                        print(f"      • Looking for SELL order with entry price = BUY SL ({target_sl_price})")
+                    else:
+                        # For SELL position, look for BUY orders with entry price EQUAL to SELL SL
+                        opposite_order_types = [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]
+                        print(f"      • Looking for BUY order with entry price = SELL SL ({target_sl_price})")
+                    
+                    # Find opposite orders with entry price exactly matching SL
+                    matching_orders = []
+                    other_orders = []
+                    
+                    for order in symbol_orders:
+                        if order.type in opposite_order_types:
+                            if abs(order.price_open - target_sl_price) < 0.00001:  # Float comparison with tolerance
+                                matching_orders.append(order)
+                                print(f"      ✅ Found matching order #{order.ticket} with entry price {order.price_open} = SL {target_sl_price}")
+                            else:
+                                other_orders.append(order)
+                                print(f"       Order #{order.ticket} entry price {order.price_open} does NOT match SL {target_sl_price}")
+                        else:
+                            # Orders in same direction or other types
+                            other_orders.append(order)
+                    
+                    # Keep only the first matching order (if any), delete all others
+                    if matching_orders:
+                        # Keep the first matching order
+                        order_to_keep = matching_orders[0]
+                        orders_to_keep = [order_to_keep]
+                        orders_to_delete = matching_orders[1:] + other_orders
+                        
+                        order_type_name = "SELL" if is_buy_position else "BUY"
+                        print(f"      🎯 Keeping opposite {order_type_name} order #{order_to_keep.ticket} with entry price matching SL")
+                        symbol_stats["has_valid_pair"] = True
+                        investor_has_valid_pair = True
+                        symbol_stats["orders_kept"] = len(orders_to_keep)
+                        stats["orders_kept"] += len(orders_to_keep)
+                    else:
+                        # No matching order found
+                        orders_to_delete = symbol_orders.copy()
+                        print(f"       No opposite order found with entry price matching SL ({target_sl_price})")
+                        symbol_stats["has_valid_pair"] = False
+                
+                # Delete all non-matching orders
+                if orders_to_delete:
+                    print(f"      🗑️  Deleting {len(orders_to_delete)} order(s)...")
+                    symbol_stats["action_taken"] = True
+                    
+                    for order in orders_to_delete:
+                        order_type_name = "UNKNOWN"
+                        if order.type == mt5.ORDER_TYPE_BUY_LIMIT:
+                            order_type_name = "BUY LIMIT"
+                        elif order.type == mt5.ORDER_TYPE_SELL_LIMIT:
+                            order_type_name = "SELL LIMIT"
+                        elif order.type == mt5.ORDER_TYPE_BUY_STOP:
+                            order_type_name = "BUY STOP"
+                        elif order.type == mt5.ORDER_TYPE_SELL_STOP:
+                            order_type_name = "SELL STOP"
+                        
+                        print(f"        • Deleting order #{order.ticket} ({order_type_name} @ {order.price_open})...")
+                        
+                        delete_request = {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": order.ticket,
+                        }
+                        
+                        result = mt5.order_send(delete_request)
+                        
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            symbol_stats["orders_deleted"] += 1
+                            stats["orders_deleted"] += 1
+                            print(f"          ✅ Deleted successfully")
+                        else:
+                            stats["errors"] += 1
+                            error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                            print(f"           Deletion failed: {error_msg}")
+            
+            else:
+                # --- CASE 2: Symbol has NO position, only pending orders ---
+                print(f"      📍 Symbol has NO position - finding closest BUY/SELL orders to current price")
+                
+                if not current_price:
+                    print(f"      ⚠️  Cannot get current price for {symbol}. Deleting all pending orders.")
+                    orders_to_delete = symbol_orders.copy()
+                    symbol_stats["has_valid_pair"] = False
+                    symbol_stats["orders_deleted"] = len(orders_to_delete)
+                    stats["orders_deleted"] += len(orders_to_delete)
+                    symbol_stats["action_taken"] = True if orders_to_delete else False
+                    
+                    # Delete all orders
+                    for order in orders_to_delete:
+                        delete_request = {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": order.ticket,
+                        }
+                        result = mt5.order_send(delete_request)
+                        if result and result.retcode != mt5.TRADE_RETCODE_DONE:
+                            stats["errors"] += 1
+                    
+                    symbol_results.append(symbol_stats)
+                    stats["symbols_processed"] += 1
+                    continue
+                
+                print(f"      • Current Price: {current_price}")
+                print(f"      • Found {len(symbol_orders)} pending orders for {symbol}")
+                
+                # Separate BUY and SELL orders
+                buy_orders = []
+                sell_orders = []
+                
+                for order in symbol_orders:
+                    if order.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]:
+                        buy_orders.append(order)
+                    elif order.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]:
+                        sell_orders.append(order)
+                
+                print(f"      • Found {len(buy_orders)} BUY orders")
+                print(f"      • Found {len(sell_orders)} SELL orders")
+                
+                # STEP 1: Find closest BUY order to current price
+                closest_buy = None
+                if buy_orders:
+                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price))
+                    buy_distance = abs(closest_buy.price_open - current_price)
+                    print(f"      🎯 Closest BUY order to CURRENT PRICE ({current_price}):")
+                    print(f"      • Ticket: {closest_buy.ticket}")
+                    print(f"      • Type: {'BUY LIMIT' if closest_buy.type == mt5.ORDER_TYPE_BUY_LIMIT else 'BUY STOP'}")
+                    print(f"      • Entry: {closest_buy.price_open}")
+                    print(f"      • SL: {closest_buy.sl}")
+                    print(f"      • Distance: {buy_distance:.5f}")
+                else:
+                    print(f"      ℹ️  No BUY orders found")
+                
+                # STEP 2: Find closest SELL order to current price
+                closest_sell = None
+                if sell_orders:
+                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price))
+                    sell_distance = abs(closest_sell.price_open - current_price)
+                    print(f"      🎯 Closest SELL order to CURRENT PRICE ({current_price}):")
+                    print(f"      • Ticket: {closest_sell.ticket}")
+                    print(f"      • Type: {'SELL LIMIT' if closest_sell.type == mt5.ORDER_TYPE_SELL_LIMIT else 'SELL STOP'}")
+                    print(f"      • Entry: {closest_sell.price_open}")
+                    print(f"      • SL: {closest_sell.sl}")
+                    print(f"      • Distance: {sell_distance:.5f}")
+                else:
+                    print(f"      ℹ️  No SELL orders found")
+                
+                # STEP 3: Check if we have both a BUY and SELL order
+                if closest_buy and closest_sell:
+                    # Check for valid SL relationship
+                    valid_sl_match = False
+                    
+                    # Check if BUY entry equals SELL SL
+                    if closest_buy.sl is not None and abs(closest_buy.sl - closest_sell.price_open) < 0.00001:
+                        valid_sl_match = True
+                        print(f"      ✅ Valid SL match: BUY SL ({closest_buy.sl}) = SELL entry ({closest_sell.price_open})")
+                    
+                    # Check if SELL entry equals BUY SL
+                    elif closest_sell.sl is not None and abs(closest_sell.sl - closest_buy.price_open) < 0.00001:
+                        valid_sl_match = True
+                        print(f"      ✅ Valid SL match: SELL SL ({closest_sell.sl}) = BUY entry ({closest_buy.price_open})")
+                    
+                    if valid_sl_match:
+                        # Keep both closest orders, delete all others
+                        orders_to_keep = [closest_buy, closest_sell]
+                        orders_to_delete = [o for o in symbol_orders if o.ticket not in [closest_buy.ticket, closest_sell.ticket]]
+                        
+                        print(f"      🎯 Keeping valid BUY/SELL pair (closest to current price with SL match)")
+                        symbol_stats["has_valid_pair"] = True
+                        investor_has_valid_pair = True
+                        symbol_stats["orders_kept"] = len(orders_to_keep)
+                        stats["orders_kept"] += len(orders_to_keep)
+                    else:
+                        # No valid SL relationship - delete ALL orders
+                        orders_to_delete = symbol_orders.copy()
+                        orders_to_keep = []
+                        print(f"       Closest orders do NOT have valid SL relationship - deleting ALL orders")
+                        symbol_stats["has_valid_pair"] = False
+                else:
+                    # Missing either BUY or SELL order - delete ALL orders
+                    orders_to_delete = symbol_orders.copy()
+                    orders_to_keep = []
+                    print(f"       Missing either BUY or SELL order - deleting ALL orders")
+                    symbol_stats["has_valid_pair"] = False
+                
+                # Delete orders
+                if orders_to_delete:
+                    print(f"      🗑️  Deleting {len(orders_to_delete)} order(s)...")
+                    symbol_stats["action_taken"] = True
+                    
+                    for order in orders_to_delete:
+                        order_type_name = "UNKNOWN"
+                        if order.type == mt5.ORDER_TYPE_BUY_LIMIT:
+                            order_type_name = "BUY LIMIT"
+                        elif order.type == mt5.ORDER_TYPE_SELL_LIMIT:
+                            order_type_name = "SELL LIMIT"
+                        elif order.type == mt5.ORDER_TYPE_BUY_STOP:
+                            order_type_name = "BUY STOP"
+                        elif order.type == mt5.ORDER_TYPE_SELL_STOP:
+                            order_type_name = "SELL STOP"
+                        
+                        print(f"        • Deleting order #{order.ticket} ({order_type_name} @ {order.price_open})...")
+                        
+                        delete_request = {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": order.ticket,
+                        }
+                        
+                        result = mt5.order_send(delete_request)
+                        
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            symbol_stats["orders_deleted"] += 1
+                            stats["orders_deleted"] += 1
+                            print(f"          ✅ Deleted successfully")
+                        else:
+                            stats["errors"] += 1
+                            error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                            print(f"           Deletion failed: {error_msg}")
+            
+            symbol_results.append(symbol_stats)
+            stats["symbols_processed"] += 1
+            
+            # Display per-symbol summary
+            print(f"      📊 {symbol} Summary:")
+            print(f"      • Management Type: {symbol_stats['management_type']}")
+            print(f"      • Has valid SL match: {'✅ YES' if symbol_stats['has_valid_pair'] else ' NO'}")
+            print(f"      • Orders kept: {symbol_stats['orders_kept']}")
+            print(f"      • Orders deleted: {symbol_stats['orders_deleted']}")
+            
+            # Store status
+            if has_position:
+                stats["symbol_status"][symbol] = "VALID_SL_MATCH" if symbol_stats["has_valid_pair"] else "NO_SL_MATCH"
+            else:
+                if symbol_stats["has_valid_pair"]:
+                    stats["symbol_status"][symbol] = "VALID_PAIR_CLOSEST_WITH_SL_MATCH"
+                else:
+                    stats["symbol_status"][symbol] = "NO_VALID_PAIR_ALL_DELETED"
+        
+        # --- DETERMINE FINAL upload_orders FLAG ---
+        # CRITICAL: upload_orders should be:
+        # - True if NO symbol has a valid SL match
+        # - False if AT LEAST ONE symbol has a valid SL match
+        
+        if investor_has_valid_pair:
+            stats["upload_orders"] = False
+            print(f"\n  └─ 🚩 upload_orders = False (At least one symbol has valid SL match)")
+        else:
+            stats["upload_orders"] = True
+            print(f"\n  └─ 🚩 upload_orders = True (No symbol has valid SL match)")
+        
+        stats["processing_success"] = True
+        
+        # --- INVESTOR SUMMARY ---
+        print(f"\n  └─ 📊 Management Results for {user_brokerid}:")
+        print(f"      • Symbols processed: {len(symbol_results)}")
+        print(f"      • Total positions: {total_positions}")
+        print(f"      • Total pending orders: {total_pending}")
+        print(f"      • Orders kept: {stats['orders_kept']}")
+        print(f"      • Orders deleted: {stats['orders_deleted']}")
+        print(f"      • upload_orders flag: {stats['upload_orders']}")
+        
+        # Show per-symbol breakdown
+        if symbol_results:
+            print(f"      • Per-symbol breakdown:")
+            for sym_result in symbol_results:
+                if sym_result['has_position']:
+                    status = "✅ VALID SL MATCH" if sym_result['has_valid_pair'] else " NO SL MATCH"
+                else:
+                    if sym_result['has_valid_pair']:
+                        status = "✅ VALID PAIR (closest orders with SL match)"
+                    else:
+                        status = " NO VALID PAIR (all orders deleted)"
+                print(f"        - {sym_result['symbol']}: {status} (kept: {sym_result['orders_kept']}, deleted: {sym_result['orders_deleted']})")
+        
+        if stats['errors'] > 0:
+            print(f"      • Errors: {stats['errors']}")
+        else:
+            print(f"      ✅ Management completed successfully")
+
+    # --- FINAL SUMMARY ---
+    print(f"\n{'='*10} 📊 SINGLE POSITION & PENDING ORDER MANAGEMENT SUMMARY (PER SYMBOL) {'='*10}")
+    print(f"   Investor ID: {stats['investor_id']}")
+    print(f"   Investors processed: {stats['investors_processed']}")
+    print(f"   Total positions found: {stats['positions_found']}")
+    print(f"   Total pending orders found: {stats['pending_orders_found']}")
+    print(f"   Symbols processed: {stats['symbols_processed']}")
+    print(f"   Orders kept: {stats['orders_kept']}")
+    print(f"   Orders deleted: {stats['orders_deleted']}")
+    print(f"   Errors: {stats['errors']}")
+    print(f"   FINAL upload_orders flag: {stats['upload_orders']}")
+    
+    # Show symbol status summary
+    if stats['symbol_status']:
+        print(f"\n   Symbol Status Summary:")
+        for symbol, status in stats['symbol_status'].items():
+            print(f"      • {symbol}: {status}")
+    
+    if stats['orders_deleted'] > 0 or stats['orders_kept'] > 0:
+        print(f"\n   Management Action: {'✅ COMPLETED' if stats['processing_success'] else '⚠️  PARTIAL'}")
+    else:
+        print(f"\n   Management Action: ℹ️  No action needed")
+    
+    print(f"\n{'='*10} 🏁 SINGLE POSITION & PENDING ORDER MANAGEMENT COMPLETE {'='*10}\n")
+    return stats
+
+def convert_grid_prices_to_limit_orders(inv_id=None):
+    """
+    Convert grid prices structure to flat limit_orders.json format.
+    READS from and SAVES BACK to the same file: prices/pending/limit_orders.json
+    
+    Only processes if symbols_grid_strategy is enabled in accountmanagement.json
+    """
+    print(f"\n{'='*10} 🔄 CONVERT GRID PRICES TO FLAT LIMIT ORDERS {'='*10}")
+    
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_processed": 0,
+        "total_orders": 0,
+        "buy_stop_orders": 0,
+        "sell_stop_orders": 0,
+        "files_updated": 0,
+        "skipped_investors": 0,
+        "skip_reasons": []
+    }
+    
+    investors_to_process = [inv_id] if inv_id else list(usersdictionary.keys())
+    
+    for investor_id in investors_to_process:
+        print(f"\n📋 Processing investor: {investor_id}")
+        
+        inv_root = Path(INV_PATH) / investor_id
+        
+        # ========== CHECK: symbols_grid_strategy from accountmanagement.json ==========
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+        if not acc_mgmt_path.exists():
+            print(f"   ⚠️ accountmanagement.json not found - skipping")
+            stats["skipped_investors"] += 1
+            stats["skip_reasons"].append(f"{investor_id}: accountmanagement.json not found")
+            continue
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                acc_config = json.load(f)
+            
+            # Check if symbols_grid_strategy is enabled
+            settings = acc_config.get("settings", {})
+            symbols_grid_strategy_enabled = settings.get("symbols_grid_strategy", False)
+            
+            if not symbols_grid_strategy_enabled:
+                print(f"   ⏭️ SKIPPED: symbols_grid_strategy is DISABLED in accountmanagement.json")
+                print(f"      • Set 'symbols_grid_strategy': true to enable conversion")
+                stats["skipped_investors"] += 1
+                stats["skip_reasons"].append(f"{investor_id}: symbols_grid_strategy disabled")
+                continue
+            
+            print(f"   ✅ symbols_grid_strategy is enabled - proceeding with conversion")
+            
+        except Exception as e:
+            print(f"   ⚠️ Could not read accountmanagement.json: {e} - skipping")
+            stats["skipped_investors"] += 1
+            stats["skip_reasons"].append(f"{investor_id}: error reading config: {str(e)[:50]}")
+            continue
+        
+        # ========== READ FROM: prices/pending/limit_orders.json ==========
+        signals_file = inv_root / "prices" / "pending_orders" / "limit_orders.json"
+        
+        if not signals_file.exists():
+            print(f"   ⚠️ limit_orders.json not found at {signals_file}")
+            stats["skipped_investors"] += 1
+            stats["skip_reasons"].append(f"{investor_id}: limit_orders.json not found")
+            continue
+        
+        try:
+            with open(signals_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # ========== VALIDATE DATA STRUCTURE ==========
+            # Skip if data is a list (already converted or invalid)
+            if isinstance(data, list):
+                print(f"   ⏭️ SKIPPED: limit_orders.json is already a flat list structure")
+                print(f"      • Found {len(data)} orders in flat format")
+                print(f"      • No conversion needed")
+                stats["skipped_investors"] += 1
+                stats["skip_reasons"].append(f"{investor_id}: already flat list format")
+                continue
+            
+            # Skip if data is not a dict
+            if not isinstance(data, dict):
+                print(f"   ⏭️ SKIPPED: Invalid data structure - expected dict, got {type(data).__name__}")
+                stats["skipped_investors"] += 1
+                stats["skip_reasons"].append(f"{investor_id}: invalid structure: {type(data).__name__}")
+                continue
+            
+            # Skip if missing required keys
+            if "categories" not in data:
+                print(f"   ⏭️ SKIPPED: Missing 'categories' key in limit_orders.json")
+                print(f"      • Available keys: {list(data.keys())}")
+                stats["skipped_investors"] += 1
+                stats["skip_reasons"].append(f"{investor_id}: missing 'categories' key")
+                continue
+            
+            # ========== FLATTEN ORDERS ==========
+            flat_orders = []
+            grid_config = data.get("grid_configuration", {})
+            generated_at = data.get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            
+            # Navigate: categories -> category -> symbols -> symbol
+            categories = data.get("categories", {})
+            total_bid_orders_found = 0
+            total_ask_orders_found = 0
+            
+            for category_name, category_data in categories.items():
+                symbols_data = category_data.get("symbols", {})
+                
+                for symbol, symbol_data in symbols_data.items():
+                    digits = symbol_data.get("digits", 5)
+                    current_prices = symbol_data.get("current_prices", {})
+                    
+                    # Process bid_orders
+                    bid_orders = symbol_data.get("bid_orders", [])
+                    ask_orders = symbol_data.get("ask_orders", [])
+                    
+                    if bid_orders or ask_orders:
+                        print(f"   📊 {symbol}: {len(bid_orders)} bid_orders, {len(ask_orders)} ask_orders")
+                        total_bid_orders_found += len(bid_orders)
+                        total_ask_orders_found += len(ask_orders)
+                    
+                    # Process bid_orders (these become sell_stop orders typically)
+                    for order in bid_orders:
+                        # Skip orders with invalid structure
+                        if not isinstance(order, dict):
+                            continue
+                            
+                        flat_order = {
+                            "symbol": symbol,
+                            "timeframe": "grid",
+                            "category": category_name,
+                            "risk_reward": order.get("risk_reward", grid_config.get("risk_reward", 3)),
+                            "order_type": order.get("order_type"),
+                            "entry": order.get("entry"),
+                            "exit": order.get("exit"),
+                            "tp": order.get("tp"),
+                            "volume": order.get("volume"),
+                            "risk_in_usd": order.get("risk_in_usd"),
+                            "min_volume_risk": order.get("min_volume_risk"),
+                            "is_grid_order": True,
+                            "grid_side": "bid",
+                            "grid_levels": grid_config.get("levels"),
+                            "grid_multiplier": grid_config.get("multiplier"),
+                            "strategy": f"dynamic_grid_{grid_config.get('multiplier', 50)}",
+                            "generated_at": generated_at,
+                            "digits": digits,
+                            "current_bid": current_prices.get("bid"),
+                            "current_ask": current_prices.get("ask")
+                        }
+                        # Remove None values
+                        flat_order = {k: v for k, v in flat_order.items() if v is not None}
+                        flat_orders.append(flat_order)
+                        
+                        # Count order types
+                        order_type = order.get("order_type", "")
+                        if "buy" in order_type.lower():
+                            stats["buy_stop_orders"] += 1
+                        elif "sell" in order_type.lower():
+                            stats["sell_stop_orders"] += 1
+                    
+                    # Process ask_orders (these become buy_stop orders typically)
+                    for order in ask_orders:
+                        # Skip orders with invalid structure
+                        if not isinstance(order, dict):
+                            continue
+                            
+                        flat_order = {
+                            "symbol": symbol,
+                            "timeframe": "grid",
+                            "category": category_name,
+                            "risk_reward": order.get("risk_reward", grid_config.get("risk_reward", 3)),
+                            "order_type": order.get("order_type"),
+                            "entry": order.get("entry"),
+                            "exit": order.get("exit"),
+                            "tp": order.get("tp"),
+                            "volume": order.get("volume"),
+                            "risk_in_usd": order.get("risk_in_usd"),
+                            "min_volume_risk": order.get("min_volume_risk"),
+                            "is_grid_order": True,
+                            "grid_side": "ask",
+                            "grid_levels": grid_config.get("levels"),
+                            "grid_multiplier": grid_config.get("multiplier"),
+                            "strategy": f"dynamic_grid_{grid_config.get('multiplier', 50)}",
+                            "generated_at": generated_at,
+                            "digits": digits,
+                            "current_bid": current_prices.get("bid"),
+                            "current_ask": current_prices.get("ask")
+                        }
+                        # Remove None values
+                        flat_order = {k: v for k, v in flat_order.items() if v is not None}
+                        flat_orders.append(flat_order)
+                        
+                        # Count order types
+                        order_type = order.get("order_type", "")
+                        if "buy" in order_type.lower():
+                            stats["buy_stop_orders"] += 1
+                        elif "sell" in order_type.lower():
+                            stats["sell_stop_orders"] += 1
+            
+            # ========== SAVE BACK TO THE SAME FILE as flat array ==========
+            if flat_orders:
+                with open(signals_file, 'w', encoding='utf-8') as f:
+                    json.dump(flat_orders, f, indent=4)
+                
+                stats["investors_processed"] += 1
+                stats["total_orders"] += len(flat_orders)
+                stats["files_updated"] += 1
+                
+                print(f"\n  ✅ CONVERTED & OVERWRITTEN: {signals_file}")
+                print(f"     • Original bid orders: {total_bid_orders_found}")
+                print(f"     • Original ask orders: {total_ask_orders_found}")
+                print(f"     • Total flat orders: {len(flat_orders)}")
+                print(f"     • Buy_stop orders: {stats['buy_stop_orders']}")
+                print(f"     • Sell_stop orders: {stats['sell_stop_orders']}")
+                
+                # Preview first few orders
+                print(f"\n  📝 First 5 orders (flat structure):")
+                for i, order in enumerate(flat_orders[:5]):
+                    print(f"     {i+1}. {order['order_type']} {order['symbol']} @ {order['entry']} (risk: ${order['risk_in_usd']:.2f})")
+                
+                if len(flat_orders) > 5:
+                    print(f"     ... and {len(flat_orders) - 5} more orders")
+                    
+            else:
+                print(f"  ⚠️ No valid orders found to convert")
+                stats["skipped_investors"] += 1
+                stats["skip_reasons"].append(f"{investor_id}: no valid orders found")
+                
+        except json.JSONDecodeError as e:
+            print(f"  ❌ JSON parsing error: {e}")
+            stats["skipped_investors"] += 1
+            stats["skip_reasons"].append(f"{investor_id}: JSON parse error")
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+            stats["skipped_investors"] += 1
+            stats["skip_reasons"].append(f"{investor_id}: {str(e)[:50]}")
+    
+    # ========== PRINT SUMMARY ==========
+    print(f"\n{'='*60}")
+    print(f"📊 CONVERSION SUMMARY")
+    print(f"  • Investors processed: {stats['investors_processed']}")
+    print(f"  • Total orders converted: {stats['total_orders']}")
+    print(f"  • Buy_stop orders: {stats['buy_stop_orders']}")
+    print(f"  • Sell_stop orders: {stats['sell_stop_orders']}")
+    print(f"  • Files updated: {stats['files_updated']}")
+    print(f"  • Skipped investors: {stats['skipped_investors']}")
+    
+    if stats['skip_reasons']:
+        print(f"\n  ⏭️ Skipped investors details:")
+        for reason in stats['skip_reasons'][:10]:  # Show first 10
+            print(f"     • {reason}")
+        if len(stats['skip_reasons']) > 10:
+            print(f"     • ... and {len(stats['skip_reasons']) - 10} more")
+    
+    print(f"{'='*60}")
+    
+    return stats
+# ---       ---#
+
+
 
 def get_normalized_symbol(record_symbol, risk_keys=None):
     """
@@ -8644,6 +11074,7 @@ def padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=None):
                 
                 # Start with a safe distance that will definitely give us at least min_risk_usd
                 # We'll increase distance until risk is achieved
+                max_attempts = 50
                 if is_buy:
                     # For buy: SL below entry - start with reasonable distance
                     # Start with current SL if it's valid, otherwise start wider
@@ -8653,7 +11084,7 @@ def padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=None):
                         test_distance = min_stop_distance * 10
                     
                     # Increase distance in steps until we achieve desired risk
-                    max_attempts = 50
+                    
                     for attempt in range(max_attempts):
                         test_sl = entry_price - test_distance
                         
@@ -10761,8 +13192,8 @@ def martingale(inv_id=None):
             return None, None
 
         def load_signals_json():
-            """Load signals.json file from original path"""
-            signals_path = inv_root / "prices" / "signals.json"
+            """Load limit_orders.json file from original path"""
+            signals_path = inv_root / "prices" / "pending_orders" / "limit_orders.json"
             
             if signals_path.exists():
                 with open(signals_path, 'r', encoding='utf-8') as f:
@@ -10778,7 +13209,7 @@ def martingale(inv_id=None):
                 json.dump(data, f, indent=2, ensure_ascii=False)
         
         def save_signals_json(file_path, data):
-            """Save signals.json file"""
+            """Save limit_orders.json file"""
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
@@ -10843,7 +13274,7 @@ def martingale(inv_id=None):
             return 0.01
 
         def update_volume_in_signals_recursive(data, symbol, new_volume, updated_count):
-            """Recursively update volume fields for a specific symbol in signals.json"""
+            """Recursively update volume fields for a specific symbol in limit_orders.json"""
             if isinstance(data, dict):
                 # Check if this is a trade dictionary with order_type
                 if data.get("order_type") and ("entry" in data or "exit" in data):
@@ -10867,7 +13298,7 @@ def martingale(inv_id=None):
             return updated_count
         
         def update_all_symbol_volumes_in_signals(signals_data, symbol_volumes):
-            """Update all volume entries for specified symbols in signals.json"""
+            """Update all volume entries for specified symbols in limit_orders.json"""
             updates_summary = {}
             
             for symbol, new_volume in symbol_volumes.items():
@@ -10884,7 +13315,7 @@ def martingale(inv_id=None):
             return updates_summary
         
         def find_first_order_in_signals(signals_data, symbol):
-            """Find first order for a symbol in signals.json"""
+            """Find first order for a symbol in limit_orders.json"""
             for category_name, category_data in signals_data.get('categories', {}).items():
                 symbols_in_category = category_data.get('symbols', {})
                 if symbol in symbols_in_category:
@@ -10912,7 +13343,7 @@ def martingale(inv_id=None):
             return None, None, None
         
         def get_current_volumes_from_signals(signals_data):
-            """Extract current volumes for all symbols from signals.json"""
+            """Extract current volumes for all symbols from limit_orders.json"""
             volumes = {}
             
             def extract_volumes(data, symbol):
@@ -11143,10 +13574,10 @@ def martingale(inv_id=None):
                 stats["errors"] += 1
                 return False, {}
 
-        # ========== SECTION 7: SIGNALS.JSON RECOVERY ==========
+        # ========== SECTION 7: limit_orders.json RECOVERY ==========
         def process_signals_recovery(recovery_amount):
-            """Process recovery for signals.json using current stage drawdown"""
-            print(f"\n  📝 STEP 4: Processing signals.json")
+            """Process recovery for limit_orders.json using current stage drawdown"""
+            print(f"\n  📝 STEP 4: Processing limit_orders.json")
             print(f"  {'─'*40}")
             
             if recovery_amount <= 0:
@@ -11165,7 +13596,7 @@ def martingale(inv_id=None):
             
             signals_path, signals_data = load_signals_json()
             if signals_path is None or signals_data is None:
-                print(f"  │ signals.json not found")
+                print(f"  │ limit_orders.json not found")
                 return False, {}
             
             try:
@@ -11278,7 +13709,7 @@ def martingale(inv_id=None):
                     if any(count > 0 for count in updates_summary.values()):
                         save_signals_json(signals_path, signals_data)
                         stats["signals_modified"] = True
-                        print(f"\n  ✓ signals.json updated")
+                        print(f"\n  ✓ limit_orders.json updated")
                         return True, get_current_volumes_from_signals(signals_data)
                 
                 return False, get_current_volumes_from_signals(signals_data)
@@ -11346,7 +13777,7 @@ def martingale(inv_id=None):
             return highest_risk_orders
         
         def analyze_highest_risk_from_signals(signals_data):
-            """Analyze highest risk orders from signals.json only"""
+            """Analyze highest risk orders from limit_orders.json only"""
             highest_risk_orders = {}
             
             if not signals_data:
@@ -11422,7 +13853,7 @@ def martingale(inv_id=None):
             return highest_risk_orders
         
         def process_pre_scaling():
-            """Process pre-scaling independently for limit_orders.json and signals.json"""
+            """Process pre-scaling independently for limit_orders.json and limit_orders.json"""
             if not martingale_pre_scaling:
                 return False
             
@@ -11472,7 +13903,7 @@ def martingale(inv_id=None):
                 current_signals_volumes = {}
                 if signals_data:
                     current_signals_volumes = get_current_volumes_from_signals(signals_data)
-                    print(f"  📄 Current signals.json volumes:")
+                    print(f"  📄 Current limit_orders.json volumes:")
                     for symbol, vol in current_signals_volumes.items():
                         print(f"     {symbol}: {vol:.2f} lots")
                 
@@ -11496,15 +13927,15 @@ def martingale(inv_id=None):
                         else:
                             print(f"       └─ Risk: ${order_info['risk']:.2f}")
                 
-                # Analyze highest risk orders from signals.json only
+                # Analyze highest risk orders from limit_orders.json only
                 signals_highest_risk_orders = {}
                 if martingale_pre_scale_highest_risk_adder and signals_data:
-                    print(f"\n  🔍 Analyzing highest risk orders from signals.json:")
+                    print(f"\n  🔍 Analyzing highest risk orders from limit_orders.json:")
                     print(f"  {'─'*50}")
                     signals_highest_risk_orders = analyze_highest_risk_from_signals(signals_data)
                     
                     for symbol, order_info in signals_highest_risk_orders.items():
-                        print(f"\n    📌 {symbol} (from signals.json) - Highest Risk Order:")
+                        print(f"\n    📌 {symbol} (from limit_orders.json) - Highest Risk Order:")
                         print(f"       ├─ Type: {order_info['order_type']}")
                         print(f"       ├─ Entry: {order_info['entry']:.5f}")
                         print(f"       ├─ Stop: {order_info['stop']:.5f}")
@@ -11638,9 +14069,9 @@ def martingale(inv_id=None):
                             else:
                                 print(f"        └─ No extra risk to cover for limit orders")
                         
-                        # ===== PROCESS SIGNALS.JSON INDEPENDENTLY =====
+                        # ===== PROCESS limit_orders.json INDEPENDENTLY =====
                         if signals_data and current_signals_volumes.get(symbol, 0) > 0:
-                            print(f"\n     📄 PROCESSING SIGNALS.JSON for {symbol}:")
+                            print(f"\n     📄 PROCESSING limit_orders.json for {symbol}:")
                             
                             total_extra_signals = 0
                             calculation_details_signals = {
@@ -11723,18 +14154,18 @@ def martingale(inv_id=None):
                     else:
                         print(f"     ℹ️ No changes needed for limit_orders.json")
                 
-                # Update signals.json independently
+                # Update limit_orders.json independently
                 if pre_scale_volumes_signals and signals_data:
-                    print(f"\n  📄 Updating signals.json:")
+                    print(f"\n  📄 Updating limit_orders.json:")
                     updates_summary = update_all_symbol_volumes_in_signals(signals_data, pre_scale_volumes_signals)
                     if any(count > 0 for count in updates_summary.values()):
                         save_signals_json(signals_path, signals_data)
                         updated = True
                         for symbol, count in updates_summary.items():
                             if count > 0:
-                                print(f"     ✓ {symbol}: updated {count} order(s) in signals.json")
+                                print(f"     ✓ {symbol}: updated {count} order(s) in limit_orders.json")
                     else:
-                        print(f"     ℹ️ No changes needed for signals.json")
+                        print(f"     ℹ️ No changes needed for limit_orders.json")
                 
                 # Store pre-scaling details in stats
                 stats["pre_scaling_details"] = pre_scaling_details
@@ -11796,7 +14227,7 @@ def martingale(inv_id=None):
                                 elif "sell" in order_type:
                                     expected_volumes[symbol]['ask'] = expected_volume
                 
-                # Get from signals.json
+                # Get from limit_orders.json
                 if signals_data:
                     def collect_expected_volumes(data, symbol):
                         if isinstance(data, dict):
@@ -11896,7 +14327,7 @@ def martingale(inv_id=None):
             if current_stage_drawdown > 0:
                 limit_orders_updated, _ = process_limit_orders_recovery(current_stage_drawdown)
             
-            # Process signals.json (only if there's drawdown to recover)
+            # Process limit_orders.json (only if there's drawdown to recover)
             signals_updated = False
             if current_stage_drawdown > 0:
                 signals_updated, _ = process_signals_recovery(current_stage_drawdown)
@@ -11961,7 +14392,7 @@ def martingale(inv_id=None):
         
         print(f"\n  📝 Modifications:")
         print(f"  │ limit_orders.json: {'✓' if stats.get('limit_orders_modified') else '−'}")
-        print(f"  │ signals.json: {'✓' if stats.get('signals_modified') else '−'}")
+        print(f"  │ limit_orders.json: {'✓' if stats.get('signals_modified') else '−'}")
         print(f"  │ Pre-scaling: {'✓' if stats.get('pre_scaling_applied') else '−'}")
         print(f"  │ Orders cancelled: {stats.get('safety_cancellations_count', 0)}")
         
@@ -12116,7 +14547,7 @@ def close_unauthorized_orders_old(inv_id=None):
             continue
         
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         # Check if already connected to correct account
         acc = mt5.account_info()
@@ -12469,7 +14900,7 @@ def close_unauthorized_orders(inv_id=None):
         # ============================================================
         # CONNECT TO MT5 ACCOUNT
         # ============================================================
-        mt5_path = broker_cfg.get("TERMINAL_PATH", "")
+        mt5_path = broker_cfg.get("Terminal_path", "")
         password = broker_cfg.get("PASSWORD", "")
         server = broker_cfg.get("SERVER", "")
         
@@ -13737,112 +16168,6 @@ def place_usd_orders(inv_id=None):
             import traceback
             traceback.print_exc()
             return False, None
-    
-    # --- SUB-FUNCTION 11: CHECK IF SYMBOL IS TRADEABLE ---
-    def is_symbol_tradeable_old(symbol):
-        """
-        Check if a symbol exists AND trading is enabled (CASE-INSENSITIVE).
-        Returns True if tradeable, False otherwise.
-        """
-        # First try direct lookup (case-sensitive)
-        symbol_info = mt5.symbol_info(symbol)
-        
-        # If direct lookup fails, try case-insensitive lookup
-        if symbol_info is None:
-            # Get all symbols from MT5
-            all_symbols = mt5.symbols_get()
-            if all_symbols:
-                # Create case-insensitive mapping
-                symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
-                symbol_lower = symbol.lower()
-                
-                if symbol_lower in symbols_lower_map:
-                    correct_symbol = symbols_lower_map[symbol_lower]
-                    if correct_symbol != symbol:
-                        print(f"          🔧 Case correction: '{symbol}' → '{correct_symbol}'")
-                    symbol_info = mt5.symbol_info(correct_symbol)
-                    
-                    # Also try to select the correct symbol
-                    if symbol_info:
-                        mt5.symbol_select(correct_symbol, True)
-        
-        if symbol_info is None:
-            return False
-        
-        # Check if trading is enabled
-        if hasattr(symbol_info, 'trade_mode') and symbol_info.trade_mode == 0:
-            return False
-        
-        # Check contract size
-        if hasattr(symbol_info, 'trade_contract_size') and symbol_info.trade_contract_size <= 0:
-            return False
-        
-        # Check if we can get a valid tick
-        tick = mt5.symbol_info_tick(symbol_info.name)  # Use the correct symbol name
-        if tick is None or (tick.ask == 0 and tick.bid == 0):
-            return False
-        
-        return True
-
-    # --- SUB-FUNCTION 12: FIND TRADEABLE SYMBOL WITH SUFFIX RETRY ---
-    def find_tradeable_symbol_with_retry_old(base_symbol, resolution_cache):
-        """
-        Try ALL suffixes one after another until a tradeable symbol is found.
-        Now with CASE-INSENSITIVE matching.
-        Returns (tradeable_symbol, used_suffix) or (None, None) if none found.
-        """
-        # Check cache first
-        cache_key = f"tradeable_{base_symbol.lower()}"  # Use lowercase for cache key
-        if cache_key in resolution_cache:
-            cached_result = resolution_cache[cache_key]
-            if cached_result is None:
-                return None, None
-            return cached_result, resolution_cache.get(f"suffix_{base_symbol.lower()}", "")
-        
-        print(f"        🔍 Searching for tradeable symbol for '{base_symbol}'...")
-        
-        # Try each suffix in order
-        for idx, suffix in enumerate(SYMBOL_SUFFIXES):
-            test_symbol = base_symbol + suffix if suffix else base_symbol
-            
-            # Skip if we already know this exact symbol is not tradeable
-            symbol_cache_key = f"checked_{test_symbol.lower()}"  # Use lowercase for cache
-            if symbol_cache_key in resolution_cache and not resolution_cache[symbol_cache_key]:
-                continue
-            
-            print(f"          Trying: {test_symbol} (suffix {idx+1}/{len(SYMBOL_SUFFIXES)})")
-            
-            # Check if this symbol is tradeable (case-insensitive)
-            if is_symbol_tradeable(test_symbol):
-                # Get the actual symbol name from MT5 (with correct case)
-                actual_symbol = None
-                all_symbols = mt5.symbols_get()
-                if all_symbols:
-                    symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
-                    test_lower = test_symbol.lower()
-                    if test_lower in symbols_lower_map:
-                        actual_symbol = symbols_lower_map[test_lower]
-                
-                if actual_symbol:
-                    print(f"          ✅ SUCCESS! {actual_symbol} IS TRADEABLE!")
-                    resolution_cache[cache_key] = actual_symbol
-                    resolution_cache[f"suffix_{base_symbol.lower()}"] = suffix
-                    resolution_cache[symbol_cache_key] = True
-                    return actual_symbol, suffix
-                else:
-                    print(f"          ✅ SUCCESS! {test_symbol} IS TRADEABLE!")
-                    resolution_cache[cache_key] = test_symbol
-                    resolution_cache[f"suffix_{base_symbol.lower()}"] = suffix
-                    resolution_cache[symbol_cache_key] = True
-                    return test_symbol, suffix
-            else:
-                resolution_cache[symbol_cache_key] = False
-        
-        # No tradeable symbol found
-        print(f"         FAILED: No tradeable symbol found for '{base_symbol}' after trying {len(SYMBOL_SUFFIXES)} suffixes")
-        resolution_cache[cache_key] = None
-        return None, None
-    
 
     def is_symbol_tradeable(symbol):
         """
@@ -14668,385 +16993,167 @@ def place_usd_orders(inv_id=None):
             'closed_count': total_closed
         }
 
-    def execute_order_old(order_data, investor_root, per_order_cache, existing_positions, original_signal, skip_proximity_check, switch_invalid_to_instant=False):
+    # --- SUB-FUNCTION: LOAD OPPOSITE DIRECTION RESTRICTION SETTING ---
+    def get_opposite_restriction_setting(investor_root):
         """
-        Execute a single order based on its order_type.
-        PRESERVES ALL FIELDS from original signal for tradeshistory.
-        REMOVES CANDLE TIME RECORD IF ORDER PLACEMENT FAILS.
+        Load opposite_order_restriction setting from accountmanagement.json.
+        Returns True if opposite direction checks should be performed.
+        Default: False
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            return False
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            settings = config.get("settings", {})
+            opposite_restriction = settings.get("opposite_order_restriction", False)
+            
+            if opposite_restriction:
+                print(f"    🔄 Opposite direction restriction ENABLED")
+            else:
+                print(f"    ℹ️  Opposite direction restriction DISABLED")
+            
+            return opposite_restriction
+            
+        except Exception as e:
+            print(f"     Error reading opposite_order_restriction: {e}")
+            return False
+    
+    # --- SUB-FUNCTION: CHECK PROXIMITY RISK (WITH OPPOSITE DIRECTION OPTION) ---
+    def check_proximity_risk(order, existing_positions, check_opposite=False):
+        """
+        Check if order is too close to existing positions using risk-based calculation.
         
         Args:
-            skip_proximity_check: If True, skips proximity risk check entirely
-            switch_invalid_to_instant: (KEPT FOR COMPATIBILITY BUT NOT USED)
+            order: Order dictionary
+            existing_positions: List of MT5 positions
+            check_opposite: If True, also check opposite direction positions
+        
+        Returns:
+            tuple: (is_risk, closest_position, risk_amount, threshold, check_type)
+            check_type: 'same_direction', 'opposite_direction', or 'none'
         """
+        symbol = order.get('symbol')
+        order_type = order.get('order_type', '').lower()
+        entry_price = float(order.get('entry', 0))
+        volume = get_volume_from_signal(order)
         
-        # --- SUB-FUNCTION: GET SUPPORTED FILLING MODES ---
-        def get_supported_filling_modes(symbol_info, is_pending_order=False):
-            """
-            Determine supported filling modes for a symbol based on its properties.
-            Returns list of filling modes to try in order of preference.
-            
-            Args:
-                symbol_info: MT5 symbol info object
-                is_pending_order: True for pending orders, False for market orders
-            
-            Returns:
-                list: List of filling mode constants to try
-            """
-            if is_pending_order:
-                # For pending orders, most brokers only support RETURN mode
-                # Some brokers don't support any filling mode for pending orders
-                return [mt5.ORDER_FILLING_RETURN]
-            
-            # For market orders, check symbol properties
-            execution_mode = symbol_info.trade_exemode
-            filling_mode_mask = symbol_info.filling_mode
-            
-            # Debug output
-            print(f"        📋 Symbol filling mode mask: {filling_mode_mask}")
-            print(f"        📋 Execution mode: {execution_mode}")
-            
-            # SYMBOL_FILLING flags
-            SYMBOL_FILLING_FOK = 0x01  # Fill or Kill
-            SYMBOL_FILLING_IOC = 0x02  # Immediate or Cancel
-            SYMBOL_FILLING_BOC = 0x04  # Book or Cancel (since build 3800)
-            
-            filling_modes = []
-            
-            # Strategy 1: For Exchange Execution, try BOC, IOC, FOK
-            if execution_mode == mt5.SYMBOL_TRADE_EXECUTION_EXCHANGE:
-                if filling_mode_mask & SYMBOL_FILLING_BOC:
-                    filling_modes.append(mt5.ORDER_FILLING_BOC)
-                if filling_mode_mask & SYMBOL_FILLING_IOC:
-                    filling_modes.append(mt5.ORDER_FILLING_IOC)
-                if filling_mode_mask & SYMBOL_FILLING_FOK:
-                    filling_modes.append(mt5.ORDER_FILLING_FOK)
-                # Always add RETURN as fallback
-                filling_modes.append(mt5.ORDER_FILLING_RETURN)
-            
-            # Strategy 2: For Market Execution, try IOC first, then RETURN
-            elif execution_mode == mt5.SYMBOL_TRADE_EXECUTION_MARKET:
-                if filling_mode_mask & SYMBOL_FILLING_IOC:
-                    filling_modes.append(mt5.ORDER_FILLING_IOC)
-                # Some brokers with Market Execution work better with RETURN
-                filling_modes.append(mt5.ORDER_FILLING_RETURN)
-                if filling_mode_mask & SYMBOL_FILLING_FOK:
-                    filling_modes.append(mt5.ORDER_FILLING_FOK)
-            
-            # Strategy 3: For Instant/Request Execution, try FOK
-            elif execution_mode in [mt5.SYMBOL_TRADE_EXECUTION_INSTANT, mt5.SYMBOL_TRADE_EXECUTION_REQUEST]:
-                if filling_mode_mask & SYMBOL_FILLING_FOK:
-                    filling_modes.append(mt5.ORDER_FILLING_FOK)
-                filling_modes.append(mt5.ORDER_FILLING_RETURN)
-            
-            # Strategy 4: Unknown execution mode - try common modes
-            else:
-                filling_modes = [
-                    mt5.ORDER_FILLING_IOC,
-                    mt5.ORDER_FILLING_FOK,
-                    mt5.ORDER_FILLING_RETURN
-                ]
-            
-            # Remove duplicates while preserving order
-            unique_modes = []
-            for mode in filling_modes:
-                if mode not in unique_modes:
-                    unique_modes.append(mode)
-            
-            print(f"        📋 Will try filling modes in order: {unique_modes}")
-            return unique_modes
+        is_buy = 'buy' in order_type and 'stop' in order_type
+        is_sell = 'sell' in order_type and 'stop' in order_type
         
-        # --- SUB-FUNCTION: SEND ORDER WITH AUTO FILLING MODE RETRY ---
-        def send_order_with_auto_filling(request_template, filling_modes, is_pending_order=False):
-            """
-            Send order with automatic retry using different filling modes.
+        if not is_buy and not is_sell:
+            return False, None, 0, 0, 'none'
+        
+        # Filter positions for this symbol
+        symbol_positions = [p for p in existing_positions if p.symbol == symbol]
+        if not symbol_positions:
+            return False, None, 0, 0, 'none'
+        
+        for position in symbol_positions:
+            position_type = position.type
+            position_entry = position.price_open
+            position_volume = position.volume
+            position_sl = position.sl
+            position_ticket = position.ticket
             
-            Args:
-                request_template: Base request dictionary (without type_filling)
-                filling_modes: List of filling modes to try
-                is_pending_order: True for pending orders
+            is_position_buy = (position_type == mt5.ORDER_TYPE_BUY)
+            is_position_sell = (position_type == mt5.ORDER_TYPE_SELL)
             
-            Returns:
-                tuple: (result, used_filling_mode, error_message)
-            """
-            for filling_mode in filling_modes:
-                # Create request copy with current filling mode
-                request = request_template.copy()
-                request["type_filling"] = filling_mode
-                
-                # For pending orders, ensure action is PENDING
-                if is_pending_order:
-                    request["action"] = mt5.TRADE_ACTION_PENDING
+            # Calculate position risk from SL
+            position_risk = 0
+            if position_sl and position_sl > 0:
+                if is_position_buy:
+                    risk_profit = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_BUY, symbol, position_volume,
+                        position_entry, position_sl
+                    )
                 else:
-                    request["action"] = mt5.TRADE_ACTION_DEAL
-                
-                # Send order
-                result = mt5.order_send(request)
-                
-                # Check if successful
-                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                    print(f"        ✅ Order successful with filling mode: {filling_mode}")
-                    return result, filling_mode, None
-                
-                # Check if we should try next filling mode
-                if result is not None and result.retcode == 10009:  # Unsupported filling mode
-                    print(f"         Filling mode {filling_mode} not supported, trying next...")
+                    risk_profit = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_SELL, symbol, position_volume,
+                        position_entry, position_sl
+                    )
+                if risk_profit:
+                    position_risk = abs(risk_profit)
+            
+            if position_risk == 0:
+                continue
+            
+            risk_threshold = position_risk / 2  # 50% threshold
+            
+            # =============================================
+            # SAME DIRECTION CHECK (ALWAYS PERFORMED)
+            # =============================================
+            if (is_buy and is_position_buy) or (is_sell and is_position_sell):
+                # Calculate potential risk
+                if is_sell and is_position_sell:
+                    if entry_price < position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                elif is_buy and is_position_buy:
+                    if entry_price > position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                else:
                     continue
-                elif result is not None and result.retcode != mt5.TRADE_RETCODE_DONE:
-                    # Other error - don't retry, return the error
-                    return result, filling_mode, f"Order failed: {result.comment} (code: {result.retcode})"
+                
+                if potential_risk and potential_risk < risk_threshold:
+                    return True, position, potential_risk, risk_threshold, 'same_direction'
             
-            # All filling modes failed
-            return None, None, "All filling modes failed"
+            # =============================================
+            # OPPOSITE DIRECTION CHECK (ONLY IF ENABLED)
+            # =============================================
+            elif check_opposite and ((is_buy and is_position_sell) or (is_sell and is_position_buy)):
+                if is_buy and is_position_sell:
+                    if entry_price > position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                elif is_sell and is_position_buy:
+                    if entry_price < position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                else:
+                    continue
+                
+                if potential_risk and potential_risk < risk_threshold:
+                    return True, position, potential_risk, risk_threshold, 'opposite_direction'
         
-        symbol = order_data.get('symbol')
-        order_type = order_data.get('order_type', '').lower()
-        entry_price = float(order_data.get('entry', 0))
-        exit_price = float(order_data.get('exit', 0)) if order_data.get('exit') else 0
-        target_price = float(order_data.get('target', 0)) if order_data.get('target') else 0
-        volume = get_volume_from_signal(order_data)
-        
-        # SKIP ORDER IF NO VOLUME FOUND
-        if volume is None:
-            error_msg = "No volume field found in signal - cannot place order"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to missing volume...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, None
-        
-        magic_number = int(order_data.get('magic', int(investor_root.name) if investor_root.name.isdigit() else 123456))
-        strategy_name = order_data.get('strategy_name', 'unknown')
-        timeframe = order_data.get('timeframe', '')
-        current_candle_time = order_data.get('current_candle_time', '')
-        signals_path = order_data.get('signals_path', '')
-        is_hedge = order_data.get('is_hedge_order', False)
-        
-        # Get symbol info - use exact symbol name
-        if not mt5.symbol_select(symbol, True):
-            error_msg = f"Failed to select symbol {symbol}"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to symbol selection failure...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, None
-        
-        symbol_info = mt5.symbol_info(symbol)
-        if not symbol_info:
-            error_msg = f"Cannot get symbol info for {symbol}"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to symbol info failure...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, None
-        
-        # Get current market prices for reference
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            error_msg = f"Cannot get tick for {symbol}"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to tick retrieval failure...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, None
-        
-        current_ask = tick.ask
-        current_bid = tick.bid
-        
-        print(f"        📊 {order_type.upper()} order: Entry={entry_price}, Current ASK={current_ask}, Current BID={current_bid}")
-        
-        # Round values to symbol digits
-        entry_price = round(entry_price, symbol_info.digits)
-        exit_price = round(exit_price, symbol_info.digits) if exit_price else 0
-        target_price = round(target_price, symbol_info.digits) if target_price else 0
+        return False, None, 0, 0, 'none'
 
-        # Clamp volume to symbol's min/max limits WITHOUT rounding
-        volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
-        
-        print(f"        📊 Final volume: {volume} (min: {symbol_info.volume_min}, max: {symbol_info.volume_max})")
-        
-        # Get MT5 order type constant
-        mt5_order_type = get_mt5_order_type(order_type)
-        if mt5_order_type is None:
-            error_msg = f"Invalid order type: {order_type}"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to invalid order type...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, None
-        
-        # Generate cache key (includes exact symbol with suffix)
-        cache_key = f"{symbol}_{mt5_order_type}_{entry_price}_{volume}"
-        
-        # Check per-order cache
-        if cache_key in per_order_cache:
-            error_msg = "Already placed in this run"
-            print(f"        ⏭️  SKIP - {error_msg}")
-            return False, None, error_msg, cache_key
-        
-        # ========== RISK MANAGEMENT CHECK ==========
-        # Get current pending orders from MT5
-        current_pending = mt5.orders_get() or []
-        
-        # Run risk management check
-        risk_allowed, risk_info = risk_management_for_duplicates(
-            investor_root, order_data, current_pending, cancel_exceeding=True
-        )
-        
-        if not risk_allowed:
-            error_msg = f"Risk management rejected: {risk_info.get('reason', 'Unknown reason')}"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), 
-                                        timeframe, current_candle_time)
-            
-            return False, None, error_msg, cache_key
-        elif risk_info.get('cancelled_count', 0) > 0:
-            print(f"        ✅ Cleaned up {risk_info['cancelled_count']} exceeding orders")
-        # ========== END OF RISK MANAGEMENT CHECK ==========
-        
-        # Check proximity risk ONLY if enabled in settings (but skip for hedge orders)
-        if is_hedge:
-            print(f"        🛡️ HEDGE ORDER: Skipping proximity risk check")
-        elif skip_proximity_check:
-            print(f"        ℹ️  Proximity risk check DISABLED - placing order regardless of position proximity")
-        else:
-            is_risk, risk_position, risk_amount, risk_threshold = check_proximity_risk(order_data, existing_positions)
-            
-            if is_risk:
-                error_msg = f"Too close to position #{risk_position.ticket if risk_position else 'unknown'}"
-                print(f"         RISK SKIP - {error_msg} (risk: ${risk_amount:.2f} < threshold: ${risk_threshold:.2f})")
-                
-                if timeframe and current_candle_time:
-                    print(f"        🗑️ Removing candle time record due to proximity risk...")
-                    remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-                
-                return False, None, error_msg, cache_key
-        
-        # --- GET SUPPORTED FILLING MODES ---
-        is_pending = order_type not in ['instant_buy', 'instant_sell']
-        filling_modes = get_supported_filling_modes(symbol_info, is_pending)
-        
-        # --- PREPARE REQUEST TEMPLATE (without type_filling) ---
-        if order_type in ['instant_buy', 'instant_sell']:
-            # Market order (instant execution)
-            price = current_ask if order_type == 'instant_buy' else current_bid
-            
-            request_template = {
-                "symbol": symbol,
-                "volume": volume,
-                "type": mt5_order_type,
-                "price": price,
-                "deviation": 20,
-                "magic": magic_number,
-                "comment": f"{strategy_name[:20]} RR{order_data.get('risk_reward', '?')}",
-                "type_time": mt5.ORDER_TIME_GTC,
-            }
-            
-            if exit_price:
-                request_template["sl"] = exit_price
-            if target_price:
-                request_template["tp"] = target_price
-                
-        else:
-            # Pending order - place exactly as specified
-            request_template = {
-                "symbol": symbol,
-                "volume": volume,
-                "type": mt5_order_type,
-                "price": entry_price,
-                "deviation": 20,
-                "magic": magic_number,
-                "comment": f"{strategy_name[:20]} RR{order_data.get('risk_reward', '?')}",
-                "type_time": mt5.ORDER_TIME_GTC,
-            }
-            
-            if exit_price:
-                request_template["sl"] = exit_price
-            if target_price:
-                request_template["tp"] = target_price
-        
-        # --- SEND ORDER WITH AUTO FILLING MODE RETRY ---
-        result, used_filling_mode, error_msg = send_order_with_auto_filling(
-            request_template, filling_modes, is_pending
-        )
-        
-        # Handle order send failure
-        if result is None:
-            error_msg = f"Order send failed: {error_msg or mt5.last_error()}"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to order send failure...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, cache_key
-        
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            error_msg = f"Order failed: {result.comment} (code: {result.retcode})"
-            print(f"         {error_msg}")
-            
-            if timeframe and current_candle_time:
-                print(f"        🗑️ Removing candle time record due to order placement failure...")
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
-            
-            return False, None, error_msg, cache_key
-        
-        # Create detailed trade record with ALL fields from original signal
-        trade_record = {}
-        
-        # First, copy ALL fields from the processed order_data
-        for key, value in order_data.items():
-            if not key.startswith('_'):  # Skip internal fields
-                trade_record[key] = value
-        
-        # Add filling mode info
-        if used_filling_mode:
-            trade_record['filling_mode_used'] = used_filling_mode
-        
-        # Then add MT5-specific fields
-        trade_record.update({
-            'ticket': result.order,
-            'magic': magic_number,
-            'placed_timestamp': datetime.now().isoformat(),
-            'status': 'pending',
-            'mt5_retcode': result.retcode,
-            'mt5_comment': result.comment,
-            'placed_price': entry_price if order_type not in ['instant_buy', 'instant_sell'] else (request_template['price'] if 'price' in request_template else entry_price),
-            'placed_volume': volume,
-            'placed_order_type': order_type,
-            'strategy_name': strategy_name,
-            'symbol_used': symbol,
-            'original_symbol_requested': order_data.get('original_symbol', symbol),
-            'is_hedge_order': is_hedge
-        })
-        
-        # Add any fields from original_signal that might have been missed
-        if original_signal:
-            for key, value in original_signal.items():
-                if key not in trade_record:
-                    trade_record[f'original_{key}'] = value
-        
-        # Save to history
-        syncing_orders_and_pnl_details(investor_root, trade_record, original_signal)
-        
-        hedge_msg = " 🛡️[HEDGE]" if is_hedge else ""
-        print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Strategy: {strategy_name}]{hedge_msg}")
-        return True, result, None, cache_key
-    
     def execute_order(order_data, investor_root, per_order_cache, existing_positions, 
                   original_signal, skip_proximity_check, switch_invalid_to_instant,
-                  authorized_magic_number):
+                  authorized_magic_number, opposite_restriction_enabled=False):
         """
         Execute a single order based on its order_type.
         Uses the authorized magic number (LOGIN_ID + USER_ID) for ALL order placements.
@@ -15253,17 +17360,36 @@ def place_usd_orders(inv_id=None):
         elif skip_proximity_check:
             print(f"        ℹ️  Proximity risk check DISABLED - placing order regardless of position proximity")
         else:
-            is_risk, risk_position, risk_amount, risk_threshold = check_proximity_risk(order_data, existing_positions)
+            # First check SAME direction (always performed)
+            is_risk_same, risk_position_same, risk_amount_same, risk_threshold_same, check_type_same = check_proximity_risk(
+                order_data, existing_positions, check_opposite=False
+            )
             
-            if is_risk:
-                error_msg = f"Too close to position #{risk_position.ticket if risk_position else 'unknown'}"
-                print(f"         RISK SKIP - {error_msg} (risk: ${risk_amount:.2f} < threshold: ${risk_threshold:.2f})")
+            if is_risk_same:
+                error_msg = f"Too close to same-direction position #{risk_position_same.ticket if risk_position_same else 'unknown'}"
+                print(f"         RISK SKIP (SAME DIRECTION) - {error_msg} (risk: ${risk_amount_same:.2f} < threshold: ${risk_threshold_same:.2f})")
                 
                 if timeframe and current_candle_time:
                     print(f"        🗑️ Removing candle time record due to proximity risk...")
                     remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
                 
                 return False, None, error_msg, cache_key
+            
+            # Then check OPPOSITE direction ONLY if opposite_restriction is enabled
+            if opposite_restriction_enabled:
+                is_risk_opposite, risk_position_opposite, risk_amount_opposite, risk_threshold_opposite, check_type_opposite = check_proximity_risk(
+                    order_data, existing_positions, check_opposite=True
+                )
+                
+                if is_risk_opposite:
+                    error_msg = f"Too close to opposite-direction position #{risk_position_opposite.ticket if risk_position_opposite else 'unknown'}"
+                    print(f"         RISK SKIP (OPPOSITE DIRECTION) - {error_msg} (risk: ${risk_amount_opposite:.2f} < threshold: ${risk_threshold_opposite:.2f})")
+                    
+                    if timeframe and current_candle_time:
+                        print(f"        🗑️ Removing candle time record due to opposite proximity risk...")
+                        remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+                    
+                    return False, None, error_msg, cache_key
         
         # --- GET SUPPORTED FILLING MODES ---
         is_pending = order_type not in ['instant_buy', 'instant_sell']
@@ -15368,62 +17494,9 @@ def place_usd_orders(inv_id=None):
         print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Magic: {magic_number}]{hedge_msg}")
         return True, result, None, cache_key
 
-    # --- NEW SUB-FUNCTION 15: PROCESS HEDGE ORDS (NO UNIQUENESS RULES) ---
-    def process_hedge_orders_old(hedge_signals, investor_root, per_order_cache, existing_positions, 
-                              skip_proximity_check, switch_invalid_to_instant, stats):
-        """
-        Process all hedge orders without any uniqueness restrictions.
-        ALL hedge orders are placed regardless of order type or quantity.
-        """
-        if not hedge_signals:
-            return stats
-        
-        print(f"\n  🛡️ PROCESSING HEDGE ORDERS ({len(hedge_signals)} signals)")
-        print(f"     📌 Hedge orders are EXEMPT from uniqueness rules - ALL will be placed")
-        
-        hedge_placed = 0
-        hedge_failed = 0
-        
-        for idx, signal_wrapper in enumerate(hedge_signals):
-            order_data = signal_wrapper['data']
-            original_signal = signal_wrapper.get('original_signal', {})
-            signals_path = signal_wrapper.get('path')
-            strategy = signal_wrapper.get('strategy', 'unknown')
-            symbol = order_data.get('symbol', '')
-            order_type = order_data.get('order_type', '').lower()
-            hedge_id = order_data.get('hedge_id', 'N/A')
-            
-            print(f"\n      🛡️ Hedge Order {idx+1}/{len(hedge_signals)}: {order_type} {symbol} [ID: {hedge_id[:20]}...]")
-            
-            # Execute the order
-            success, result, error, cache_key = execute_order(
-                order_data, investor_root, per_order_cache, existing_positions,
-                original_signal, skip_proximity_check, switch_invalid_to_instant
-            )
-            
-            if success:
-                print(f"      ✅ HEDGE ORDER SUCCESS: {order_type} {symbol}")
-                hedge_placed += 1
-                stats['orders_placed'] += 1
-                stats['per_order_cache'].add(cache_key)
-                stats['authorized_keys'].add(cache_key)
-            else:
-                print(f"       HEDGE ORDER FAILED: {error}")
-                hedge_failed += 1
-                stats['orders_failed'] += 1
-                
-                # Remove the failed signal from limit_orders.json
-                if signals_path:
-                    signals_file = Path(signals_path)
-                    if signals_file.exists():
-                        remove_signal_from_limit_orders(signals_file, order_data)
-                        stats['records_removed'] += 1
-        
-        print(f"\n  🛡️ HEDGE ORDERS SUMMARY: {hedge_placed} placed, {hedge_failed} failed")
-        return stats
-    
     def process_hedge_orders(hedge_signals, investor_root, per_order_cache, existing_positions, 
-                          skip_proximity_check, switch_invalid_to_instant, stats, authorized_magic_number):
+                      skip_proximity_check, switch_invalid_to_instant, stats, 
+                      authorized_magic_number, opposite_restriction_enabled=False):
         """
         Process all hedge orders without any uniqueness restrictions.
         Uses authorized magic number for all placements.
@@ -15455,7 +17528,7 @@ def place_usd_orders(inv_id=None):
             success, result, error, cache_key = execute_order(
                 order_data, investor_root, per_order_cache, existing_positions,
                 original_signal, skip_proximity_check, switch_invalid_to_instant,
-                authorized_magic_number  # Pass the authorized magic number
+                authorized_magic_number, opposite_restriction_enabled  # Add this
             )
             
             if success:
@@ -15478,282 +17551,9 @@ def place_usd_orders(inv_id=None):
         print(f"\n  🛡️ HEDGE ORDERS SUMMARY: {hedge_placed} placed, {hedge_failed} failed")
         return stats
 
-    # --- NEW SUB-FUNCTION 16: PROCESS REGULAR ORDERS WITH FALLBACK LOGIC ---
-    def process_regular_orders_with_fallback_old(regular_signals_by_key, investor_root, per_order_cache, existing_positions,
-                                      skip_proximity_check, switch_invalid_to_instant, stats):
-        """
-        Process regular (non-hedge) orders with strict uniqueness rules.
-        Only ONE order per (symbol, order_type) will be placed (the newest).
-        If the newest fails, falls back to the second newest.
-        AFTER placing the latest successfully, cancel all older orders for the same (symbol, order_type).
-        
-        This function ONLY applies the fallback logic if enable_latest_fallback_to_older_order 
-        is set to true in accountmanagement.json. Otherwise, it skips immediately.
-        """
-        if not regular_signals_by_key:
-            return stats
-        
-        # --- CANCEL OLDER ORDERS SUB-FUNCTION ---
-        def cancel_older_orders_for_group(symbol, order_type, placed_ticket):
-            """
-            Cancel all pending orders for the same (symbol, order_type) that are OLDER
-            than the successfully placed order. Keeps only the latest order.
-            
-            Args:
-                symbol: The trading symbol (with suffix)
-                order_type: Order type string (buy_stop, sell_stop, etc.)
-                placed_ticket: The ticket number of the successfully placed order (to KEEP)
-            
-            Returns:
-                int: Number of orders cancelled
-            """
-            try:
-                # Get all current pending orders
-                all_pending = mt5.orders_get(symbol=symbol)
-                
-                if not all_pending or len(all_pending) == 0:
-                    return 0
-                
-                # Normalize order type for comparison
-                order_type_lower = order_type.lower()
-                if 'buy' in order_type_lower and 'stop' in order_type_lower:
-                    mt5_type_to_match = mt5.ORDER_TYPE_BUY_STOP
-                elif 'sell' in order_type_lower and 'stop' in order_type_lower:
-                    mt5_type_to_match = mt5.ORDER_TYPE_SELL_STOP
-                elif 'buy' in order_type_lower and 'limit' in order_type_lower:
-                    mt5_type_to_match = mt5.ORDER_TYPE_BUY_LIMIT
-                elif 'sell' in order_type_lower and 'limit' in order_type_lower:
-                    mt5_type_to_match = mt5.ORDER_TYPE_SELL_LIMIT
-                else:
-                    print(f"         Unknown order type for cancellation: {order_type}")
-                    return 0
-                
-                # Find orders to cancel (same symbol, same type, NOT the placed ticket)
-                orders_to_cancel = []
-                for order in all_pending:
-                    if order.type == mt5_type_to_match and order.ticket != placed_ticket:
-                        orders_to_cancel.append(order)
-                
-                if not orders_to_cancel:
-                    print(f"         ℹ️ No older orders to cancel for {symbol} {order_type}")
-                    return 0
-                
-                print(f"         🧹 Found {len(orders_to_cancel)} older order(s) for {symbol} {order_type} to clean up...")
-                
-                cancelled_count = 0
-                for order in orders_to_cancel:
-                    # Get order timeframe from comment or magic for logging
-                    order_comment = order.comment if hasattr(order, 'comment') else ''
-                    order_time = datetime.fromtimestamp(order.time_setup).strftime('%Y-%m-%d %H:%M:%S') if hasattr(order, 'time_setup') else 'unknown'
-                    
-                    print(f"         🗑️ Cancelling older order #{order.ticket} ({symbol} @ {order.price_open}, setup: {order_time})")
-                    
-                    # Create cancellation request
-                    cancel_request = {
-                        "action": mt5.TRADE_ACTION_REMOVE,
-                        "order": order.ticket
-                    }
-                    
-                    # Send cancellation request
-                    result = mt5.order_send(cancel_request)
-                    
-                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        cancelled_count += 1
-                        print(f"         ✅ Successfully cancelled older order #{order.ticket}")
-                        
-                        # Also remove from tradeshistory.json if it exists
-                        try:
-                            history_path = investor_root / "tradeshistory.json"
-                            if history_path.exists():
-                                with open(history_path, 'r', encoding='utf-8') as f:
-                                    history = json.load(f)
-                                
-                                # Update the cancelled order status
-                                for trade in history:
-                                    if isinstance(trade, dict) and trade.get('ticket') == order.ticket:
-                                        trade['status'] = 'cancelled'
-                                        trade['cancelled_reason'] = f'Replaced by newer order #{placed_ticket}'
-                                        trade['cancelled_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                        break
-                                
-                                with open(history_path, 'w', encoding='utf-8') as f:
-                                    json.dump(history, f, indent=4)
-                        except Exception as e:
-                            print(f"         Error updating tradeshistory for cancelled order: {e}")
-                    else:
-                        error_msg = f"Unknown error ({result.retcode})" if result else "No response"
-                        if result and result.comment:
-                            error_msg = result.comment
-                        print(f"         Failed to cancel order #{order.ticket}: {error_msg}")
-                
-                print(f"         ✅ Cleanup complete: Cancelled {cancelled_count}/{len(orders_to_cancel)} older order(s)")
-                return cancelled_count
-                
-            except Exception as e:
-                print(f"         Error during order cleanup: {e}")
-                import traceback
-                traceback.print_exc()
-                return 0
-        
-        # --- LOAD CONFIGURATION SETTING FOR FALLBACK LOGIC ---
-        acc_mgmt_path = investor_root / "accountmanagement.json"
-        enable_fallback = False  # Default to disabled
-        
-        if acc_mgmt_path.exists():
-            try:
-                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                settings = config.get("settings", {})
-                enable_fallback = settings.get("enable_latest_fallback_to_older_order", False)
-                
-                if enable_fallback:
-                    print(f"\n  📊 PROCESSING REGULAR ORDERS ({len(regular_signals_by_key)} groups)")
-                    print(f"     📌 Fallback logic ENABLED - only ONE order per symbol/type (newest first, fallback if needed)")
-                    print(f"     🧹 Older orders will be CANCELLED after latest is placed")
-                else:
-                    print(f"\n  📊 PROCESSING REGULAR ORDERS - FALLBACK LOGIC DISABLED")
-                    print(f"     📌 Placing ALL regular orders unconditionally (no grouping, no fallback)")
-                    print(f"     💡 To enable latest-fallback logic, set enable_latest_fallback_to_older_order: true in accountmanagement.json")
-            except Exception as e:
-                print(f"    Error reading accountmanagement.json: {e}")
-                print(f"    Defaulting to fallback logic DISABLED - placing all orders")
-                enable_fallback = False
-        else:
-            print(f"    ℹ️ No accountmanagement.json found - fallback logic DISABLED")
-            print(f"    📌 Placing ALL regular orders unconditionally")
-            enable_fallback = False
-        
-        # --- IF FALLBACK LOGIC IS DISABLED, PLACE ALL ORDERS WITHOUT GROUPING/FALLBACK ---
-        if not enable_fallback:
-            print(f"\n  🚀 Placing ALL regular orders unconditionally (fallback logic OFF)")
-            
-            all_regular_signals = []
-            for key, symbol_signals in regular_signals_by_key.items():
-                all_regular_signals.extend(symbol_signals)
-            
-            print(f"     📊 Total regular signals to place: {len(all_regular_signals)}")
-            
-            for idx, signal_wrapper in enumerate(all_regular_signals):
-                order_data = signal_wrapper['data']
-                original_signal = signal_wrapper.get('original_signal', {})
-                signals_path = signal_wrapper.get('path')
-                symbol = order_data.get('symbol', '')
-                order_type = order_data.get('order_type', '')
-                
-                print(f"\n      📊 [{idx+1}/{len(all_regular_signals)}] Placing {order_type} for {symbol}...")
-                
-                # Execute the order
-                success, result, error, cache_key = execute_order(
-                    order_data, investor_root, per_order_cache, existing_positions,
-                    original_signal, skip_proximity_check, switch_invalid_to_instant
-                )
-                
-                if success:
-                    print(f"      ✅ SUCCESS: {order_type} order placed for {symbol}")
-                    stats['orders_placed'] += 1
-                    per_order_cache.add(cache_key)
-                    stats['authorized_keys'].add(cache_key)
-                else:
-                    print(f"       FAILED: {error}")
-                    stats['orders_failed'] += 1
-                    
-                    # Remove the failed signal from limit_orders.json
-                    if signals_path:
-                        signals_file = Path(signals_path)
-                        if signals_file.exists():
-                            remove_signal_from_limit_orders(signals_file, order_data)
-                            stats['records_removed'] += 1
-            
-            stats['fallback_used'] = 0
-            stats['older_orders_cancelled'] = 0
-            return stats
-        
-        # --- FALLBACK LOGIC IS ENABLED - PROCEED WITH NORMAL FALLBACK PROCESSING ---
-        print(f"\n  🔄 FALLBACK LOGIC ENABLED - applying latest-first ordering with fallback and old order cleanup")
-        
-        fallback_used_count = 0
-        older_orders_cancelled_count = 0
-        
-        for key, symbol_signals in regular_signals_by_key.items():
-            # Sort signals by current_candle_time (newest first)
-            sorted_signals = sorted(symbol_signals, 
-                                key=lambda x: x['data'].get('current_candle_time', ''), 
-                                reverse=True)
-            
-            symbol = sorted_signals[0]['data'].get('symbol', '')
-            order_type = sorted_signals[0]['data'].get('order_type', '')
-            
-            print(f"\n    🎯 Processing group: {key} ({len(sorted_signals)} signals)")
-            print(f"       - Newest signal time: {sorted_signals[0]['data'].get('current_candle_time', 'N/A')}")
-            if len(sorted_signals) > 1:
-                print(f"       - Has {len(sorted_signals)-1} fallback/older signal(s) available")
-            
-            # Track if we successfully placed an order for this group
-            placed_ticket = None
-            
-            # Try to place the newest order first
-            for idx, signal_wrapper in enumerate(sorted_signals):
-                order_data = signal_wrapper['data']
-                original_signal = signal_wrapper.get('original_signal', {})
-                signals_path = signal_wrapper.get('path')
-                
-                is_fallback = idx > 0
-                order_label = "FALLBACK" if is_fallback else "PRIMARY"
-                
-                print(f"\n      🔄 [{order_label}] Attempting to place {order_type} for {symbol}...")
-                
-                # Execute the order
-                success, result, error, cache_key = execute_order(
-                    order_data, investor_root, per_order_cache, existing_positions,
-                    original_signal, skip_proximity_check, switch_invalid_to_instant
-                )
-                
-                if success:
-                    placed_ticket = result.order
-                    print(f"      ✅ [{order_label}] SUCCESS: {order_type} order placed for {symbol} (Ticket: {placed_ticket})")
-                    stats['orders_placed'] += 1
-                    per_order_cache.add(cache_key)
-                    stats['authorized_keys'].add(cache_key)
-                    
-                    if is_fallback:
-                        fallback_used_count += 1
-                        print(f"      🔄 FALLBACK SUCCESSFUL: Used fallback signal for {symbol} {order_type}")
-                    
-                    # --- 🧹 CLEANUP: Cancel all older orders for the same (symbol, order_type) ---
-                    print(f"\n      🧹 CLEANUP: Cancelling older orders for {symbol} {order_type}...")
-                    cancelled = cancel_older_orders_for_group(symbol, order_type, placed_ticket)
-                    older_orders_cancelled_count += cancelled
-                    
-                    # If order succeeded, break out of fallback loop
-                    break
-                    
-                else:
-                    print(f"       [{order_label}] FAILED: {error}")
-                    
-                    # Remove the failed signal from limit_orders.json
-                    if signals_path:
-                        signals_file = Path(signals_path)
-                        if signals_file.exists():
-                            remove_signal_from_limit_orders(signals_file, order_data)
-                            stats['records_removed'] += 1
-                    
-                    # If this was the last signal and it failed
-                    if idx == len(sorted_signals) - 1:
-                        print(f"       All attempts failed for {symbol} {order_type}")
-                        stats['orders_failed'] += 1
-        
-        # Update stats
-        stats['fallback_used'] = fallback_used_count
-        stats['older_orders_cancelled'] = older_orders_cancelled_count
-        
-        if older_orders_cancelled_count > 0:
-            print(f"\n  🧹 CLEANUP SUMMARY: Cancelled {older_orders_cancelled_count} older order(s) across all groups")
-        
-        return stats
-    
     def process_regular_orders_with_fallback(regular_signals_by_key, investor_root, per_order_cache, existing_positions,
-                                          skip_proximity_check, switch_invalid_to_instant, stats, authorized_magic_number):
+                                      skip_proximity_check, switch_invalid_to_instant, stats, 
+                                      authorized_magic_number, opposite_restriction_enabled=False):
         """
         Process regular (non-hedge) orders with strict uniqueness rules.
         Uses authorized magic number for all placements.
@@ -15899,7 +17699,7 @@ def place_usd_orders(inv_id=None):
                 success, result, error, cache_key = execute_order(
                     order_data, investor_root, per_order_cache, existing_positions,
                     original_signal, skip_proximity_check, switch_invalid_to_instant,
-                    authorized_magic_number
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
                 )
                 
                 if success:
@@ -15958,9 +17758,9 @@ def place_usd_orders(inv_id=None):
                 success, result, error, cache_key = execute_order(
                     order_data, investor_root, per_order_cache, existing_positions,
                     original_signal, skip_proximity_check, switch_invalid_to_instant,
-                    authorized_magic_number
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
                 )
-                
+                                
                 if success:
                     placed_ticket = result.order
                     print(f"      ✅ [{order_label}] SUCCESS: {order_type} order placed for {symbol} (Ticket: {placed_ticket}) [Magic: {authorized_magic_number}]")
@@ -15998,208 +17798,6 @@ def place_usd_orders(inv_id=None):
         
         return stats
 
-    # --- MAIN EXECUTION FLOW ---
-    def main_old():
-        print("\n" + "="*80)
-        print("🚀 STARTING ENHANCED ORDER PLACEMENT ENGINE (WITH HEDGE ORDER EXEMPTION & FALLBACK)")
-        print("="*80)
-        
-        investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
-        any_orders_placed = False
-        global_stats = {
-            'investors_processed': 0,
-            'investors_blocked': 0,
-            'total_signals_found': 0,
-            'total_hedge_signals': 0,
-            'total_regular_signals': 0,
-            'total_orders_placed': 0,
-            'total_orders_failed': 0,
-            'total_orders_cancelled_regulation': 0,
-            'total_suffix_retries_successful': 0,
-            'total_running_positions': 0,
-            'total_pending_orders': 0,
-            'total_candle_records_removed': 0,
-            'total_proximity_check_disabled': 0,
-            'total_orders_converted': 0,
-            'total_fallback_used': 0,
-            'total_hedge_orders_placed': 0,
-            'total_hedge_orders_failed': 0
-        }
-
-        for user_brokerid in investor_ids:
-            print(f"\n{'='*60}")
-            print(f"📋 INVESTOR: {user_brokerid}")
-            print(f"{'='*60}")
-            
-            resolution_cache = {}
-            investor_root = Path(INV_PATH) / user_brokerid
-            
-            if not investor_root.exists():
-                print(f"   Investor root not found: {investor_root}")
-                continue
-            
-            # STEP 1: Check authorization status
-            can_proceed, activities = check_authorization_status(investor_root)
-            
-            if not can_proceed:
-                print(f"  🚫 INVESTOR BLOCKED - unauthorized actions detected without bypass")
-                global_stats['investors_blocked'] += 1
-                continue
-            
-            # STEP 2: Load proximity risk setting from accountmanagement.json
-            print(f"\n  ⚙️  Loading configuration from accountmanagement.json...")
-            skip_proximity_check = not get_proximity_risk_setting(investor_root)
-            
-            if skip_proximity_check:
-                global_stats['total_proximity_check_disabled'] += 1
-            
-            # STEP 3: Load invalid order conversion setting
-            switch_invalid_to_instant = get_switch_invalid_setting(investor_root)
-            
-            # STEP 4: Take initial snapshot of current pending orders and positions (BEFORE sync)
-            print(f"\n  📸 Taking initial snapshot of current orders/positions...")
-            snapshot_success, snapshot_stats = update_orders_status_in_tradeshistory(investor_root)
-            
-            # STEP 5: Sync existing tradeshistory.json (to get current status and assign position IDs)
-            print(f"\n  🔄 Syncing tradeshistory.json with MT5 (checking all orders/positions)...")
-            sync_success, sync_stats = syncing_orders_and_pnl_details(investor_root)
-            
-            if sync_stats:
-                global_stats['total_running_positions'] += sync_stats.get('running_positions', 0)
-                global_stats['total_pending_orders'] += sync_stats.get('pending_orders', 0)
-                print(f"  📊 Current status: {sync_stats.get('running_positions', 0)} running positions, "
-                    f"{sync_stats.get('pending_orders', 0)} pending orders")
-            
-            # ========== SCAN AND CLEANUP EXISTING PENDING ORDERS ==========
-            print(f"\n  🧹 SCANNING EXISTING PENDING ORDERS FOR RISK VIOLATIONS...")
-            current_pending_orders = mt5.orders_get() or []
-            
-            if current_pending_orders:
-                print(f"  📋 Found {len(current_pending_orders)} existing pending orders:")
-                for order in current_pending_orders:
-                    order_type_name = "BUY_STOP" if order.type == mt5.ORDER_TYPE_BUY_STOP else "SELL_STOP" if order.type == mt5.ORDER_TYPE_SELL_STOP else "BUY_LIMIT" if order.type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL_LIMIT"
-                    print(f"     - #{order.ticket}: {order_type_name} {order.symbol} @ {order.price_open} vol {order.volume_initial}")
-                
-                # Run cleanup scan without evaluating a new order
-                risk_allowed, cleanup_info = risk_management_for_duplicates(
-                    investor_root, None, current_pending_orders, cancel_exceeding=True, check_only=True
-                )
-                
-                if cleanup_info.get('cancelled_count', 0) > 0:
-                    print(f"\n  ✅ Cleaned up {cleanup_info['cancelled_count']} violating order(s)")
-                    
-                    # Refresh tradeshistory after cleanup
-                    print(f"  🔄 Refreshing tradeshistory after cleanup...")
-                    final_sync, final_stats = syncing_orders_and_pnl_details(investor_root)
-                else:
-                    print(f"\n  ✅ No risk violations found in existing orders")
-            else:
-                print(f"  ℹ️ No existing pending orders to scan")
-            # ========== END OF SCAN ==========
-            
-            # STEP 6: Collect signals from ALL strategy folders (separate hedge from regular)
-            all_signals, hedge_signals, regular_signals = collect_orders_from_signals(investor_root, resolution_cache)
-            
-            if not all_signals:
-                print(f"  ℹ️  No signals found for {user_brokerid}")
-                continue
-            
-            global_stats['investors_processed'] += 1
-            global_stats['total_signals_found'] += len(all_signals)
-            global_stats['total_hedge_signals'] += len(hedge_signals)
-            global_stats['total_regular_signals'] += len(regular_signals)
-            
-            # Count successful suffix retries
-            suffix_retries = sum(1 for s in all_signals if s['data'].get('used_suffix', 'none') != 'none')
-            global_stats['total_suffix_retries_successful'] += suffix_retries
-            if suffix_retries > 0:
-                print(f"  🔄 Successfully applied suffix retry to {suffix_retries} signals")
-            
-            # STEP 7: Get existing positions for risk check
-            existing_positions = mt5.positions_get() or []
-            print(f"  📊 Found {len(existing_positions)} existing open positions for risk check")
-            
-            # STEP 8: Group regular signals by symbol and order_type (buy_stop/sell_stop)
-            # Hedge orders are handled separately without grouping
-            regular_signals_by_key = {}
-            
-            for signal_wrapper in regular_signals:
-                order_data = signal_wrapper['data']
-                symbol = order_data.get('symbol', '')
-                order_type = order_data.get('order_type', '').lower()
-                
-                # Only process stop orders for regular signals
-                if order_type not in ['buy_stop', 'sell_stop']:
-                    print(f"  ℹ️  Skipping non-stop regular order: {order_type} for {symbol}")
-                    continue
-                
-                key = f"{symbol}_{order_type}"
-                
-                if key not in regular_signals_by_key:
-                    regular_signals_by_key[key] = []
-                
-                regular_signals_by_key[key].append(signal_wrapper)
-            
-            print(f"  📊 Grouped regular signals into {len(regular_signals_by_key)} symbol/order_type groups")
-            print(f"  🛡️ Hedge signals: {len(hedge_signals)} (will ALL be placed)")
-            
-            # STEP 9: Per-order cache for this run
-            per_order_cache = set()
-            
-            # STEP 10: Build authorized keys for regulation
-            authorized_keys = set()
-            
-            # STEP 11: Process hedge orders FIRST (no uniqueness rules, all placed)
-            investor_stats = {
-                'orders_placed': 0,
-                'orders_failed': 0,
-                'records_removed': 0,
-                'per_order_cache': per_order_cache,
-                'authorized_keys': authorized_keys,
-                'fallback_used': 0
-            }
-            
-            if hedge_signals:
-                investor_stats = process_hedge_orders(
-                    hedge_signals, investor_root, per_order_cache, existing_positions,
-                    skip_proximity_check, switch_invalid_to_instant, investor_stats
-                )
-            
-            # STEP 12: Process regular orders with fallback logic (only ONE per symbol/type)
-            if regular_signals_by_key:
-                investor_stats = process_regular_orders_with_fallback(
-                    regular_signals_by_key, investor_root, per_order_cache, existing_positions,
-                    skip_proximity_check, switch_invalid_to_instant, investor_stats
-                )
-            
-            # Update global stats
-            global_stats['total_orders_placed'] += investor_stats['orders_placed']
-            global_stats['total_orders_failed'] += investor_stats['orders_failed']
-            global_stats['total_candle_records_removed'] += investor_stats['records_removed']
-            global_stats['total_fallback_used'] += investor_stats['fallback_used']
-            
-            # Track hedge-specific stats
-            hedge_placed = sum(1 for s in hedge_signals if s.get('_placed', False))
-            global_stats['total_hedge_orders_placed'] += hedge_placed
-            global_stats['total_hedge_orders_failed'] += len(hedge_signals) - hedge_placed
-          
-            # STEP 14: Take final snapshot of current pending orders and positions (AFTER placement and regulation)
-            print(f"\n  📸 Taking final snapshot of current orders/positions...")
-            final_snapshot_success, final_snapshot_stats = update_orders_status_in_tradeshistory(investor_root)
-            
-            # STEP 15: Final sync to capture any changes from regulation (ONLY position details, NO status changes)
-            print(f"\n  🔄 Final sync to capture position details...")
-            final_sync, final_stats = syncing_orders_and_pnl_details(investor_root)
-            
-            if final_stats:
-                print(f"  📊 Final status: {final_stats.get('running_positions', 0)} running positions, "
-                    f"{final_stats.get('pending_orders', 0)} pending orders")
-            
-            
-            if investor_stats['orders_placed'] > 0:
-                any_orders_placed = True
-        return any_orders_placed
-    
     # --- MAIN EXECUTION FLOW ---
     def main():
         print("\n" + "="*80)
@@ -16285,6 +17883,9 @@ def place_usd_orders(inv_id=None):
             # ============================================================
             print(f"\n  ⚙️  Loading configuration from accountmanagement.json...")
             skip_proximity_check = not get_proximity_risk_setting(investor_root)
+
+            # Load opposite direction restriction setting
+            opposite_restriction_enabled = get_opposite_restriction_setting(investor_root)            
             
             if skip_proximity_check:
                 global_stats['total_proximity_check_disabled'] += 1
@@ -16429,17 +18030,14 @@ def place_usd_orders(inv_id=None):
                 investor_stats = process_hedge_orders(
                     hedge_signals, investor_root, per_order_cache, existing_positions,
                     skip_proximity_check, switch_invalid_to_instant, investor_stats,
-                    authorized_magic_number
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
                 )
-            
-            # ============================================================
-            # STEP 13: Process regular orders with fallback logic
-            # ============================================================
+
             if regular_signals_by_key:
                 investor_stats = process_regular_orders_with_fallback(
                     regular_signals_by_key, investor_root, per_order_cache, existing_positions,
                     skip_proximity_check, switch_invalid_to_instant, investor_stats,
-                    authorized_magic_number
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
                 )
             
             # Update global stats
@@ -17167,7 +18765,7 @@ def check_pending_orders_risk(inv_id=None):
         print(f"  └─ 🔌 Checking account connection...")
         
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         print(f"      • Terminal Path: {mt5_path}")
         print(f"      • Login ID: {login_id}")
@@ -17556,7 +19154,7 @@ def orders_reward_correction(inv_id=None):
         print(f"  └─ 🔌 Initializing account connection...")
         
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         print(f"      • Terminal Path: {mt5_path}")
         print(f"      • Login ID: {login_id}")
@@ -18310,7 +19908,7 @@ def apply_dynamic_breakeven(inv_id=None):
         
         # --- ACCOUNT INITIALIZATION ---
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         acc = mt5.account_info()
         if acc is None or acc.login != login_id:
@@ -18442,10 +20040,14 @@ def trades_analytics(inv_id=None):
     """
     Fetch and record all individual trades grouped by risk configurations,
     segregated into dual chronological windows:
-      - from_execution_start_date: Full lifetime history since broker launch.
+      - from_execution_start_date: Full lifetime history since broker launch up to contract expiry
+        or current date if no contract expiry defined.
       - last_28_days: A rolling snapshot tracking the immediate trailing 28 days.
+        Each day's run creates a new dated entry (e.g., april_22_2026_to_may_20_2026)
+        preserving historical snapshots without overwriting.
     
     Reconciles missing profiles and fields between FETCHED_INVESTORS and UPDATED_INVESTORS.
+    Also tracks unauthorized actions and updates the unauthorized_actions flag.
     """
     
     print("\n" + "="*80)
@@ -18474,6 +20076,34 @@ def trades_analytics(inv_id=None):
     
     # Dictionary to keep track of generated analytics structures for synchronization later
     generated_analytics_registry = {}
+    
+    # Define the empty analytics structure template
+    EMPTY_ANALYTICS_STRUCTURE = {
+        "from_execution_start_date": {
+            "start_date": "",
+            "end_date": "",
+            "last_updated": "",
+            "trades_within_risks_config": {
+                "summaries": {
+                    "summaries_of_profits_only": {}
+                },
+                "regular_data": {
+                    "authorized": {},
+                    "unauthorized": {}
+                }
+            },
+            "trades_outside_risks_config": {
+                "summaries": {
+                    "summaries_of_profits_only": {}
+                },
+                "regular_data": {
+                    "authorized": {},
+                    "unauthorized": {}
+                }
+            }
+        },
+        "last_28_days": {}
+    }
     
     # Iterate System Investors
     for user_brokerid in investor_ids:
@@ -18511,6 +20141,10 @@ def trades_analytics(inv_id=None):
             print(f" │ No operational start boundary 'execution_start_date' flagged inside tracking state.")
             continue
 
+        # Get contract duration and expiry date for proper end date calculation
+        contract_duration = activities_data.get('contract_duration')
+        contract_expiry_date = activities_data.get('contract_expiry_date')
+        
         broker_cfg = active_users_dict.get(user_brokerid)
         if not broker_cfg:
             print(f" │ Critical authorization mapping criteria missing inside system dictionary.")
@@ -18570,13 +20204,53 @@ def trades_analytics(inv_id=None):
             print(f" │ Failed to parse operational start boundary string format: {execution_start_date}")
             continue
         
+        # Calculate the end date for from_execution_start_date window
+        # Priority: contract_expiry_date > contract_duration calculation > current date
+        end_datetime = None
+        
+        if contract_expiry_date:
+            # Try to parse contract expiry date
+            for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%b %d, %Y"]:
+                try:
+                    end_datetime = datetime.strptime(str(contract_expiry_date), fmt)
+                    print(f" │ Using contract expiry date as end boundary: {end_datetime.strftime('%B %d, %Y')}")
+                    break
+                except:
+                    continue
+        
+        if not end_datetime and contract_duration:
+            # Calculate end date based on duration days from start date
+            try:
+                duration_days = int(contract_duration)
+                end_datetime = start_datetime + timedelta(days=duration_days)
+                print(f" │ Using contract duration ({duration_days} days) to calculate end boundary: {end_datetime.strftime('%B %d, %Y')}")
+            except (ValueError, TypeError):
+                pass
+        
+        if not end_datetime:
+            # Fallback to current date
+            end_datetime = datetime.now()
+            print(f" │ No contract expiry or duration found. Using current date as end boundary: {end_datetime.strftime('%B %d, %Y')}")
+        
+        # Ensure end_datetime is not before start_datetime
+        if end_datetime < start_datetime:
+            print(f" │ Warning: Calculated end date ({end_datetime}) is before start date ({start_datetime}). Using current date instead.")
+            end_datetime = datetime.now()
+        
         # Calculate trailing 28-day boundary floor
         now_time = datetime.now()
         trailing_28d_floor = now_time - timedelta(days=28)
         
+        # Create snapshot key for today's 28-day window (e.g., "april_22_2026_to_may_20_2026")
+        start_date_str = trailing_28d_floor.strftime("%B_%d_%Y").lower()
+        end_date_str = now_time.strftime("%B_%d_%Y").lower()
+        snapshot_key = f"{start_date_str}_to_{end_date_str}"
+        
         # Fetch widest window possible to cover both segments
+        # For from_execution_start_date, only fetch up to end_datetime (not current date)
         query_start_datetime = min(start_datetime, trailing_28d_floor)
-        history_deals = mt5.history_deals_get(query_start_datetime, now_time)
+        query_end_datetime = max(end_datetime, now_time)
+        history_deals = mt5.history_deals_get(query_start_datetime, query_end_datetime)
         if not history_deals:
             print(f" │ ℹ️ Zero closed trade records detected on account terminal layer history.")
             continue
@@ -18590,6 +20264,7 @@ def trades_analytics(inv_id=None):
                 deals_by_position[position_key].append(deal)
         
         master_flat_processed_trades = []
+        unauthorized_trades_detected = False  # Track if any unauthorized trades are found
         
         # EVALUATE INDIVIDUAL POSITION RECORDS
         for position_id, deals in deals_by_position.items():
@@ -18609,6 +20284,10 @@ def trades_analytics(inv_id=None):
                 
             is_authorized = (entry_deal.magic == unique_magic_number)
             auth_group = "authorized" if is_authorized else "unauthorized"
+            
+            # Track unauthorized trades
+            if not is_authorized:
+                unauthorized_trades_detected = True
             
             trade_type = "BUY" if entry_deal.type == 0 else "SELL"
             mt5_action = mt5.ORDER_TYPE_BUY if entry_deal.type == 0 else mt5.ORDER_TYPE_SELL
@@ -18741,7 +20420,16 @@ def trades_analytics(inv_id=None):
             }
             master_flat_processed_trades.append(trade_record)
 
-        # SEPARATE PIPELINE STATISTICS BUILDER UTILITY
+        # Update unauthorized action flags based on detected trades
+        activities_data['unauthorized_action_detected'] = unauthorized_trades_detected
+        activities_data[' unauthorized_actions'] = "1" if unauthorized_trades_detected else "0"
+        
+        if unauthorized_trades_detected:
+            print(f" │ ⚠️ UNAUTHORIZED TRADES DETECTED! Setting unauthorized_actions=1")
+        else:
+            print(f" │ ✅ No unauthorized trades detected. Setting unauthorized_actions=0")
+
+        # SEPARATE PIPELINE STATISTICS BUILDER UTILITY (MODIFIED - REMOVED SYMBOLS CONTEST NESTS)
         def run_segment_analytics(trades_pool, window_start_dt, mode="full"):
             trades_pool.sort(key=lambda x: x["raw_close_time"])
             t_count = len(trades_pool)
@@ -18755,6 +20443,7 @@ def trades_analytics(inv_id=None):
             w_rate = round((p_count / t_count * 100), 2) if t_count > 0 else 0.0
             l_rate = round((l_count / t_count * 100), 2) if t_count > 0 else 0.0
             
+            # Build symbol performance data
             sym_map = {}
             sl_tp_count, no_sl_tp_count = 0, 0
             for t in trades_pool:
@@ -18765,7 +20454,14 @@ def trades_analytics(inv_id=None):
                     no_sl_tp_count += 1
                     
                 if s not in sym_map:
-                    sym_map[s] = {"total_trades": 0, "wins_count": 0, "gross_profit_revenue": 0.0, "gross_loss_revenue": 0.0, "total_pnl": 0.0}
+                    sym_map[s] = {
+                        "total_trades": 0, 
+                        "wins_count": 0, 
+                        "losses_count": 0,
+                        "gross_profit_revenue": 0.0, 
+                        "gross_loss_revenue": 0.0, 
+                        "total_pnl": 0.0
+                    }
                 m = sym_map[s]
                 m["total_trades"] += 1
                 m["total_pnl"] += t["total_pnl"]
@@ -18773,36 +20469,20 @@ def trades_analytics(inv_id=None):
                     m["wins_count"] += 1
                     m["gross_profit_revenue"] += t["total_pnl"]
                 elif t["total_pnl"] < 0:
+                    m["losses_count"] += 1
                     m["gross_loss_revenue"] += abs(t["total_pnl"])
 
-            processed_symbols = []
+            # Build all_traded_symbols data structure
+            all_traded_symbols = {}
             for s_name, sm in sym_map.items():
-                denom_rev = sm["gross_profit_revenue"] + sm["gross_loss_revenue"]
-                processed_symbols.append({
+                all_traded_symbols[s_name] = {
                     "symbol": s_name,
-                    "winrate_by_count": round((sm["wins_count"] / sm["total_trades"] * 100), 2) if sm["total_trades"] > 0 else 0.0,
-                    "winrate_by_revenue": round((sm["gross_profit_revenue"] / denom_rev * 100), 2) if denom_rev > 0 else 0.0,
-                    "pnl": round(sm["total_pnl"], 2)
-                })
+                    "total_trades": sm["total_trades"],
+                    "total_profit": round(sm["gross_profit_revenue"], 2),
+                    "total_loss": round(sm["gross_loss_revenue"], 2)
+                }
 
-            best_c, best_r, poor_c, poor_r = {}, {}, {}, {}
-            if processed_symbols:
-                v_bc = [s for s in processed_symbols if s["winrate_by_count"] >= 20.0]
-                if v_bc: 
-                    top_c = sorted(v_bc, key=lambda x: x["winrate_by_count"], reverse=True)[0]
-                    best_c = {"symbol": top_c["symbol"], "winrate_by_count": top_c["winrate_by_count"], "pnl": top_c["pnl"]}
-                
-                pc = sorted(processed_symbols, key=lambda x: x["winrate_by_count"])[0]
-                poor_c = {"symbol": pc["symbol"], "winrate_by_count": pc["winrate_by_count"], "pnl": pc["pnl"]}
-                
-                if mode == "full":
-                    v_br = [s for s in processed_symbols if s["winrate_by_revenue"] >= 20.0]
-                    if v_br: 
-                        top_r = sorted(v_br, key=lambda x: x["winrate_by_revenue"], reverse=True)[0]
-                        best_r = {"symbol": top_r["symbol"], "winrate_by_revenue": top_r["winrate_by_revenue"], "pnl": top_r["pnl"]}
-                    pr = sorted(processed_symbols, key=lambda x: x["winrate_by_revenue"])[0]
-                    poor_r = {"symbol": pr["symbol"], "winrate_by_revenue": pr["winrate_by_revenue"], "pnl": pr["pnl"]}
-
+            # Calculate highest sequential losses (keeping trade details)
             hi_losses = {}
             curr_streak = []
             max_loss_streak = 0.0
@@ -18812,20 +20492,48 @@ def trades_analytics(inv_id=None):
                         s_loss = abs(sum(x["total_pnl"] for x in curr_streak))
                         if s_loss > max_loss_streak:
                             max_loss_streak = s_loss
-                            hi_losses = {"consecutive_losses_count": len(curr_streak), "total_loss_pnl": round(-s_loss, 2), "trades": [{**x} for x in curr_streak]}
+                            # Create clean copy of trades for the streak
+                            streak_trades = []
+                            for x in curr_streak:
+                                clean_trade = {**x}
+                                clean_trade.pop("raw_close_time", None)
+                                clean_trade.pop("is_within_risk", None)
+                                clean_trade.pop("auth_group", None)
+                                clean_trade.pop("trade_owned_by_risk_reward_raw_target", None)
+                                streak_trades.append(clean_trade)
+                            hi_losses = {
+                                "consecutive_losses_count": len(curr_streak), 
+                                "total_loss_pnl": round(-s_loss, 2), 
+                                "trades": streak_trades
+                            }
                     curr_streak = []
                 elif t["total_pnl"] < 0:
                     curr_streak.append(t)
             if len(curr_streak) >= 3:
                 s_loss = abs(sum(x["total_pnl"] for x in curr_streak))
-                if s_loss > max_loss_streak: hi_losses = {"consecutive_losses_count": len(curr_streak), "total_loss_pnl": round(-s_loss, 2), "trades": [{**x} for x in curr_streak]}
+                if s_loss > max_loss_streak:
+                    streak_trades = []
+                    for x in curr_streak:
+                        clean_trade = {**x}
+                        clean_trade.pop("raw_close_time", None)
+                        clean_trade.pop("is_within_risk", None)
+                        clean_trade.pop("auth_group", None)
+                        clean_trade.pop("trade_owned_by_risk_reward_raw_target", None)
+                        streak_trades.append(clean_trade)
+                    hi_losses = {
+                        "consecutive_losses_count": len(curr_streak), 
+                        "total_loss_pnl": round(-s_loss, 2), 
+                        "trades": streak_trades
+                    }
 
+            # Calculate highest sequential days in loss (keeping trade details)
             hi_days = {}
             d_pnl_map, d_trades_map = {}, {}
             for t in trades_pool:
                 td = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
                 d_pnl_map[td] = d_pnl_map.get(td, 0.0) + t["total_pnl"]
-                if td not in d_trades_map: d_trades_map[td] = []
+                if td not in d_trades_map: 
+                    d_trades_map[td] = []
                 d_trades_map[td].append(t)
 
             chron_days = sorted(d_pnl_map.keys())
@@ -18838,7 +20546,23 @@ def trades_analytics(inv_id=None):
                     s_loss = abs(sum(d_pnl_map[d] for d in streak))
                     if s_loss > max_day_streak_loss:
                         max_day_streak_loss = s_loss
-                        hi_days = {"consecutive_days_count": len(streak), "total_loss_pnl": round(-s_loss, 2), "days": {d: [{**w} for w in d_trades_map[d]] for d in streak}}
+                        # Create clean copy of days with their trades
+                        days_data = {}
+                        for d in streak:
+                            clean_trades = []
+                            for w in d_trades_map[d]:
+                                clean_trade = {**w}
+                                clean_trade.pop("raw_close_time", None)
+                                clean_trade.pop("is_within_risk", None)
+                                clean_trade.pop("auth_group", None)
+                                clean_trade.pop("trade_owned_by_risk_reward_raw_target", None)
+                                clean_trades.append(clean_trade)
+                            days_data[d] = clean_trades
+                        hi_days = {
+                            "consecutive_days_count": len(streak), 
+                            "total_loss_pnl": round(-s_loss, 2), 
+                            "days": days_data
+                        }
 
             for d in chron_days:
                 if d_pnl_map[d] >= 0.01:
@@ -18848,41 +20572,20 @@ def trades_analytics(inv_id=None):
                     curr_day_streak.append(d)
             finish_day_streak(curr_day_streak)
 
-            cal_matrix = {}
-            loop_date = window_start_dt.date()
-            while loop_date <= datetime.now().date():
-                cal_matrix[loop_date.strftime('%Y-%m-%d')] = []
-                loop_date += timedelta(days=1)
-            for t in trades_pool:
-                t_dt = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
-                if t_dt in cal_matrix:
-                    c_trade = {**t}
-                    c_trade.pop("raw_close_time", None)
-                    c_trade.pop("is_within_risk", None)
-                    c_trade.pop("auth_group", None)
-                    c_trade.pop("trade_owned_by_risk_reward_raw_target", None)
-                    cal_matrix[t_dt].append(c_trade)
-
-            for x in hi_losses.get("trades", []): 
-                x.pop("raw_close_time", None)
-                x.pop("is_within_risk", None)
-                x.pop("auth_group", None)
-                x.pop("trade_owned_by_risk_reward_raw_target", None)
-            for d in hi_days.get("days", {}):
-                for x in hi_days["days"][d]: 
-                    x.pop("raw_close_time", None)
-                    x.pop("is_within_risk", None)
-                    x.pop("auth_group", None)
-                    x.pop("trade_owned_by_risk_reward_raw_target", None)
-
             if mode == "count_only":
                 return {
-                    "total_trades": t_count, "total_pnl": round(t_pnl, 2),
-                    "profit_trades": p_count, "loss_trades": l_count,
-                    "win_rate_by_count": w_rate, "loss_rate_by_count": l_rate,
-                    "symbols_traded": len(sym_map), "closed_deals_with_sl_tp": sl_tp_count, "closed_deals_without_sl_tp": no_sl_tp_count,
-                    "symbols_contest": {"best_symbol_winrate_by_count": best_c, "poorest_symbol_winrate_by_count": poor_c},
-                    "highest_sequential_losses": hi_losses, "highest_sequential_days_in_loss": hi_days, "all_trades": cal_matrix
+                    "total_trades": t_count, 
+                    "total_pnl": round(t_pnl, 2),
+                    "profit_trades": p_count, 
+                    "loss_trades": l_count,
+                    "win_rate_by_count_percentage": w_rate, 
+                    "loss_rate_by_count_percentage": l_rate,
+                    "all_traded_symbols": all_traded_symbols,
+                    "symbols_traded": len(sym_map), 
+                    "closed_deals_with_sl_tp": sl_tp_count, 
+                    "closed_deals_without_sl_tp": no_sl_tp_count,
+                    "highest_sequential_losses": hi_losses, 
+                    "highest_sequential_days_in_loss": hi_days
                 }
             else:
                 p_rev = sum(t["total_pnl"] for t in p_list)
@@ -18892,176 +20595,211 @@ def trades_analytics(inv_id=None):
                 l_rev_rate = round((abs(l_rev) / turnover * 100), 2) if turnover > 0 else 0.0
                 
                 return {
-                    "total_trades": t_count, "total_pnl": round(t_pnl, 2),
-                    "profit_trades": p_count, "loss_trades": l_count, "profit_amount": p_count, "loss_amount": l_count,
-                    "win_rate_by_count": w_rate, "loss_rate_by_count": l_rate, "win_rate_by_revenue": w_rev_rate, "loss_rate_by_revenue": l_rev_rate,
-                    "symbols_traded": len(sym_map), "closed_deals_with_sl_tp": sl_tp_count, "closed_deals_without_sl_tp": no_sl_tp_count,
-                    "symbols_contest": {"best_symbol_winrate_by_count": best_c, "best_symbol_winrate_by_revenue": best_r, "poorest_symbol_winrate_by_count": poor_c, "poorest_symbol_winrate_by_revenue": poor_r},
-                    "highest_sequential_losses": hi_losses, "highest_sequential_days_in_loss": hi_days, "all_trades": cal_matrix
+                    "total_trades": t_count, 
+                    "total_pnl": round(t_pnl, 2),
+                    "profit_trades": p_count, 
+                    "loss_trades": l_count, 
+                    "profit_amount": round(p_rev, 2), 
+                    "loss_amount": round(abs(l_rev), 2),
+                    "win_rate_by_count_percentage": w_rate, 
+                    "loss_rate_by_count_percentage": l_rate, 
+                    "win_rate_by_revenue_percentage": w_rev_rate, 
+                    "loss_rate_by_revenue_percentage": l_rev_rate,
+                    "all_traded_symbols": all_traded_symbols,
+                    "symbols_traded": len(sym_map), 
+                    "closed_deals_with_sl_tp": sl_tp_count, 
+                    "closed_deals_without_sl_tp": no_sl_tp_count,
+                    "highest_sequential_losses": hi_losses, 
+                    "highest_sequential_days_in_loss": hi_days
                 }
 
+        # Load existing analytics if present to preserve historical snapshots
+        existing_analytics = activities_data.get('analytics', {})
+        
         # FINAL ANALYTICS JSON CONTAINER GENERATOR
         final_analytics_payload = {
             "from_execution_start_date": {
                 "start_date": execution_start_date,
-                "end_date": now_time.strftime('%Y-%m-%d'),
-                "last_updated": now_time.isoformat()
-            },
-            "last_28_days": {
-                "start_date": trailing_28d_floor.strftime("%B %d, %Y"),
-                "end_date": now_time.strftime('%Y-%m-%d'),
+                "end_date": end_datetime.strftime('%Y-%m-%d'),
                 "last_updated": now_time.isoformat()
             }
         }
         
+        # Preserve existing from_execution_start_date if it exists (don't overwrite historical data)
+        if "from_execution_start_date" in existing_analytics:
+            # Keep the original start_date from first run, but update end_date based on contract
+            final_analytics_payload["from_execution_start_date"]["start_date"] = existing_analytics["from_execution_start_date"].get("start_date", execution_start_date)
+            # Always use the calculated end_datetime for consistency
+            final_analytics_payload["from_execution_start_date"]["end_date"] = end_datetime.strftime('%Y-%m-%d')
+        
+        # Initialize or retrieve the last_28_days historical container (now only contains dated snapshots)
+        if "last_28_days" not in existing_analytics:
+            final_analytics_payload["last_28_days"] = {}
+        else:
+            # Copy over existing snapshots, but filter out any non-dated wrapper objects
+            existing_snapshots = existing_analytics.get("last_28_days", {})
+            final_analytics_payload["last_28_days"] = {}
+            for key, value in existing_snapshots.items():
+                # Only keep keys that match the dated snapshot pattern (contain "to")
+                if "_to_" in key and isinstance(value, dict) and "start_date" in value:
+                    final_analytics_payload["last_28_days"][key] = value
+        
         total_combined_trades = 0
 
-        # EXECUTE MATRIX POPULATION PER TIMELINE ROOT NODE
-        for window_key in ["from_execution_start_date", "last_28_days"]:
-            window_floor_ts = start_datetime.timestamp() if window_key == "from_execution_start_date" else trailing_28d_floor.timestamp()
-            window_start_dt_obj = start_datetime if window_key == "from_execution_start_date" else trailing_28d_floor
+        # Helper function to build summaries for a window (with combined inherited+claimed counts)
+        def build_summaries_only(bracket_trades, c_group, sorted_rewards):
+            summaries = {
+                "summaries_of_profits_only": {}
+            }
             
-            timeframe_filtered_pool = [t for t in master_flat_processed_trades if t["raw_close_time"] >= window_floor_ts]
+            # --- CATEGORY: SUMMARIES OF PROFITS ONLY ---
+            total_losses_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] <= 0)
+            total_won_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] > 0)
             
-            for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
-                final_analytics_payload[window_key][c_group] = {
-                    "summaries": {
-                        "summaries_of_profits_only": {},
-                        "summaries_of_profits_and_flat_breakeven": {}
-                    },
-                    "regular_data": {}
-                }
-                
-                is_within = (c_group == "trades_within_risks_config")
-                bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
-                
-                all_discovered_rewards = set(str(t["trade_owned_by_risk_reward_raw_target"]) for t in bracket_trades if t["trade_owned_by_risk_reward_raw_target"] != "N/A")
-                
-                def numeric_sort(val):
-                    try: return float(val)
-                    except ValueError: return 999.0
-                sorted_rewards = sorted(list(all_discovered_rewards), key=numeric_sort)
-
-                # --- CATEGORY A: SUMMARIES OF PROFITS ONLY ---
-                total_losses_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] <= 0)
-                total_won_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] > 0)
-                
-                # Revenue Calculations
-                revenue_lost_profits_only = sum(abs(t["total_pnl"]) for t in bracket_trades if t["total_pnl"] <= 0)
-                revenue_won_profits_only = sum(t["total_pnl"] for t in bracket_trades if t["total_pnl"] > 0)
-                
-                for reward_key in sorted_rewards:
-                    claimed_pool = []
-                    for t in bracket_trades:
-                        is_primary = (str(t["trade_owned_by_risk_reward_raw_target"]) == reward_key)
-                        is_beneficiary = (reward_key in [b.strip() for b in t["beneficiaries"].split(",")])
-                        if (is_primary or is_beneficiary) and t["total_pnl"] > 0:
-                            claimed_pool.append(t)
-                            
-                    total_claimed = len(claimed_pool)
-                    denom = total_claimed + total_losses_profits_only
-                    winrate = round((total_claimed / denom * 100), 2) if denom > 0 else 0.0
-                    
-                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"][f"total_claimed_trades_by_risk_reward_{reward_key}"] = total_claimed
-                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"][f"total_claimed_trades_by_risk_reward_{reward_key}_winrate_by_count"] = winrate
-
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_lost_trades_by_count"] = total_losses_profits_only
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_won_trades_by_count"] = total_won_profits_only
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_lost_trades_by_revenue"] = round(revenue_lost_profits_only, 2)
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_only"]["total_won_trades_by_revenue"] = round(revenue_won_profits_only, 2)
-
-                # --- CATEGORY B: SUMMARIES OF PROFITS AND FLAT BREAKEVEN ---
-                total_losses_with_be = 0
-                total_won_with_be = 0
-                
-                revenue_lost_with_be = 0.0
-                revenue_won_with_be = 0.0
-                
+            revenue_lost_profits_only = sum(abs(t["total_pnl"]) for t in bracket_trades if t["total_pnl"] <= 0)
+            revenue_won_profits_only = sum(t["total_pnl"] for t in bracket_trades if t["total_pnl"] > 0)
+            
+            # FIRST PASS: Calculate claimed trades count for each reward level
+            # (trades where this reward level is the primary target)
+            claimed_counts = {}
+            for reward_key in sorted_rewards:
+                primary_claimed = 0
                 for t in bracket_trades:
-                    if t["total_pnl"] > 0:
-                        total_won_with_be += 1
-                        revenue_won_with_be += t["total_pnl"]
-                    else:
-                        if t["trade_risk"] > 0 and t["total_pnl"] >= (-0.50 * t["trade_risk"]):
-                            total_won_with_be += 1
-                            # Treat flat/breakeven balance adjustments under won-revenue metrics
-                            revenue_won_with_be += t["total_pnl"]
-                        else:
-                            total_losses_with_be += 1
-                            revenue_lost_with_be += abs(t["total_pnl"])
+                    if t["trade_owned_by_risk_reward_raw_target"] == reward_key and t["total_pnl"] > 0:
+                        primary_claimed += 1
+                claimed_counts[reward_key] = primary_claimed
+            
+            # SECOND PASS: Calculate inherited counts
+            # Lower risk rewards inherit from higher risk rewards
+            # Convert reward keys to float for proper numeric comparison
+            reward_values = []
+            for rk in sorted_rewards:
+                try:
+                    reward_values.append((float(rk), rk))
+                except ValueError:
+                    pass
+            reward_values.sort(key=lambda x: x[0])  # Sort ascending
+            
+            # For each reward level, calculate combined inherited + claimed count
+            for i, (r_val, r_key) in enumerate(reward_values):
+                # Start with its own claimed count
+                combined_total = claimed_counts.get(r_key, 0)
+                # Add all claimed trades from higher reward levels (greater value)
+                for j in range(i + 1, len(reward_values)):
+                    higher_val, higher_key = reward_values[j]
+                    combined_total += claimed_counts.get(higher_key, 0)
+                
+                # Create single combined field
+                summaries["summaries_of_profits_only"][f"inherited_and_claimed_trades_by_risk_reward_{r_key}"] = combined_total
 
-                for reward_key in sorted_rewards:
-                    claimed_pool = []
-                    for t in bracket_trades:
-                        is_primary = (str(t["trade_owned_by_risk_reward_raw_target"]) == reward_key)
-                        is_beneficiary = (reward_key in [b.strip() for b in t["beneficiaries"].split(",")])
-                        
-                        if is_primary or is_beneficiary:
-                            if t["total_pnl"] > 0:
-                                claimed_pool.append(t)
-                            elif t["total_pnl"] <= 0 and t["trade_risk"] > 0 and t["total_pnl"] >= (-0.50 * t["trade_risk"]):
-                                claimed_pool.append(t)
-                                
-                    total_claimed = len(claimed_pool)
-                    denom = total_claimed + total_losses_with_be
-                    winrate = round((total_claimed / denom * 100), 2) if denom > 0 else 0.0
-                    
-                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"][f"total_claimed_trades_by_risk_reward_{reward_key}"] = total_claimed
-                    final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"][f"total_claimed_trades_by_risk_reward_{reward_key}_winrate_by_count"] = winrate
+            summaries["summaries_of_profits_only"]["total_lost_trades"] = total_losses_profits_only
+            summaries["summaries_of_profits_only"]["total_won_trades"] = total_won_profits_only
+            summaries["summaries_of_profits_only"]["total_lost_trades_amount"] = round(revenue_lost_profits_only, 2)
+            summaries["summaries_of_profits_only"]["total_won_trades_amount"] = round(revenue_won_profits_only, 2)
+            
+            return summaries
 
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_lost_trades_by_count"] = total_losses_with_be
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_won_trades_by_count"] = total_won_with_be
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_lost_trades_by_revenue"] = round(revenue_lost_with_be, 2)
-                final_analytics_payload[window_key][c_group]["summaries"]["summaries_of_profits_and_flat_breakeven"]["total_won_trades_by_revenue"] = round(revenue_won_with_be, 2)
+        # PROCESS FROM_EXECUTION_START_DATE (full history from start_date to end_datetime)
+        window_floor_ts = start_datetime.timestamp()
+        window_end_ts = end_datetime.timestamp()
+        window_start_dt_obj = start_datetime
+        
+        # Filter trades within the start to end date range (not beyond contract expiry)
+        timeframe_filtered_pool = [t for t in master_flat_processed_trades if window_floor_ts <= t["raw_close_time"] <= window_end_ts]
+        
+        for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
+            if "from_execution_start_date" not in final_analytics_payload:
+                final_analytics_payload["from_execution_start_date"] = {}
+            
+            final_analytics_payload["from_execution_start_date"][c_group] = {
+                "summaries": {},
+                "regular_data": {}
+            }
+            
+            is_within = (c_group == "trades_within_risks_config")
+            bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
+            
+            all_discovered_rewards = set(str(t["trade_owned_by_risk_reward_raw_target"]) for t in bracket_trades if t["trade_owned_by_risk_reward_raw_target"] != "N/A")
+            
+            def numeric_sort(val):
+                try: return float(val)
+                except ValueError: return 999.0
+            sorted_rewards = sorted(list(all_discovered_rewards), key=numeric_sort)
 
-                # 2. Compile standard baseline regular datasets
-                for a_group in ["authorized", "unauthorized"]:
-                    source_trades = [t for t in bracket_trades if t["auth_group"] == a_group]
-                    if window_key == "from_execution_start_date":
-                        total_combined_trades += len(source_trades)
-                    
-                    regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj, mode="full")
-                    final_analytics_payload[window_key][c_group]["regular_data"][a_group] = regular_summary
+            # Build summaries with combined inherited+claimed counts
+            summaries = build_summaries_only(bracket_trades, c_group, sorted_rewards)
+            final_analytics_payload["from_execution_start_date"][c_group]["summaries"] = summaries
 
-                    # 3. Dynamic sub-nest creation using Milestone Waterfall Inheritance arrays
-                    for reward_key in sorted_rewards:
-                        reward_nest_key = f"risk_reward_{reward_key}"
-                        if reward_nest_key not in final_analytics_payload[window_key][c_group]:
-                            final_analytics_payload[window_key][c_group][reward_nest_key] = {}
+            # Compile standard baseline regular datasets
+            for a_group in ["authorized", "unauthorized"]:
+                source_trades = [t for t in bracket_trades if t["auth_group"] == a_group]
+                if len(source_trades) > 0:
+                    total_combined_trades += len(source_trades)
+                
+                regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj, mode="full")
+                final_analytics_payload["from_execution_start_date"][c_group]["regular_data"][a_group] = regular_summary
 
-                        allocated_pool = []
-                        for t in source_trades:
-                            is_primary = (str(t["trade_owned_by_risk_reward_raw_target"]) == reward_key)
-                            is_beneficiary = (reward_key in [b.strip() for b in t["beneficiaries"].split(",")])
-                            
-                            if (is_primary or is_beneficiary) and t["total_pnl"] > 0:
-                                allocated_pool.append({**t})
-                            elif t["total_pnl"] <= 0:
-                                allocated_pool.append({**t})
+        # PROCESS LAST_28_DAYS - Create new snapshot with dated key (preserving history)
+        window_floor_ts = trailing_28d_floor.timestamp()
+        window_start_dt_obj = trailing_28d_floor
+        
+        # Filter trades for the last 28 days window
+        timeframe_filtered_pool = [t for t in master_flat_processed_trades if t["raw_close_time"] >= window_floor_ts]
+        
+        # Create the new snapshot for today's 28-day window
+        current_snapshot = {
+            "start_date": trailing_28d_floor.strftime("%B %d, %Y"),
+            "end_date": now_time.strftime('%Y-%m-%d'),
+            "last_updated": now_time.isoformat()
+        }
+        
+        for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
+            current_snapshot[c_group] = {
+                "summaries": {},
+                "regular_data": {}
+            }
+            
+            is_within = (c_group == "trades_within_risks_config")
+            bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
+            
+            all_discovered_rewards = set(str(t["trade_owned_by_risk_reward_raw_target"]) for t in bracket_trades if t["trade_owned_by_risk_reward_raw_target"] != "N/A")
+            
+            def numeric_sort(val):
+                try: return float(val)
+                except ValueError: return 999.0
+            sorted_rewards = sorted(list(all_discovered_rewards), key=numeric_sort)
 
-                        final_analytics_payload[window_key][c_group][reward_nest_key][a_group] = run_segment_analytics(allocated_pool, window_start_dt_obj, mode="count_only")
+            # Build summaries with combined inherited+claimed counts
+            summaries = build_summaries_only(bracket_trades, c_group, sorted_rewards)
+            current_snapshot[c_group]["summaries"] = summaries
 
-        # Strip internal temporary tracking keys before dumping analytics payload to files
-        for window_key in ["from_execution_start_date", "last_28_days"]:
-            for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
-                for key in list(final_analytics_payload[window_key][c_group].keys()):
-                    if key.startswith("risk_reward_"):
-                        for auth in ["authorized", "unauthorized"]:
-                            if auth in final_analytics_payload[window_key][c_group][key]:
-                                for day in final_analytics_payload[window_key][c_group][key][auth].get("all_trades", {}):
-                                    for trd in final_analytics_payload[window_key][c_group][key][auth]["all_trades"][day]:
-                                        trd.pop("trade_owned_by_risk_reward_raw_target", None)
+            # Compile standard baseline regular datasets
+            for a_group in ["authorized", "unauthorized"]:
+                source_trades = [t for t in bracket_trades if t["auth_group"] == a_group]
+                if len(source_trades) > 0:
+                    total_combined_trades += len(source_trades)
+                
+                regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj, mode="full")
+                current_snapshot[c_group]["regular_data"][a_group] = regular_summary
+        
+        # Add the new snapshot to the last_28_days container with the dated key
+        final_analytics_payload["last_28_days"][snapshot_key] = current_snapshot
 
         # LOCAL DISK ACTIVITIES ENGINE COMMIT
         for old_key in ['Analytics', 'AnalyticsSummary', 'AllTradesDetailed', 'last_analytics_update']:
             activities_data.pop(old_key, None)
             
         activities_data['analytics'] = final_analytics_payload
+        activities_data['analytics_structure'] = EMPTY_ANALYTICS_STRUCTURE
         
         try:
             with open(activities_path, 'w', encoding='utf-8') as f:
                 json.dump(activities_data, f, indent=4)
             print(f" │ ✅ Performance payload successfully updated in: activities.json")
+            print(f" │ 📅 New 28-day snapshot stored as: {snapshot_key}")
+            print(f" │ 📅 Contract period: {execution_start_date} to {end_datetime.strftime('%B %d, %Y')}")
+            print(f" │ 🔒 Unauthorized actions flag: {activities_data['unauthorized_actions']} (detected: {activities_data['unauthorized_action_detected']})")
+            print(f" │ 📋 Analytics structure template saved to 'analytics_structure' field")
             # Cache payload internally for cross-file synchronization sequence below
             generated_analytics_registry[str(user_brokerid)] = final_analytics_payload
         except Exception as e:
@@ -19135,7 +20873,8 @@ def trades_analytics(inv_id=None):
                     "profitandloss": "0.00",
                     "execution_start_date": datetime.now().strftime('%Y-%m-%d'),
                     "accountmanagement": {},
-                    "analytics": {}
+                    "analytics": {},
+                    "analytics_structure": EMPTY_ANALYTICS_STRUCTURE
                 }
             updated_data[current_id] = destination_record
 
@@ -19161,6 +20900,12 @@ def trades_analytics(inv_id=None):
                 except Exception:
                     destination_record["analytics"] = {}
                     has_mutated_database = True
+        
+        # ACTION C2: Ensure analytics_structure field exists with empty template
+        if "analytics_structure" not in destination_record:
+            destination_record["analytics_structure"] = EMPTY_ANALYTICS_STRUCTURE
+            has_mutated_database = True
+            print(f" │   📋 Added empty analytics_structure template for {current_id}")
 
         # ACTION D: Inject fresh analytics data blocks if generated during this execution run
         if current_id in generated_analytics_registry:
@@ -19168,6 +20913,39 @@ def trades_analytics(inv_id=None):
             destination_record.pop('trades_analytics', None)  # Scrub deprecated keys
             destination_record["analytics"] = generated_analytics_registry[current_id]
             has_mutated_database = True
+
+        # ACTION E: Synchronize unauthorized actions flags from the actual activities.json file
+        # This ensures the UPDATED_INVESTORS database reflects the current unauthorized state
+        inv_id_int = int(current_id) if current_id.isdigit() else None
+        if inv_id_int is not None:
+            # Read the actual activities.json to get the current unauthorized state
+            try:
+                inv_activities_path = Path(root_dir_base) / str(inv_id_int) / "activities.json"
+                if inv_activities_path.exists():
+                    with open(inv_activities_path, 'r', encoding='utf-8') as f:
+                        inv_activities_data = json.load(f)
+                    
+                    # Update destination record with the current unauthorized flags
+                    if 'unauthorized_actions' in inv_activities_data:
+                        dest_unauth_actions = destination_record.get('unauthorized_actions')
+                        if dest_unauth_actions != inv_activities_data['unauthorized_actions']:
+                            destination_record['unauthorized_actions'] = inv_activities_data['unauthorized_actions']
+                            has_mutated_database = True
+                            print(f" │   🔄 Synced unauthorized_actions for {current_id}: {inv_activities_data['unauthorized_actions']}")
+                    
+                    if 'unauthorized_action_detected' in inv_activities_data:
+                        dest_unauth_detected = destination_record.get('unauthorized_action_detected')
+                        if dest_unauth_detected != inv_activities_data['unauthorized_action_detected']:
+                            destination_record['unauthorized_action_detected'] = inv_activities_data['unauthorized_action_detected']
+                            has_mutated_database = True
+                            print(f" │   🔄 Synced unauthorized_action_detected for {current_id}: {inv_activities_data['unauthorized_action_detected']}")
+                    
+                    # Also sync analytics_structure from activities.json if present
+                    if 'analytics_structure' in inv_activities_data:
+                        destination_record['analytics_structure'] = inv_activities_data['analytics_structure']
+                        has_mutated_database = True
+            except Exception as e:
+                print(f" │   ⚠️ Could not sync unauthorized flags for {current_id}: {e}")
 
     # 3. Save updates back to disk if modifications occurred
     if has_mutated_database:
@@ -19185,10 +20963,8 @@ def trades_analytics(inv_id=None):
     print(" ✅ ANALYTICS RUN PROCESSING TASK COMPLETED".ljust(79) + "=")
     print("="*80)
     return stats
-
-
+    
 #  accounts 
-
 def process_single_invest(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
@@ -19285,8 +21061,6 @@ def process_single_invest(inv_folder):
     except Exception as io_err:
         print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
     
-    # Always fire tracking file-movement tasks regardless of connection state
-    move_fetched_investors()
 
     # =====================================================================
     # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
@@ -19298,7 +21072,7 @@ def process_single_invest(inv_folder):
     password_str = broker_cfg["PASSWORD"]
     server_str = broker_cfg["SERVER"]
     
-    configured_path = broker_cfg.get("TERMINAL_PATH", "")
+    configured_path = broker_cfg.get("Terminal_path", "")
     init_successful = False
     
     # Attempt 1: Dynamic Attachment Strategy
@@ -19401,10 +21175,11 @@ def process_single_invest(inv_folder):
             return account_stats
 
         # =====================================================================
-        # Execute here
+        # MASTER CONDITIONAL ROUTING (TIME RANGE FILTER)
         # =====================================================================
-        populate_orders_missing_fields(inv_id=inv_id)
-        maximum_risk_distance(inv_id=inv_id)
+        symbols_dynamic_grid_prices(inv_id=inv_id)
+        manage_position_and_pending_orders_in_signals(inv_id=inv_id)
+        convert_grid_prices_to_limit_orders(inv_id=inv_id)
         
         mt5.shutdown()
         
@@ -19526,7 +21301,7 @@ def process_single_investor(inv_folder):
     password_str = broker_cfg["PASSWORD"]
     server_str = broker_cfg["SERVER"]
     
-    configured_path = broker_cfg.get("TERMINAL_PATH", "")
+    configured_path = broker_cfg.get("Terminal_path", "")
     init_successful = False
     
     # Attempt 1: Dynamic Attachment Strategy
@@ -19635,8 +21410,6 @@ def process_single_investor(inv_folder):
         
         timerange_result = restricted_timerange(inv_id=inv_id)
         
-        # Determine strict truthiness for restriction tracking
-        # If the result points to a true block, or a dictionary indicating true, it's restricted.
         is_restricted = False
         if isinstance(timerange_result, dict):
             is_restricted = timerange_result.get('is_restricted', False)
@@ -19649,16 +21422,32 @@ def process_single_investor(inv_folder):
         if not is_restricted:
             print(f"🛡️ [{inv_id}] Validation Clear. Explicitly OUTSIDE restricted window -> Running core trade logic...")
             
-            # Run security safety tracking
             check_and_record_unauthorized_actions(inv_id=inv_id)
             delete_unauthorized_symbol_files(inv_id=inv_id)
-
-            # Core processing sequence execution
+            
+            # directional bias execution #
             additional_candles_for_orders_limitation(inv_id=inv_id)
             fetch_ohlc_data_for_investor(inv_id=inv_id)
             directional_bias(inv_id=inv_id)
             additional_candles_for_orders_limitation(inv_id=inv_id)
             create_position_hedge(inv_id=inv_id)
+            # directional bias execution #
+
+            
+
+            # grid execution #
+            symbols_dynamic_grid_prices(inv_id=inv_id)
+            # grid execution #
+            
+           
+            # grid single position and pending #
+            manage_single_position_and_pending(inv_id=inv_id)
+            # single position and pending #
+
+            # grid single position and pending #
+            convert_grid_prices_to_limit_orders(inv_id=inv_id)
+            # grid single position and pending #
+
             deduplicate_orders(inv_id=inv_id)
             filter_unauthorized_symbols(inv_id=inv_id)
             filter_unauthorized_timeframes(inv_id=inv_id)
@@ -19672,6 +21461,7 @@ def process_single_investor(inv_folder):
             live_usd_risk_and_scaling(inv_id=inv_id)
             apply_default_prices(inv_id=inv_id)
             martingale(inv_id=inv_id)
+
             clean_trades_history(inv_id=inv_id)
             place_usd_orders(inv_id=inv_id)
             close_unauthorized_orders(inv_id=inv_id)
@@ -19715,15 +21505,18 @@ def place_orders_parallel():
     investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
     
     if not investor_folders:
-        print(" └─ 🔘 No investor directories found. Calling move_fetched_investors() and retrying...")
+        print(" └─ 🔘 No investor directories found. Calling move_fetched_investors()...")
         try:
             move_fetched_investors()
         except Exception as err:
-            print(f"[ERROR] Failed to run move_fetched_investors: {err}")
-            
-        return place_orders_parallel()
+            print(f"[CRITICAL ERROR] move_fetched_investors crashed: {err}")
 
-    # --- SENSE RAW HARDWARE SPECS ---
+        investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+
+        if not investor_folders:
+            print(" └─ ❌ No investor directories found to process. Aborting execution safely.")
+            return
+
     cpu_cores = os.cpu_count() or 1
     available_ram_bytes = psutil.virtual_memory().available
     available_ram_mb = available_ram_bytes / (1024 * 1024)
@@ -19732,9 +21525,8 @@ def place_orders_parallel():
     max_by_ram = int(available_ram_mb // 300)  
     hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
 
-    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} (Cap: {max_by_cpu}) | Free RAM: {available_ram_mb:.1f}MB (Cap: {max_by_ram})")
+    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
 
-    # --- CROSS-WINDOW SYSTEM DEDUCTION ---
     active_mt5_count = 0
     for proc in psutil.process_iter(['name']):
         try:
@@ -19747,121 +21539,102 @@ def place_orders_parallel():
     remaining_slots_left = max(0, hardware_max_limit - active_mt5_count)
     
     print(f"📊 Global System Load -> Active MT5 instances in other windows: {active_mt5_count}")
-    print(f"🔒 Adjusted Safe Limit for THIS Window: {remaining_slots_left} available slots remaining.")
 
     if remaining_slots_left == 0:
-        print("⚠️  SYSTEM AT MAXIMUM SAFE CAPACITY: No resource slots left. Deferring execution to protect VPS.")
+        print("⚠️  SYSTEM AT MAXIMUM SAFE CAPACITY: Deferring execution.")
         return
 
-    # --- BATCH LOAD BALANCING ---
     total_detected = len(investor_folders)
     if total_detected > remaining_slots_left:
-        print(f" ⚠️  OVERLOAD PREVENTED: {total_detected} folders detected exceeds adjusted limit of {remaining_slots_left}.")
         active_batch = investor_folders[:remaining_slots_left]
-        print(f" ⏳ Sliced batch: Processing first {remaining_slots_left} accounts. Deferring remaining {total_detected - remaining_slots_left} folders.")
     else:
         active_batch = investor_folders
 
     if not active_batch:
         return
 
-    print(f" 📋 Processing batch of {len(active_batch)} investors across {len(active_batch)} execution channels.")
-    
-    # --- EXECUTE ACROSS DYNAMIC POOL ---
+    # Executing clean one-shot pool
     try:
         with mp.Pool(processes=len(active_batch)) as pool:
             results = pool.map(process_single_investor, active_batch)
     except Exception as pool_err:
         print(f"[CRITICAL] Error executing multiprocessing pool: {pool_err}")
 
-    return
 
 def place_orders_parallel_loop():
     """
-    ORCHESTRATOR (Persistent Loop): Senses hardware capabilities at launch to lock 
-    in a safe maximum process pool, then dynamically monitors global background terminal 
-    footprints on EVERY loop cycle to safely adapt execution queues.
+    ORCHESTRATOR (Persistent Loop): Senses hardware capabilities dynamically
+    on EVERY cycle to instantiate clean, context-managed worker pools that 
+    accurately adapt to evolving system workloads.
     """
     try:
         move_fetched_investors()
-    except:
-        pass
+    except Exception as err:
+        print(f"[ERROR] Initial fetch failed: {err}")
         
     inv_base_path = Path(INV_PATH)
     print(f"🚀 Initializing Self-Sensing Persistent Trading Engine Pool...")
-
-    initial_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-    
-    if not initial_folders:
-        print(" └─ 🔘 No initial investor directories found. Calling fallback and retrying...")
-        time.sleep(5)
-        return place_orders_parallel_loop() 
-
-    # --- SENSE HARDWARE SPECS DYNAMICALLY AT BOOT ---
-    cpu_cores = os.cpu_count() or 1
-    available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
-
-    max_by_cpu = cpu_cores * 4
-    max_by_ram = int(available_ram_mb // 300)
-    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
-
-    num_workers = min(len(initial_folders), hardware_max_limit)
-    
-    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-    print(f" 🔧 Hardware Gate: Locking maximum worker pool at {num_workers} processes (Max Engine Capacity: {hardware_max_limit}).")
-
-    pool = mp.Pool(processes=num_workers)
 
     while True:
         try:
             all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
             
+            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
             if not all_investor_folders:
-                print(" └─ 🔘 No investor directories found during loop. Executing move_fetched_investors() & retrying...")
+                print(" └─ 🔘 No investor directories found during loop. Executing move_fetched_investors()...")
                 try:
                     move_fetched_investors()
+                    all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
                 except Exception as inner_err:
                     print(f" [ERROR] Fallback shift error: {inner_err}")
-                continue
+                
+                if not all_investor_folders:
+                    print(" ⏳ Directory empty. Sleeping for 10 seconds before next scan...")
+                    time.sleep(10)
+                    continue
 
             # --- LIVE GLOBAL RESOURCE AUDIT ON EVERY LOOP CYCLE ---
+            cpu_cores = os.cpu_count() or 1
+            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+
+            max_by_cpu = cpu_cores * 4
+            max_by_ram = int(available_ram_mb // 300)
+            hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
+
             active_mt5_count = 0
-            
-            for proc in psutil.process_iter(['name', 'ppid']):
+            for proc in psutil.process_iter(['name']):
                 try:
                     pname = proc.info['name'].lower() if proc.info['name'] else ""
                     if "terminal.exe" in pname or "terminal64.exe" in pname:
-                        # Stripped child process checking to rely purely on active platform presence
                         active_mt5_count += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
 
             adjusted_capacity = max(0, hardware_max_limit - active_mt5_count)
-            current_safe_cap = min(num_workers, adjusted_capacity)
-
-            # Dynamic Load Balancing Slice
-            if current_safe_cap <= 0:
-                print(f"⏳ [STANDBY] System capacity fully utilized by other windows ({active_mt5_count} active terminals). Waiting for free space...")
-                time.sleep(3)
+            
+            if adjusted_capacity <= 0:
+                print(f"⏳ [STANDBY] System capacity fully utilized ({active_mt5_count} active terminals). Waiting...")
+                time.sleep(5)
                 continue
 
-            if len(all_investor_folders) > current_safe_cap:
-                print(f" ⚠️  RESOURCE CEILING APPLIED: {len(all_investor_folders)} investors active. Capping this cycle's slice to {current_safe_cap}.")
-                active_batch = all_investor_folders[:current_safe_cap]
-                deferred_count = len(all_investor_folders) - current_safe_cap
-                print(f" ⏳ Slicing batch: Running first {current_safe_cap} accounts. {deferred_count} deferred to next loop.")
-            else:
-                active_batch = all_investor_folders
+            # Slice our workload down to match strict real-time resource availability
+            slice_size = min(len(all_investor_folders), adjusted_capacity)
+            active_batch = all_investor_folders[:slice_size]
 
-            print(f"\n--- Cycle Start: Processing {len(active_batch)} investors within safe limits ---")
+            print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
             
-            jobs = []
-            for folder in active_batch:
-                job = pool.apply_async(process_single_investor, args=(folder,))
-                jobs.append(job)
-            
-            results = [job.get() for job in jobs]
-            print(f"--- Cycle Complete. Safe execution maintained. Sleeping for 1 second ---")
+            # FIXED: Pool instantiated inside context manager inside loop iteration
+            # This cleans all process footprints, pipes memory leaks, and scales perfectly
+            with mp.Pool(processes=len(active_batch)) as pool:
+                jobs = []
+                for folder in active_batch:
+                    job = pool.apply_async(process_single_investor, args=(folder,))
+                    jobs.append(job)
+                
+                # Force synchronization bar before closing the pool step block
+                results = [job.get() for job in jobs]
+                
+            print(f"--- Cycle Complete. Work group closed cleanly. Cooldown sleep ---")
             
         except Exception as e:
             print(f"Critical Error in Orchestrator Loop: {e}")
@@ -19870,6 +21643,6 @@ def place_orders_parallel_loop():
         time.sleep(1)
 
 if __name__ == "__main__":
-   move_fetched_investors()
+   place_orders_parallel()
 
 

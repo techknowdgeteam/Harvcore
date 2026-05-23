@@ -34,6 +34,9 @@ def work_only_in_specific_timerange():
     Function will ONLY work during specified time windows.
     Does NOT need MT5 connection - just checks time configuration.
     
+    If 'from' or 'to' values parse to 0 (e.g., "0", "0.00", "0:00 am", "00:00"), 
+    it overrides all restrictions and assumes work is always allowed.
+    
     Returns:
         dict: Statistics about the time range check including whether function should work
     """
@@ -41,6 +44,7 @@ def work_only_in_specific_timerange():
     
     from datetime import datetime
     from pathlib import Path
+    import json
     
     print(f"\n{'='*10} ⏰ WORK TIME CHECK (Only work during specified hours) {'='*10}")
     
@@ -64,8 +68,8 @@ def work_only_in_specific_timerange():
     if not default_config_path.exists():
         print(f"   Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
         stats["errors"].append(f"Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
-        stats["processing_success"] = True  # Still success, just no restriction
-        stats["should_work"] = True  # If no config, allow work
+        stats["processing_success"] = True  
+        stats["should_work"] = True  
         return stats
     
     try:
@@ -75,24 +79,32 @@ def work_only_in_specific_timerange():
         print(f"   Error loading default config: {e}")
         stats["errors"].append(f"Error loading default config: {e}")
         stats["processing_success"] = True
-        stats["should_work"] = True  # If error loading, allow work
+        stats["should_work"] = True  
         return stats
     
-    # Parse time strings (e.g., "12:00 am" or "12:30 pm" or "21:00")
+    # Parse time strings (e.g., "12:00 am" or "12:30 pm" or "21:00" or "0:00 am")
     def parse_time_string(time_str):
-        time_str = time_str.lower().strip().replace(" ", "")
+        # Handle edge cases like raw numbers or floats passed as strings/ints
+        time_str_clean = str(time_str).lower().strip().replace(" ", "")
         
-        is_pm = "pm" in time_str
-        is_am = "am" in time_str
+        # Absolute raw check for simple zero strings before stripping am/pm modifiers
+        if time_str_clean in ["0", "0.00", "0.0", "00:00"]:
+            return 0, 0
+            
+        is_pm = "pm" in time_str_clean
+        is_am = "am" in time_str_clean
         
-        clean_time = time_str.replace("pm", "").replace("am", "")
+        clean_time = time_str_clean.replace("pm", "").replace("am", "")
         
         if ":" in clean_time:
             parts = clean_time.split(":")
             hour = int(parts[0])
             minute = int(parts[1]) if len(parts) > 1 else 0
         else:
-            hour = int(clean_time)
+            try:
+                hour = int(clean_time)
+            except ValueError:
+                hour = int(float(clean_time))
             minute = 0
         
         if is_pm and hour != 12:
@@ -115,94 +127,123 @@ def work_only_in_specific_timerange():
     time_windows_list = []
     is_within_any_window = False
     matched_window = None
+    zero_override_triggered = False
     
     try:
         default_settings = default_config.get("settings", {})
         time_ranges = default_settings.get("execute_function_in_time_range_of", [])
         
-        # Handle both old format (single dict) and new format (list of dicts)
         if isinstance(time_ranges, dict):
-            # Old format - single time range
             time_ranges = [time_ranges]
         
         if time_ranges and len(time_ranges) > 0:
-            has_time_restriction = True
-            print(f"  📋 Found {len(time_ranges)} time window(s) in DEFAULT config")
             
-            current_time_minutes = current_time.hour * 60 + current_time.minute
-            
+            # FIRST: Safely parse and check ALL windows for any true 0 value override rule
             for idx, time_range in enumerate(time_ranges):
                 if "from" in time_range and "to" in time_range:
                     try:
-                        # Parse start time
-                        start_hour, start_minute = parse_time_string(time_range["from"])
-                        # Parse end time
-                        end_hour, end_minute = parse_time_string(time_range["to"])
+                        f_hour, f_min = parse_time_string(time_range["from"])
+                        t_hour, t_min = parse_time_string(time_range["to"])
                         
-                        # Calculate minutes
-                        start_minutes = start_hour * 60 + start_minute
-                        end_minutes = end_hour * 60 + end_minute
-                        
-                        # Check if window crosses midnight
-                        crosses_midnight = end_minutes < start_minutes
-                        
-                        if crosses_midnight:
-                            is_in_window = (current_time_minutes >= start_minutes or 
-                                           current_time_minutes <= end_minutes)
-                        else:
-                            is_in_window = start_minutes <= current_time_minutes <= end_minutes
-                        
-                        # Format for display
-                        start_12hr = to_12hr(start_hour, start_minute)
-                        end_12hr = to_12hr(end_hour, end_minute)
-                        
-                        window_info = {
-                            'index': idx + 1,
-                            'from': time_range['from'],
-                            'to': time_range['to'],
-                            'from_24hr': f"{start_hour:02d}:{start_minute:02d}",
-                            'to_24hr': f"{end_hour:02d}:{end_minute:02d}",
-                            'from_12hr': start_12hr,
-                            'to_12hr': end_12hr,
-                            'is_within': is_in_window
-                        }
-                        
-                        time_windows_list.append(window_info)
-                        
-                        if is_in_window:
-                            is_within_any_window = True
-                            matched_window = window_info
-                            print(f"  🕘 Window {idx + 1}: {time_range['from']} - {time_range['to']}  WITHIN")
-                        else:
-                            print(f"  🕘 Window {idx + 1}: {time_range['from']} - {time_range['to']}  OUTSIDE")
-                            
-                    except Exception as e:
-                        stats["errors"].append(f"Failed to parse time range {idx}: {e}")
-                        print(f"   Failed to parse window {idx + 1}: {e}")
+                        # If either from or to side evaluates strictly to 0 hours and 0 minutes
+                        if (f_hour == 0 and f_min == 0) or (t_hour == 0 and t_min == 0):
+                            print(f"   ⚠️ Window {idx + 1} evaluated to a '0' or '0.00' condition ({time_range['from']} -> {time_range['to']}).")
+                            print(f"   👉 Always Work Rule Activated! Restrictions completely bypassed.")
+                            zero_override_triggered = True
+                            break
+                    except Exception:
+                        # Fallback simple text check if parsing crashes on weird data types
+                        from_clean = str(time_range["from"]).lower().replace(" ", "").replace("am", "").replace("pm", "")
+                        to_clean = str(time_range["to"]).lower().replace(" ", "").replace("am", "").replace("pm", "")
+                        if from_clean in ["0", "0.00", "0.0", "00:00", "0:00"] or to_clean in ["0", "0.00", "0.0", "00:00", "0:00"]:
+                            zero_override_triggered = True
+                            break
             
-            if is_within_any_window and matched_window:
-                print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is WITHIN window {matched_window['index']}: {matched_window['from']} - {matched_window['to']}")
-            elif has_time_restriction and not is_within_any_window:
-                print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is NOT within ANY work window")
+            # SECOND: Process active time windows ONLY if no zero rule was triggered
+            if not zero_override_triggered:
+                current_time_minutes = current_time.hour * 60 + current_time.minute
+                
+                for idx, time_range in enumerate(time_ranges):
+                    if "from" in time_range and "to" in time_range:
+                        try:
+                            # Parse start time
+                            start_hour, start_minute = parse_time_string(time_range["from"])
+                            # Parse end time
+                            end_hour, end_minute = parse_time_string(time_range["to"])
+                            
+                            # Calculate minutes
+                            start_minutes = start_hour * 60 + start_minute
+                            end_minutes = end_hour * 60 + end_minute
+                            
+                            # Check if window crosses midnight
+                            crosses_midnight = end_minutes < start_minutes
+                            
+                            if crosses_midnight:
+                                is_in_window = (current_time_minutes >= start_minutes or 
+                                                current_time_minutes <= end_minutes)
+                            else:
+                                is_in_window = start_minutes <= current_time_minutes <= end_minutes
+                            
+                            # Format for display
+                            start_12hr = to_12hr(start_hour, start_minute)
+                            end_12hr = to_12hr(end_hour, end_minute)
+                            
+                            window_info = {
+                                'index': idx + 1,
+                                'from': time_range['from'],
+                                'to': time_range['to'],
+                                'from_24hr': f"{start_hour:02d}:{start_minute:02d}",
+                                'to_24hr': f"{end_hour:02d}:{end_minute:02d}",
+                                'from_12hr': start_12hr,
+                                'to_12hr': end_12hr,
+                                'is_within': is_in_window
+                            }
+                            
+                            time_windows_list.append(window_info)
+                            has_time_restriction = True
+                            
+                            if is_in_window:
+                                is_within_any_window = True
+                                matched_window = window_info
+                                print(f"   Documented Window {idx + 1}: {time_range['from']} - {time_range['to']}  WITHIN")
+                            else:
+                                print(f"   Documented Window {idx + 1}: {time_range['from']} - {time_range['to']}  OUTSIDE")
+                                
+                        except Exception as e:
+                            stats["errors"].append(f"Failed to parse time range {idx}: {e}")
+                            print(f"    Failed to parse window {idx + 1}: {e}")
+                
+                if has_time_restriction:
+                    print(f"   📋 System evaluated {len(time_windows_list)} filtering time window(s)")
+                    if is_within_any_window and matched_window:
+                        print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is WITHIN window {matched_window['index']}: {matched_window['from']} - {matched_window['to']}")
+                    else:
+                        print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is NOT within ANY work window")
+            else:
+                # Force settings to wide open execution state
+                has_time_restriction = False
+                is_within_any_window = True
+                time_windows_list = []
+                matched_window = None
                 
     except Exception as e:
         stats["errors"].append(f"Error loading time ranges: {e}")
         print(f"   Error processing time ranges: {e}")
     
-    # If no time restriction defined = work always
+    # If no time restriction defined or zero override caught = work always allowed
     if not has_time_restriction:
         is_within_any_window = True
-        print(f"   No time restriction defined - work always allowed")
+        print(f"   No active time restriction - work always allowed")
     
     # Display current time
-    print(f"  🕐 Current time: {current_time.strftime('%I:%M:%S %p')}")
+    print(f"   🕐 Current time: {current_time.strftime('%I:%M:%S %p')}")
     
     # Final decision
     if is_within_any_window:
-        print(f"   WITHIN work time window - Function CAN work")
+        print(f"   🟢 WITHIN work parameters - Function CAN work")
         stats["should_work"] = True
     else:
-        print(f"   OUTSIDE work time window - Function CANNOT work")
+        print(f"   🔴 OUTSIDE work parameters - Function CANNOT work")
         stats["should_work"] = False
     
     stats["has_time_restriction"] = has_time_restriction
@@ -221,15 +262,15 @@ def work_only_in_specific_timerange():
 
     # --- FINAL SUMMARY ---
     print(f"\n{'='*10} 📊 SUMMARY {'='*10}")
-    print(f"  Has time restriction: {has_time_restriction}")
+    print(f"   Has time restriction: {has_time_restriction}")
     if has_time_restriction:
-        print(f"  Total time windows: {len(time_windows_list)}")
-        print(f"  Within any window: {is_within_any_window}")
+        print(f"   Total active windows: {len(time_windows_list)}")
+        print(f"   Within active window: {is_within_any_window}")
         if matched_window:
-            print(f"  Matched window: {matched_window['from']} - {matched_window['to']}")
+            print(f"   Matched window: {matched_window['from']} - {matched_window['to']}")
     else:
-        print(f"  Within work window: {is_within_any_window} (always allowed)")
-    print(f"  Function should work: {is_within_any_window}")
+        print(f"   Within work window: {is_within_any_window} (Always allowed due to '0/0.00' override or blank configuration)")
+    print(f"   Function should work: {is_within_any_window}")
     
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
@@ -237,6 +278,45 @@ def work_only_in_specific_timerange():
 
 def fetch_tables_streaming(batch_size=5000):
     """Stream results directly to file without holding all in memory"""
+    
+    def denormalize_path_value(value, field_name):
+        """Convert underscore-normalized paths back to original path format with backslashes"""
+        if value is None:
+            return None
+        
+        # Check if field name contains 'path' (case insensitive)
+        if 'path' not in field_name.lower():
+            return value
+        
+        # Only process string values
+        if not isinstance(value, str):
+            return value
+        
+        # Convert underscores back to backslashes (ONLY underscores, preserve everything else)
+        # This reverses the normalization done during update
+        denormalized = value.replace('_', '\\')
+        
+        # Handle drive letters: C:\ should remain C:\ (not C:\\)
+        # First fix drive letter patterns (e.g., C:\ becomes C:\)
+        import re
+        # Fix drive letters (e.g., "C:\" pattern)
+        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
+        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
+        
+        # Convert single backslashes to double backslashes for JSON string representation
+        # But preserve the actual path structure
+        denormalized = denormalized.replace('\\', '\\')
+        
+        # Fix drive letters again after double backslash conversion
+        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
+        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
+        
+        if denormalized != value:
+            print(f"       Denormalized path field '{field_name}':")
+            print(f"         Normalized: {value[:100]}{'...' if len(value) > 100 else ''}")
+            print(f"         Restored: {denormalized[:100]}{'...' if len(denormalized) > 100 else ''}")
+        
+        return denormalized
     
     def repair_json_field(value):
         """Intelligently detect and repair JSON fields, even if they're escaped or malformed"""
@@ -345,10 +425,14 @@ def fetch_tables_streaming(batch_size=5000):
         return value
     
     def clean_record(record, default_accountmanagement=None):
-        """Clean a record by repairing all fields that might contain JSON"""
+        """Clean a record by repairing all fields that might contain JSON and denormalizing paths"""
         cleaned = {}
         for key, value in record.items():
+            # First, denormalize path fields if they are strings
             if isinstance(value, str) and len(value) > 0:
+                # Denormalize path fields before JSON repair
+                value = denormalize_path_value(value, key)
+                
                 # Attempt to repair JSON fields
                 repaired = repair_json_field(value)
                 cleaned[key] = repaired
@@ -379,25 +463,58 @@ def fetch_tables_streaming(batch_size=5000):
     print("-"*70)
     
     try:
-        # Step 1: Test Connection and Get Actual Data Columns
+        # Step 1: Test Connection and Get Actual Data Columns (excluding analytics column)
         print("\n📡 [1/7] Testing Database Connection & Fetching Schema...")
-        test_query = "SELECT * FROM insiders LIMIT 1"
-        test_result = db.execute_query(test_query)
         
-        if test_result.get('status') != 'success':
-            print(f"   Connection FAILED: {test_result.get('message')}")
-            return
-        print(f"   Connection SUCCESSFUL")
+        # Get all columns from insiders table except 'analytics'
+        get_columns_query = """
+        SELECT COLUMN_NAME 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'insiders'
+        AND COLUMN_NAME != 'analytics'
+        ORDER BY ORDINAL_POSITION
+        """
         
-        # Get column names from the first row of actual data
-        columns = None
-        results = test_result.get('results', [])
-        if results and len(results) > 0:
-            # Get column names from the first row's keys
-            columns = list(results[0].keys())
-            print(f"  📋 Found {len(columns)} columns from data: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
+        columns_result = db.execute_query(get_columns_query)
+        columns = []
+        
+        if columns_result.get('status') == 'success' and columns_result.get('results'):
+            for row in columns_result['results']:
+                column_name = row.get('COLUMN_NAME', '')
+                if column_name and column_name.lower() != 'analytics':
+                    columns.append(column_name)
+            
+            print(f"  📋 Found {len(columns)} columns from schema (excluding 'analytics'): {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
+            
+            # Test connection with a simple query
+            test_query = f"SELECT {', '.join([f'`{col}`' for col in columns[:1]])} FROM insiders LIMIT 1"
+            test_result = db.execute_query(test_query)
+            
+            if test_result.get('status') != 'success':
+                print(f"   Connection FAILED: {test_result.get('message')}")
+                return
         else:
-            print(f"    No data rows to determine schema, falling back to SELECT *")
+            # Fallback: try to get columns from data
+            print(f"    Could not fetch schema from information_schema, trying SELECT *...")
+            test_query = "SELECT * FROM insiders LIMIT 1"
+            test_result = db.execute_query(test_query)
+            
+            if test_result.get('status') != 'success':
+                print(f"   Connection FAILED: {test_result.get('message')}")
+                return
+            
+            results = test_result.get('results', [])
+            if results and len(results) > 0:
+                # Get column names from the first row's keys, excluding 'analytics'
+                all_columns = list(results[0].keys())
+                columns = [col for col in all_columns if col.lower() != 'analytics']
+                print(f"  📋 Found {len(columns)} columns from data (excluding 'analytics'): {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
+            else:
+                print(f"    No data rows to determine schema")
+                columns = []
+        
+        print(f"   Connection SUCCESSFUL")
         
         # Step 2: Get Total Count
         print("\n📊 [2/7] Counting Total Records...")
@@ -440,9 +557,17 @@ def fetch_tables_streaming(batch_size=5000):
             suspended_rows = suspended_result.get('results', [])
             
             for row in suspended_rows:
+                # Denormalize path fields in suspended users as well
+                cleaned_row = {}
+                for key, value in row.items():
+                    if isinstance(value, str) and 'path' in key.lower():
+                        cleaned_row[key] = denormalize_path_value(value, key)
+                    else:
+                        cleaned_row[key] = value
+                
                 # Only add if at least one status matches exactly
-                app_status = row.get('application_status')
-                srv_decision = row.get('server_decision')
+                app_status = cleaned_row.get('application_status')
+                srv_decision = cleaned_row.get('server_decision')
                 
                 # Double-check filtering (case-insensitive)
                 is_suspended = False
@@ -462,12 +587,12 @@ def fetch_tables_streaming(batch_size=5000):
                 
                 if is_suspended:
                     suspended_users.append({
-                        'id': row.get('id'),
-                        'email': row.get('email'),
-                        'fullname': row.get('fullname'),
-                        'login': row.get('login'),
-                        'application_status': row.get('application_status'),
-                        'server_decision': row.get('server_decision'),
+                        'id': cleaned_row.get('id'),
+                        'email': cleaned_row.get('email'),
+                        'fullname': cleaned_row.get('fullname'),
+                        'login': cleaned_row.get('login'),
+                        'application_status': cleaned_row.get('application_status'),
+                        'server_decision': cleaned_row.get('server_decision'),
                         'status_source': 'application_status' if app_status and app_status.lower() in ['suspended', 'blacklisted'] else 'server_decision',
                         'suspended_at': datetime.now().isoformat()
                     })
@@ -638,8 +763,9 @@ def fetch_tables_streaming(batch_size=5000):
         elif empty_acct_count > 0 and not default_accountmanagement:
             print(f"    No default account management available - will leave empty")
         
-        # Step 7: Stream Insiders Data with JSON Repair and AccountManagement Filling
-        print(f"\n📥 [7/7] Streaming Insiders Records to File (with JSON repair & account management fill)...")
+        # Step 7: Stream Insiders Data with JSON Repair and AccountManagement Filling (excluding analytics column)
+        print(f"\n📥 [7/7] Streaming Insiders Records to File (with JSON repair, path denormalization, & account management fill)...")
+        print(f"  📌 Note: 'analytics' column is EXCLUDED from export")
         print("-"*70)
         
         start_time = datetime.now()
@@ -647,12 +773,18 @@ def fetch_tables_streaming(batch_size=5000):
         current_batch = 0
         json_repaired_count = 0
         accountmanagement_filled_count = 0
+        path_denormalized_count = 0
         
-        # Build column list for SELECT query if needed
-        select_clause = "*"
-        if columns:
-            # Escape column names with backticks to handle reserved words
-            select_clause = ", ".join([f"`{col}`" for col in columns])
+        # Build column list for SELECT query (excluding analytics)
+        if not columns:
+            print(f"    No columns available for query. Cannot proceed.")
+            return
+        
+        # Ensure analytics is not in the column list
+        columns = [col for col in columns if col.lower() != 'analytics']
+        select_clause = ", ".join([f"`{col}`" for col in columns])
+        
+        print(f"  📋 Exporting columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
         
         with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             f.write('{\n')
@@ -663,7 +795,7 @@ def fetch_tables_streaming(batch_size=5000):
                 current_batch += 1
                 batch_start = datetime.now()
                 
-                # Fetch batch with explicit column list
+                # Fetch batch with explicit column list (excluding analytics)
                 query = f"SELECT {select_clause} FROM insiders LIMIT {batch_size} OFFSET {offset}"
                 result = db.execute_query(query)
                 
@@ -685,7 +817,7 @@ def fetch_tables_streaming(batch_size=5000):
                     if not first_record:
                         f.write(',\n')
                     
-                    # Clean the row data by repairing JSON fields AND filling empty accountmanagement
+                    # Clean the row data by repairing JSON fields, denormalizing paths, AND filling empty accountmanagement
                     cleaned_row = clean_record(row, default_accountmanagement)
                     
                     # Track if accountmanagement was filled
@@ -695,6 +827,11 @@ def fetch_tables_streaming(batch_size=5000):
                         # Uncomment the next lines to exclude tracking fields
                         # cleaned_row.pop('_accountmanagement_filled', None)
                         # cleaned_row.pop('_filled_at', None)
+                    
+                    # Track path denormalizations
+                    for key, value in cleaned_row.items():
+                        if 'path' in key.lower() and isinstance(value, str) and '\\' in value:
+                            path_denormalized_count += 1
                     
                     # Additional type conversions
                     for key, value in cleaned_row.items():
@@ -739,6 +876,7 @@ def fetch_tables_streaming(batch_size=5000):
                 print(f"  Batch {current_batch:>3}/{total_batches:<3} [{bar}] {progress:5.1f}% | "
                       f"Records: {offset:>{len(str(total_rows))},}/{total_rows:,} | "
                       f"Filled: {accountmanagement_filled_count:,} | "
+                      f"Paths: {path_denormalized_count:,} | "
                       f"Speed: {records_per_sec:>6,.0f} rec/s | "
                       f"Size: {bytes_written/1024:>8,.1f} KB")
             
@@ -754,9 +892,12 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"   Status           : SUCCESS")
         print(f"  📊 Records Exported : {offset:,} / {total_rows:,}")
         print(f"  📦 Batches Used     : {current_batch}")
-        print(f"  📋 Schema Columns   : {len(columns) if columns else 'Dynamic (SELECT *)'}")
+        print(f"  📋 Schema Columns   : {len(columns)} (excluded 'analytics')")
         print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
-        print(f"   Account Mgmt Filled: {accountmanagement_filled_count:,} users")
+        print(f"  🔄 Path Denormalized: {path_denormalized_count} path fields restored")
+        print(f"     - Conversion: underscores → backslashes")
+        print(f"     - Preserved: colons (:), spaces ( ), other characters")
+        print(f"  📝 Account Mgmt Filled: {accountmanagement_filled_count:,} users")
         print(f"     - Empty Users Found: {empty_acct_count:,}")
         print(f"     - Successfully Filled: {accountmanagement_filled_count:,}")
         if empty_acct_count > 0 and accountmanagement_filled_count < empty_acct_count:
@@ -797,7 +938,7 @@ def fetch_tables_streaming(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-     
+
 def update_tables_streaming(batch_size=5000):
     """Stream updates from UPDATED_INVESTORS JSON to database without holding all in memory"""
     
@@ -864,6 +1005,78 @@ def update_tables_streaming(batch_size=5000):
         elapsed_time = 0
         avg_speed = 0
         unmapped_fields = set()
+        
+        # Helper function to determine if a value should be treated as JSON
+        def is_json_field(value):
+            """Determine if a value should be stored as JSON in database"""
+            if value is None:
+                return False
+            if isinstance(value, (dict, list)):
+                return True
+            if isinstance(value, str):
+                # Check if string represents a JSON object/array
+                stripped = value.strip()
+                if stripped.startswith('{') and stripped.endswith('}'):
+                    return True
+                if stripped.startswith('[') and stripped.endswith(']'):
+                    return True
+            return False
+        
+        def normalize_path_value(value, field_name):
+            """Normalize path values: ONLY replace backslashes with underscores, preserve EVERYTHING else (spaces, colons, etc.)"""
+            if value is None:
+                return None
+            
+            # Check if field name contains 'path' (case insensitive)
+            if 'path' not in field_name.lower():
+                return value
+            
+            # Only process string values
+            if not isinstance(value, str):
+                return value
+            
+            # IMPORTANT: ONLY replace backslash characters with underscore
+            # Do NOT replace colons, spaces, forward slashes, or any other characters
+            normalized = value.replace('\\', '_')
+            
+            # Debug print to see what's happening
+            if normalized != value:
+                print(f"       Normalizing path field '{field_name}':")
+                print(f"         Original: {value}")
+                print(f"         Normalized: {normalized}")
+                print(f"         Changes: Only backslashes replaced with underscores")
+            
+            return normalized
+        
+        def normalize_json_value(value):
+            """Convert value to proper JSON for database storage"""
+            if value is None:
+                return None
+            
+            # If it's already a dict or list, dump to JSON string
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False)
+            
+            # If it's a string, try to parse it as JSON
+            if isinstance(value, str):
+                stripped = value.strip()
+                # Handle "NULL" string - treat as NULL
+                if stripped.upper() == 'NULL':
+                    return None
+                # Handle empty string or "{}" - treat as empty JSON object
+                if stripped == '' or stripped == '{}':
+                    return '{}'
+                # Try to parse as JSON to validate
+                if (stripped.startswith('{') and stripped.endswith('}')) or \
+                   (stripped.startswith('[') and stripped.endswith(']')):
+                    try:
+                        # Validate it's proper JSON
+                        json.loads(stripped)
+                        return stripped
+                    except:
+                        # If parsing fails, treat as regular string
+                        return value
+            return value
         
         # Step 3: Process insiders data only if file exists and is not empty
         if file_exists:
@@ -941,16 +1154,28 @@ def update_tables_streaming(batch_size=5000):
                                     unmapped_fields.add(json_field)
                                     continue
                                 
-                                # Handle different value types
-                                if value is None:
+                                # Make a copy of original value for debugging
+                                original_value = value
+                                
+                                # Normalize path values BEFORE any other processing
+                                if 'path' in json_field.lower():
+                                    value = normalize_path_value(value, json_field)
+                                
+                                # Handle JSON fields intelligently
+                                if is_json_field(value):
+                                    # This is a JSON field - normalize and store as JSON
+                                    json_value = normalize_json_value(value)
+                                    
+                                    if json_value is None:
+                                        update_parts.append(f"`{json_field}` = NULL")
+                                    else:
+                                        # Escape single quotes for SQL
+                                        escaped_json = json_value.replace("'", "\\'")
+                                        update_parts.append(f"`{json_field}` = '{escaped_json}'")
+                                    
+                                elif value is None:
                                     # Set to NULL
                                     update_parts.append(f"`{json_field}` = NULL")
-                                    
-                                elif isinstance(value, (dict, list)):
-                                    # Complex JSON object - store as JSON string
-                                    json_str = json.dumps(value, ensure_ascii=False)
-                                    escaped_json = json_str.replace("'", "\\'")
-                                    update_parts.append(f"`{json_field}` = '{escaped_json}'")
                                     
                                 elif isinstance(value, bool):
                                     # Boolean values
@@ -962,9 +1187,13 @@ def update_tables_streaming(batch_size=5000):
                                     update_parts.append(f"`{json_field}` = {value}")
                                     
                                 elif isinstance(value, str):
-                                    # String values - escape single quotes
-                                    escaped_value = value.replace("'", "\\'")
-                                    update_parts.append(f"`{json_field}` = '{escaped_value}'")
+                                    # Check if string is "NULL" (should be treated as SQL NULL)
+                                    if value.strip().upper() == 'NULL':
+                                        update_parts.append(f"`{json_field}` = NULL")
+                                    else:
+                                        # Regular string - escape single quotes
+                                        escaped_value = value.replace("'", "\\'")
+                                        update_parts.append(f"`{json_field}` = '{escaped_value}'")
                                     
                                 else:
                                     # Any other type - convert to string
@@ -1222,7 +1451,7 @@ def update_tables_streaming(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-
+           
 def close_db_browser():
     db.shutdown()
     print(f"\n🔒 Database connection closed.")
@@ -1236,9 +1465,9 @@ def create_investor_mt5_files(inv_id=None):
     
     Logic:
         1. If user is suspended/blacklisted -> IGNORE completely (skip immediately)
-        2. If folder doesn't exist and user NOT suspended -> CREATE folder, update TERMINAL_PATH,
+        2. If folder doesn't exist and user NOT suspended -> CREATE folder, update Terminal_path,
            and if application_status is 'pending', change it to 'just-joined'.
-        3. If folder exists and user NOT suspended -> ENSURE TERMINAL_PATH is set in record,
+        3. If folder exists and user NOT suspended -> ENSURE Terminal_path is set in record,
            and if application_status is 'pending', change it to 'just-joined'.
     
     Returns:
@@ -1328,8 +1557,8 @@ def create_investor_mt5_files(inv_id=None):
                     print(f"🗑️  SUSPENDED ID:{investor_id} - Deleting active folder for blacklisted user...")
                     shutil.rmtree(target_folder, ignore_errors=True)
                     deleted += 1
-                    if 'TERMINAL_PATH' in investors_data[investor_id]:
-                        investors_data[investor_id]['TERMINAL_PATH'] = ''
+                    if 'Terminal_path' in investors_data[investor_id]:
+                        investors_data[investor_id]['Terminal_path'] = ''
                         investors_modified = True
                 except Exception as e:
                     errors += 1
@@ -1357,18 +1586,18 @@ def create_investor_mt5_files(inv_id=None):
         folder_exists = os.path.exists(target_folder)
         current_status = investor_data.get('application_status', '')
         
-        # RULE 2: If folder exists and user is NOT suspended
+        # RULE 2: If folder exists and user is NOT suspended (Verify path regardless of application status)
         if folder_exists:
-            current_path = investor_data.get('TERMINAL_PATH', '')
+            current_path = investor_data.get('Terminal_path', '')
             
-            # Ensure TERMINAL_PATH is set correctly
+            # Ensure Terminal_path is set correctly regardless of application status
             if not current_path or current_path != normalized_path:
-                investors_data[investor_id]['TERMINAL_PATH'] = normalized_path
+                investors_data[investor_id]['Terminal_path'] = normalized_path
                 investors_modified = True
                 path_updates += 1
-                print(f"🔧 ID:{investor_id} → TERMINAL_PATH fixed to: {normalized_path[:60]}...")
+                print(f"🔧 ID:{investor_id} → Terminal_path fixed to: {normalized_path[:60]}...")
             else:
-                print(f"✓ ID:{investor_id} → TERMINAL_PATH verified")
+                print(f"✓ ID:{investor_id} → Terminal_path verified")
             
             # Check application_status: only change if it is exactly "pending"
             if current_status == "pending":
@@ -1390,7 +1619,7 @@ def create_investor_mt5_files(inv_id=None):
                             ignore=shutil.ignore_patterns('*.lock', '*.log'))
             
             # Assign structural data
-            investors_data[investor_id]['TERMINAL_PATH'] = normalized_path
+            investors_data[investor_id]['Terminal_path'] = normalized_path
             
             # Handle application status condition
             if current_status == "pending":
@@ -1509,9 +1738,9 @@ def get_investors_balance():
         login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
         password = investor_data.get('password', '') or investor_data.get('PASSWORD', '')
         server = investor_data.get('server', '') or investor_data.get('SERVER', '')
-        terminal_path = investor_data.get('TERMINAL_PATH', '')
+        Terminal_path = investor_data.get('Terminal_path', '')
         
-        if not all([login_id, password, server, terminal_path]):
+        if not all([login_id, password, server, Terminal_path]):
             print(f" ID:{investor_id} → Missing credentials")
             skipped += 1
             continue
@@ -1525,8 +1754,8 @@ def get_investors_balance():
             continue
         
         # Check terminal exists
-        if not os.path.exists(terminal_path):
-            print(f"ID:{investor_id} → Terminal not found at: {terminal_path}")
+        if not os.path.exists(Terminal_path):
+            print(f"ID:{investor_id} → Terminal not found at: {Terminal_path}")
             errors += 1
             continue
         
@@ -1595,8 +1824,8 @@ def get_investors_balance():
                     mt5.shutdown()
                 
                 # Initialize MT5 with specific terminal path
-                print(f"      → Initializing MT5 at: {terminal_path}")
-                if not mt5.initialize(path=terminal_path, timeout=60000):
+                print(f"      → Initializing MT5 at: {Terminal_path}")
+                if not mt5.initialize(path=Terminal_path, timeout=60000):
                     error_msg = mt5.last_error()
                     print(f"   INITIALIZATION FAILED: {error_msg}")
                     print(f"      → COULD NOT LOGIN - MT5 failed to start")
@@ -1729,7 +1958,7 @@ def get_investors_balance():
     
     return updated > 0
 
-def process_single_investor_(inv_id):
+def process_single_investor(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist
     NO MT5 INITIALIZATION OR LOGIN
@@ -1760,7 +1989,7 @@ def process_single_investor_(inv_id):
     
     return account_stats
 
-def process_single_investor(inv_id):
+def process_single_investor_(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist and executes
     other operations ONLY if within allowed time range.
@@ -2040,4 +2269,5 @@ def place_orders_parallel_loop():
         
 # Example usage
 if __name__ == "__main__":
-    place_orders_parallel_loop()
+    place_orders_parallel()
+    
