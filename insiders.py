@@ -1048,6 +1048,44 @@ def update_tables_streaming(batch_size=5000):
             
             return normalized
         
+        def normalize_execution_start_date(value):
+            """Normalize execution_start_date from 'May 22, 2026' format to '2026-05-23' format"""
+            if value is None:
+                return None
+            
+            # If it's not a string, return as is
+            if not isinstance(value, str):
+                return value
+            
+            # Try to parse date in various formats
+            date_formats = [
+                "%B %d, %Y",  # May 22, 2026
+                "%b %d, %Y",  # May 22, 2026 (abbreviated month)
+                "%d-%b-%Y",   # 22-May-2026
+                "%Y-%m-%d",   # 2026-05-22 (already in correct format)
+                "%m/%d/%Y",   # 05/22/2026
+                "%d/%m/%Y",   # 22/05/2026
+                "%Y/%m/%d",   # 2026/05/22
+            ]
+            
+            original_value = value.strip()
+            
+            for date_format in date_formats:
+                try:
+                    parsed_date = datetime.strptime(original_value, date_format)
+                    # Convert to YYYY-MM-DD format
+                    normalized = parsed_date.strftime("%Y-%m-%d")
+                    if normalized != original_value:
+                        print(f"       Normalizing execution_start_date:")
+                        print(f"         Original: {original_value}")
+                        print(f"         Normalized: {normalized}")
+                    return normalized
+                except ValueError:
+                    continue
+            
+            # If no format matches, return original value (maybe it's already in correct format or different)
+            return value
+        
         def normalize_json_value(value):
             """Convert value to proper JSON for database storage"""
             if value is None:
@@ -1156,6 +1194,10 @@ def update_tables_streaming(batch_size=5000):
                                 
                                 # Make a copy of original value for debugging
                                 original_value = value
+                                
+                                # Normalize execution_start_date if this is the field
+                                if json_field.lower() == 'execution_start_date':
+                                    value = normalize_execution_start_date(value)
                                 
                                 # Normalize path values BEFORE any other processing
                                 if 'path' in json_field.lower():
@@ -1451,7 +1493,7 @@ def update_tables_streaming(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-           
+
 def close_db_browser():
     db.shutdown()
     print(f"\n🔒 Database connection closed.")
@@ -1958,7 +2000,7 @@ def get_investors_balance():
     
     return updated > 0
 
-def process_single_investor(inv_id):
+def process_single_invest(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist
     NO MT5 INITIALIZATION OR LOGIN
@@ -1989,7 +2031,7 @@ def process_single_investor(inv_id):
     
     return account_stats
 
-def process_single_investor_(inv_id):
+def process_single_investor(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist and executes
     other operations ONLY if within allowed time range.

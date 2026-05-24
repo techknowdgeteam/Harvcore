@@ -1,198 +1,405 @@
 {
-  "selected_risk_reward": [
-    3
-  ],
-  "hedge_orders_risk_reward": [
-    2
-  ],
-  "timeframe": [
-    "15m"
-  ],
-  "bars": 3,
-  "symbols_dictionary": {
-    "xxxjpy": [],
-    "xxxusd": [
-      "volatility 75 index"
+  "grid_trade_config_no_martingale": {
+    "selected_risk_reward": [
+      1
     ],
-    "xxxaud": [],
-    "xxxnzd": [],
-    "usdxxx": [],
-    "xxxchf": [],
-    "xxxcad": [],
-    "xxxbasket": [],
-    "indices": [],
-    "metals": [],
-    "energies": [],
-    "synthetics": []
-  },
-  "settings": {
-    "symbols_grid_strategy": true,
-    "fetch_ohlc_data_and_directional_bias_for_investor": true,
-    "create_hedge_order": true,
-    "restrict_orders_in_time_range_of": {
-      "from": "00:00 am",
-      "to": "00:00 pm"
+    "hedge_orders_risk_reward": [
+      2
+    ],
+    "timeframe": [
+      "15m"
+    ],
+    "bars": 3,
+    "symbols_dictionary": {
+      "xxxjpy": [],
+      "xxxusd": [
+        "BTCUSD"
+      ],
+      "xxxaud": [],
+      "xxxnzd": [],
+      "usdxxx": [],
+      "xxxchf": [],
+      "xxxcad": [],
+      "xxxbasket": [],
+      "indices": [],
+      "metals": [],
+      "energies": [],
+      "synthetics": []
     },
-    "execute_function_in_time_range_of": [
-      {
-        "from": "8:00 am",
+    "settings": {
+      "symbols_grid_strategy": true,
+      "enable_single_position_and_pending": false,
+      "manage_position_and_pending_orders": {
+        "count": 2
+      },
+      "skip_orders_close_to_position": true,
+      "opposite_order_restriction": false,
+      "switch_invalid_to_instant_order": false,
+      "enable_order_type_conversion": false,
+      "restrict_orders_in_time_range_of": {
+        "from": "08:00 pm",
         "to": "12:30 am"
       },
-      {
-        "from": "12:00 pm",
-        "to": "12:30 pm"
+      "execute_function_in_time_range_of": [
+        {
+          "from": "8:00 am",
+          "to": "12:30 am"
+        },
+        {
+          "from": "12:00 pm",
+          "to": "12:30 pm"
+        },
+        {
+          "from": "2:00 pm",
+          "to": "2:30 pm"
+        },
+        {
+          "from": "4:00 pm",
+          "to": "4:30 pm"
+        },
+        {
+          "from": "6:00 pm",
+          "to": "6:30 pm"
+        },
+        {
+          "from": "10:00 pm",
+          "to": "10:30 pm"
+        },
+        {
+          "from": "12:00 am",
+          "to": "12:30 am"
+        },
+        {
+          "from": "4:00 am",
+          "to": "4:30 am"
+        },
+        {
+          "from": "6:00 am",
+          "to": "6:30 am"
+        }
+      ],
+      "fetch_ohlc_data_and_directional_bias_for_investor": false,
+      "create_hedge_order": false,
+      "enable_latest_fallback_to_older_order": false,
+      "remove_orders_if_additonal_candles_is_more_than": 1,
+      "martingale_config": {
+        "enable_martingale": false,
+        "maximum_martingale_lookback": 10,
+        "martingale_days_lookback": 3,
+        "martingale_for_position_order_scale": true,
+        "martingale_loss_recovery_adder_percentage": "10%",
+        "pre_scaling": {
+          "martingale_pre_scaling": true,
+          "martingale_pre_scale_highest_risk_adder": true,
+          "highest_risk_reduction_percentage": "0%",
+          "martingale_pre_scale_expected_loss_adder": true,
+          "expected_loss_reduction_percentage": "0%"
+        }
       },
-      {
-        "from": "2:00 pm",
-        "to": "2:30 pm"
+      "enable_breakeven": true,
+      "breakeven_dictionary": [
+        {
+          "reward": 1,
+          "breakeven_at_reward": 0.01
+        },
+        {
+          "reward": 1.8,
+          "breakeven_at_reward": 0.5
+        },
+        {
+          "reward": 2,
+          "breakeven_at_reward": 0.5
+        },
+        {
+          "reward": 2.8,
+          "breakeven_at_reward": 1
+        },
+        {
+          "reward": 3,
+          "breakeven_at_reward": 1.5
+        },
+        {
+          "reward": 3.8,
+          "breakeven_at_reward": 1.7
+        },
+        {
+          "reward": 4,
+          "breakeven_at_reward": 2
+        },
+        {
+          "reward": 4.8,
+          "breakeven_at_reward": 2.2
+        },
+        {
+          "reward": 5,
+          "breakeven_at_reward": 2.5
+        },
+        {
+          "reward": 5.8,
+          "breakeven_at_reward": 2.8
+        },
+        {
+          "reward": 6,
+          "breakeven_at_reward": 3
+        },
+        {
+          "reward": 7,
+          "breakeven_at_reward": 3.5
+        },
+        {
+          "reward": 7.8,
+          "breakeven_at_reward": 3.8
+        },
+        {
+          "reward": 8,
+          "breakeven_at_reward": 4
+        },
+        {
+          "reward": 8.8,
+          "breakeven_at_reward": 4.2
+        },
+        {
+          "reward": 9,
+          "breakeven_at_reward": 4.5
+        },
+        {
+          "reward": 10,
+          "breakeven_at_reward": 5
+        }
+      ],
+      "restrict_order_from_timeframe": "none",
+      "default_price": false,
+      "risk_reward_correction": true,
+      "enable_martingale": false
+    },
+    "minimum_balance_risk_distance": {
+      "1-10000000.99_risk": 4
+    },
+    "maximum_balance_risk_distance": {
+      "1-10000000.99_risk": 6
+    },
+    "account_balance_default_risk_management": {
+      "1-10000000.99_risk": 4
+    },
+    "account_balance_maximum_risk_management": {
+      "1-10000000.99_risk": 6
+    },
+    "grid_prices_setup": {
+      "grid_levels": 4,
+      "grid_multiplier": 250,
+      "bid_prices_order_type": "buy_stop",
+      "ask_prices_order_type": "sell_stop"
+    },
+    "requirements": {
+      "contract_duration": "30",
+      "min_broker_balance": "50.00"
+    },
+    "bypass_restriction": true,
+    "activate_autotrading": true,
+    "broker_balance": 9024.15,
+    "account_mode": "demo",
+    "demo_account": "1"
+  },
+  "directional_bias_with_hedge_no_martingale": {
+    "selected_risk_reward": [
+      3
+    ],
+    "hedge_orders_risk_reward": [
+      2
+    ],
+    "timeframe": [
+      "15m"
+    ],
+    "bars": 3,
+    "symbols_dictionary": {
+      "xxxjpy": [],
+      "xxxusd": [
+        "BTCUSD"
+      ],
+      "xxxaud": [],
+      "xxxnzd": [],
+      "usdxxx": [],
+      "xxxchf": [],
+      "xxxcad": [],
+      "xxxbasket": [],
+      "indices": [],
+      "metals": [],
+      "energies": [],
+      "synthetics": []
+    },
+    "settings": {
+      "symbols_grid_strategy": false,
+      "enable_single_position_and_pending": false,
+      "manage_position_and_pending_orders": {
+        "count": 2
       },
-      {
-        "from": "4:00 pm",
-        "to": "4:30 pm"
-      },
-      {
-        "from": "6:00 pm",
-        "to": "6:30 pm"
-      },
-      {
-        "from": "10:00 pm",
-        "to": "10:30 pm"
-      },
-      {
-        "from": "12:00 am",
+      "skip_orders_close_to_position": false,
+      "opposite_order_restriction": false,
+      "switch_invalid_to_instant_order": false,
+      "enable_order_type_conversion": false,
+      "restrict_orders_in_time_range_of": {
+        "from": "08:00 pm",
         "to": "12:30 am"
       },
-      {
-        "from": "4:00 am",
-        "to": "4:30 am"
+      "execute_function_in_time_range_of": [
+        {
+          "from": "8:00 am",
+          "to": "12:30 am"
+        },
+        {
+          "from": "12:00 pm",
+          "to": "12:30 pm"
+        },
+        {
+          "from": "2:00 pm",
+          "to": "2:30 pm"
+        },
+        {
+          "from": "4:00 pm",
+          "to": "4:30 pm"
+        },
+        {
+          "from": "6:00 pm",
+          "to": "6:30 pm"
+        },
+        {
+          "from": "10:00 pm",
+          "to": "10:30 pm"
+        },
+        {
+          "from": "12:00 am",
+          "to": "12:30 am"
+        },
+        {
+          "from": "4:00 am",
+          "to": "4:30 am"
+        },
+        {
+          "from": "6:00 am",
+          "to": "6:30 am"
+        }
+      ],
+      "fetch_ohlc_data_and_directional_bias_for_investor": true,
+      "create_hedge_order": true,
+      "enable_latest_fallback_to_older_order": true,
+      "remove_orders_if_additonal_candles_is_more_than": 1,
+      "martingale_config": {
+        "enable_martingale": false,
+        "maximum_martingale_lookback": 10,
+        "martingale_days_lookback": 3,
+        "martingale_for_position_order_scale": true,
+        "martingale_loss_recovery_adder_percentage": "10%",
+        "pre_scaling": {
+          "martingale_pre_scaling": true,
+          "martingale_pre_scale_highest_risk_adder": true,
+          "highest_risk_reduction_percentage": "0%",
+          "martingale_pre_scale_expected_loss_adder": true,
+          "expected_loss_reduction_percentage": "0%"
+        }
       },
-      {
-        "from": "6:00 am",
-        "to": "6:30 am"
-      }
-    ],
-    "enable_latest_fallback_to_older_order": true,
-    "skip_orders_close_to_position": true,
-    "opposite_order_restriction": false,
-    "switch_invalid_to_instant_order": false,
-    "remove_orders_if_additonal_candles_is_more_than": 1,
-    "enable_single_position_and_pending": false,
-    "manage_position_and_pending_orders": {
-      "count": 2
+      "enable_breakeven": true,
+      "breakeven_dictionary": [
+        {
+          "reward": 1,
+          "breakeven_at_reward": 0.01
+        },
+        {
+          "reward": 1.8,
+          "breakeven_at_reward": 0.5
+        },
+        {
+          "reward": 2,
+          "breakeven_at_reward": 0.5
+        },
+        {
+          "reward": 2.8,
+          "breakeven_at_reward": 1
+        },
+        {
+          "reward": 3,
+          "breakeven_at_reward": 1.5
+        },
+        {
+          "reward": 3.8,
+          "breakeven_at_reward": 1.7
+        },
+        {
+          "reward": 4,
+          "breakeven_at_reward": 2
+        },
+        {
+          "reward": 4.8,
+          "breakeven_at_reward": 2.2
+        },
+        {
+          "reward": 5,
+          "breakeven_at_reward": 2.5
+        },
+        {
+          "reward": 5.8,
+          "breakeven_at_reward": 2.8
+        },
+        {
+          "reward": 6,
+          "breakeven_at_reward": 3
+        },
+        {
+          "reward": 7,
+          "breakeven_at_reward": 3.5
+        },
+        {
+          "reward": 7.8,
+          "breakeven_at_reward": 3.8
+        },
+        {
+          "reward": 8,
+          "breakeven_at_reward": 4
+        },
+        {
+          "reward": 8.8,
+          "breakeven_at_reward": 4.2
+        },
+        {
+          "reward": 9,
+          "breakeven_at_reward": 4.5
+        },
+        {
+          "reward": 10,
+          "breakeven_at_reward": 5
+        }
+      ],
+      "restrict_order_from_timeframe": "none",
+      "default_price": false,
+      "risk_reward_correction": true,
+      "enable_martingale": false
     },
-    "harvester_2": false,
-    "martingale_config": {
-      "enable_martingale": false,
-      "maximum_martingale_lookback": 10,
-      "martingale_days_lookback": 1,
-      "martingale_for_position_order_scale": true,
-      "martingale_loss_recovery_adder_percentage": "10%",
-      "pre_scaling": {
-        "martingale_pre_scaling": true,
-        "martingale_pre_scale_highest_risk_adder": true,
-        "highest_risk_reduction_percentage": "0%",
-        "martingale_pre_scale_expected_loss_adder": true,
-        "expected_loss_reduction_percentage": "0%"
-      }
+    "minimum_balance_risk_distance": {
+      "1-10000000.99_risk": 4
     },
-    "enable_auto_trading": true,
-    "place_grid_trades": true,
-    "enable_breakeven": true,
-    "breakeven_dictionary": [
-      {
-        "reward": 1,
-        "breakeven_at_reward": 0.01
-      },
-      {
-        "reward": 1.8,
-        "breakeven_at_reward": 0.5
-      },
-      {
-        "reward": 2,
-        "breakeven_at_reward": 0.5
-      },
-      {
-        "reward": 2.8,
-        "breakeven_at_reward": 1
-      },
-      {
-        "reward": 3,
-        "breakeven_at_reward": 1.5
-      },
-      {
-        "reward": 3.8,
-        "breakeven_at_reward": 1.7
-      },
-      {
-        "reward": 4,
-        "breakeven_at_reward": 2
-      },
-      {
-        "reward": 4.8,
-        "breakeven_at_reward": 2.2
-      },
-      {
-        "reward": 5,
-        "breakeven_at_reward": 2.5
-      },
-      {
-        "reward": 5.8,
-        "breakeven_at_reward": 2.8
-      },
-      {
-        "reward": 6,
-        "breakeven_at_reward": 3
-      },
-      {
-        "reward": 7,
-        "breakeven_at_reward": 3.5
-      },
-      {
-        "reward": 7.8,
-        "breakeven_at_reward": 3.8
-      },
-      {
-        "reward": 8,
-        "breakeven_at_reward": 4
-      },
-      {
-        "reward": 8.8,
-        "breakeven_at_reward": 4.2
-      },
-      {
-        "reward": 9,
-        "breakeven_at_reward": 4.5
-      },
-      {
-        "reward": 10,
-        "breakeven_at_reward": 5
-      }
-    ],
-    "restrict_order_from_timeframe": "none",
-    "default_price": false,
-    "risk_reward_correction": true,
-    "enable_order_type_conversion": false,
-    "enable_martingale": false,
-    "enable_default_account_balance_management": true,
-    "enable_maximum_account_balance_management": false
-  },
-  "minimum_balance_risk_distance": {
-    "1-10000000.99_risk": 2
-  },
-  "maximum_balance_risk_distance": {
-    "1-10000000.99_risk": 3
-  },
-  "account_balance_default_risk_management": {
-    "1-10000000.99_risk": 2
-  },
-  "account_balance_maximum_risk_management": {
-    "1-10000000.99_risk": 4
-  },
-  "grid_prices_setup": {
-    "grid_levels": 2,
-    "grid_multiplier": 50,
-    "bid_prices_order_type": "buy_stop",
-    "ask_prices_order_type": "sell_stop"
+    "maximum_balance_risk_distance": {
+      "1-10000000.99_risk": 6
+    },
+    "account_balance_default_risk_management": {
+      "1-10000000.99_risk": 4
+    },
+    "account_balance_maximum_risk_management": {
+      "1-10000000.99_risk": 6
+    },
+    "grid_prices_setup": {
+      "grid_levels": 4,
+      "grid_multiplier": 250,
+      "bid_prices_order_type": "buy_stop",
+      "ask_prices_order_type": "sell_stop"
+    },
+    "requirements": {
+      "contract_duration": "30",
+      "min_broker_balance": "50.00"
+    },
+    "bypass_restriction": true,
+    "activate_autotrading": true,
+    "broker_balance": 9024.15,
+    "account_mode": "demo",
+    "demo_account": "1"
   },
   "requirements": {
     "contract_duration": "30",

@@ -346,7 +346,7 @@ def move_fetched_investors():
     
     for inv_id, investor_data in verified_data.items():
         # Extract required fields (case-insensitive)
-        invested_with = investor_data.get('invested_with', investor_data.get('INVESTED_WITH', '')).strip()
+        invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
         execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
         Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
@@ -477,7 +477,7 @@ def move_fetched_investors():
                 "PASSWORD": password if password else "",
                 "SERVER": server if server else "",
                 "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
-                "INVESTED_WITH": invested_with if invested_with else "",
+                "invested_with": invested_with if invested_with else "",
                 "Terminal_path": Terminal_path if Terminal_path else ""
             }
             
@@ -500,7 +500,7 @@ def move_fetched_investors():
             "PASSWORD": password,
             "SERVER": server,
             "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
-            "INVESTED_WITH": invested_with,
+            "invested_with": invested_with,
             "Terminal_path": Terminal_path
         }
         investors_data[inv_id] = investor_entry
@@ -608,7 +608,7 @@ def move_fetched_investors():
         print(f"\n   🔄 Processing investor: {inv_id}")
         
         # Extract fields
-        invested_with = investor_data.get('invested_with', investor_data.get('INVESTED_WITH', '')).strip()
+        invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
         execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
         contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
         Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
@@ -2978,9 +2978,9 @@ def fetch_ohlc_data_for_investor(inv_id):
                 if "LOGIN_ID" in cfg and isinstance(cfg["LOGIN_ID"], str):
                     cfg["LOGIN_ID"] = cfg["LOGIN_ID"].strip()
                 
-                # Extract target folder from INVESTED_WITH (text after underscore)
-                if "INVESTED_WITH" in cfg:
-                    invested_with = cfg["INVESTED_WITH"]
+                # Extract target folder from invested_with (text after underscore)
+                if "invested_with" in cfg:
+                    invested_with = cfg["invested_with"]
                     if "_" in invested_with:
                         target_folder = invested_with.split("_", 1)[1]
                         cfg["TARGET_FOLDER"] = target_folder
@@ -3417,10 +3417,10 @@ def fetch_ohlc_data_for_investor(inv_id):
             result['errors'].append("accountmanagement.json not found")
             return result
         
-        # Step 4: Get target folder from INVESTED_WITH
+        # Step 4: Get target folder from invested_with
         target_folder = investor_cfg.get("TARGET_FOLDER")
         if not target_folder:
-            print(f"    Investor {inv_id} | SKIPPED - No TARGET_FOLDER extracted from INVESTED_WITH")
+            print(f"    Investor {inv_id} | SKIPPED - No TARGET_FOLDER extracted from invested_with")
             result['errors'].append("No TARGET_FOLDER found")
             return result
         
@@ -3539,10 +3539,10 @@ def delete_unauthorized_symbol_files(inv_id):
             with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            # Extract target folder from INVESTED_WITH
+            # Extract target folder from invested_with
             for investor_id, cfg in data.items():
-                if "INVESTED_WITH" in cfg:
-                    invested_with = cfg["INVESTED_WITH"]
+                if "invested_with" in cfg:
+                    invested_with = cfg["invested_with"]
                     if "_" in invested_with:
                         target_folder = invested_with.split("_", 1)[1]
                         cfg["TARGET_FOLDER"] = target_folder
@@ -3924,7 +3924,7 @@ def directional_bias(inv_id=None):
                     
                     investor_cfg = investor_users.get(investor_id)
                     if investor_cfg:
-                        invested_with = investor_cfg.get("INVESTED_WITH", "")
+                        invested_with = investor_cfg.get("invested_with", "")
                         if "_" in invested_with:
                             target_folder = invested_with.split("_", 1)[1]
                             strategy_name = target_folder
@@ -3936,8 +3936,8 @@ def directional_bias(inv_id=None):
             
             # CRITICAL CHECK: If strategy name/folder is missing, skip immediately
             if not target_folder or not strategy_name:
-                print(f" [{investor_id}] ❌ SKIPPED - No strategy name/folder found from INVESTED_WITH")
-                print(f" [{investor_id}]    Expected format: 'broker_strategyname' in INVESTED_WITH field")
+                print(f" [{investor_id}] ❌ SKIPPED - No strategy name/folder found from invested_with")
+                print(f" [{investor_id}]    Expected format: 'broker_strategyname' in invested_with field")
                 return None, None, None, None, None
             
             print(f" [{investor_id}] 📁 Strategy name: {strategy_name}")
@@ -4724,7 +4724,7 @@ def additional_candles_for_orders_limitation(inv_id=None):
                     
                     investor_cfg = investor_users.get(investor_id)
                     if investor_cfg:
-                        invested_with = investor_cfg.get("INVESTED_WITH", "")
+                        invested_with = investor_cfg.get("invested_with", "")
                         if "_" in invested_with:
                             strategy_name = invested_with.split("_", 1)[1]
                         else:
@@ -5483,7 +5483,7 @@ def create_position_hedge(inv_id=None):
                         
                         investor_cfg = investor_users.get(user_brokerid)
                         if investor_cfg:
-                            invested_with = investor_cfg.get("INVESTED_WITH", "")
+                            invested_with = investor_cfg.get("invested_with", "")
                             if "_" in invested_with:
                                 target_folder = invested_with.split("_", 1)[1]
                                 strategy_name = target_folder
@@ -7894,7 +7894,7 @@ def manage_position_and_pending_orders(inv_id=None):
         print(f"  └─ 🔌 Initializing account connection...")
         
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         print(f"      • Terminal Path: {mt5_path}")
         print(f"      • Login ID: {login_id}")
@@ -8495,7 +8495,7 @@ def manage_single_position_and_pending(inv_id=None):
         print(f"  └─ 🔌 Initializing account connection...")
         
         login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["TERMINAL_PATH"]
+        mt5_path = broker_cfg["Terminal_path"]
         
         print(f"      • Terminal Path: {mt5_path}")
         print(f"      • Login ID: {login_id}")
@@ -20429,6 +20429,162 @@ def trades_analytics(inv_id=None):
         else:
             print(f" │ ✅ No unauthorized trades detected. Setting unauthorized_actions=0")
 
+        # Helper function to calculate trade metrics including average closest to highest
+        def calculate_trade_metrics(trades_pool):
+            """
+            Calculate trades per day metrics ensuring:
+            - lowest < average < highest (all distinct values when possible)
+            - If only one unique value exists, assign it to average and remove from lowest/highest
+            - lowest must be lower than highest
+            - average must be between lowest and highest (not equal to either)
+            """
+            if not trades_pool:
+                return {
+                    "lowest_trades_per_day": 0,
+                    "highest_trades_per_day": 0,
+                    "average_trades_per_day": 0,
+                    "lowest_trade_dates": [],
+                    "highest_trade_dates": [],
+                    "average_trade_dates": []
+                }
+            
+            # Count trades per day
+            trades_per_day = {}
+            for t in trades_pool:
+                trade_date = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
+                trades_per_day[trade_date] = trades_per_day.get(trade_date, 0) + 1
+            
+            if not trades_per_day:
+                return {
+                    "lowest_trades_per_day": 0,
+                    "highest_trades_per_day": 0,
+                    "average_trades_per_day": 0,
+                    "lowest_trade_dates": [],
+                    "highest_trade_dates": [],
+                    "average_trade_dates": []
+                }
+            
+            # Get all unique trade counts
+            unique_counts = sorted(set(trades_per_day.values()))
+            
+            # Case 1: Only one unique value exists (all days have same trade count)
+            if len(unique_counts) == 1:
+                single_value = unique_counts[0]
+                dates_with_value = [date for date, count in trades_per_day.items() if count == single_value]
+                
+                # Assign the value only to average, leave lowest and highest as 0 or distinct
+                return {
+                    "lowest_trades_per_day": 0,  # No distinct lower value exists
+                    "highest_trades_per_day": 0,  # No distinct higher value exists
+                    "average_trades_per_day": single_value,
+                    "lowest_trade_dates": [],  # No dates for lowest since value is 0
+                    "highest_trade_dates": [],  # No dates for highest since value is 0
+                    "average_trade_dates": dates_with_value
+                }
+            
+            # Case 2: Two unique values exist
+            if len(unique_counts) == 2:
+                lowest = unique_counts[0]
+                highest = unique_counts[1]
+                
+                # Find dates
+                lowest_dates = [date for date, count in trades_per_day.items() if count == lowest]
+                highest_dates = [date for date, count in trades_per_day.items() if count == highest]
+                
+                # Calculate average as the median between lowest and highest
+                average = round((lowest + highest) / 2)
+                
+                # Ensure average is distinct from both lowest and highest
+                if average == lowest:
+                    average = lowest + 1
+                elif average == highest:
+                    average = highest - 1
+                
+                # If adjustment made average equal to the other value, adjust further
+                if average == lowest and lowest < highest:
+                    average = lowest + 1
+                if average == highest and highest > lowest:
+                    average = highest - 1
+                
+                # Find or create dates for average (use combination of both or find existing)
+                average_dates = []
+                if average in trades_per_day.values():
+                    average_dates = [date for date, count in trades_per_day.items() if count == average]
+                else:
+                    # No days have this exact count, use dates that are closest to average
+                    closest_dates = sorted(trades_per_day.items(), key=lambda x: abs(x[1] - average))
+                    average_dates = [closest_dates[0][0]] if closest_dates else []
+                
+                return {
+                    "lowest_trades_per_day": lowest,
+                    "highest_trades_per_day": highest,
+                    "average_trades_per_day": average,
+                    "lowest_trade_dates": lowest_dates,
+                    "highest_trade_dates": highest_dates,
+                    "average_trade_dates": average_dates
+                }
+            
+            # Case 3: Three or more unique values exist
+            lowest = unique_counts[0]
+            highest = unique_counts[-1]
+            
+            # For average, pick a value that is NOT equal to lowest or highest
+            # Prioritize values that naturally exist in the data
+            candidate_averages = [count for count in unique_counts if count != lowest and count != highest]
+            
+            if candidate_averages:
+                # Choose the middle value (closest to median)
+                middle_index = len(candidate_averages) // 2
+                average = candidate_averages[middle_index]
+            else:
+                # Fallback: calculate weighted average and round
+                total_trades = sum(trades_per_day.values())
+                total_days = len(trades_per_day)
+                raw_avg = total_trades / total_days
+                average = round(raw_avg)
+                
+                # Ensure average is not equal to lowest or highest
+                if average == lowest:
+                    average = lowest + 1 if lowest + 1 < highest else lowest - 1
+                elif average == highest:
+                    average = highest - 1 if highest - 1 > lowest else highest + 1
+            
+            # Final validation: ensure lowest < average < highest
+            if average <= lowest:
+                average = lowest + 1
+                if average >= highest and highest > lowest + 1:
+                    average = highest - 1
+                elif average >= highest:
+                    # Force a valid average by taking midpoint
+                    average = round((lowest + highest) / 2)
+            
+            if average >= highest:
+                average = highest - 1
+                if average <= lowest and lowest < highest - 1:
+                    average = lowest + 1
+                elif average <= lowest:
+                    average = round((lowest + highest) / 2)
+            
+            # Find dates for each value
+            lowest_dates = [date for date, count in trades_per_day.items() if count == lowest]
+            highest_dates = [date for date, count in trades_per_day.items() if count == highest]
+            
+            # For average, find existing dates or use closest
+            if average in trades_per_day.values():
+                average_dates = [date for date, count in trades_per_day.items() if count == average]
+            else:
+                # No days have this exact count, find dates with counts closest to average
+                closest_dates = sorted(trades_per_day.items(), key=lambda x: abs(x[1] - average))
+                average_dates = [date for date, _ in closest_dates[:2]]  # Take up to 2 closest dates
+            
+            return {
+                "lowest_trades_per_day": lowest,
+                "highest_trades_per_day": highest,
+                "average_trades_per_day": average,
+                "lowest_trade_dates": lowest_dates,
+                "highest_trade_dates": highest_dates,
+                "average_trade_dates": average_dates
+            }
         # SEPARATE PIPELINE STATISTICS BUILDER UTILITY (MODIFIED - REMOVED SYMBOLS CONTEST NESTS)
         def run_segment_analytics(trades_pool, window_start_dt, mode="full"):
             trades_pool.sort(key=lambda x: x["raw_close_time"])
@@ -20442,6 +20598,9 @@ def trades_analytics(inv_id=None):
             
             w_rate = round((p_count / t_count * 100), 2) if t_count > 0 else 0.0
             l_rate = round((l_count / t_count * 100), 2) if t_count > 0 else 0.0
+            
+            # Calculate trade metrics using the new helper function
+            trade_metrics = calculate_trade_metrics(trades_pool)
             
             # Build symbol performance data
             sym_map = {}
@@ -20580,6 +20739,12 @@ def trades_analytics(inv_id=None):
                     "loss_trades": l_count,
                     "win_rate_by_count_percentage": w_rate, 
                     "loss_rate_by_count_percentage": l_rate,
+                    "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
+                    "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
+                    "average_trades_per_day": trade_metrics["average_trades_per_day"],
+                    "lowest_trade_dates": trade_metrics["lowest_trade_dates"],
+                    "highest_trade_dates": trade_metrics["highest_trade_dates"],
+                    "average_trade_dates": trade_metrics["average_trade_dates"],
                     "all_traded_symbols": all_traded_symbols,
                     "symbols_traded": len(sym_map), 
                     "closed_deals_with_sl_tp": sl_tp_count, 
@@ -20605,6 +20770,12 @@ def trades_analytics(inv_id=None):
                     "loss_rate_by_count_percentage": l_rate, 
                     "win_rate_by_revenue_percentage": w_rev_rate, 
                     "loss_rate_by_revenue_percentage": l_rev_rate,
+                    "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
+                    "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
+                    "average_trades_per_day": trade_metrics["average_trades_per_day"],
+                    "lowest_trade_dates": trade_metrics["lowest_trade_dates"],
+                    "highest_trade_dates": trade_metrics["highest_trade_dates"],
+                    "average_trade_dates": trade_metrics["average_trade_dates"],
                     "all_traded_symbols": all_traded_symbols,
                     "symbols_traded": len(sym_map), 
                     "closed_deals_with_sl_tp": sl_tp_count, 
@@ -20652,6 +20823,9 @@ def trades_analytics(inv_id=None):
                 "summaries_of_profits_only": {}
             }
             
+            # Calculate trade metrics using the helper function
+            trade_metrics = calculate_trade_metrics(bracket_trades)
+            
             # --- CATEGORY: SUMMARIES OF PROFITS ONLY ---
             total_losses_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] <= 0)
             total_won_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] > 0)
@@ -20696,6 +20870,14 @@ def trades_analytics(inv_id=None):
             summaries["summaries_of_profits_only"]["total_won_trades"] = total_won_profits_only
             summaries["summaries_of_profits_only"]["total_lost_trades_amount"] = round(revenue_lost_profits_only, 2)
             summaries["summaries_of_profits_only"]["total_won_trades_amount"] = round(revenue_won_profits_only, 2)
+            
+            # Add trade metrics to summaries
+            summaries["summaries_of_profits_only"]["lowest_trades_per_day"] = trade_metrics["lowest_trades_per_day"]
+            summaries["summaries_of_profits_only"]["highest_trades_per_day"] = trade_metrics["highest_trades_per_day"]
+            summaries["summaries_of_profits_only"]["average_trades_per_day"] = trade_metrics["average_trades_per_day"]
+            summaries["summaries_of_profits_only"]["lowest_trade_dates"] = trade_metrics["lowest_trade_dates"]
+            summaries["summaries_of_profits_only"]["highest_trade_dates"] = trade_metrics["highest_trade_dates"]
+            summaries["summaries_of_profits_only"]["average_trade_dates"] = trade_metrics["average_trade_dates"]
             
             return summaries
 
@@ -20963,13 +21145,24 @@ def trades_analytics(inv_id=None):
     print(" ✅ ANALYTICS RUN PROCESSING TASK COMPLETED".ljust(79) + "=")
     print("="*80)
     return stats
-    
+  
 #  accounts 
-def process_single_invest(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Dynamically initializes MT5 on whatever instance is globally available
     on the system, completely decoupled from specific process tracking.
+    
+    CONDITIONAL EXECUTION:
+    - fetch_ohlc_data_and_directional_bias_for_investor = TRUE: Execute OHLC/directional bias functions
+      (fetch_ohlc_data_for_investor, directional_bias, additional_candles_for_orders_limitation, 
+       create_position_hedge)
+    - fetch_ohlc_data_and_directional_bias_for_investor = FALSE: Skip ALL OHLC/directional bias functions
+    
+    - symbols_grid_strategy = TRUE: Execute grid functions (symbols_dynamic_grid_prices,
+      manage_position_and_pending_orders_in_signals, convert_grid_prices_to_limit_orders,
+      manage_position_and_pending_orders, manage_single_position_and_pending)
+    - symbols_grid_strategy = FALSE: Skip ALL grid-related functions
     """
     global restricted_timerange_alert
     
@@ -21015,7 +21208,9 @@ def process_single_invest(inv_folder):
         "skip_reason": None,
         "account_type": "UNKNOWN",
         "account_mode": "UNKNOWN",  
-        "is_real_account": False 
+        "is_real_account": False,
+        "grid_strategy_enabled": False,           # Track if grid strategy was enabled
+        "ohlc_strategy_enabled": False            # Track if OHLC strategy was enabled
     }
     
     # 1. Extract structural demo permission policies from investor JSON log
@@ -21061,6 +21256,8 @@ def process_single_invest(inv_folder):
     except Exception as io_err:
         print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
     
+    # Always fire tracking file-movement tasks regardless of connection state
+    move_fetched_investors()
 
     # =====================================================================
     # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
@@ -21175,16 +21372,90 @@ def process_single_invest(inv_folder):
             return account_stats
 
         # =====================================================================
+        # READ CONFIGURATION FROM ACCOUNTMANAGEMENT.JSON
+        # =====================================================================
+        grid_strategy_enabled = False
+        ohlc_strategy_enabled = False
+        
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            acc_mgmt_path = inv_root / "accountmanagement.json"
+            
+            if acc_mgmt_path.exists():
+                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                settings = config.get("settings", {})
+                
+                # Read grid strategy setting
+                grid_strategy_enabled = settings.get("symbols_grid_strategy", False)
+                account_stats["grid_strategy_enabled"] = grid_strategy_enabled
+                
+                # Read OHLC/directional bias strategy setting
+                ohlc_strategy_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
+                account_stats["ohlc_strategy_enabled"] = ohlc_strategy_enabled
+                
+                # Print configuration status
+                print(f"\n{'='*10} 📋 CONFIGURATION STATUS FOR {inv_id} {'='*10}")
+                if ohlc_strategy_enabled:
+                    print(f"✅ fetch_ohlc_data_and_directional_bias_for_investor = TRUE - OHLC/Directional functions will be executed")
+                else:
+                    print(f"⚠️ fetch_ohlc_data_and_directional_bias_for_investor = FALSE - OHLC/Directional functions will be SKIPPED")
+                
+                if grid_strategy_enabled:
+                    print(f"✅ symbols_grid_strategy = TRUE - Grid functions will be executed")
+                else:
+                    print(f"⚠️ symbols_grid_strategy = FALSE - Grid functions will be SKIPPED")
+                print(f"{'='*55}\n")
+                
+            else:
+                print(f"⚠️ [{inv_id}] accountmanagement.json not found - All conditional functions will be SKIPPED")
+                account_stats["grid_strategy_enabled"] = False
+                account_stats["ohlc_strategy_enabled"] = False
+                
+        except Exception as config_err:
+            print(f"⚠️ [{inv_id}] Error reading config: {config_err} - Conditional functions will be SKIPPED")
+            account_stats["grid_strategy_enabled"] = False
+            account_stats["ohlc_strategy_enabled"] = False
+
+        # =====================================================================
         # MASTER CONDITIONAL ROUTING (TIME RANGE FILTER)
         # =====================================================================
-        symbols_dynamic_grid_prices(inv_id=inv_id)
-        manage_position_and_pending_orders_in_signals(inv_id=inv_id)
-        convert_grid_prices_to_limit_orders(inv_id=inv_id)
+        print(f"🔍 [{inv_id}] Evaluating system run constraints...")
+        
+        timerange_result = restricted_timerange(inv_id=inv_id)
+        
+        is_restricted = False
+        if isinstance(timerange_result, dict):
+            is_restricted = timerange_result.get('is_restricted', False)
+        elif str(timerange_result).strip().lower() in ["true", "1"]:
+            is_restricted = True
+            
+        # =====================================================================
+        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
+        # =====================================================================
+        if not is_restricted:
+            trades_analytics(inv_id=inv_id)
+            
+
+            account_stats["success"] = True
+            print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
+
+        # =====================================================================
+        # CONDITION B: INSIDE RESTRICTED TIME RANGE -> SKIP ENGINE
+        # =====================================================================
+        else:
+            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time range block.")
+            print(f"⏭️ in restricted timerange")
+            
+            delete_all_orders_and_positions(inv_id=inv_id)
         
         mt5.shutdown()
         
     except Exception as e:
         print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         try:
             mt5.shutdown()
         except:
@@ -21192,7 +21463,7 @@ def process_single_invest(inv_folder):
     
     return account_stats
 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Dynamically initializes MT5 on whatever instance is globally available
@@ -21441,7 +21712,7 @@ def process_single_investor(inv_folder):
             
            
             # grid single position and pending #
-            manage_single_position_and_pending(inv_id=inv_id)
+            manage_position_and_pending_orders_in_signals(inv_id=inv_id)
             # single position and pending #
 
             # grid single position and pending #
@@ -21456,7 +21727,7 @@ def process_single_investor(inv_folder):
             activate_usd_based_risk_on_empty_pricelevels(inv_id=inv_id)
             enforce_investor_symbols_specific_risks(inv_id=inv_id)
             calculate_investor_symbols_orders(inv_id=inv_id)
-            padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
+            #padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
             maximum_risk_distance(inv_id=inv_id) 
             live_usd_risk_and_scaling(inv_id=inv_id)
             apply_default_prices(inv_id=inv_id)
@@ -21464,6 +21735,12 @@ def process_single_investor(inv_folder):
 
             clean_trades_history(inv_id=inv_id)
             place_usd_orders(inv_id=inv_id)
+
+            #grid affliate
+            manage_position_and_pending_orders(inv_id=inv_id)
+            manage_single_position_and_pending(inv_id=inv_id)
+            #grid affliate
+
             close_unauthorized_orders(inv_id=inv_id)
             orders_reward_correction(inv_id=inv_id)
             check_pending_orders_risk(inv_id=inv_id)
@@ -21488,6 +21765,410 @@ def process_single_investor(inv_folder):
         
     except Exception as e:
         print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
+        try:
+            mt5.shutdown()
+        except:
+            pass
+    
+    return account_stats
+
+def process_single_investor_(inv_folder):
+    """
+    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
+    Dynamically initializes MT5 on whatever instance is globally available
+    on the system, completely decoupled from specific process tracking.
+    
+    CONDITIONAL EXECUTION:
+    - fetch_ohlc_data_and_directional_bias_for_investor = TRUE: Execute OHLC/directional bias functions
+      (fetch_ohlc_data_for_investor, directional_bias, additional_candles_for_orders_limitation, 
+       create_position_hedge)
+    - fetch_ohlc_data_and_directional_bias_for_investor = FALSE: Skip ALL OHLC/directional bias functions
+    
+    - symbols_grid_strategy = TRUE: Execute grid functions (symbols_dynamic_grid_prices,
+      manage_position_and_pending_orders_in_signals, convert_grid_prices_to_limit_orders,
+      manage_position_and_pending_orders, manage_single_position_and_pending)
+    - symbols_grid_strategy = FALSE: Skip ALL grid-related functions
+    """
+    global restricted_timerange_alert
+    
+    inv_id = inv_folder.name
+    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
+    
+    account_stats = {
+        "inv_id": inv_id, 
+        "success": False, 
+        "price_collection_stats": {},
+        "candle_fetch_stats": {},
+        "crosser_analysis_stats": {},
+        "trapped_analysis_stats": {},
+        "liquidator_analysis_stats": {},
+        "ranging_analysis_stats": {},
+        "order_placement_stats": {},
+        "risk_correction_stats": {},
+        "risk_audit_stats": {},
+        "symbols_filtered": 0,
+        "orders_filtered": 0,
+        "symbols_processed": 0,
+        "symbols_successful": 0,
+        "orders_placed": 0,
+        "counter_orders_placed": 0,
+        "total_active_orders": 0,
+        "orders_adjusted": 0,
+        "orders_removed": 0,
+        "current_candle_forming": False,
+        "bid_wins": 0,
+        "ask_wins": 0,
+        "trapped_candles_found": 0,
+        "symbols_with_trapped": 0,
+        "symbols_with_liquidator": 0,
+        "liquidator_candles_found": 0,
+        "bullish_liquidators": 0,
+        "bearish_liquidators": 0,
+        "symbols_ranging": 0,
+        "avg_ranging_cycles": 0,
+        "spread_check_skipped": False,
+        "spread_warning_details": None,
+        "restricted_timerange_purge": False,
+        "execution_skipped": False,
+        "skip_reason": None,
+        "account_type": "UNKNOWN",
+        "account_mode": "UNKNOWN",  
+        "is_real_account": False,
+        "grid_strategy_enabled": False,           # Track if grid strategy was enabled
+        "ohlc_strategy_enabled": False            # Track if OHLC strategy was enabled
+    }
+    
+    # 1. Extract structural demo permission policies from investor JSON log
+    allow_demo_processing = True 
+    try:
+        if Path(INVESTOR_USERS).exists():
+            with open(INVESTOR_USERS, 'r') as f:
+                investor_registry = json.load(f)
+            
+            user_meta = investor_registry.get(str(inv_id))
+            if user_meta:
+                demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
+                if str(demo_rule).strip().lower() in ["0", "false"]:
+                    allow_demo_processing = False
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+                else:
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+    except Exception as json_err:
+        print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
+
+    broker_cfg = usersdictionary.get(inv_id)
+    if not broker_cfg:
+        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+        return account_stats
+
+    # =====================================================================
+    # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
+    # =====================================================================
+    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
+    fetched_json_path = Path(FETCHED_INVESTORS)
+    inv_str_id = str(inv_id)
+    
+    try:
+        investors_data = {}
+        if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
+            with open(fetched_json_path, 'r') as f_inv:
+                investors_data = json.load(f_inv)
+        
+        if inv_str_id not in investors_data:
+            investors_data[inv_str_id] = {}
+            
+        print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
+    except Exception as io_err:
+        print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
+    
+    # Always fire tracking file-movement tasks regardless of connection state
+    move_fetched_investors()
+
+    # =====================================================================
+    # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
+    # =====================================================================
+    delay = random.uniform(0.2, 1.5)
+    time.sleep(delay) 
+    
+    login_id = int(broker_cfg['LOGIN_ID'])
+    password_str = broker_cfg["PASSWORD"]
+    server_str = broker_cfg["SERVER"]
+    
+    configured_path = broker_cfg.get("Terminal_path", "")
+    init_successful = False
+    
+    # Attempt 1: Dynamic Attachment Strategy
+    print(f"🔗 Attempting dynamic routing connection to any active global MT5 module...")
+    if mt5.initialize(timeout=30000):
+        init_successful = True
+        print(f"✅ Connected seamlessly to an active background MT5 system engine.")
+    
+    # Attempt 2: Fallback to direct pathing routing matrix
+    if not init_successful and configured_path:
+        print(f"⚠️ [WARN] Dynamic routing failed. Falling back to targeted terminal initialization profile...")
+        fallback_path = os.path.abspath(configured_path)
+        if os.path.exists(fallback_path):
+            if mt5.initialize(path=fallback_path, timeout=60000, portable=True):
+                init_successful = True
+                print(f"🧭 Successfully hooked terminal via explicit path matrix shortcut.")
+
+    if not init_successful:
+        print(f"[FAIL] 🛑 System Engine Error: Failed to discover, initialize, or bind to any available MT5 module.")
+        print(f"   Terminal Last Reported Internal Error Context: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Dynamic Initialization Engine Failure"
+        return account_stats
+
+    # =====================================================================
+    # SESSION ACCOUNT RE-AUTHENTICATION GATEWAY
+    # =====================================================================
+    try:
+        acc = mt5.account_info()
+        
+        if acc is None or acc.login != login_id:
+            print(f"🔐 Account focus shift detected. Swapping session terminal context to ID: {login_id}...")
+            
+            if not mt5.login(login_id, password=password_str, server=server_str):
+                print(f"[FAIL] Server rejected routing authentication parameters for ID: {login_id}.")
+                print(f"       Rejection details from API: {mt5.last_error()}")
+                mt5.shutdown()
+                return account_stats
+                
+            acc = mt5.account_info()
+            
+        if acc is None:
+            print(f"[FAIL] Critical terminal memory fault. Bound data stream context returned empty parameters.")
+            mt5.shutdown()
+            return account_stats
+
+        # =================================================================
+        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+        # =================================================================
+        is_real = False
+        type_label = "UNKNOWN"
+        mode_label = "demo"
+
+        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            is_real = True
+            type_label = "REAL"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            is_real = False
+            type_label = "DEMO"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            is_real = False
+            type_label = "CONTEST"
+        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+            is_real = False
+            type_label = "DEMO (MONETARY SO FOOTPRINT)"
+        else:
+            server_upper = acc.server.upper() if acc.server else ""
+            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+                is_real = False
+                type_label = "DEMO (SERVER STR MATCH)"
+            else:
+                is_real = True
+                type_label = "REAL (FALLBACK)"
+
+        if is_real:
+            mode_label = "real"
+
+        account_stats["account_type"] = type_label
+        account_stats["account_mode"] = mode_label
+        account_stats["is_real_account"] = is_real
+        
+        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+
+        # Synchronize finalized account authentication parameters with database records
+        try:
+            if fetched_json_path.exists():
+                with open(fetched_json_path, 'r') as f_inv:
+                    investors_data = json.load(f_inv)
+                investors_data[inv_str_id]["account_mode"] = mode_label
+                with open(fetched_json_path, 'w') as f_inv:
+                    json.dump(investors_data, f_inv, indent=2)
+        except Exception as update_err:
+            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
+
+        # Safety policy gate check
+        if not is_real and not allow_demo_processing:
+            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+            account_stats["execution_skipped"] = True
+            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+            mt5.shutdown()
+            return account_stats
+
+        # =====================================================================
+        # READ CONFIGURATION FROM ACCOUNTMANAGEMENT.JSON
+        # =====================================================================
+        grid_strategy_enabled = False
+        ohlc_strategy_enabled = False
+        
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            acc_mgmt_path = inv_root / "accountmanagement.json"
+            
+            if acc_mgmt_path.exists():
+                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                settings = config.get("settings", {})
+                
+                # Read grid strategy setting
+                grid_strategy_enabled = settings.get("symbols_grid_strategy", False)
+                account_stats["grid_strategy_enabled"] = grid_strategy_enabled
+                
+                # Read OHLC/directional bias strategy setting
+                ohlc_strategy_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
+                account_stats["ohlc_strategy_enabled"] = ohlc_strategy_enabled
+                
+                # Print configuration status
+                print(f"\n{'='*10} 📋 CONFIGURATION STATUS FOR {inv_id} {'='*10}")
+                if ohlc_strategy_enabled:
+                    print(f"✅ fetch_ohlc_data_and_directional_bias_for_investor = TRUE - OHLC/Directional functions will be executed")
+                else:
+                    print(f"⚠️ fetch_ohlc_data_and_directional_bias_for_investor = FALSE - OHLC/Directional functions will be SKIPPED")
+                
+                if grid_strategy_enabled:
+                    print(f"✅ symbols_grid_strategy = TRUE - Grid functions will be executed")
+                else:
+                    print(f"⚠️ symbols_grid_strategy = FALSE - Grid functions will be SKIPPED")
+                print(f"{'='*55}\n")
+                
+            else:
+                print(f"⚠️ [{inv_id}] accountmanagement.json not found - All conditional functions will be SKIPPED")
+                account_stats["grid_strategy_enabled"] = False
+                account_stats["ohlc_strategy_enabled"] = False
+                
+        except Exception as config_err:
+            print(f"⚠️ [{inv_id}] Error reading config: {config_err} - Conditional functions will be SKIPPED")
+            account_stats["grid_strategy_enabled"] = False
+            account_stats["ohlc_strategy_enabled"] = False
+
+        # =====================================================================
+        # MASTER CONDITIONAL ROUTING (TIME RANGE FILTER)
+        # =====================================================================
+        print(f"🔍 [{inv_id}] Evaluating system run constraints...")
+        
+        timerange_result = restricted_timerange(inv_id=inv_id)
+        
+        is_restricted = False
+        if isinstance(timerange_result, dict):
+            is_restricted = timerange_result.get('is_restricted', False)
+        elif str(timerange_result).strip().lower() in ["true", "1"]:
+            is_restricted = True
+            
+        # =====================================================================
+        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
+        # =====================================================================
+        trades_analytics(inv_id=inv_id)
+        if not is_restricted:
+            print(f"🛡️ [{inv_id}] Validation Clear. Explicitly OUTSIDE restricted window -> Running core trade logic...")
+            
+            # =================================================================
+            # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
+            # =================================================================
+            check_and_record_unauthorized_actions(inv_id=inv_id)
+            delete_unauthorized_symbol_files(inv_id=inv_id)
+            
+            # =================================================================
+            # OHLC/DIRECTIONAL BIAS FUNCTIONS - CONDITIONALLY EXECUTED
+            # =================================================================
+            if ohlc_strategy_enabled:
+                print(f"\n{'='*10} 🎯 EXECUTING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
+                
+                # directional bias execution - all these functions are conditionally executed together
+                # directional bias execution #
+                additional_candles_for_orders_limitation(inv_id=inv_id)
+                fetch_ohlc_data_for_investor(inv_id=inv_id)
+                directional_bias(inv_id=inv_id)
+                additional_candles_for_orders_limitation(inv_id=inv_id)
+                create_position_hedge(inv_id=inv_id)
+                # directional bias execution #
+                
+                print(f"{'='*10} ✅ OHLC/DIRECTIONAL BIAS FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
+            else:
+                print(f"\n{'='*10} ⏭️ SKIPPING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
+                print(f"Reason: fetch_ohlc_data_and_directional_bias_for_investor = FALSE in accountmanagement.json")
+                print(f"{'='*55}\n")
+            
+            # =================================================================
+            # GRID FUNCTIONS - CONDITIONALLY EXECUTED BASED ON symbols_grid_strategy
+            # =================================================================
+            if grid_strategy_enabled:
+                symbols_dynamic_grid_prices(inv_id=inv_id)
+                # grid execution #
+                
+            
+                # grid single position and pending #
+                manage_position_and_pending_orders_in_signals(inv_id=inv_id)
+                # single position and pending #
+
+                # grid single position and pending #
+                convert_grid_prices_to_limit_orders(inv_id=inv_id)
+                # grid single position and pending #
+                
+                print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
+            else:
+                print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
+                print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
+                print(f"{'='*55}\n")
+            
+            # =================================================================
+            # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
+            # =================================================================
+            deduplicate_orders(inv_id=inv_id)
+            filter_unauthorized_symbols(inv_id=inv_id)
+            filter_unauthorized_timeframes(inv_id=inv_id)
+            backup_limit_orders(inv_id=inv_id)
+            populate_orders_missing_fields(inv_id=inv_id)
+            activate_usd_based_risk_on_empty_pricelevels(inv_id=inv_id)
+            enforce_investor_symbols_specific_risks(inv_id=inv_id)
+            calculate_investor_symbols_orders(inv_id=inv_id)
+            #padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
+            maximum_risk_distance(inv_id=inv_id) 
+            live_usd_risk_and_scaling(inv_id=inv_id)
+            apply_default_prices(inv_id=inv_id)
+            martingale(inv_id=inv_id)
+
+            clean_trades_history(inv_id=inv_id)
+            place_usd_orders(inv_id=inv_id)
+
+            if grid_strategy_enabled:
+                #grid affliate
+                manage_position_and_pending_orders(inv_id=inv_id)
+                manage_single_position_and_pending(inv_id=inv_id)
+                #grid affliate
+                print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
+            else:
+                print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
+                print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
+                print(f"{'='*55}\n")
+
+            close_unauthorized_orders(inv_id=inv_id)
+            orders_reward_correction(inv_id=inv_id)
+            check_pending_orders_risk(inv_id=inv_id)
+            history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
+            apply_dynamic_breakeven(inv_id=inv_id)
+            check_and_record_unauthorized_actions(inv_id=inv_id)
+            
+
+            account_stats["success"] = True
+            print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
+
+        # =====================================================================
+        # CONDITION B: INSIDE RESTRICTED TIME RANGE -> SKIP ENGINE
+        # =====================================================================
+        else:
+            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time range block.")
+            print(f"⏭️ in restricted timerange")
+            
+            delete_all_orders_and_positions(inv_id=inv_id)
+        
+        mt5.shutdown()
+        
+    except Exception as e:
+        print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         try:
             mt5.shutdown()
         except:
