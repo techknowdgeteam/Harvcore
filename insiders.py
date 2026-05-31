@@ -15,6 +15,7 @@ import json
 import psutil
 import re
 from typing import Any, Dict, List, Union
+import socket
 
 
 DEFAULT_MT5_PATH = r"C:\xampp\htdocs\harvcore\mt5\MetaTrader 5"
@@ -279,6 +280,97 @@ def work_only_in_specific_timerange():
 def fetch_tables_streaming(batch_size=5000):
     """Stream results directly to file without holding all in memory"""
     
+    def get_system_ipv4():
+        """Get the system's IPv4 address"""
+        try:
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)
+        except Exception:
+            return "127.0.0.1"
+    
+    def parse_server_ipconfig(ipconfig_value):
+        """Parse system_server_ipconfig from string to dictionary and extract user IDs"""
+        if ipconfig_value is None:
+            return {}
+        
+        # If it's already a dict, use it
+        if isinstance(ipconfig_value, dict):
+            return ipconfig_value
+        
+        # If it's a string, try to parse it
+        if isinstance(ipconfig_value, str):
+            # Try to repair and parse JSON
+            try:
+                # First attempt: direct JSON parse
+                return json.loads(ipconfig_value)
+            except json.JSONDecodeError:
+                pass
+            
+            # Second attempt: Use repair_json_field
+            try:
+                repaired = repair_json_field(ipconfig_value)
+                if isinstance(repaired, dict):
+                    return repaired
+            except:
+                pass
+            
+            # Third attempt: Try to evaluate as Python literal
+            try:
+                import ast
+                parsed = ast.literal_eval(ipconfig_value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except:
+                pass
+            
+            # If all fails, return empty dict
+            print(f"    ⚠️ Could not parse system_server_ipconfig")
+            return {}
+        
+        return {}
+    
+    def extract_user_ids_from_ip(ipconfig_dict, target_ip):
+        """Extract user IDs for a specific IP, ignoring nested objects"""
+        if not ipconfig_dict or target_ip not in ipconfig_dict:
+            return []
+        
+        ip_data = ipconfig_dict[target_ip]
+        
+        # If it's not a list, return empty
+        if not isinstance(ip_data, list):
+            print(f"    ⚠️ Data for IP {target_ip} is not a list: {type(ip_data)}")
+            return []
+        
+        user_ids = []
+        for item in ip_data:
+            # Only add if it's a valid ID (int or string that can be converted)
+            if isinstance(item, (int, float)):
+                # Convert to string for consistent handling
+                user_ids.append(str(int(item)))
+            elif isinstance(item, str):
+                # Try to convert to int if it's numeric
+                try:
+                    # Check if it's a numeric string
+                    if item.strip().isdigit():
+                        user_ids.append(str(int(item)))
+                    else:
+                        # Skip non-numeric strings (like URLs or other text)
+                        print(f"    ℹ️ Skipping non-numeric entry: '{item}' for IP {target_ip}")
+                        continue
+                except:
+                    print(f"    ℹ️ Skipping invalid entry: '{item}' for IP {target_ip}")
+                    continue
+            elif isinstance(item, dict):
+                # Skip dictionary objects (like {"URL": "..."})
+                print(f"    ℹ️ Skipping nested object for IP {target_ip}: {item}")
+                continue
+            else:
+                # Skip any other types
+                print(f"    ℹ️ Skipping unsupported type {type(item)} for IP {target_ip}: {item}")
+                continue
+        
+        return user_ids
+    
     def denormalize_path_value(value, field_name):
         """Convert underscore-normalized paths back to original path format with backslashes"""
         if value is None:
@@ -293,18 +385,15 @@ def fetch_tables_streaming(batch_size=5000):
             return value
         
         # Convert underscores back to backslashes (ONLY underscores, preserve everything else)
-        # This reverses the normalization done during update
         denormalized = value.replace('_', '\\')
         
         # Handle drive letters: C:\ should remain C:\ (not C:\\)
-        # First fix drive letter patterns (e.g., C:\ becomes C:\)
         import re
         # Fix drive letters (e.g., "C:\" pattern)
         denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
         denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
         
         # Convert single backslashes to double backslashes for JSON string representation
-        # But preserve the actual path structure
         denormalized = denormalized.replace('\\', '\\')
         
         # Fix drive letters again after double backslash conversion
@@ -337,7 +426,6 @@ def fetch_tables_streaming(batch_size=5000):
         # Check if it looks like JSON (starts with { or [)
         if not (value.startswith('{') or value.startswith('[')):
             # Check if it might be a string representation of JSON
-            # Handle cases like "{\n    \"key\": \"value\"\n}"
             if (value.startswith('"{') and value.endswith('}"')) or \
                (value.startswith("'{") and value.endswith("}'")) or \
                (value.startswith('"[') and value.endswith(']"')) or \
@@ -450,8 +538,7 @@ def fetch_tables_streaming(batch_size=5000):
                 (isinstance(accountmanagement, list) and len(accountmanagement) == 0)):
                 # Fill with default accountmanagement data
                 cleaned['accountmanagement'] = default_accountmanagement
-                cleaned['_accountmanagement_filled'] = True  # Optional: track that it was filled
-                cleaned['_filled_at'] = datetime.now().isoformat()  # Optional: timestamp
+                cleaned['_accountmanagement_filled'] = True
         
         return cleaned
     
@@ -463,8 +550,74 @@ def fetch_tables_streaming(batch_size=5000):
     print("-"*70)
     
     try:
-        # Step 1: Test Connection and Get Actual Data Columns (excluding analytics column)
-        print("\n📡 [1/7] Testing Database Connection & Fetching Schema...")
+        # STEP 0: Get System IP Address
+        print("\n🖥️ [0/6] Getting System IP Address...")
+        system_ip = get_system_ipv4()
+        print(f"  System IPv4 Address: {system_ip}")
+        
+        # STEP 1: Fetch and Parse system_server_ipconfig (NO AUTO-INSERT)
+        print(f"\n🔍 [1/6] Fetching System Server IP Configuration...")
+        
+        # Fetch current config
+        query = "SELECT system_server_ipconfig FROM server_account LIMIT 1"
+        result = db.execute_query(query)
+        
+        ipconfig_data = {}
+        if result.get('status') == 'success':
+            rows = result.get('results', [])
+            if rows and len(rows) > 0:
+                ipconfig_value = rows[0].get('system_server_ipconfig')
+                ipconfig_data = parse_server_ipconfig(ipconfig_value)
+                print(f"  ✅ Successfully parsed server configuration")
+            else:
+                print(f"  No server_account records found")
+                return
+        else:
+            print(f"  Failed to fetch server_account: {result.get('message')}")
+            return
+        
+        # Extract user IDs for the current system IP
+        user_ids_to_fetch = extract_user_ids_from_ip(ipconfig_data, system_ip)
+        
+        # Show current config for debugging
+        if ipconfig_data:
+            print(f"\n  📋 Current IP Configuration:")
+            for ip, data in ipconfig_data.items():
+                if isinstance(data, list):
+                    # Count only numeric IDs (ignore nested objects)
+                    numeric_ids = [item for item in data if isinstance(item, (int, str)) and str(item).isdigit()]
+                    print(f"     - {ip}: {len(numeric_ids)} user(s) - {numeric_ids[:5]}{'...' if len(numeric_ids) > 5 else ''}")
+                else:
+                    print(f"     - {ip}: {type(data).__name__} (invalid format)")
+        
+        # Check if system IP exists in config
+        if system_ip not in ipconfig_data:
+            print(f"\n{'='*70}")
+            print(f"  EXPORT CANCELLED - IP NOT FOUND")
+            print(f"{'='*70}")
+            print(f"  System IP: {system_ip}")
+            print(f"  Reason: This IP address is not configured in server_account.system_server_ipconfig")
+            print(f"  ℹ️ No automatic insertion will be performed.")
+            print(f"  ℹ️ Please add this IP to the configuration first.")
+            print(f"{'='*70}")
+            return
+        
+        # Check if there are any user IDs to fetch
+        if not user_ids_to_fetch:
+            print(f"\n{'='*70}")
+            print(f"  ℹ️ EXPORT CANCELLED - NO USERS ASSIGNED")
+            print(f"{'='*70}")
+            print(f"  System IP: {system_ip}")
+            print(f"  Reason: No valid user IDs are associated with this IP in system_server_ipconfig")
+            print(f"  ℹ️ Please add user IDs to this IP in the database first.")
+            print(f"{'='*70}")
+            return
+        
+        print(f"\n  ✅ System IP found with {len(user_ids_to_fetch)} valid user(s)!")
+        print(f"  📋 User IDs to fetch: {user_ids_to_fetch}")
+        
+        # Step 2: Test Connection and Get Actual Data Columns (excluding analytics column)
+        print("\n📡 [2/6] Testing Database Connection & Fetching Schema...")
         
         # Get all columns from insiders table except 'analytics'
         get_columns_query = """
@@ -516,10 +669,18 @@ def fetch_tables_streaming(batch_size=5000):
         
         print(f"   Connection SUCCESSFUL")
         
-        # Step 2: Get Total Count
-        print("\n📊 [2/7] Counting Total Records...")
-        count_query = "SELECT COUNT(*) as total FROM insiders"
-        count_result = db.execute_query(count_query)
+        # Step 3: Get Total Count (only for the specific user IDs)
+        print("\n📊 [3/6] Counting Total Records (filtered by user IDs)...")
+        
+        # Build IN clause for user IDs
+        id_placeholders = ','.join(['%s'] * len(user_ids_to_fetch))
+        count_query = f"""
+            SELECT COUNT(*) as total 
+            FROM insiders 
+            WHERE id IN ({id_placeholders})
+        """
+        
+        count_result = db.execute_query(count_query, params=user_ids_to_fetch)
         
         total_rows = 0
         if isinstance(count_result, dict) and count_result.get('status') == 'success':
@@ -529,100 +690,20 @@ def fetch_tables_streaming(batch_size=5000):
                                results[0].get('COUNT(*)') or 
                                results[0].get('count') or 0)
         
-        print(f"  📈 Total Records Found: {total_rows:,}")
+        print(f"  📈 Total Records Found (filtered): {total_rows:,}")
         
         if total_rows == 0:
-            print(f"    No records to fetch. Export cancelled.")
+            print(f"    No records found for the specified user IDs. Export cancelled.")
+            print(f"    User IDs queried: {user_ids_to_fetch}")
             return
         
         # Calculate batches needed
         total_batches = (total_rows + batch_size - 1) // batch_size
         print(f"  📦 Estimated Batches: {total_batches}")
         
-        # Step 3: Fetch Suspended/Blacklisted Accounts (FIXED)
-        print(f"\n🚫 [3/7] Fetching Suspended/Blacklisted Accounts...")
-        suspended_users = []
+        # Step 4: Fetch Server Account Management and Requirements
+        print(f"\n⚙️ [4/6] Fetching Default Server Account Management & Requirements...")
         
-        # FIXED: Properly check for non-NULL values and exact matches
-        suspended_query = """
-            SELECT id, email, fullname, login, application_status, server_decision 
-            FROM insiders 
-            WHERE (application_status IS NOT NULL AND application_status IN ('suspended', 'blacklisted'))
-               OR (server_decision IS NOT NULL AND server_decision IN ('suspended', 'blacklisted'))
-            ORDER BY id
-        """
-        
-        suspended_result = db.execute_query(suspended_query)
-        if suspended_result.get('status') == 'success':
-            suspended_rows = suspended_result.get('results', [])
-            
-            for row in suspended_rows:
-                # Denormalize path fields in suspended users as well
-                cleaned_row = {}
-                for key, value in row.items():
-                    if isinstance(value, str) and 'path' in key.lower():
-                        cleaned_row[key] = denormalize_path_value(value, key)
-                    else:
-                        cleaned_row[key] = value
-                
-                # Only add if at least one status matches exactly
-                app_status = cleaned_row.get('application_status')
-                srv_decision = cleaned_row.get('server_decision')
-                
-                # Double-check filtering (case-insensitive)
-                is_suspended = False
-                status_value = None
-                
-                if app_status and isinstance(app_status, str):
-                    app_status_lower = app_status.lower()
-                    if app_status_lower in ['suspended', 'blacklisted']:
-                        is_suspended = True
-                        status_value = app_status
-                
-                if not is_suspended and srv_decision and isinstance(srv_decision, str):
-                    srv_decision_lower = srv_decision.lower()
-                    if srv_decision_lower in ['suspended', 'blacklisted']:
-                        is_suspended = True
-                        status_value = srv_decision
-                
-                if is_suspended:
-                    suspended_users.append({
-                        'id': cleaned_row.get('id'),
-                        'email': cleaned_row.get('email'),
-                        'fullname': cleaned_row.get('fullname'),
-                        'login': cleaned_row.get('login'),
-                        'application_status': cleaned_row.get('application_status'),
-                        'server_decision': cleaned_row.get('server_decision'),
-                        'status_source': 'application_status' if app_status and app_status.lower() in ['suspended', 'blacklisted'] else 'server_decision',
-                        'suspended_at': datetime.now().isoformat()
-                    })
-            
-            # Save suspended accounts to JSON file
-            os.makedirs(os.path.dirname(SUSPENDED_ACCOUNTS), exist_ok=True)
-            with open(SUSPENDED_ACCOUNTS, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'total_suspended': len(suspended_users),
-                    'last_updated': datetime.now().isoformat(),
-                    'suspended_accounts': suspended_users
-                }, f, indent=2, default=str)
-            
-            if len(suspended_users) > 0:
-                print(f"   Suspended Accounts Saved: {len(suspended_users)} accounts")
-                # Show first few suspended users for verification
-                for i, user in enumerate(suspended_users[:3]):
-                    print(f"     - ID: {user['id']}, Email: {user['email']}, Status: {user['status_source']}")
-                if len(suspended_users) > 3:
-                    print(f"     ... and {len(suspended_users) - 3} more")
-            else:
-                print(f"    No suspended/blacklisted accounts found")
-            print(f"  📁 File: {SUSPENDED_ACCOUNTS}")
-        else:
-            print(f"    Failed to fetch suspended accounts: {suspended_result.get('message')}")
-        
-        # Step 4: Fetch Server Account Management and Requirements (Updated)
-        print(f"\n⚙️ [4/7] Fetching Default Server Account Management & Requirements...")
-        
-        # Updated query to fetch min_broker_balance and contract_duration
         server_acct_query = """
             SELECT 
                 accountmanagement,
@@ -633,7 +714,7 @@ def fetch_tables_streaming(batch_size=5000):
         """
         server_result = db.execute_query(server_acct_query)
         
-        default_accountmanagement = None  # Store default value for filling empty user accountmanagement
+        default_accountmanagement = None
         
         if server_result.get('status') == 'success':
             server_rows = server_result.get('results', [])
@@ -647,19 +728,15 @@ def fetch_tables_streaming(batch_size=5000):
                 parsed_management = None
                 if server_acct_management:
                     try:
-                        # Try to repair/parse the JSON
                         if isinstance(server_acct_management, str):
                             parsed_management = repair_json_field(server_acct_management)
                         else:
                             parsed_management = server_acct_management
                         
-                        # Ensure parsed_management is a dictionary
                         if not isinstance(parsed_management, dict):
                             if isinstance(parsed_management, list):
-                                # Convert list to dict with 'data' key
                                 parsed_management = {'data': parsed_management}
                             else:
-                                # Create new dict with original data
                                 parsed_management = {'value': parsed_management}
                     except Exception as e:
                         print(f"    Failed to parse accountmanagement: {str(e)}")
@@ -667,105 +744,48 @@ def fetch_tables_streaming(batch_size=5000):
                 else:
                     parsed_management = {}
                 
-                # Ensure parsed_management is a dict
                 if not isinstance(parsed_management, dict):
                     parsed_management = {}
                 
                 # Add requirements section with fetched values
                 requirements = {}
                 
-                # Add contract_duration if not None
                 if contract_duration is not None:
                     requirements['contract_duration'] = contract_duration
                 else:
                     requirements['contract_duration'] = None
-                    print(f"    contract_duration is NULL in server_account")
                 
-                # Add min_broker_balance if not None
                 if min_broker_balance is not None:
-                    # Convert Decimal to float for JSON serialization
                     if isinstance(min_broker_balance, Decimal):
                         requirements['min_broker_balance'] = float(min_broker_balance)
                     else:
                         requirements['min_broker_balance'] = min_broker_balance
                 else:
                     requirements['min_broker_balance'] = None
-                    print(f"    min_broker_balance is NULL in server_account")
                 
-                # Add requirements to the parsed management data
                 parsed_management['requirements'] = requirements
-                
-                # Store as default for filling empty user accountmanagement
                 default_accountmanagement = parsed_management
                 
-                # Save directly as JSON (not nested under a field)
-                os.makedirs(os.path.dirname(DEFAULT_ACCOUNTMANAGEMENT), exist_ok=True)
-                with open(DEFAULT_ACCOUNTMANAGEMENT, 'w', encoding='utf-8') as f:
-                    json.dump(parsed_management, f, indent=2, default=str)
-                
                 print(f"   Default Server Account Management Loaded with Requirements")
-                print(f"  📁 File: {DEFAULT_ACCOUNTMANAGEMENT}")
-                print(f"  📋 Type: {type(parsed_management).__name__}")
-                
-                # Show preview of default data including new requirements
-                print(f"  🔍 Requirements Added:")
+                print(f"  🔍 Requirements:")
                 print(f"     - contract_duration: {requirements.get('contract_duration')} days")
                 print(f"     - min_broker_balance: ${requirements.get('min_broker_balance')}")
-                
-                # Show preview of existing data keys
-                existing_keys = [k for k in parsed_management.keys() if k != 'requirements']
-                if existing_keys:
-                    print(f"  🔍 Existing Keys: {existing_keys[:3]}{'...' if len(existing_keys) > 3 else ''}")
             else:
                 print(f"    No server_account records found")
                 default_accountmanagement = {'requirements': {'contract_duration': None, 'min_broker_balance': None}}
-                with open(DEFAULT_ACCOUNTMANAGEMENT, 'w', encoding='utf-8') as f:
-                    json.dump(default_accountmanagement, f, indent=2)
         else:
             print(f"    Failed to fetch server account management: {server_result.get('message')}")
             default_accountmanagement = {'requirements': {'contract_duration': None, 'min_broker_balance': None}}
         
-        # Step 5: Prepare Output Directory for Insiders Data
-        print(f"\n📁 [5/7] Preparing Output Directory for Insiders Data...")
+        # Step 5: Prepare Output Directory and Stream Data
+        print(f"\n📁 [5/6] Preparing Output Directory for Insiders Data...")
         os.makedirs(os.path.dirname(FETCHED_INVESTORS), exist_ok=True)
         print(f"   Directory ready: {os.path.dirname(FETCHED_INVESTORS)}")
         
-        # Step 6: Count records with empty accountmanagement (for reporting)
-        print(f"\n📊 [6/7] Analyzing Account Management Data...")
-        
-        empty_acct_count = 0
-        acct_check_query = """
-            SELECT COUNT(*) as empty_count 
-            FROM insiders 
-            WHERE accountmanagement IS NULL 
-               OR accountmanagement = '' 
-               OR TRIM(accountmanagement) = ''
-               OR accountmanagement = '{}'
-               OR accountmanagement = '[]'
-               OR accountmanagement = 'null'
-        """
-        acct_check_result = db.execute_query(acct_check_query)
-        if acct_check_result.get('status') == 'success':
-            acct_rows = acct_check_result.get('results', [])
-            if acct_rows and len(acct_rows) > 0:
-                empty_acct_count = int(acct_rows[0].get('empty_count') or 0)
-        
-        print(f"  📈 Users with Empty AccountManagement: {empty_acct_count:,} / {total_rows:,} ({empty_acct_count/total_rows*100:.1f}%)")
-        
-        if empty_acct_count > 0 and default_accountmanagement:
-            print(f"  🔧 Will fill {empty_acct_count:,} users with default account management data")
-            # Show requirements that will be filled
-            reqs = default_accountmanagement.get('requirements', {})
-            if reqs:
-                print(f"  📋 Default Requirements to fill:")
-                print(f"     - contract_duration: {reqs.get('contract_duration')} days")
-                print(f"     - min_broker_balance: ${reqs.get('min_broker_balance')}")
-        elif empty_acct_count > 0 and not default_accountmanagement:
-            print(f"    No default account management available - will leave empty")
-        
-        # Step 7: Stream Insiders Data with JSON Repair and AccountManagement Filling (excluding analytics column)
-        print(f"\n📥 [7/7] Streaming Insiders Records to File (with JSON repair, path denormalization, & account management fill)...")
+        # Step 6: Stream Insiders Data
+        print(f"\n📥 [6/6] Streaming Insiders Records to File...")
         print(f"  📌 Note: 'analytics' column is EXCLUDED from export")
+        print(f"  🎯 Filter: Only user IDs associated with system IP {system_ip}")
         print("-"*70)
         
         start_time = datetime.now()
@@ -775,19 +795,24 @@ def fetch_tables_streaming(batch_size=5000):
         accountmanagement_filled_count = 0
         path_denormalized_count = 0
         
-        # Build column list for SELECT query (excluding analytics)
         if not columns:
             print(f"    No columns available for query. Cannot proceed.")
             return
         
-        # Ensure analytics is not in the column list
         columns = [col for col in columns if col.lower() != 'analytics']
         select_clause = ", ".join([f"`{col}`" for col in columns])
         
         print(f"  📋 Exporting columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
+        print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs: {user_ids_to_fetch[:10]}{'...' if len(user_ids_to_fetch) > 10 else ''}")
         
         with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             f.write('{\n')
+            f.write(f'  "_metadata": {{\n')
+            f.write(f'    "system_ip": "{system_ip}",\n')
+            f.write(f'    "user_ids_filtered": {json.dumps(user_ids_to_fetch)},\n')
+            f.write(f'    "export_timestamp": "{datetime.now().isoformat()}",\n')
+            f.write(f'    "total_records": {total_rows}\n')
+            f.write(f'  }},\n')
             first_record = True
             offset = 0
             
@@ -795,9 +820,14 @@ def fetch_tables_streaming(batch_size=5000):
                 current_batch += 1
                 batch_start = datetime.now()
                 
-                # Fetch batch with explicit column list (excluding analytics)
-                query = f"SELECT {select_clause} FROM insiders LIMIT {batch_size} OFFSET {offset}"
-                result = db.execute_query(query)
+                query = f"""
+                    SELECT {select_clause} 
+                    FROM insiders 
+                    WHERE id IN ({id_placeholders})
+                    ORDER BY id
+                    LIMIT {batch_size} OFFSET {offset}
+                """
+                result = db.execute_query(query, params=user_ids_to_fetch)
                 
                 if result.get('status') != 'success':
                     print(f"\n   QUERY ERROR at batch {current_batch}: {result.get('message')}")
@@ -808,32 +838,22 @@ def fetch_tables_streaming(batch_size=5000):
                     print(f"\n    No rows returned at offset {offset:,}. Stopping.")
                     break
                 
-                # Write batch to file with pretty formatting
                 batch_bytes = 0
                 for row in rows:
-                    # Use id if available, otherwise fallback to offset
                     record_id = str(row.get('id') or row.get('ID') or f"record_{offset}")
                     
                     if not first_record:
                         f.write(',\n')
                     
-                    # Clean the row data by repairing JSON fields, denormalizing paths, AND filling empty accountmanagement
                     cleaned_row = clean_record(row, default_accountmanagement)
                     
-                    # Track if accountmanagement was filled
                     if cleaned_row.get('_accountmanagement_filled'):
                         accountmanagement_filled_count += 1
-                        # Remove tracking fields if you don't want them in final output
-                        # Uncomment the next lines to exclude tracking fields
-                        # cleaned_row.pop('_accountmanagement_filled', None)
-                        # cleaned_row.pop('_filled_at', None)
                     
-                    # Track path denormalizations
                     for key, value in cleaned_row.items():
                         if 'path' in key.lower() and isinstance(value, str) and '\\' in value:
                             path_denormalized_count += 1
                     
-                    # Additional type conversions
                     for key, value in cleaned_row.items():
                         if value is None:
                             cleaned_row[key] = None
@@ -842,14 +862,11 @@ def fetch_tables_streaming(batch_size=5000):
                         elif isinstance(value, Decimal):
                             cleaned_row[key] = float(value)
                     
-                    # Track if any JSON was repaired in this row
                     for key, value in cleaned_row.items():
                         if isinstance(value, (dict, list)) and key in row and isinstance(row[key], str):
                             json_repaired_count += 1
                     
-                    # Format each record with indentation for readability
                     json_str = json.dumps(cleaned_row, default=str, indent=2)
-                    # Indent the entire JSON object to align with the key
                     lines = json_str.split('\n')
                     indented_lines = ['    ' + line for line in lines]
                     formatted_json = '\n'.join(indented_lines)
@@ -863,20 +880,16 @@ def fetch_tables_streaming(batch_size=5000):
                 offset += len(rows)
                 bytes_written += batch_bytes
                 
-                # Batch progress
                 batch_time = (datetime.now() - batch_start).total_seconds()
                 records_per_sec = len(rows) / batch_time if batch_time > 0 else 0
                 
-                # Progress bar
                 progress = (offset / total_rows) * 100
                 bar_length = 30
-                filled = int(bar_length * offset // total_rows)
+                filled = int(bar_length * offset // total_rows) if total_rows > 0 else 0
                 bar = '█' * filled + '░' * (bar_length - filled)
                 
                 print(f"  Batch {current_batch:>3}/{total_batches:<3} [{bar}] {progress:5.1f}% | "
                       f"Records: {offset:>{len(str(total_rows))},}/{total_rows:,} | "
-                      f"Filled: {accountmanagement_filled_count:,} | "
-                      f"Paths: {path_denormalized_count:,} | "
                       f"Speed: {records_per_sec:>6,.0f} rec/s | "
                       f"Size: {bytes_written/1024:>8,.1f} KB")
             
@@ -890,40 +903,19 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"\n📋 EXPORT SUMMARY")
         print("="*70)
         print(f"   Status           : SUCCESS")
+        print(f"  🖥️  System IP        : {system_ip}")
+        print(f"  👥 Valid User IDs   : {len(user_ids_to_fetch)} users")
         print(f"  📊 Records Exported : {offset:,} / {total_rows:,}")
         print(f"  📦 Batches Used     : {current_batch}")
         print(f"  📋 Schema Columns   : {len(columns)} (excluded 'analytics')")
         print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
         print(f"  🔄 Path Denormalized: {path_denormalized_count} path fields restored")
-        print(f"     - Conversion: underscores → backslashes")
-        print(f"     - Preserved: colons (:), spaces ( ), other characters")
         print(f"  📝 Account Mgmt Filled: {accountmanagement_filled_count:,} users")
-        print(f"     - Empty Users Found: {empty_acct_count:,}")
-        print(f"     - Successfully Filled: {accountmanagement_filled_count:,}")
-        if empty_acct_count > 0 and accountmanagement_filled_count < empty_acct_count:
-            print(f"       Warning: {empty_acct_count - accountmanagement_filled_count} users could not be filled")
         print(f"  💾 File Size        : {bytes_written/1024:,.1f} KB ({bytes_written/1048576:.2f} MB)")
         print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
         print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
         print(f"  📁 Output File      : {FETCHED_INVESTORS}")
         print("="*70)
-        print(f"\n📋 ADDITIONAL EXPORTS")
-        print("="*70)
-        print(f"  🚫 Suspended Accounts: {SUSPENDED_ACCOUNTS}")
-        print(f"     Total Suspended   : {len(suspended_users)} accounts")
-        if len(suspended_users) > 0:
-            print(f"     Status Check      : Verified exact matches only (case-insensitive)")
-        print(f"  ⚙️  Default Server Mgmt: {DEFAULT_ACCOUNTMANAGEMENT}")
-        print(f"     Used to fill {accountmanagement_filled_count:,} empty user accountmanagement fields")
-        
-        # Show requirements that were added
-        if default_accountmanagement and isinstance(default_accountmanagement, dict):
-            reqs = default_accountmanagement.get('requirements', {})
-            if reqs:
-                print(f"     📋 Requirements added to default:")
-                print(f"        - contract_duration: {reqs.get('contract_duration')} days")
-                print(f"        - min_broker_balance: ${reqs.get('min_broker_balance')}")
-        
         print(f"  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
         
@@ -2000,6 +1992,230 @@ def get_investors_balance():
     
     return updated > 0
 
+def verify_investors_balance():
+    """
+    Verify balance for investors who have applied for verification.
+    
+    Processes investors with balance_verification status = 'applied-for-verification' or 'applied_for_verification'
+    
+    For each such investor:
+    - Gets current account balance using MT5
+    - Updates broker_balance with the current balance
+    - Changes balance_verification status to 'verified'
+    
+    Then COPIES these verified investors to updated_investors.json
+    (without removing them from fetched_investors.json)
+    
+    Returns:
+        bool: True if at least one investor balance was verified, False otherwise
+    """
+    
+    print(f"\n{'='*60}")
+    print(f"🔐 BALANCE VERIFICATION")
+    print(f"{'='*60}")
+    
+    # Check if fetched investors file exists
+    if not os.path.exists(FETCHED_INVESTORS):
+        print(f"Fetched investors file not found: {FETCHED_INVESTORS}")
+        return False
+    
+    # Load fetched investors data (SOURCE)
+    try:
+        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+            investors_data = json.load(f)
+        print(f"📋 Loaded {len(investors_data)} investors from fetched_investors.json")
+    except Exception as e:
+        print(f"Error loading investors: {e}")
+        return False
+    
+    # Statistics
+    processed = 0
+    verified = 0
+    skipped = 0
+    errors = 0
+    already_logged_in_count = 0
+    fresh_login_count = 0
+    failed_login_count = 0
+    
+    investors_modified = False
+    
+    # Define valid verification statuses to process
+    verification_statuses = ['applied-for-verification', 'applied_for_verification']
+    
+    for investor_id, investor_data in investors_data.items():
+        balance_verification_status = investor_data.get('balance_verification', '').strip().lower()
+        
+        # Skip if not applied for verification
+        if balance_verification_status not in verification_statuses:
+            if balance_verification_status:
+                print(f"⏭️ ID:{investor_id} → Balance Verification Status: {balance_verification_status}")
+            continue
+        
+        # Extract credentials
+        login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
+        password = investor_data.get('password', '') or investor_data.get('PASSWORD', '')
+        server = investor_data.get('server', '') or investor_data.get('SERVER', '')
+        Terminal_path = investor_data.get('Terminal_path', '')
+        
+        if not all([login_id, password, server, Terminal_path]):
+            print(f" ID:{investor_id} → Missing credentials")
+            skipped += 1
+            continue
+        
+        # Validate login_id
+        try:
+            login_id_int = int(login_id)
+        except (ValueError, TypeError):
+            print(f" ID:{investor_id} → Invalid LOGIN_ID: {login_id}")
+            skipped += 1
+            continue
+        
+        # Check terminal exists
+        if not os.path.exists(Terminal_path):
+            print(f" ID:{investor_id} → Terminal not found at: {Terminal_path}")
+            errors += 1
+            continue
+        
+        print(f"\n✅ ID:{investor_id} (Login:{login_id_int}) - Balance Verification in Progress...")
+        
+        # Check if already logged in with this account
+        already_logged_in_account = None
+        
+        try:
+            if mt5.initialize():
+                account_info = mt5.account_info()
+                if account_info is not None:
+                    already_logged_in_account = account_info.login
+                    if account_info.login == login_id_int:
+                        print(f"    ✅ Already logged in as {login_id_int}")
+                        
+                        balance = account_info.balance
+                        currency = account_info.currency
+                        
+                        balance_str = f"{balance:.2f}"
+                        investor_data['broker_balance'] = balance_str
+                        investor_data['balance_verification'] = 'verified'
+                        investors_modified = True
+                        
+                        print(f"    💰 Balance: {currency} {balance:,.2f}")
+                        print(f"    📝 Status: {balance_verification_status} → verified")
+                        
+                        processed += 1
+                        verified += 1
+                        already_logged_in_count += 1
+                        mt5.shutdown()
+                        continue
+                mt5.shutdown()
+        except Exception as e:
+            print(f"    Could not check MT5 status: {e}")
+        
+        # Fresh login attempt
+        print(f"    🔐 Fresh login for {login_id_int}...")
+        
+        try:
+            if mt5.terminal_info() is not None:
+                mt5.shutdown()
+            
+            if not mt5.initialize(path=Terminal_path, timeout=60000):
+                error_msg = mt5.last_error()
+                print(f"     INITIALIZATION FAILED: {error_msg}")
+                failed_login_count += 1
+                errors += 1
+                continue
+            
+            if not mt5.login(login_id_int, password=password, server=server):
+                error_msg = mt5.last_error()
+                print(f"     LOGIN FAILED: {error_msg}")
+                mt5.shutdown()
+                failed_login_count += 1
+                errors += 1
+                continue
+            
+            print(f"    ✅ Fresh login successful")
+            fresh_login_count += 1
+            
+            account_info = mt5.account_info()
+            if account_info is None:
+                print(f"     No account info after login")
+                mt5.shutdown()
+                errors += 1
+                continue
+            
+            balance = account_info.balance
+            currency = account_info.currency
+            
+            balance_str = f"{balance:.2f}"
+            investor_data['broker_balance'] = balance_str
+            investor_data['balance_verification'] = 'verified'
+            investors_modified = True
+            
+            print(f"    💰 Balance: {currency} {balance:,.2f}")
+            print(f"    📝 Status: {balance_verification_status} → verified")
+            
+            processed += 1
+            verified += 1
+            
+            mt5.shutdown()
+            
+        except Exception as e:
+            print(f"     ERROR: {str(e)[:100]}")
+            failed_login_count += 1
+            errors += 1
+            try:
+                mt5.shutdown()
+            except:
+                pass
+    
+    # Save updated fetched_investors.json (SOURCE - update the status and balance)
+    if investors_modified:
+        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+            json.dump(investors_data, f, indent=2)
+        print(f"\n💾 Updated fetched_investors.json")
+    
+    # COPY verified investors to updated_investors.json (RESULT)
+    print(f"\n{'='*60}")
+    print(f"📋 COPYING VERIFIED INVESTORS TO UPDATED_INVESTORS.JSON")
+    print(f"{'='*60}")
+    
+    # Build updated_investors.json with ONLY verified investors
+    updated_investors_data = {}
+    copied_count = 0
+    
+    for investor_id, investor_data in investors_data.items():
+        balance_verification_status = investor_data.get('balance_verification', '').strip().lower()
+        
+        if balance_verification_status == 'verified':
+            updated_investors_data[investor_id] = investor_data.copy()
+            copied_count += 1
+            print(f"✅ COPIED ID:{investor_id} to updated_investors.json")
+    
+    # Save updated_investors.json (RESULT - overwrite with fresh data)
+    if copied_count > 0:
+        with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+            json.dump(updated_investors_data, f, indent=2)
+        print(f"💾 Saved {copied_count} verified investors to updated_investors.json")
+    else:
+        print(f"⚠️ No verified investors to copy")
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print(f"✅ BALANCE VERIFICATION SUMMARY")
+    print(f"{'='*60}")
+    print(f"✅ Verified: {verified}")
+    print(f" Errors: {errors}")
+    print(f"🔄 Already logged in: {already_logged_in_count}")
+    print(f"🔐 Fresh logins: {fresh_login_count}")
+    print(f" Failed logins: {failed_login_count}")
+    
+    # Final cleanup
+    try:
+        if mt5.terminal_info() is not None:
+            mt5.shutdown()
+    except:
+        pass
+    
+    return verified > 0
+
 def process_single_invest(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist
@@ -2074,7 +2290,7 @@ def process_single_investor(inv_id):
         fetch_tables_streaming()
         create_investor_mt5_files(inv_id=inv_id)
         get_investors_balance()
-        #
+        verify_investors_balance()
         close_db_browser()
         initialize_browser(force_new=True)
         update_tables_streaming()
@@ -2308,8 +2524,9 @@ def place_orders_parallel_loop():
         pool.close()
         pool.join()
 
-        
+
+
 # Example usage
 if __name__ == "__main__":
-    place_orders_parallel()
+    fetch_tables_streaming()
     
