@@ -1,552 +1,550 @@
 {
-  "_metadata": {
-    "system_ip": "172.20.10.12",
-    "user_ids_filtered": ["1"],
-    "export_timestamp": "2026-05-31T21:06:54.251872",
-    "total_records": 1
-  },
-  "1":     {
-      "id": "1",
-      "broker": "Deriv",
-      "email": "knnyking12@gmail.com",
-      "fullname": "Arobieke Kehinde Adeyemi",
-      "server": "Deriv-Demo",
-      "login": "5996427",
-      "password": "@Techknowdge12#",
-      "application_status": "approved",
-      "broker_balance": "9034.85",
-      "balance_verification": "verified",
-      "profitandloss": "0.00",
-      "passkey": "$2y$10$1p7neBZgjHaC2flqHnolLOWbF/6BTifrKiPLZ3CBdr0K69txedOry",
-      "submitted_at": "0000-00-00 00:00:00",
-      "balance_display": "hide",
-      "execution_start_date": "2026-05-31",
-      "analytics_history": "NULL",
-      "revenue_history": [
-        {
-          "id": 1780223563,
-          "execution_start_date": "2026-05-31",
-          "execution_end_date": "2026-06-30",
-          "starting_balance": 9034.85,
-          "current_balance": 9034.85,
-          "profit": 0,
-          "user_share": 0,
-          "server_share": 0,
-          "loyalties": "active"
-        },
-        {
-          "id": 1779892713,
-          "execution_start_date": "2026-05-27",
-          "execution_end_date": "2026-06-26",
-          "starting_balance": 9024.15,
-          "current_balance": 9324.15,
-          "profit": 300,
-          "user_share": 210,
-          "server_share": 90,
-          "loyalties": "payment-confirmed",
-          "payment_details": "Amount: $90.00, Coin: btc, Confirmed_at: 2026-05-27 10:46:01",
-          "payment_date": "2026-05-27 10:46:01"
-        },
-        {
-          "id": 1779893343,
-          "execution_start_date": "2026-05-27",
-          "execution_end_date": "2026-06-26",
-          "starting_balance": 9024.15,
-          "current_balance": 9254.15,
-          "profit": 230,
-          "user_share": 161,
-          "server_share": 69,
-          "loyalties": "payment-confirmed",
-          "payment_details": "Amount: $69.00, Coin: btc, Confirmed_at: 2026-05-27 10:50:57",
-          "payment_date": "2026-05-27 10:50:57"
-        },
-        {
-          "id": 1779893611,
-          "execution_start_date": "2026-05-27",
-          "execution_end_date": "2026-06-26",
-          "starting_balance": 9024.15,
-          "current_balance": 9924.15,
-          "profit": 900,
-          "user_share": 630,
-          "server_share": 270,
-          "loyalties": "payment-confirmed",
-          "payment_details": "Amount: $270.00, Coin: btc, Confirmed_at: 2026-05-27 10:55:10",
-          "payment_date": "2026-05-27 10:55:10"
-        },
-        {
-          "id": 1779905122,
-          "execution_start_date": "2026-05-27",
-          "execution_end_date": "2026-06-26",
-          "starting_balance": 9024.15,
-          "current_balance": 9024.15,
-          "profit": 0,
-          "user_share": 0,
-          "server_share": 0,
-          "loyalties": "contract_cancelled",
-          "cancelled_at": "2026-05-27 14:07:22",
-          "cancelled_by": "techknowdge12"
-        },
-        {
-          "id": 1779905773,
-          "execution_start_date": "2026-05-27",
-          "execution_end_date": "2026-06-26",
-          "starting_balance": 9024.15,
-          "current_balance": 9824.15,
-          "profit": 800,
-          "user_share": 560,
-          "server_share": 240,
-          "loyalties": "payment-confirmed",
-          "payment_details": "Amount: $240.00, Coin: btc, Confirmed_at: 2026-05-27 14:23:36",
-          "payment_date": "2026-05-27 14:23:36"
-        },
-        {
-          "id": 1779908133,
-          "execution_start_date": "2026-05-27",
-          "execution_end_date": "2026-06-26",
-          "starting_balance": 9024.15,
-          "current_balance": 9024.15,
-          "profit": 0,
-          "user_share": 0,
-          "server_share": 0,
-          "loyalties": "contract_ended"
-        }
+  "1": {
+    "id": "1",
+    "broker": "Deriv",
+    "email": "knnyking12@gmail.com",
+    "fullname": "Arobieke Kehinde Adeyemi",
+    "server": "Deriv-Demo",
+    "login": "5996427",
+    "password": "@Techknowdge12#",
+    "application_status": "approved",
+    "broker_balance": "90033.77",
+    "balance_verification": "verified",
+    "profitandloss": "0.00",
+    "passkey": "$2y$10$1p7neBZgjHaC2flqHnolLOWbF/6BTifrKiPLZ3CBdr0K69txedOry",
+    "submitted_at": "0000-00-00 00:00:00",
+    "balance_display": "hide",
+    "execution_start_date": "2026-05-01",
+    "analytics_history": "NULL",
+    "revenue_history": [
+      {
+        "id": 1780223563,
+        "execution_start_date": "2026-05-31",
+        "execution_end_date": "2026-06-30",
+        "starting_balance": 9034.85,
+        "current_balance": 9034.85,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "active"
+      },
+      {
+        "id": 1779892713,
+        "execution_start_date": "2026-05-27",
+        "execution_end_date": "2026-06-26",
+        "starting_balance": 9024.15,
+        "current_balance": 9324.15,
+        "profit": 300,
+        "user_share": 210,
+        "server_share": 90,
+        "loyalties": "payment-confirmed",
+        "payment_details": "Amount: $90.00, Coin: btc, Confirmed_at: 2026-05-27 10:46:01",
+        "payment_date": "2026-05-27 10:46:01"
+      },
+      {
+        "id": 1779893343,
+        "execution_start_date": "2026-05-27",
+        "execution_end_date": "2026-06-26",
+        "starting_balance": 9024.15,
+        "current_balance": 9254.15,
+        "profit": 230,
+        "user_share": 161,
+        "server_share": 69,
+        "loyalties": "payment-confirmed",
+        "payment_details": "Amount: $69.00, Coin: btc, Confirmed_at: 2026-05-27 10:50:57",
+        "payment_date": "2026-05-27 10:50:57"
+      },
+      {
+        "id": 1779893611,
+        "execution_start_date": "2026-05-27",
+        "execution_end_date": "2026-06-26",
+        "starting_balance": 9024.15,
+        "current_balance": 9924.15,
+        "profit": 900,
+        "user_share": 630,
+        "server_share": 270,
+        "loyalties": "payment-confirmed",
+        "payment_details": "Amount: $270.00, Coin: btc, Confirmed_at: 2026-05-27 10:55:10",
+        "payment_date": "2026-05-27 10:55:10"
+      },
+      {
+        "id": 1779905122,
+        "execution_start_date": "2026-05-27",
+        "execution_end_date": "2026-06-26",
+        "starting_balance": 9024.15,
+        "current_balance": 9024.15,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "contract_cancelled",
+        "cancelled_at": "2026-05-27 14:07:22",
+        "cancelled_by": "techknowdge12"
+      },
+      {
+        "id": 1779905773,
+        "execution_start_date": "2026-05-27",
+        "execution_end_date": "2026-06-26",
+        "starting_balance": 9024.15,
+        "current_balance": 9824.15,
+        "profit": 800,
+        "user_share": 560,
+        "server_share": 240,
+        "loyalties": "payment-confirmed",
+        "payment_details": "Amount: $240.00, Coin: btc, Confirmed_at: 2026-05-27 14:23:36",
+        "payment_date": "2026-05-27 14:23:36"
+      },
+      {
+        "id": 1779908133,
+        "execution_start_date": "2026-05-27",
+        "execution_end_date": "2026-06-26",
+        "starting_balance": 9024.15,
+        "current_balance": 9024.15,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "contract_ended"
+      }
+    ],
+    "loyalties": "NULL",
+    "contract_days_left": "0",
+    "paymentdetails": "Amount: $240.00, Coin: btc, Confirmed_at: 2026-05-27 14:23:36",
+    "message": "NULL",
+    "unauthorized_actions": {
+      "detected": true,
+      "bypass_active": true,
+      "autotrading_active": true,
+      "type": [
+        "trades"
       ],
-      "loyalties": "NULL",
-      "contract_days_left": "0",
-      "paymentdetails": "Amount: $240.00, Coin: btc, Confirmed_at: 2026-05-27 14:23:36",
-      "message": "NULL",
-      "unauthorized_actions": {
-        "detected": true,
-        "bypass_active": true,
-        "autotrading_active": true,
-        "type": [
-          "trades"
-        ],
-        "unauthorized_withdrawals": [],
-        "unauthorized_orders": [],
-        "unauthorized_positions": []
+      "unauthorized_withdrawals": [],
+      "unauthorized_orders": [],
+      "unauthorized_positions": []
+    },
+    "notifications": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
       },
-      "notifications": {
-        "1": {
-          "section": "AccountMode",
-          "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "2": {
-          "section": "Strategies",
-          "message": "Your account has been configured with the following trading strategy(s): prices. The system will execute trades according to this strategy configuration.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "3": {
-          "section": "StartDate",
-          "message": "Your trading program is active as of May 22, 2026. Welcome aboard!",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "4": {
-          "section": "Autotrading",
-          "message": "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "5": {
-          "section": "BypassRestriction",
-          "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
-          "time": "2026-05-22 23:17:10",
-          "type": "error",
-          "update": "read"
-        },
-        "6": {
-          "section": "ContractDuration",
-          "message": "Your trading contract duration is set to 30 days. Your contract will expire on June 21, 2026. You are currently within your active trading period.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "7": {
-          "section": "TerminalPath",
-          "message": "Your trading terminal has been configured and is ready for automated trading.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "8": {
-          "section": "BalanceCheck",
-          "message": "? BALANCE VERIFICATION: Investor's broker balance of $9024.15 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "read"
-        },
-        "9": {
-          "section": "BalanceDiscrepancy",
-          "message": "? BALANCE MISMATCH DETECTED: Your calculated balance ($9024.15) is higher than your MT5 actual balance ($9025.35) by $1.20. This indicates that an unauthorized activity has been taken..",
-          "time": "2026-05-23 09:44:33",
-          "type": "error",
-          "update": "read"
-        },
-        "10": {
-          "section": "UnauthorizedTrades",
-          "message": "? UNAUTHORIZED TRADES DETECTED: 2 unauthorized trade(s) found with total P&L ? $1.92. This trade does not match our authorized system activity.",
-          "time": "2026-05-23 09:49:39",
-          "type": "error",
-          "update": "read"
-        },
-        "11": {
-          "section": "ApplicationStatus",
-          "message": "?? APPLICATION STATUS CHANGE: Your account status has changed from 'approved' to 'APPROVED WITH BYPASS'. Unauthorized actions are being automatically bypassed but are still being flagged for monitoring.",
-          "time": "2026-05-23 09:49:39",
-          "type": "error",
-          "update": "read"
-        },
-        "12": {
-          "section": "AuditComplete",
-          "message": "? AUDIT COMPLETED: System audit detected 2 trades requiring attention. Please review your account activity.",
-          "time": "2026-05-23 09:49:39",
-          "type": "error",
-          "update": "read"
-        },
-        "13": {
-          "section": "RestrictedTimeWindow",
-          "message": "? NORMAL TRADING HOURS: You are outside the restricted trading window (8:00 PM - 12:30 AM). Trading activities can proceed normally. Current time: 06:14:32 PM",
-          "time": "2026-05-23 18:14:32",
-          "type": "success",
-          "update": "read"
-        },
-        "14": {
-          "section": "RestrictedTimeWindow",
-          "message": "?? RESTRICTED TIME WINDOW: You are currently in the restricted trading window (8:00 PM - 12:30 AM). Trading activities are LIMITED during this time. Current time: 08:13:39 PM",
-          "time": "2026-05-23 20:13:39",
-          "type": "warning",
-          "update": "read"
-        },
-        "15": {
-          "section": "RestrictedTimeWindow",
-          "message": "? NORMAL TRADING HOURS: You are outside the restricted trading window (8:00 PM - 12:30 AM). Trading activities can proceed normally. Current time: 07:32:13 AM",
-          "time": "2026-05-24 07:32:13",
-          "type": "success",
-          "update": "read"
-        }
+      "2": {
+        "section": "Strategies",
+        "message": "Your account has been configured with the following trading strategy(s): prices. The system will execute trades according to this strategy configuration.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
       },
-      "executions_notification": {
-        "1": {
-          "section": "AccountMode",
-          "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "2": {
-          "section": "Strategies",
-          "message": "SERVER NOTIFICATION: Investor 1 successfully configured with strategies: prices",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "3": {
-          "section": "StartDate",
-          "message": "SERVER NOTIFICATION: Investor 1 enrollment confirmed. Start date: May 22, 2026",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "4": {
-          "section": "Autotrading",
-          "message": "SERVER NOTIFICATION: Investor 1 auto-trading is active and ready for automated execution.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "5": {
-          "section": "BypassRestriction",
-          "message": "SERVER NOTIFICATION: Investor 1 has bypass_restriction ENABLED.",
-          "time": "2026-05-22 23:17:10",
-          "type": "error",
-          "update": "new"
-        },
-        "6": {
-          "section": "ContractDuration",
-          "message": "SERVER NOTIFICATION: Investor 1 contract duration configured: 30 days.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "7": {
-          "section": "TerminalPath",
-          "message": "SERVER NOTIFICATION: Investor 1 terminal path configured successfully.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "8": {
-          "section": "BalanceCheck",
-          "message": "? BALANCE VERIFICATION: Investor's broker balance of $9024.15 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
-          "time": "2026-05-22 23:17:10",
-          "type": "success",
-          "update": "new"
-        },
-        "9": {
-          "section": "BalanceDiscrepancy",
-          "message": "SERVER NOTIFICATION: Investor 1 balance discrepancy of $1.20 detected. Calculated: $9024.15, MT5 Actual: $9025.35",
-          "time": "2026-05-23 09:44:33",
-          "type": "error",
-          "update": "new"
-        },
-        "10": {
-          "section": "UnauthorizedTrades",
-          "message": "SERVER NOTIFICATION: Investor 1 has 2 unauthorized trades with total P&L $1.92. Magic mismatch with authorized 59964271.",
-          "time": "2026-05-23 09:49:39",
-          "type": "error",
-          "update": "new"
-        },
-        "11": {
-          "section": "ApplicationStatus",
-          "message": "SERVER NOTIFICATION: Investor 1 status changed to approved_with_bypass. Bypass mode active.",
-          "time": "2026-05-23 09:49:39",
-          "type": "error",
-          "update": "new"
-        },
-        "12": {
-          "section": "AuditComplete",
-          "message": "SERVER NOTIFICATION: Investor 1 audit completed. Found: 2 trades",
-          "time": "2026-05-23 09:49:39",
-          "type": "error",
-          "update": "new"
-        },
-        "13": {
-          "section": "RestrictedTimeWindow",
-          "message": "SERVER NOTIFICATION: Investor 1 is OUTSIDE restricted time window (8:00 PM - 12:30 AM) at 06:14:32 PM. Normal trading allowed.",
-          "time": "2026-05-23 18:14:32",
-          "type": "success",
-          "update": "new"
-        },
-        "14": {
-          "section": "RestrictedTimeWindow",
-          "message": "SERVER NOTIFICATION: Investor 1 is IN restricted time window (8:00 PM - 12:30 AM) at 08:13:39 PM. Trading restrictions active.",
-          "time": "2026-05-23 20:13:39",
-          "type": "warning",
-          "update": "new"
-        },
-        "15": {
-          "section": "RestrictedTimeWindow",
-          "message": "SERVER NOTIFICATION: Investor 1 is OUTSIDE restricted time window (8:00 PM - 12:30 AM) at 07:32:13 AM. Normal trading allowed.",
-          "time": "2026-05-24 07:32:13",
-          "type": "success",
-          "update": "new"
-        }
+      "3": {
+        "section": "StartDate",
+        "message": "Your trading program is active as of May 22, 2026. Welcome aboard!",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
       },
-      "server_decision": "NULL",
-      "accountmanagement": {
-        "selected_risk_reward": [
-          3
+      "4": {
+        "section": "Autotrading",
+        "message": "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
+        "time": "2026-05-22 23:17:10",
+        "type": "error",
+        "update": "read"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "Your trading contract duration is set to 30 days. Your contract will expire on June 21, 2026. You are currently within your active trading period.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "Your trading terminal has been configured and is ready for automated trading.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $9024.15 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "read"
+      },
+      "9": {
+        "section": "BalanceDiscrepancy",
+        "message": "? BALANCE MISMATCH DETECTED: Your calculated balance ($9024.15) is higher than your MT5 actual balance ($9025.35) by $1.20. This indicates that an unauthorized activity has been taken..",
+        "time": "2026-05-23 09:44:33",
+        "type": "error",
+        "update": "read"
+      },
+      "10": {
+        "section": "UnauthorizedTrades",
+        "message": "? UNAUTHORIZED TRADES DETECTED: 2 unauthorized trade(s) found with total P&L ? $1.92. This trade does not match our authorized system activity.",
+        "time": "2026-05-23 09:49:39",
+        "type": "error",
+        "update": "read"
+      },
+      "11": {
+        "section": "ApplicationStatus",
+        "message": "?? APPLICATION STATUS CHANGE: Your account status has changed from 'approved' to 'APPROVED WITH BYPASS'. Unauthorized actions are being automatically bypassed but are still being flagged for monitoring.",
+        "time": "2026-05-23 09:49:39",
+        "type": "error",
+        "update": "read"
+      },
+      "12": {
+        "section": "AuditComplete",
+        "message": "? AUDIT COMPLETED: System audit detected 2 trades requiring attention. Please review your account activity.",
+        "time": "2026-05-23 09:49:39",
+        "type": "error",
+        "update": "read"
+      },
+      "13": {
+        "section": "RestrictedTimeWindow",
+        "message": "? NORMAL TRADING HOURS: You are outside the restricted trading window (8:00 PM - 12:30 AM). Trading activities can proceed normally. Current time: 06:14:32 PM",
+        "time": "2026-05-23 18:14:32",
+        "type": "success",
+        "update": "read"
+      },
+      "14": {
+        "section": "RestrictedTimeWindow",
+        "message": "?? RESTRICTED TIME WINDOW: You are currently in the restricted trading window (8:00 PM - 12:30 AM). Trading activities are LIMITED during this time. Current time: 08:13:39 PM",
+        "time": "2026-05-23 20:13:39",
+        "type": "warning",
+        "update": "read"
+      },
+      "15": {
+        "section": "RestrictedTimeWindow",
+        "message": "? NORMAL TRADING HOURS: You are outside the restricted trading window (8:00 PM - 12:30 AM). Trading activities can proceed normally. Current time: 07:32:13 AM",
+        "time": "2026-05-24 07:32:13",
+        "type": "success",
+        "update": "read"
+      }
+    },
+    "executions_notification": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "SERVER NOTIFICATION: Investor 1 successfully configured with strategies: prices",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "SERVER NOTIFICATION: Investor 1 enrollment confirmed. Start date: May 22, 2026",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "SERVER NOTIFICATION: Investor 1 auto-trading is active and ready for automated execution.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "SERVER NOTIFICATION: Investor 1 has bypass_restriction ENABLED.",
+        "time": "2026-05-22 23:17:10",
+        "type": "error",
+        "update": "new"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "SERVER NOTIFICATION: Investor 1 contract duration configured: 30 days.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "SERVER NOTIFICATION: Investor 1 terminal path configured successfully.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $9024.15 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-05-22 23:17:10",
+        "type": "success",
+        "update": "new"
+      },
+      "9": {
+        "section": "BalanceDiscrepancy",
+        "message": "SERVER NOTIFICATION: Investor 1 balance discrepancy of $1.20 detected. Calculated: $9024.15, MT5 Actual: $9025.35",
+        "time": "2026-05-23 09:44:33",
+        "type": "error",
+        "update": "new"
+      },
+      "10": {
+        "section": "UnauthorizedTrades",
+        "message": "SERVER NOTIFICATION: Investor 1 has 2 unauthorized trades with total P&L $1.92. Magic mismatch with authorized 59964271.",
+        "time": "2026-05-23 09:49:39",
+        "type": "error",
+        "update": "new"
+      },
+      "11": {
+        "section": "ApplicationStatus",
+        "message": "SERVER NOTIFICATION: Investor 1 status changed to approved_with_bypass. Bypass mode active.",
+        "time": "2026-05-23 09:49:39",
+        "type": "error",
+        "update": "new"
+      },
+      "12": {
+        "section": "AuditComplete",
+        "message": "SERVER NOTIFICATION: Investor 1 audit completed. Found: 2 trades",
+        "time": "2026-05-23 09:49:39",
+        "type": "error",
+        "update": "new"
+      },
+      "13": {
+        "section": "RestrictedTimeWindow",
+        "message": "SERVER NOTIFICATION: Investor 1 is OUTSIDE restricted time window (8:00 PM - 12:30 AM) at 06:14:32 PM. Normal trading allowed.",
+        "time": "2026-05-23 18:14:32",
+        "type": "success",
+        "update": "new"
+      },
+      "14": {
+        "section": "RestrictedTimeWindow",
+        "message": "SERVER NOTIFICATION: Investor 1 is IN restricted time window (8:00 PM - 12:30 AM) at 08:13:39 PM. Trading restrictions active.",
+        "time": "2026-05-23 20:13:39",
+        "type": "warning",
+        "update": "new"
+      },
+      "15": {
+        "section": "RestrictedTimeWindow",
+        "message": "SERVER NOTIFICATION: Investor 1 is OUTSIDE restricted time window (8:00 PM - 12:30 AM) at 07:32:13 AM. Normal trading allowed.",
+        "time": "2026-05-24 07:32:13",
+        "type": "success",
+        "update": "new"
+      }
+    },
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        1
+      ],
+      "hedge_orders_risk_reward": [
+        2
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 3,
+      "symbols_dictionary": {
+        "xxxjpy": [],
+        "xxxusd": [
+          "GBPUSD"
         ],
-        "hedge_orders_risk_reward": [
-          2
-        ],
-        "timeframe": [
-          "15m"
-        ],
-        "bars": 3,
-        "symbols_dictionary": {
-          "xxxjpy": [],
-          "xxxusd": [
-            "BTCUSD"
-          ],
-          "xxxaud": [],
-          "xxxnzd": [],
-          "usdxxx": [],
-          "xxxchf": [],
-          "xxxcad": [],
-          "xxxbasket": [],
-          "indices": [],
-          "metals": [],
-          "energies": [],
-          "synthetics": []
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "symbols_grid_strategy": true,
+        "enable_single_position_and_pending": false,
+        "manage_position_and_pending_orders": {
+          "count": 2
         },
-        "settings": {
-          "symbols_grid_strategy": false,
-          "enable_single_position_and_pending": false,
-          "manage_position_and_pending_orders": {
-            "count": 2
-          },
-          "skip_orders_close_to_position": false,
-          "opposite_order_restriction": false,
-          "switch_invalid_to_instant_order": false,
-          "enable_order_type_conversion": false,
-          "restrict_orders_in_time_range_of": {
-            "from": "08:00 pm",
+        "skip_orders_close_to_position": true,
+        "opposite_order_restriction": false,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrict_orders_in_time_range_of": {
+          "from": "09:00 pm",
+          "to": "12:30 am"
+        },
+        "execute_function_in_time_range_of": [
+          {
+            "from": "8:00 am",
             "to": "12:30 am"
           },
-          "execute_function_in_time_range_of": [
-            {
-              "from": "8:00 am",
-              "to": "12:30 am"
-            },
-            {
-              "from": "12:00 pm",
-              "to": "12:30 pm"
-            },
-            {
-              "from": "2:00 pm",
-              "to": "2:30 pm"
-            },
-            {
-              "from": "4:00 pm",
-              "to": "4:30 pm"
-            },
-            {
-              "from": "6:00 pm",
-              "to": "6:30 pm"
-            },
-            {
-              "from": "10:00 pm",
-              "to": "10:30 pm"
-            },
-            {
-              "from": "12:00 am",
-              "to": "12:30 am"
-            },
-            {
-              "from": "4:00 am",
-              "to": "4:30 am"
-            },
-            {
-              "from": "6:00 am",
-              "to": "6:30 am"
-            }
-          ],
-          "fetch_ohlc_data_and_directional_bias_for_investor": true,
-          "create_hedge_order": true,
-          "enable_latest_fallback_to_older_order": true,
-          "remove_orders_if_additonal_candles_is_more_than": 1,
-          "martingale_config": {
-            "enable_martingale": false,
-            "maximum_martingale_lookback": 10,
-            "martingale_days_lookback": 3,
-            "martingale_for_position_order_scale": true,
-            "martingale_loss_recovery_adder_percentage": "10%",
-            "pre_scaling": {
-              "martingale_pre_scaling": true,
-              "martingale_pre_scale_highest_risk_adder": true,
-              "highest_risk_reduction_percentage": "0%",
-              "martingale_pre_scale_expected_loss_adder": true,
-              "expected_loss_reduction_percentage": "0%"
-            }
+          {
+            "from": "12:00 pm",
+            "to": "12:30 pm"
           },
-          "enable_breakeven": true,
-          "breakeven_dictionary": [
-            {
-              "reward": 1,
-              "breakeven_at_reward": 0.01
-            },
-            {
-              "reward": 1.8,
-              "breakeven_at_reward": 0.5
-            },
-            {
-              "reward": 2,
-              "breakeven_at_reward": 0.5
-            },
-            {
-              "reward": 2.8,
-              "breakeven_at_reward": 1
-            },
-            {
-              "reward": 3,
-              "breakeven_at_reward": 1.5
-            },
-            {
-              "reward": 3.8,
-              "breakeven_at_reward": 1.7
-            },
-            {
-              "reward": 4,
-              "breakeven_at_reward": 2
-            },
-            {
-              "reward": 4.8,
-              "breakeven_at_reward": 2.2
-            },
-            {
-              "reward": 5,
-              "breakeven_at_reward": 2.5
-            },
-            {
-              "reward": 5.8,
-              "breakeven_at_reward": 2.8
-            },
-            {
-              "reward": 6,
-              "breakeven_at_reward": 3
-            },
-            {
-              "reward": 7,
-              "breakeven_at_reward": 3.5
-            },
-            {
-              "reward": 7.8,
-              "breakeven_at_reward": 3.8
-            },
-            {
-              "reward": 8,
-              "breakeven_at_reward": 4
-            },
-            {
-              "reward": 8.8,
-              "breakeven_at_reward": 4.2
-            },
-            {
-              "reward": 9,
-              "breakeven_at_reward": 4.5
-            },
-            {
-              "reward": 10,
-              "breakeven_at_reward": 5
-            }
-          ],
-          "restrict_order_from_timeframe": "none",
-          "default_price": false,
-          "risk_reward_correction": true,
-          "enable_martingale": false
+          {
+            "from": "2:00 pm",
+            "to": "2:30 pm"
+          },
+          {
+            "from": "4:00 pm",
+            "to": "4:30 pm"
+          },
+          {
+            "from": "6:00 pm",
+            "to": "6:30 pm"
+          },
+          {
+            "from": "10:00 pm",
+            "to": "10:30 pm"
+          },
+          {
+            "from": "12:00 am",
+            "to": "12:30 am"
+          },
+          {
+            "from": "4:00 am",
+            "to": "4:30 am"
+          },
+          {
+            "from": "6:00 am",
+            "to": "6:30 am"
+          }
+        ],
+        "fetch_ohlc_data_and_directional_bias_for_investor": false,
+        "create_hedge_order": false,
+        "enable_latest_fallback_to_older_order": false,
+        "remove_orders_if_additonal_candles_is_more_than": 1,
+        "martingale_config": {
+          "enable_martingale": true,
+          "maximum_martingale_lookback": 30,
+          "martingale_days_lookback": 3,
+          "martingale_for_position_order_scale": true,
+          "martingale_loss_recovery_adder_percentage": "10%",
+          "pre_scaling": {
+            "martingale_pre_scaling": true,
+            "martingale_pre_scale_highest_risk_adder": true,
+            "highest_risk_reduction_percentage": "0%",
+            "martingale_pre_scale_expected_loss_adder": true,
+            "expected_loss_reduction_percentage": "0%"
+          },
+          "hierarchical_scaling": true
         },
-        "minimum_balance_risk_distance": {
-          "1-10000000.99_risk": 4
-        },
-        "maximum_balance_risk_distance": {
-          "1-10000000.99_risk": 6
-        },
-        "account_balance_default_risk_management": {
-          "1-10000000.99_risk": 4
-        },
-        "account_balance_maximum_risk_management": {
-          "1-10000000.99_risk": 6
-        },
-        "grid_prices_setup": {
-          "grid_levels": 4,
-          "grid_multiplier": 250,
-          "bid_prices_order_type": "buy_stop",
-          "ask_prices_order_type": "sell_stop"
-        },
-        "requirements": {
-          "contract_duration": "30",
-          "min_broker_balance": "50.00"
-        },
-        "bypass_restriction": true,
-        "activate_autotrading": true,
-        "broker_balance": 9024.15,
-        "account_mode": "demo",
-        "demo_account": "1"
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.01
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 3,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 3.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 2
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 2.2
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 2.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 2.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 3
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 3.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 3.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.2
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": true
       },
-      "invested_with": "Deriv_prices",
-      "enable_autotrading": "1",
-      "bypass_restriction": "1",
-      "demo_account": "1",
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 0.5
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 4
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 3
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 150
+      },
+      "grid_prices_setup": {
+        "grid_levels": 4,
+        "grid_multiplier": 100,
+        "bid_prices_order_type": "buy_stop",
+        "ask_prices_order_type": "sell_stop"
+      },
+      "requirements": {
+        "contract_duration": "30",
+        "min_broker_balance": "50.00"
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9024.15,
       "account_mode": "demo",
-      "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe"
-    }
+      "demo_account": "1"
+    },
+    "invested_with": "Deriv_prices",
+    "enable_autotrading": "1",
+    "bypass_restriction": "1",
+    "demo_account": "1",
+    "account_mode": "demo",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe",
+    "account_balance": 8984.51,
+    "account_currency": "USD",
+    "account_leverage": 1000
+  }
 }

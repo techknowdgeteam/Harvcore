@@ -1452,31 +1452,25 @@ def check_and_record_unauthorized_actions(inv_id=None):
         if not start_datetime:
             start_datetime = datetime.now()
             print(f"│  📅 Using current date as start: {start_datetime.strftime('%Y-%m-%d')}")
-        
+            
         # ============================================================
-        # CONNECT TO MT5
+        # VERIFY MT5 CONNECTION (Assume already initialized)
         # ============================================================
-        mt5_path = broker_cfg.get("Terminal_path", "")
-        password = broker_cfg.get("PASSWORD", "")
-        server = broker_cfg.get("SERVER", "")
-        
-        if not mt5.initialize(path=mt5_path):
-            print(f"│   MT5 initialization failed: {mt5.last_error()}")
-            continue
-        
+        # Check if MT5 is connected to the correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != int(login_id):
-            print(f"│  🔌 Logging into account {login_id}...")
-            if not mt5.login(int(login_id), password=password, server=server):
-                print(f"│   Login failed: {mt5.last_error()}")
-                mt5.shutdown()
-                continue
-            print(f"│  ✅ Successfully logged in")
+        if acc is None:
+            print(f"│   ❌ MT5 not initialized or no account connected!")
+            print(f"│   💡 This function expects MT5 to be already initialized and logged in")
+            continue
+        elif acc.login != int(login_id):
+            print(f"│   ⚠️ Connected to wrong account: {acc.login} (expected: {login_id})")
+            print(f"│   💡 Cannot proceed - account mismatch")
+            continue
         else:
-            print(f"│  ✅ Already logged in")
-        
+            print(f"│  ✅ MT5 already connected to correct account: {acc.login}")
+
         # Get MT5 account balance (actual broker balance)
-        mt5_balance = mt5.account_info().balance
+        mt5_balance = acc.balance
         print(f"│  💰 MT5 Actual Balance: ${mt5_balance:.2f}")
         
         # ============================================================
@@ -1958,7 +1952,6 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print(f"│  • Contract Days Left: {contract_days_left}")
         
         # Shutdown MT5 connection for this investor
-        mt5.shutdown()
     
     # ============================================================
     # SAVE UPDATED_INVESTORS.JSON
@@ -12761,33 +12754,6 @@ def apply_default_prices(inv_id=None, callback_function=None):
     return any_orders_modified
 
 def martingale(inv_id=None):
-    """
-    Function: Checks martingale status using staged drawdown approach.
-    
-    STAGED DRAWDOWN LOGIC:
-    - Each stage has a maximum loss limit defined by account_balance_maximum_risk_management
-    - When drawdown exceeds the stage limit, we move to the next stage
-    - Only the CURRENT STAGE DRAWDOWN (remainder) is processed for recovery
-    - If remainder = 0 (exact multiple), we use account_balance_default_risk_management as floor
-    
-    LATER-BALANCE LOGIC:
-    - Starting balance is the balance on execution start date
-    - Profits are added to the starting balance to create a "later balance"
-    - Drawdown is calculated from the highest later-balance (peak including profits)
-    
-    WINRATE/LOSSRATE LOGIC:
-    - Winrate = Total Profits / (Total Profits + Total Losses) * 100
-    - Lossrate = Total Losses / (Total Profits + Total Losses) * 100
-    - Based on monetary value, not trade count
-    
-    IMPORTANT: MT5 connection must already be initialized by the calling function!
-    
-    Args:
-        inv_id: Optional specific investor ID to process. If None, processes all investors.
-        
-    Returns:
-        dict: Statistics about the martingale status
-    """
     print(f"\n{'='*10} 🎰 MARTINGALE STAGED DRAWDOWN SYSTEM {'='*10}")
     if inv_id:
         print(f" Processing single investor: {inv_id}")
@@ -13213,7 +13179,396 @@ def martingale(inv_id=None):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+
+        def record_authorized_pending_orders_local():
+            """
+            Records all authorized pending orders from MT5 to limit_orders.json files.
+            Uses existing MT5 connection - assumes already initialized by caller.
+            Returns: dict with statistics
+            """
+            print(f"\n  📝 HELPER: Recording Authorized Pending Orders")
+            print(f"  {'─'*40}")
+            
+            # Get authorized magic number from config
+            broker_cfg = usersdictionary.get(user_brokerid)
+            if not broker_cfg:
+                print(f"  │ ✗ No broker configuration found")
+                return {'success': False, 'error': 'No broker config'}
+            
+            login_id = broker_cfg.get('LOGIN_ID', '')
+            if not login_id:
+                print(f"  │ ✗ No LOGIN_ID found")
+                return {'success': False, 'error': 'No LOGIN_ID'}
+            
+            try:
+                authorized_magic_number = int(str(login_id) + str(user_brokerid))
+                print(f"  │ Authorized Magic Number: {authorized_magic_number}")
+            except (ValueError, TypeError) as e:
+                print(f"  │ ✗ Error creating magic number: {e}")
+                return {'success': False, 'error': str(e)}
+            
+            # Verify MT5 connection
+            acc = mt5.account_info()
+            if acc is None:
+                print(f"  │ ✗ MT5 not initialized or no account connected")
+                return {'success': False, 'error': 'MT5 not connected'}
+            elif acc.login != int(login_id):
+                print(f"  │ ✗ Account mismatch: {acc.login} vs expected {login_id}")
+                return {'success': False, 'error': 'Account mismatch'}
+            else:
+                print(f"  │ ✓ Connected to correct account: {acc.login}")
+            
+            # Scan pending orders
+            pending_orders = mt5.orders_get()
+            if not pending_orders:
+                print(f"  │ ℹ️ No pending orders found")
+                return {'success': True, 'orders_found': 0, 'recorded': 0}
+            
+            print(f"  │ Found {len(pending_orders)} pending order(s)")
+            
+            # Find existing limit_orders.json files
+            inv_root = Path(INV_PATH) / user_brokerid
+            all_limit_files = list(inv_root.rglob("limit_orders.json"))
+            valid_limit_files = []
+            for file_path in all_limit_files:
+                if not any(ignore in str(file_path) for ignore in ['__pycache__', '.git', 'node_modules', 'backup', 'template']):
+                    valid_limit_files.append(file_path)
+            
+            if not valid_limit_files:
+                print(f"  │ ✗ No limit_orders.json files found to append to")
+                return {'success': False, 'error': 'No limit_orders.json files'}
+            
+            print(f"  │ Found {len(valid_limit_files)} limit_orders.json file(s)")
+            
+            # Build set of existing tickets
+            existing_tickets = set()
+            symbol_to_file_map = {}
+            
+            for limit_file in valid_limit_files:
+                try:
+                    with open(limit_file, 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                    if isinstance(existing_data, list):
+                        for record in existing_data:
+                            if isinstance(record, dict) and 'ticket' in record:
+                                existing_tickets.add(record['ticket'])
+                        for record in existing_data:
+                            if isinstance(record, dict) and 'symbol' in record:
+                                if record['symbol'] not in symbol_to_file_map:
+                                    symbol_to_file_map[record['symbol']] = limit_file
+                except Exception as e:
+                    print(f"  │ ⚠️ Could not read {limit_file.name}: {e}")
+            
+            print(f"  │ Existing tickets: {len(existing_tickets)}")
+            
+            # Process each pending order
+            orders_to_record = []
+            authorized_count = 0
+            unauthorized_skipped = 0
+            duplicate_skipped = 0
+            
+            for order in pending_orders:
+                order_ticket = order.ticket
+                order_symbol = order.symbol
+                order_magic = order.magic
+                order_volume = order.volume_initial
+                order_price = order.price_open
+                order_sl = order.sl
+                order_tp = order.tp
+                order_type = order.type
+                
+                # Map MT5 order type to string format
+                order_type_map = {
+                    mt5.ORDER_TYPE_BUY_LIMIT: "buy_limit",
+                    mt5.ORDER_TYPE_SELL_LIMIT: "sell_limit",
+                    mt5.ORDER_TYPE_BUY_STOP: "buy_stop",
+                    mt5.ORDER_TYPE_SELL_STOP: "sell_stop",
+                    mt5.ORDER_TYPE_BUY_STOP_LIMIT: "buy_stop_limit",
+                    mt5.ORDER_TYPE_SELL_STOP_LIMIT: "sell_stop_limit"
+                }
+                order_type_str = order_type_map.get(order_type)
+                
+                if order_type_str is None:
+                    continue
+                
+                # Check magic number
+                if order_magic != authorized_magic_number:
+                    unauthorized_skipped += 1
+                    continue
+                
+                # Check for duplicate
+                if order_ticket in existing_tickets:
+                    duplicate_skipped += 1
+                    continue
+                
+                authorized_count += 1
+                
+                # Determine target file
+                target_file = symbol_to_file_map.get(order_symbol)
+                if target_file is None and valid_limit_files:
+                    target_file = valid_limit_files[0]
+                else:
+                    continue
+                
+                # Build order record
+                import uuid
+                order_record = {
+                    'symbol': order_symbol,
+                    'order_type': order_type_str,
+                    'entry': order_price,
+                    '_volume': order_volume,
+                    'exit': order_sl if order_sl else 0,
+                    'target': order_tp if order_tp else 0,
+                    'ticket': order_ticket,
+                    'magic': order_magic,
+                    'time_setup': datetime.fromtimestamp(order.time_setup).strftime('%Y-%m-%d %H:%M:%S') if hasattr(order, 'time_setup') else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'original_symbol': order_symbol,
+                    'recorded_timestamp': datetime.now().isoformat(),
+                    'record_id': str(uuid.uuid4()),
+                    'status': 'pending'
+                }
+                
+                # Calculate risk_reward if SL and TP are set
+                if order_sl and order_tp and order_sl != 0 and order_tp != 0:
+                    is_buy = 'buy' in order_type_str
+                    if is_buy:
+                        risk = order_price - order_sl
+                        reward = order_tp - order_price
+                    else:
+                        risk = order_sl - order_price
+                        reward = order_price - order_tp
+                    if risk > 0:
+                        order_record['risk_reward'] = round(reward / risk, 2)
+                
+                orders_to_record.append({
+                    'record': order_record,
+                    'target_file': target_file,
+                    'symbol': order_symbol,
+                    'ticket': order_ticket
+                })
+            
+            if not orders_to_record:
+                print(f"  │ ℹ️ No new authorized orders to record (Auth: {authorized_count}, Dup: {duplicate_skipped}, UnAuth: {unauthorized_skipped})")
+                return {'success': True, 'orders_found': len(pending_orders), 'recorded': 0}
+            
+            # Append orders to files
+            orders_by_file = {}
+            for order_item in orders_to_record:
+                file_path_str = str(order_item['target_file'])
+                if file_path_str not in orders_by_file:
+                    orders_by_file[file_path_str] = {
+                        'file': order_item['target_file'],
+                        'orders': []
+                    }
+                orders_by_file[file_path_str]['orders'].append(order_item)
+            
+            records_appended = 0
+            for file_key, file_data in orders_by_file.items():
+                target_file = file_data['file']
+                orders_list = file_data['orders']
+                
+                # Load existing signals
+                existing_signals = []
+                if target_file.exists():
+                    with open(target_file, 'r', encoding='utf-8') as f:
+                        existing_signals = json.load(f)
+                
+                # Append new records
+                for order_item in orders_list:
+                    existing_signals.append(order_item['record'])
+                    records_appended += 1
+                
+                # Save back
+                with open(target_file, 'w', encoding='utf-8') as f:
+                    json.dump(existing_signals, f, indent=4)
+                
+                print(f"  │ ✓ Appended {len(orders_list)} record(s) to {target_file.parent.name}")
+            
+            print(f"  │ ✓ Total recorded: {records_appended} new orders (Auth: {authorized_count}, Dup skipped: {duplicate_skipped})")
+            return {
+                'success': True, 
+                'orders_found': len(pending_orders), 
+                'recorded': records_appended,
+                'authorized': authorized_count,
+                'duplicates_skipped': duplicate_skipped,
+                'unauthorized_skipped': unauthorized_skipped
+            }
         
+        def cancel_all_pending_orders_local():
+            """
+            Cancels pending orders ONLY if:
+            1. The order ticket exists in recorded limit_orders.json files
+            2. The volume in MT5 does NOT match the volume in the JSON file
+            Orders not found in JSON or with matching volumes are kept.
+            Uses existing MT5 connection.
+            Returns: dict with statistics
+            """
+            print(f"\n  🔥 HELPER: Selective Cancellation of Mismatched Pending Orders")
+            print(f"  {'─'*40}")
+            
+            # Verify MT5 connection
+            if not mt5.terminal_info():
+                print(f"  │ ✗ MT5 not connected")
+                return {'success': False, 'error': 'MT5 not connected', 'deleted': 0}
+            
+            acc = mt5.account_info()
+            if not acc:
+                print(f"  │ ✗ Cannot get account info")
+                return {'success': False, 'error': 'No account info', 'deleted': 0}
+            
+            print(f"  │ Connected to account: {acc.login}")
+            
+            # Load all limit_orders.json files to get expected volumes by ticket
+            inv_root = Path(INV_PATH) / user_brokerid
+            all_limit_files = list(inv_root.rglob("limit_orders.json"))
+            valid_limit_files = []
+            for file_path in all_limit_files:
+                if not any(ignore in str(file_path) for ignore in ['__pycache__', '.git', 'node_modules', 'backup', 'template']):
+                    valid_limit_files.append(file_path)
+            
+            if not valid_limit_files:
+                print(f"  │ ✗ No limit_orders.json files found to verify against")
+                return {'success': False, 'error': 'No limit_orders.json files', 'deleted': 0}
+            
+            print(f"  │ Found {len(valid_limit_files)} limit_orders.json file(s)")
+            
+            # Helper function to find any *_volume key in an order
+            def get_volume_from_order(order_dict):
+                """Extract volume from any key ending with '_volume'"""
+                for key, value in order_dict.items():
+                    if key.endswith('_volume') and isinstance(value, (int, float)):
+                        return value
+                # Fallback to '_volume' key
+                if '_volume' in order_dict:
+                    return order_dict['_volume']
+                return None
+            
+            # Build dictionary of expected volumes by ticket from all JSON files
+            expected_volumes_by_ticket = {}
+            
+            for limit_file in valid_limit_files:
+                try:
+                    with open(limit_file, 'r', encoding='utf-8') as f:
+                        existing_orders = json.load(f)
+                    
+                    # Handle both list and dict formats
+                    orders_to_process = []
+                    if isinstance(existing_orders, list):
+                        orders_to_process = existing_orders
+                    elif isinstance(existing_orders, dict):
+                        # Extract from categories if dict format
+                        for category_name, category_data in existing_orders.get('categories', {}).items():
+                            symbols_in_category = category_data.get('symbols', {})
+                            for symbol, symbol_signals in symbols_in_category.items():
+                                def extract_orders(data):
+                                    if isinstance(data, dict):
+                                        if data.get("order_type") and ("entry" in data or "exit" in data):
+                                            orders_to_process.append(data)
+                                        for key, value in data.items():
+                                            if isinstance(value, (dict, list)):
+                                                extract_orders(value)
+                                    elif isinstance(data, list):
+                                        for item in data:
+                                            if isinstance(item, (dict, list)):
+                                                extract_orders(item)
+                                extract_orders(symbol_signals)
+                    
+                    for order in orders_to_process:
+                        if isinstance(order, dict) and 'ticket' in order:
+                            ticket = order['ticket']
+                            volume = get_volume_from_order(order)
+                            
+                            if volume:
+                                expected_volumes_by_ticket[ticket] = {
+                                    'expected_volume': volume,
+                                    'symbol': order.get('symbol', 'Unknown'),
+                                    'order_type': order.get('order_type', 'Unknown'),
+                                    'file': str(limit_file)
+                                }
+                except Exception as e:
+                    print(f"  │ ⚠️ Could not read {limit_file.name}: {e}")
+            
+            if not expected_volumes_by_ticket:
+                print(f"  │ ℹ️ No recorded orders with volume information found in JSON files")
+                return {'success': True, 'found': 0, 'deleted': 0, 'failed': 0}
+            
+            print(f"  │ Found {len(expected_volumes_by_ticket)} recorded orders with volume info")
+            
+            # Get all pending orders from MT5
+            pending_orders = mt5.orders_get()
+            
+            if not pending_orders:
+                print(f"  │ ℹ️ No pending orders to check")
+                return {'success': True, 'found': 0, 'deleted': 0, 'failed': 0}
+            
+            print(f"  │ Found {len(pending_orders)} pending order(s) in MT5")
+            
+            deleted = 0
+            failed = 0
+            kept_matching = 0
+            kept_not_in_json = 0
+            
+            # Check each pending order
+            for order in pending_orders:
+                order_ticket = order.ticket
+                order_volume = order.volume_initial
+                order_symbol = order.symbol
+                
+                # Get order type name for logging
+                order_type_names = {
+                    mt5.ORDER_TYPE_BUY_LIMIT: "BUY_LIMIT",
+                    mt5.ORDER_TYPE_SELL_LIMIT: "SELL_LIMIT",
+                    mt5.ORDER_TYPE_BUY_STOP: "BUY_STOP",
+                    mt5.ORDER_TYPE_SELL_STOP: "SELL_STOP",
+                }
+                order_type_name = order_type_names.get(order.type, f"TYPE_{order.type}")
+                
+                # Check if ticket exists in our recorded JSON
+                if order_ticket in expected_volumes_by_ticket:
+                    expected_data = expected_volumes_by_ticket[order_ticket]
+                    expected_volume = expected_data['expected_volume']
+                    
+                    # Compare volumes (allow small floating point difference)
+                    if abs(order_volume - expected_volume) < 0.001:
+                        # Volumes match - keep the order
+                        kept_matching += 1
+                        print(f"  │ ✓ KEPT {order_type_name} #{order_ticket} | {order_symbol} | Volume: {order_volume:.3f} (matches JSON)")
+                    else:
+                        # Volumes don't match - cancel the order
+                        cancel_request = {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": order_ticket
+                        }
+                        result = mt5.order_send(cancel_request)
+                        
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            deleted += 1
+                            print(f"  │ 🔥 CANCELLED {order_type_name} #{order_ticket} | {order_symbol} | Volume mismatch: MT5={order_volume:.3f} vs JSON={expected_volume:.3f}")
+                        else:
+                            failed += 1
+                            error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
+                            print(f"  │ ✗ Failed to cancel #{order_ticket}: {error_msg}")
+                else:
+                    # Ticket not found in JSON - keep the order (might be from other systems)
+                    kept_not_in_json += 1
+                    print(f"  │ ℹ️ KEPT {order_type_name} #{order_ticket} | {order_symbol} | Not found in recorded JSON")
+            
+            print(f"\n  │ 📊 Cancellation Summary:")
+            print(f"  │   • Total MT5 pending orders: {len(pending_orders)}")
+            print(f"  │   • Orders kept (matching volume): {kept_matching}")
+            print(f"  │   • Orders kept (not in JSON): {kept_not_in_json}")
+            print(f"  │   • Orders cancelled (volume mismatch): {deleted}")
+            print(f"  │   • Failed cancellations: {failed}")
+            
+            return {
+                'success': True, 
+                'found': len(pending_orders), 
+                'deleted': deleted, 
+                'failed': failed,
+                'kept_matching': kept_matching,
+                'kept_not_in_json': kept_not_in_json
+            }
+
         def get_all_symbols_from_limit_orders(data):
             """Get all symbols from limit_orders.json"""
             symbols = set()
@@ -13238,7 +13593,7 @@ def martingale(inv_id=None):
         def get_volume_field_from_order(order):
             """Extract volume field from order dict regardless of key name"""
             for key, value in order.items():
-                if 'volume' in key.lower() and isinstance(value, (int, float)):
+                if '_volume' in key.lower() and isinstance(value, (int, float)):
                     return key, value
             return None, None
         
@@ -13278,10 +13633,10 @@ def martingale(inv_id=None):
             if isinstance(data, dict):
                 # Check if this is a trade dictionary with order_type
                 if data.get("order_type") and ("entry" in data or "exit" in data):
-                    if "volume" in data:
-                        old_volume = data["volume"]
+                    if "_volume" in data:
+                        old_volume = data["_volume"]
                         if abs(old_volume - new_volume) > 0.001:
-                            data["volume"] = new_volume
+                            data["_volume"] = new_volume
                             updated_count += 1
                             print(f"        │ Updated {symbol} volume: {old_volume:.2f} → {new_volume:.2f} lots")
                 
@@ -13315,57 +13670,86 @@ def martingale(inv_id=None):
             return updates_summary
         
         def find_first_order_in_signals(signals_data, symbol):
-            """Find first order for a symbol in limit_orders.json"""
-            for category_name, category_data in signals_data.get('categories', {}).items():
-                symbols_in_category = category_data.get('symbols', {})
-                if symbol in symbols_in_category:
-                    symbol_data = symbols_in_category[symbol]
-                    
-                    def find_first_order(data):
-                        if isinstance(data, dict):
-                            if "order_type" in data and "entry" in data and "exit" in data:
-                                return data.get('entry'), data.get('exit'), data.get('order_type')
-                            for key, value in data.items():
-                                if isinstance(value, (dict, list)):
-                                    result = find_first_order(value)
-                                    if result[0] is not None:
-                                        return result
-                        elif isinstance(data, list):
-                            for item in data:
-                                if isinstance(item, (dict, list)):
-                                    result = find_first_order(item)
-                                    if result[0] is not None:
-                                        return result
-                        return None, None, None
-                    
-                    return find_first_order(symbol_data)
+            """Find first order for a symbol in signals.json (handles both list and dict formats)"""
+            
+            # Handle list format
+            if isinstance(signals_data, list):
+                for order in signals_data:
+                    if isinstance(order, dict) and order.get('symbol') == symbol:
+                        entry = order.get('entry')
+                        stop = order.get('exit') or order.get('stop_loss')
+                        order_type = order.get('order_type')
+                        if entry and stop and order_type:
+                            return entry, stop, order_type
+                return None, None, None
+            
+            # Handle dict format with categories
+            if isinstance(signals_data, dict):
+                for category_name, category_data in signals_data.get('categories', {}).items():
+                    symbols_in_category = category_data.get('symbols', {})
+                    if symbol in symbols_in_category:
+                        symbol_data = symbols_in_category[symbol]
+                        
+                        def find_first_order(data):
+                            if isinstance(data, dict):
+                                if "order_type" in data and "entry" in data and "exit" in data:
+                                    return data.get('entry'), data.get('exit'), data.get('order_type')
+                                for key, value in data.items():
+                                    if isinstance(value, (dict, list)):
+                                        result = find_first_order(value)
+                                        if result[0] is not None:
+                                            return result
+                            elif isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, (dict, list)):
+                                        result = find_first_order(item)
+                                        if result[0] is not None:
+                                            return result
+                            return None, None, None
+                        
+                        return find_first_order(symbol_data)
             
             return None, None, None
-        
+
         def get_current_volumes_from_signals(signals_data):
-            """Extract current volumes for all symbols from limit_orders.json"""
+            """Extract current volumes for all symbols from signals.json (handles both list and dict formats)"""
             volumes = {}
             
-            def extract_volumes(data, symbol):
-                if isinstance(data, dict):
-                    if data.get("order_type") and "entry" in data and "exit" in data:
-                        if "volume" in data:
-                            volumes[symbol] = data["volume"]
-                    for key, value in data.items():
-                        if isinstance(value, (dict, list)):
-                            extract_volumes(value, symbol)
-                elif isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, (dict, list)):
-                            extract_volumes(item, symbol)
+            # Handle list format (your actual format)
+            if isinstance(signals_data, list):
+                for order in signals_data:
+                    if isinstance(order, dict):
+                        symbol = order.get('symbol')
+                        if symbol:
+                            # Try different volume field names
+                            volume = order.get('_volume') or order.get('_volume') or order.get('scaled_volume')
+                            if volume:
+                                volumes[symbol] = float(volume)
+                return volumes
             
-            for category_name, category_data in signals_data.get('categories', {}).items():
-                symbols_in_category = category_data.get('symbols', {})
-                for symbol, symbol_signals in symbols_in_category.items():
-                    extract_volumes(symbol_signals, symbol)
+            # Handle dict format with categories (old format)
+            if isinstance(signals_data, dict):
+                def extract_volumes(data, symbol):
+                    if isinstance(data, dict):
+                        if data.get("order_type") and ("entry" in data or "exit" in data):
+                            volume = data.get('_volume') or data.get('_volume')
+                            if volume:
+                                volumes[symbol] = volume
+                        for key, value in data.items():
+                            if isinstance(value, (dict, list)):
+                                extract_volumes(value, symbol)
+                    elif isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, (dict, list)):
+                                extract_volumes(item, symbol)
+                
+                for category_name, category_data in signals_data.get('categories', {}).items():
+                    symbols_in_category = category_data.get('symbols', {})
+                    for symbol, symbol_signals in symbols_in_category.items():
+                        extract_volumes(symbol_signals, symbol)
             
             return volumes
-        
+
         def get_current_volumes_from_limit_orders(orders_data):
             """Extract current volumes for all symbols from limit_orders.json"""
             volumes = {}
@@ -13634,8 +14018,8 @@ def martingale(inv_id=None):
                                 symbol_data = symbols_in_category[symbol]
                                 def find_volume(data):
                                     if isinstance(data, dict):
-                                        if "volume" in data:
-                                            return data["volume"]
+                                        if "_volume" in data:
+                                            return data["_volume"]
                                         for key, value in data.items():
                                             if isinstance(value, (dict, list)):
                                                 result = find_volume(value)
@@ -13759,7 +14143,7 @@ def martingale(inv_id=None):
                                     'order_type': order_type,
                                     'entry': entry,
                                     'stop': stop,
-                                    'volume': volume,
+                                    '_volume': volume,
                                     'risk': risk,
                                     'original_risk': risk,
                                     'source': 'limit_orders'
@@ -13777,25 +14161,77 @@ def martingale(inv_id=None):
             return highest_risk_orders
         
         def analyze_highest_risk_from_signals(signals_data):
-            """Analyze highest risk orders from limit_orders.json only"""
+            """Analyze highest risk orders from signals.json (handles both list and dict formats)"""
             highest_risk_orders = {}
             
             if not signals_data:
                 return highest_risk_orders
             
+            # Handle list format (your actual format)
+            if isinstance(signals_data, list):
+                symbol_orders = {}
+                for order in signals_data:
+                    if isinstance(order, dict):
+                        symbol = order.get('symbol')
+                        if symbol:
+                            if symbol not in symbol_orders:
+                                symbol_orders[symbol] = []
+                            symbol_orders[symbol].append(order)
+                
+                for symbol, orders_list in symbol_orders.items():
+                    highest_risk = 0
+                    highest_risk_order_info = None
+                    
+                    for order in orders_list:
+                        entry = order.get('entry')
+                        stop = order.get('exit') or order.get('stop_loss')
+                        volume = order.get('_volume') or order.get('_volume') or order.get('scaled_volume')
+                        order_type = order.get('order_type', 'Unknown')
+                        
+                        if entry and stop and volume and volume > 0:
+                            symbol_info = mt5.symbol_info(symbol)
+                            if symbol_info:
+                                contract_size = symbol_info.trade_contract_size
+                                price_diff = abs(entry - stop)
+                                risk = price_diff * volume * contract_size
+                                
+                                if risk > highest_risk:
+                                    highest_risk = risk
+                                    highest_risk_order_info = {
+                                        'order_type': order_type,
+                                        'entry': entry,
+                                        'stop': stop,
+                                        '_volume': volume,
+                                        'risk': risk,
+                                        'original_risk': risk,
+                                        'source': 'signals'
+                                    }
+                    
+                    if highest_risk_order_info:
+                        if highest_risk_reduction_percentage > 0:
+                            reduction_amount = highest_risk * (highest_risk_reduction_percentage / 100)
+                            highest_risk = highest_risk - reduction_amount
+                            highest_risk_order_info['risk'] = highest_risk
+                            highest_risk_order_info['reduction_applied'] = reduction_amount
+                        
+                        highest_risk_orders[symbol] = highest_risk_order_info
+                
+                return highest_risk_orders
+            
+            # Handle dict format with categories (old format)
             def find_all_orders(data, symbol, orders_list):
                 if isinstance(data, dict):
                     if data.get("order_type") and "entry" in data and "exit" in data:
                         entry = data.get('entry')
                         stop = data.get('exit')
-                        volume = data.get('volume', 0)
+                        volume = data.get('_volume', 0)
                         order_type = data.get('order_type', 'Unknown')
                         
                         if entry and stop and volume and volume > 0:
                             orders_list.append({
                                 'entry': entry,
                                 'stop': stop,
-                                'volume': volume,
+                                '_volume': volume,
                                 'order_type': order_type
                             })
                     
@@ -13820,7 +14256,7 @@ def martingale(inv_id=None):
                     for order in orders_list:
                         entry = order['entry']
                         stop = order['stop']
-                        volume = order['volume']
+                        volume = order['_volume']
                         order_type = order['order_type']
                         
                         symbol_info = mt5.symbol_info(symbol)
@@ -13835,7 +14271,7 @@ def martingale(inv_id=None):
                                     'order_type': order_type,
                                     'entry': entry,
                                     'stop': stop,
-                                    'volume': volume,
+                                    '_volume': volume,
                                     'risk': risk,
                                     'original_risk': risk,
                                     'source': 'signals'
@@ -13851,19 +14287,35 @@ def martingale(inv_id=None):
                         highest_risk_orders[symbol] = highest_risk_order_info
             
             return highest_risk_orders
-        
+
         def process_pre_scaling():
-            """Process pre-scaling independently for limit_orders.json and limit_orders.json"""
+            """
+            Process pre-scaling based on existing OPEN POSITIONS.
+            
+            LOGIC (restored from original):
+            1. Get all open MT5 positions with valid stop losses
+            2. For each position, calculate expected loss = (entry - stop) * volume * contract_size
+            3. Apply expected loss reduction percentage if configured
+            4. Add highest risk from pending orders (if enabled)
+            5. Calculate additional volume needed to cover total extra risk
+            6. Update pending orders with new volumes (adds to existing volume)
+            
+            Then hierarchical scaling will process the updated orders.
+            
+            Returns:
+                bool: True if any orders were updated, False otherwise
+            """
             if not martingale_pre_scaling:
                 return False
             
             print(f"\n{'='*60}")
-            print(f"  🎯 PRE-SCALING ANALYSIS")
+            print(f"  🎯 PRE-SCALING ANALYSIS (Based on Open Positions)")
             print(f"{'='*60}")
             print(f"  │ Highest risk adder: {'✓ ENABLED' if martingale_pre_scale_highest_risk_adder else '✗ DISABLED'}")
             print(f"  │   - Reduction: {highest_risk_reduction_percentage}%")
             print(f"  │ Expected loss adder: {'✓ ENABLED' if martingale_pre_scale_expected_loss_adder else '✗ DISABLED'}")
             print(f"  │   - Reduction: {expected_loss_reduction_percentage}%")
+            print(f"  │ Stage drawdown: ${current_stage_drawdown:.2f}")
             print(f"{'─'*60}")
             
             try:
@@ -13874,40 +14326,37 @@ def martingale(inv_id=None):
                     return False
                 
                 print(f"  │ 📊 Open Positions: {len(positions)}")
-                print()
                 
                 # Display current positions details
                 for pos in positions:
-                    print(f"    Position #{pos.ticket}: {pos.symbol}")
+                    print(f"\n    Position #{pos.ticket}: {pos.symbol}")
                     print(f"      ├─ Type: {'BUY' if pos.type == 0 else 'SELL'}")
                     print(f"      ├─ Volume: {pos.volume:.2f} lots")
                     print(f"      ├─ Entry: {pos.price_open:.5f}")
                     print(f"      ├─ Current: {pos.price_current:.5f}")
                     print(f"      ├─ Stop Loss: {pos.sl if pos.sl else 'None'}")
-                    print(f"      ├─ Take Profit: {pos.tp if pos.tp else 'None'}")
                     print(f"      └─ Profit: ${pos.profit:.2f}")
-                    print()
                 
-                # Load order files independently
+                # Load order files
                 limit_orders_path, limit_orders_data = load_limit_orders()
                 signals_path, signals_data = load_signals_json()
                 
-                # Get current volumes from both files independently
+                # Get current volumes from both files
                 current_limit_volumes = {}
                 if limit_orders_data:
                     current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
-                    print(f"  📄 Current limit_orders.json volumes:")
+                    print(f"\n  📄 Current limit_orders.json volumes:")
                     for symbol, vol in current_limit_volumes.items():
                         print(f"     {symbol}: {vol:.2f} lots")
                 
                 current_signals_volumes = {}
                 if signals_data:
                     current_signals_volumes = get_current_volumes_from_signals(signals_data)
-                    print(f"  📄 Current limit_orders.json volumes:")
+                    print(f"\n  📄 Current signals.json volumes:")
                     for symbol, vol in current_signals_volumes.items():
                         print(f"     {symbol}: {vol:.2f} lots")
                 
-                # Analyze highest risk orders from limit_orders.json only
+                # Analyze highest risk orders from limit_orders.json (if enabled)
                 limit_highest_risk_orders = {}
                 if martingale_pre_scale_highest_risk_adder and limit_orders_data:
                     print(f"\n  🔍 Analyzing highest risk orders from limit_orders.json:")
@@ -13919,7 +14368,7 @@ def martingale(inv_id=None):
                         print(f"       ├─ Type: {order_info['order_type']}")
                         print(f"       ├─ Entry: {order_info['entry']:.5f}")
                         print(f"       ├─ Stop: {order_info['stop']:.5f}")
-                        print(f"       ├─ Volume: {order_info['volume']:.2f} lots")
+                        print(f"       ├─ Volume: {order_info['_volume']:.2f} lots")
                         print(f"       ├─ Original Risk: ${order_info['original_risk']:.2f}")
                         if highest_risk_reduction_percentage > 0:
                             print(f"       ├─ Reduction ({highest_risk_reduction_percentage}%): ${order_info.get('reduction_applied', 0):.2f}")
@@ -13927,19 +14376,19 @@ def martingale(inv_id=None):
                         else:
                             print(f"       └─ Risk: ${order_info['risk']:.2f}")
                 
-                # Analyze highest risk orders from limit_orders.json only
+                # Analyze highest risk orders from signals.json (if enabled)
                 signals_highest_risk_orders = {}
                 if martingale_pre_scale_highest_risk_adder and signals_data:
-                    print(f"\n  🔍 Analyzing highest risk orders from limit_orders.json:")
+                    print(f"\n  🔍 Analyzing highest risk orders from signals.json:")
                     print(f"  {'─'*50}")
                     signals_highest_risk_orders = analyze_highest_risk_from_signals(signals_data)
                     
                     for symbol, order_info in signals_highest_risk_orders.items():
-                        print(f"\n    📌 {symbol} (from limit_orders.json) - Highest Risk Order:")
+                        print(f"\n    📌 {symbol} (from signals.json) - Highest Risk Order:")
                         print(f"       ├─ Type: {order_info['order_type']}")
                         print(f"       ├─ Entry: {order_info['entry']:.5f}")
                         print(f"       ├─ Stop: {order_info['stop']:.5f}")
-                        print(f"       ├─ Volume: {order_info['volume']:.2f} lots")
+                        print(f"       ├─ Volume: {order_info['_volume']:.2f} lots")
                         print(f"       ├─ Original Risk: ${order_info['original_risk']:.2f}")
                         if highest_risk_reduction_percentage > 0:
                             print(f"       ├─ Reduction ({highest_risk_reduction_percentage}%): ${order_info.get('reduction_applied', 0):.2f}")
@@ -13947,13 +14396,13 @@ def martingale(inv_id=None):
                         else:
                             print(f"       └─ Risk: ${order_info['risk']:.2f}")
                 
-                # Pre-scale calculation for each position - INDEPENDENT FOR LIMIT ORDERS
+                # Pre-scale calculation for each position
                 pre_scale_volumes_limit = {}
                 pre_scale_volumes_signals = {}
                 pre_scaling_details = {}
                 
                 print(f"\n{'─'*60}")
-                print(f"  📈 Calculating pre-scaling requirements per symbol:")
+                print(f"  📈 Calculating pre-scaling requirements from open positions:")
                 print(f"{'─'*60}")
                 
                 for position in positions:
@@ -13994,23 +14443,24 @@ def martingale(inv_id=None):
                         expected_loss_original = price_diff * position_volume * contract_size
                         expected_loss = abs(expected_loss_original)
                         
-                        if expected_loss_reduction_percentage > 0:
-                            reduction_amount = expected_loss * (expected_loss_reduction_percentage / 100)
-                            expected_loss = expected_loss - reduction_amount
-                        
                         print(f"     📉 Expected Loss Calculation:")
                         print(f"        ├─ Price diff: {price_diff:.5f}")
                         print(f"        ├─ Contract size: {contract_size}")
                         print(f"        ├─ Original loss: ${abs(expected_loss_original):.2f}")
-                        if expected_loss_reduction_percentage > 0:
+                        
+                        # Apply expected loss reduction if configured
+                        if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0:
+                            reduction_amount = expected_loss * (expected_loss_reduction_percentage / 100)
+                            expected_loss = expected_loss - reduction_amount
                             print(f"        ├─ Reduction ({expected_loss_reduction_percentage}%): ${reduction_amount:.2f}")
+                        
                         print(f"        └─ Adjusted loss: ${expected_loss:.2f}")
                         
-                        # Risk per lot
+                        # Risk per lot for this symbol
                         risk_per_lot = price_diff * contract_size
                         print(f"     Risk per lot: ${risk_per_lot:.2f}")
                         
-                        # ===== PROCESS LIMIT_ORDERS.JSON INDEPENDENTLY =====
+                        # ===== PROCESS LIMIT_ORDERS.JSON =====
                         if limit_orders_data and current_limit_volumes.get(symbol, 0) > 0:
                             print(f"\n     📄 PROCESSING LIMIT_ORDERS.JSON for {symbol}:")
                             
@@ -14020,7 +14470,7 @@ def martingale(inv_id=None):
                                 "file_type": "limit_orders",
                                 "expected_loss": expected_loss,
                                 "expected_loss_original": abs(expected_loss_original),
-                                "expected_loss_reduction": reduction_amount if expected_loss_reduction_percentage > 0 else 0,
+                                "expected_loss_reduction": reduction_amount if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0 else 0,
                                 "highest_risk": 0,
                                 "highest_risk_original": 0,
                                 "highest_risk_reduction": 0,
@@ -14044,6 +14494,16 @@ def martingale(inv_id=None):
                                 total_extra_limit += highest_risk_value
                                 print(f"        ├─ Highest risk adder (from limit_orders): ${highest_risk_value:.2f}")
                             
+                            # Also add stage drawdown recovery amount
+                            if current_stage_drawdown > 0:
+                                # Distribute stage drawdown across symbols with pending orders
+                                symbols_with_orders = len([s for s in current_limit_volumes.keys() if current_limit_volumes.get(s, 0) > 0])
+                                if symbols_with_orders > 0:
+                                    drawdown_share = current_stage_drawdown / symbols_with_orders
+                                    total_extra_limit += drawdown_share
+                                    calculation_details_limit["drawdown_share"] = drawdown_share
+                                    print(f"        ├─ Stage drawdown share: ${drawdown_share:.2f}")
+                            
                             calculation_details_limit["total_extra"] = total_extra_limit
                             
                             if total_extra_limit > 0:
@@ -14058,20 +14518,29 @@ def martingale(inv_id=None):
                                 new_volume = current_volume + additional_volume_needed
                                 new_volume = round(new_volume, 2)
                                 
+                                # Respect broker volume limits
+                                min_volume = symbol_info.volume_min
+                                max_volume = symbol_info.volume_max
+                                volume_step = symbol_info.volume_step
+                                
+                                # Round to valid step
+                                steps = round(new_volume / volume_step) if volume_step > 0 else 0
+                                new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                                
                                 print(f"        ├─ Current volume: {current_volume:.2f} lots")
                                 print(f"        ├─ Additional needed: {additional_volume_needed:.2f} lots")
                                 print(f"        └─ NEW TOTAL VOLUME: {new_volume:.2f} lots")
                                 
-                                if new_volume >= 0.01 and new_volume != current_volume:
+                                if new_volume >= min_volume and abs(new_volume - current_volume) > 0.001:
                                     pre_scale_volumes_limit[symbol] = new_volume
                                 
                                 pre_scaling_details[f"{symbol}_limit"] = calculation_details_limit
                             else:
                                 print(f"        └─ No extra risk to cover for limit orders")
                         
-                        # ===== PROCESS limit_orders.json INDEPENDENTLY =====
+                        # ===== PROCESS SIGNALS.JSON =====
                         if signals_data and current_signals_volumes.get(symbol, 0) > 0:
-                            print(f"\n     📄 PROCESSING limit_orders.json for {symbol}:")
+                            print(f"\n     📄 PROCESSING SIGNALS.JSON for {symbol}:")
                             
                             total_extra_signals = 0
                             calculation_details_signals = {
@@ -14079,7 +14548,7 @@ def martingale(inv_id=None):
                                 "file_type": "signals",
                                 "expected_loss": expected_loss,
                                 "expected_loss_original": abs(expected_loss_original),
-                                "expected_loss_reduction": reduction_amount if expected_loss_reduction_percentage > 0 else 0,
+                                "expected_loss_reduction": reduction_amount if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0 else 0,
                                 "highest_risk": 0,
                                 "highest_risk_original": 0,
                                 "highest_risk_reduction": 0,
@@ -14103,6 +14572,15 @@ def martingale(inv_id=None):
                                 total_extra_signals += highest_risk_value
                                 print(f"        ├─ Highest risk adder (from signals): ${highest_risk_value:.2f}")
                             
+                            # Also add stage drawdown recovery amount
+                            if current_stage_drawdown > 0:
+                                symbols_with_signals = len([s for s in current_signals_volumes.keys() if current_signals_volumes.get(s, 0) > 0])
+                                if symbols_with_signals > 0:
+                                    drawdown_share = current_stage_drawdown / symbols_with_signals
+                                    total_extra_signals += drawdown_share
+                                    calculation_details_signals["drawdown_share"] = drawdown_share
+                                    print(f"        ├─ Stage drawdown share: ${drawdown_share:.2f}")
+                            
                             calculation_details_signals["total_extra"] = total_extra_signals
                             
                             if total_extra_signals > 0:
@@ -14117,31 +14595,39 @@ def martingale(inv_id=None):
                                 new_volume = current_volume + additional_volume_needed
                                 new_volume = round(new_volume, 2)
                                 
+                                # Respect broker volume limits
+                                min_volume = symbol_info.volume_min
+                                max_volume = symbol_info.volume_max
+                                volume_step = symbol_info.volume_step
+                                
+                                steps = round(new_volume / volume_step) if volume_step > 0 else 0
+                                new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                                
                                 print(f"        ├─ Current volume: {current_volume:.2f} lots")
                                 print(f"        ├─ Additional needed: {additional_volume_needed:.2f} lots")
                                 print(f"        └─ NEW TOTAL VOLUME: {new_volume:.2f} lots")
                                 
-                                if new_volume >= 0.01 and new_volume != current_volume:
+                                if new_volume >= min_volume and abs(new_volume - current_volume) > 0.001:
                                     pre_scale_volumes_signals[symbol] = new_volume
                                 
                                 pre_scaling_details[f"{symbol}_signals"] = calculation_details_signals
                             else:
                                 print(f"        └─ No extra risk to cover for signals")
-                        
+                                
                     except Exception as e:
                         print(f"     ✗ Error processing {symbol}: {e}")
                         import traceback
                         traceback.print_exc()
                         continue
                 
-                # Apply updates to files independently
+                # Apply updates to files
                 print(f"\n{'─'*60}")
                 print(f"  💾 APPLYING PRE-SCALING UPDATES")
                 print(f"{'─'*60}")
                 
                 updated = False
                 
-                # Update limit_orders.json independently
+                # Update limit_orders.json
                 if pre_scale_volumes_limit and limit_orders_data:
                     print(f"\n  📄 Updating limit_orders.json:")
                     updates_summary = update_volumes_in_limit_orders(limit_orders_data, pre_scale_volumes_limit)
@@ -14150,29 +14636,59 @@ def martingale(inv_id=None):
                         updated = True
                         for symbol, count in updates_summary.items():
                             if count > 0:
-                                print(f"     ✓ {symbol}: updated {count} order(s) in limit_orders.json")
+                                print(f"     ✓ {symbol}: updated {count} order(s) to {pre_scale_volumes_limit[symbol]:.3f} lots")
                     else:
                         print(f"     ℹ️ No changes needed for limit_orders.json")
                 
-                # Update limit_orders.json independently
+                # Update signals.json
                 if pre_scale_volumes_signals and signals_data:
-                    print(f"\n  📄 Updating limit_orders.json:")
-                    updates_summary = update_all_symbol_volumes_in_signals(signals_data, pre_scale_volumes_signals)
-                    if any(count > 0 for count in updates_summary.values()):
+                    print(f"\n  📄 Updating signals.json:")
+                    
+                    def update_volumes_recursive(data, symbol, new_volume):
+                        """Recursively update volume fields for a symbol"""
+                        if isinstance(data, dict):
+                            if data.get('symbol') == symbol and data.get('order_type'):
+                                if '_volume' in data:
+                                    old_vol = data['_volume']
+                                    if abs(old_vol - new_volume) > 0.001:
+                                        data['_volume'] = new_volume
+                                        return 1
+                                if '_volume' in data:
+                                    old_vol = data['_volume']
+                                    if abs(old_vol - new_volume) > 0.001:
+                                        data['_volume'] = new_volume
+                                        return 1
+                            for key, value in data.items():
+                                if isinstance(value, (dict, list)):
+                                    count = update_volumes_recursive(value, symbol, new_volume)
+                                    if count > 0:
+                                        return count
+                        elif isinstance(data, list):
+                            total_updates = 0
+                            for item in data:
+                                total_updates += update_volumes_recursive(item, symbol, new_volume)
+                            return total_updates
+                        return 0
+                    
+                    updates_count = 0
+                    for symbol, new_volume in pre_scale_volumes_signals.items():
+                        count = update_volumes_recursive(signals_data, symbol, new_volume)
+                        if count > 0:
+                            updates_count += count
+                            print(f"     ✓ {symbol}: updated {count} order(s) to {new_volume:.3f} lots")
+                    
+                    if updates_count > 0:
                         save_signals_json(signals_path, signals_data)
                         updated = True
-                        for symbol, count in updates_summary.items():
-                            if count > 0:
-                                print(f"     ✓ {symbol}: updated {count} order(s) in limit_orders.json")
                     else:
-                        print(f"     ℹ️ No changes needed for limit_orders.json")
+                        print(f"     ℹ️ No changes needed for signals.json")
                 
                 # Store pre-scaling details in stats
                 stats["pre_scaling_details"] = pre_scaling_details
                 
                 if updated:
                     print(f"\n  ✅ PRE-SCALING COMPLETE")
-                    print(f"     ├─ Total symbols processed: {len(set([k.split('_')[0] for k in pre_scaling_details.keys()]))}")
+                    print(f"     ├─ Total symbols processed from positions: {len(positions)}")
                     print(f"     ├─ Limit orders updated: {len(pre_scale_volumes_limit)}")
                     print(f"     └─ Signals updated: {len(pre_scale_volumes_signals)}")
                 else:
@@ -14185,14 +14701,355 @@ def martingale(inv_id=None):
                 import traceback
                 traceback.print_exc()
                 return False
-
-        # ========== SECTION 9: SAFETY CHECK ==========
+    
+        def process_hierarchical_scaling():
+            """
+            Process hierarchical scaling after pre-scaling.
+            
+            LOGIC:
+            1. Group orders by symbol and direction (BUY/SELL) from limit_orders.json and signals.json
+            2. For SELL orders: sort descending (highest first = closest to market)
+            3. For BUY orders: sort ascending (lowest first = closest to market)
+            4. Calculate risk for the FARTHEST order first
+            5. Each closer order inherits risk from the farther order (reverse inheritance)
+            6. Recalculate volume based on inherited risk using MT5 order_calc_profit
+            7. Update orders with new hierarchical volumes
+            
+            Returns:
+                bool: True if any orders were updated, False otherwise
+            """
+            if not martingale_enabled:
+                return False
+            
+            # Check if hierarchical scaling is enabled
+            hierarchical_enabled = config.get("settings", {}).get("martingale_config", {}).get("hierarchical_scaling", False)
+            
+            if not hierarchical_enabled:
+                print(f"\n  ⏭️ Hierarchical scaling DISABLED in config")
+                return False
+            
+            print(f"\n{'='*60}")
+            print(f"  🪜 HIERARCHICAL SCALING (Post Pre-Scaling)")
+            print(f"{'='*60}")
+            print(f"  │ Grouping orders by symbol and direction...")
+            print(f"  │ For SELL: descending price (highest first = closest to market)")
+            print(f"  │ For BUY: ascending price (lowest first = closest to market)")
+            print(f"  │ FARTHEST order (Tier N) sets the base risk")
+            print(f"  │ Each CLOSER order inherits risk from the farther order")
+            print(f"{'─'*60}")
+            
+            updated = False
+            hierarchical_details = {}
+            
+            try:
+                # Load both order files
+                limit_orders_path, limit_orders_data = load_limit_orders()
+                signals_path, signals_data = load_signals_json()
+                
+                # Track updates for each file
+                limit_updates = {}
+                signals_updates = {}
+                
+                # Helper function to calculate risk safely
+                def calculate_risk_safe(symbol, order_type, entry, stop, volume):
+                    """Calculate risk using MT5, handling price normalization"""
+                    try:
+                        is_buy = 'BUY' in order_type.upper()
+                        
+                        # For risk calculation, we need to ensure stop is on the correct side
+                        # The actual risk amount is always positive
+                        if is_buy:
+                            risk_distance = abs(entry - stop)
+                            calc_type = mt5.ORDER_TYPE_BUY
+                        else:
+                            risk_distance = abs(stop - entry)
+                            calc_type = mt5.ORDER_TYPE_SELL
+                        
+                        # Use order_calc_profit with the correct direction
+                        profit = mt5.order_calc_profit(calc_type, symbol, volume, entry, stop)
+                        
+                        if profit is not None:
+                            return abs(profit)
+                        
+                        # Fallback: manual calculation
+                        symbol_info = mt5.symbol_info(symbol)
+                        if symbol_info:
+                            contract_size = symbol_info.trade_contract_size
+                            price_diff = risk_distance
+                            risk = price_diff * volume * contract_size
+                            return risk
+                        
+                        return None
+                    except Exception as e:
+                        print(f"          Risk calculation error: {e}")
+                        return None
+                
+                # ========== PROCESS LIMIT_ORDERS.JSON ==========
+                if limit_orders_data and isinstance(limit_orders_data, list):
+                    print(f"\n  📄 Processing limit_orders.json:")
+                    
+                    # Group orders by symbol and direction
+                    grouped_orders = {}
+                    
+                    for idx, order in enumerate(limit_orders_data):
+                        if not isinstance(order, dict):
+                            continue
+                        
+                        symbol = order.get('symbol')
+                        order_type = order.get('order_type', '').upper()
+                        entry = order.get('entry')
+                        stop = order.get('exit') or order.get('stop_loss')
+                        
+                        volume_key, current_volume = get_volume_field_from_order(order)
+                        
+                        if not all([symbol, order_type, entry, stop, current_volume]):
+                            continue
+                        
+                        is_buy = 'BUY' in order_type
+                        direction = 'BUY' if is_buy else 'SELL'
+                        group_key = f"{symbol}_{direction}"
+                        
+                        # Get current market price
+                        symbol_info = mt5.symbol_info(symbol)
+                        if not symbol_info:
+                            continue
+                        
+                        current_price = symbol_info.ask if is_buy else symbol_info.bid
+                        distance_to_market = abs(entry - current_price)
+                        
+                        if group_key not in grouped_orders:
+                            grouped_orders[group_key] = []
+                        
+                        grouped_orders[group_key].append({
+                            'index': idx,
+                            'symbol': symbol,
+                            'order_type': order_type,
+                            'entry': entry,
+                            'stop': stop,
+                            'current_volume': current_volume,
+                            'volume_key': volume_key,
+                            'distance': distance_to_market,
+                            'is_buy': is_buy,
+                            'original_order': order
+                        })
+                    
+                    # Process each group
+                    for group_key, orders_list in grouped_orders.items():
+                        symbol = group_key.split('_')[0]
+                        direction = group_key.split('_')[1]
+                        
+                        # Sort orders:
+                        # - SELL: descending price (highest first = closest to market)
+                        # - BUY: ascending price (lowest first = closest to market)
+                        if direction == 'SELL':
+                            orders_list.sort(key=lambda x: x['entry'], reverse=True)
+                            sort_order = "descending (highest first = closest)"
+                        else:  # BUY
+                            orders_list.sort(key=lambda x: x['entry'])
+                            sort_order = "ascending (lowest first = closest)"
+                        
+                        print(f"\n    📊 {symbol} - {direction} orders ({len(orders_list)}):")
+                        print(f"       Sort: {sort_order}")
+                        print(f"       Inheritance: FARTHEST order sets base risk, CLOSER orders inherit")
+                        
+                        # Process from FARTHEST to CLOSEST (reverse order)
+                        # Store calculated risks for each tier
+                        tier_risks = []
+                        
+                        # First, calculate risk for each order at its current volume
+                        for order_info in orders_list:
+                            entry = order_info['entry']
+                            stop = order_info['stop']
+                            current_volume = order_info['current_volume']
+                            order_type = order_info['order_type']
+                            
+                            current_risk = calculate_risk_safe(symbol, order_type, entry, stop, current_volume)
+                            
+                            if current_risk is None or current_risk <= 0:
+                                print(f"       ❌ Cannot calculate risk for {symbol} at {entry}")
+                                current_risk = 0
+                            
+                            tier_risks.append({
+                                'order_info': order_info,
+                                'current_risk': current_risk,
+                                'current_volume': current_volume
+                            })
+                        
+                        # Now process in reverse order (farthest first)
+                        # Farthest order (last in sorted list) becomes the base
+                        for i in range(len(tier_risks) - 1, -1, -1):
+                            tier_num = i + 1
+                            tier_data = tier_risks[i]
+                            order_info = tier_data['order_info']
+                            current_risk = tier_data['current_risk']
+                            current_volume = tier_data['current_volume']
+                            entry = order_info['entry']
+                            stop = order_info['stop']
+                            order_type = order_info['order_type']
+                            
+                            if i == len(tier_risks) - 1:
+                                # FARTHEST order (last in list) - this is the base tier
+                                target_risk = current_risk
+                                print(f"\n       🪜 Tier {tier_num} (FARTHEST - BASE):")
+                                print(f"          Entry: {entry:.5f} | Stop: {stop:.5f}")
+                                print(f"          Volume: {current_volume:.3f} | Risk: ${current_risk:.2f}")
+                                print(f"          → This is the BASE tier - all closer orders will inherit this risk")
+                            else:
+                                # CLOSER orders inherit risk from the FARTHEST order
+                                # Use the base risk (from the farthest order)
+                                target_risk = tier_risks[-1]['current_risk']
+                                
+                                # Binary search for volume that gives target_risk
+                                symbol_info = mt5.symbol_info(symbol)
+                                if not symbol_info:
+                                    print(f"       ❌ Tier {tier_num}: Cannot get symbol info for {symbol}")
+                                    continue
+                                
+                                min_volume = symbol_info.volume_min
+                                max_volume = symbol_info.volume_max
+                                volume_step = symbol_info.volume_step
+                                
+                                low = min_volume
+                                high = max_volume
+                                best_volume = current_volume
+                                best_risk_diff = float('inf')
+                                
+                                for _ in range(50):
+                                    test_volume = (low + high) / 2
+                                    if volume_step > 0:
+                                        test_volume = round(test_volume / volume_step) * volume_step
+                                    test_volume = max(min_volume, min(max_volume, test_volume))
+                                    test_volume = round(test_volume, 2)
+                                    
+                                    test_risk = calculate_risk_safe(symbol, order_type, entry, stop, test_volume)
+                                    
+                                    if test_risk is None:
+                                        break
+                                    
+                                    risk_diff = abs(test_risk - target_risk)
+                                    
+                                    if risk_diff < best_risk_diff:
+                                        best_risk_diff = risk_diff
+                                        best_volume = test_volume
+                                    
+                                    if abs(test_risk - target_risk) < 0.01:
+                                        best_volume = test_volume
+                                        break
+                                    
+                                    if test_risk < target_risk:
+                                        low = test_volume
+                                    else:
+                                        high = test_volume
+                                
+                                best_volume = round(best_volume, 2)
+                                best_volume = max(min_volume, min(max_volume, best_volume))
+                                
+                                actual_risk = calculate_risk_safe(symbol, order_type, entry, stop, best_volume)
+                                if actual_risk is None:
+                                    actual_risk = target_risk
+                                
+                                print(f"\n       🪜 Tier {tier_num} (CLOSER - inherits from Tier {len(tier_risks)}):")
+                                print(f"          Entry: {entry:.5f} | Stop: {stop:.5f}")
+                                print(f"          Original volume: {current_volume:.3f} (risk: ${current_risk:.2f})")
+                                print(f"          Target risk (inherited from farthest): ${target_risk:.2f}")
+                                print(f"          NEW volume: {best_volume:.3f} lots (actual risk: ${actual_risk:.2f})")
+                                
+                                # Store update for this order
+                                limit_updates[order_info['index']] = {
+                                    'new_volume': best_volume,
+                                    'volume_key': order_info['volume_key'],
+                                    'old_volume': current_volume,
+                                    'target_risk': target_risk,
+                                    'actual_risk': actual_risk,
+                                    'tier': tier_num,
+                                    'is_base': False
+                                }
+                                
+                                hierarchical_details[f"{symbol}_{direction}_tier{tier_num}"] = {
+                                    'symbol': symbol,
+                                    'direction': direction,
+                                    'tier': tier_num,
+                                    'entry': entry,
+                                    'stop': stop,
+                                    'old_volume': current_volume,
+                                    'new_volume': best_volume,
+                                    'old_risk': current_risk,
+                                    'new_risk': actual_risk,
+                                    'target_risk': target_risk,
+                                    'source': 'limit_orders',
+                                    'inherits_from': f"tier_{len(tier_risks)}"
+                                }
+                        
+                        # Also mark the base order (it keeps its original volume but add metadata)
+                        base_idx = tier_risks[-1]['order_info']['index']
+                        limit_updates[base_idx] = {
+                            'new_volume': tier_risks[-1]['current_volume'],
+                            'volume_key': tier_risks[-1]['order_info']['volume_key'],
+                            'old_volume': tier_risks[-1]['current_volume'],
+                            'target_risk': tier_risks[-1]['current_risk'],
+                            'actual_risk': tier_risks[-1]['current_risk'],
+                            'tier': len(tier_risks),
+                            'is_base': True
+                        }
+                        
+                        hierarchical_details[f"{symbol}_{direction}_base_tier"] = {
+                            'symbol': symbol,
+                            'direction': direction,
+                            'tier': len(tier_risks),
+                            'entry': tier_risks[-1]['order_info']['entry'],
+                            'stop': tier_risks[-1]['order_info']['stop'],
+                            '_volume': tier_risks[-1]['current_volume'],
+                            'risk': tier_risks[-1]['current_risk'],
+                            'source': 'limit_orders',
+                            'is_base': True
+                        }
+                        
+                        print(f"\n       ✅ {symbol} {direction} hierarchical scaling complete")
+                        print(f"          Base risk (from farthest): ${tier_risks[-1]['current_risk']:.2f}")
+                        print(f"          All closer orders adjusted to match this risk")
+                    
+                    # Apply updates to limit_orders_data
+                    if limit_updates:
+                        for idx, update in limit_updates.items():
+                            if idx < len(limit_orders_data):
+                                order = limit_orders_data[idx]
+                                volume_key = update['volume_key']
+                                if volume_key:
+                                    order[volume_key] = update['new_volume']
+                                    order['hierarchical_scaled'] = True
+                                    order['hierarchical_tier'] = update['tier']
+                                    order['hierarchical_target_risk'] = update['target_risk']
+                                    order['hierarchical_actual_risk'] = update['actual_risk']
+                                    order['hierarchical_is_base'] = update.get('is_base', False)
+                        
+                        save_limit_orders(limit_orders_path, limit_orders_data)
+                        updated = True
+                        print(f"\n  ✓ limit_orders.json updated with hierarchical scaling")
+                
+                # Store hierarchical details in stats
+                stats["hierarchical_scaling_details"] = hierarchical_details
+                stats["hierarchical_scaling_applied"] = updated
+                
+                if updated:
+                    print(f"\n  ✅ HIERARCHICAL SCALING COMPLETE")
+                    print(f"     ├─ Total tiers processed: {len(hierarchical_details)}")
+                    print(f"     └─ Orders updated: {len(limit_updates)}")
+                else:
+                    print(f"\n  ℹ️ No hierarchical scaling needed")
+                
+                return updated
+                
+            except Exception as e:
+                print(f"  ✗ Hierarchical scaling error: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+                 
         def safety_check_pending_orders():
-            """Cancel MT5 orders that don't match volumes in both files"""
+            """Check MT5 orders against expected volumes from JSON files"""
             print(f"\n  🛡️ STEP 6: Safety Check")
             print(f"  {'─'*40}")
             
-            # Use nonlocal variable from outer scope
             nonlocal safety_cancellations, safety_cancellations_count
             
             try:
@@ -14210,52 +15067,92 @@ def martingale(inv_id=None):
                 
                 expected_volumes = {}
                 
-                # Get from limit_orders.json
-                if limit_orders_data and isinstance(limit_orders_data, list):
-                    for order in limit_orders_data:
-                        if isinstance(order, dict):
-                            symbol = order.get('symbol')
-                            order_type = order.get('order_type', '').lower()
-                            
-                            volume_key, expected_volume = get_volume_field_from_order(order)
-                            
-                            if symbol and expected_volume and expected_volume > 0:
-                                if symbol not in expected_volumes:
-                                    expected_volumes[symbol] = {}
-                                if "buy" in order_type:
-                                    expected_volumes[symbol]['bid'] = expected_volume
-                                elif "sell" in order_type:
-                                    expected_volumes[symbol]['ask'] = expected_volume
+                # Helper function to find any *_volume key in an order
+                def get_volume_from_order(order_dict):
+                    """Extract volume from any key ending with '_volume'"""
+                    for key, value in order_dict.items():
+                        if key.endswith('_volume') and isinstance(value, (int, float)):
+                            return value
+                    # Fallback to '_volume' key
+                    if '_volume' in order_dict:
+                        return order_dict['_volume']
+                    return None
                 
-                # Get from limit_orders.json
-                if signals_data:
-                    def collect_expected_volumes(data, symbol):
-                        if isinstance(data, dict):
-                            if data.get("order_type") and "entry" in data and "exit" in data:
-                                order_type = data.get("order_type", "").lower()
-                                expected_volume = data.get("volume", 0)
+                # Get from limit_orders.json (handles both list and dict formats)
+                if limit_orders_data:
+                    if isinstance(limit_orders_data, list):
+                        # List format (your actual format)
+                        for order in limit_orders_data:
+                            if isinstance(order, dict):
+                                symbol = order.get('symbol')
+                                order_type = order.get('order_type', '').lower()
+                                expected_volume = get_volume_from_order(order)
                                 
-                                if expected_volume > 0:
+                                if symbol and expected_volume and expected_volume > 0:
                                     if symbol not in expected_volumes:
                                         expected_volumes[symbol] = {}
                                     if "buy" in order_type:
                                         expected_volumes[symbol]['bid'] = expected_volume
                                     elif "sell" in order_type:
                                         expected_volumes[symbol]['ask'] = expected_volume
-                            
-                            for key, value in data.items():
-                                if isinstance(value, (dict, list)):
-                                    collect_expected_volumes(value, symbol)
-                        
-                        elif isinstance(data, list):
-                            for item in data:
-                                if isinstance(item, (dict, list)):
-                                    collect_expected_volumes(item, symbol)
-                    
-                    for category_name, category_data in signals_data.get('categories', {}).items():
-                        symbols_in_category = category_data.get('symbols', {})
-                        for symbol, symbol_signals in symbols_in_category.items():
-                            collect_expected_volumes(symbol_signals, symbol)
+                    elif isinstance(limit_orders_data, dict):
+                        # Dict format (old format with categories)
+                        for category_name, category_data in limit_orders_data.get('categories', {}).items():
+                            symbols_in_category = category_data.get('symbols', {})
+                            for symbol, symbol_signals in symbols_in_category.items():
+                                def extract_volumes(data):
+                                    if isinstance(data, dict):
+                                        if data.get("order_type") and ("entry" in data or "exit" in data):
+                                            order_type = data.get("order_type", "").lower()
+                                            expected_volume = get_volume_from_order(data)
+                                            if expected_volume and expected_volume > 0:
+                                                if symbol not in expected_volumes:
+                                                    expected_volumes[symbol] = {}
+                                                if "buy" in order_type:
+                                                    expected_volumes[symbol]['bid'] = expected_volume
+                                                elif "sell" in order_type:
+                                                    expected_volumes[symbol]['ask'] = expected_volume
+                                        for key, value in data.items():
+                                            if isinstance(value, (dict, list)):
+                                                extract_volumes(value)
+                                extract_volumes(symbol_signals)
+                
+                # Also process signals_data if it exists and is different
+                if signals_data and signals_data != limit_orders_data:
+                    if isinstance(signals_data, list):
+                        for order in signals_data:
+                            if isinstance(order, dict):
+                                symbol = order.get('symbol')
+                                order_type = order.get('order_type', '').lower()
+                                expected_volume = get_volume_from_order(order)
+                                
+                                if symbol and expected_volume and expected_volume > 0:
+                                    if symbol not in expected_volumes:
+                                        expected_volumes[symbol] = {}
+                                    if "buy" in order_type:
+                                        expected_volumes[symbol]['bid'] = expected_volume
+                                    elif "sell" in order_type:
+                                        expected_volumes[symbol]['ask'] = expected_volume
+                    elif isinstance(signals_data, dict):
+                        for category_name, category_data in signals_data.get('categories', {}).items():
+                            symbols_in_category = category_data.get('symbols', {})
+                            for symbol, symbol_signals in symbols_in_category.items():
+                                def extract_volumes(data):
+                                    if isinstance(data, dict):
+                                        if data.get("order_type") and ("entry" in data or "exit" in data):
+                                            order_type = data.get("order_type", "").lower()
+                                            expected_volume = get_volume_from_order(data)
+                                            if expected_volume and expected_volume > 0:
+                                                if symbol not in expected_volumes:
+                                                    expected_volumes[symbol] = {}
+                                                if "buy" in order_type:
+                                                    expected_volumes[symbol]['bid'] = expected_volume
+                                                elif "sell" in order_type:
+                                                    expected_volumes[symbol]['ask'] = expected_volume
+                                        for key, value in data.items():
+                                            if isinstance(value, (dict, list)):
+                                                extract_volumes(value)
+                                extract_volumes(symbol_signals)
                 
                 orders_to_cancel = []
                 
@@ -14314,7 +15211,7 @@ def martingale(inv_id=None):
 
         # ========== MAIN EXECUTION ==========
         def main():
-            """Main execution - staged drawdown recovery with independent pre-scaling"""
+            """Main execution - staged drawdown recovery with independent pre-scaling and hierarchical scaling"""
             # Use nonlocal variables
             nonlocal safety_cancellations, safety_cancellations_count
             
@@ -14322,35 +15219,58 @@ def martingale(inv_id=None):
             print(f"  STAGE {current_stage} RECOVERY - ${current_stage_drawdown:.2f}")
             print(f"{'='*50}")
             
+            # ========== STEP 0: RECORD EXISTING AUTHORIZED ORDERS ==========
+            print(f"\n  📋 STEP 0: Pre-Recovery Operations")
+            print(f"  {'─'*40}")
+            
+            # Helper 1: Record authorized pending orders to JSON
+            record_result = record_authorized_pending_orders_local()
+            if not record_result['success']:
+                print(f"  ⚠️ Warning: Could not record authorized orders: {record_result.get('error', 'Unknown error')}")
+            else:
+                print(f"  ✓ Recorded {record_result.get('recorded', 0)} new authorized orders")
+            
             # Process limit_orders.json (only if there's drawdown to recover)
             limit_orders_updated = False
             if current_stage_drawdown > 0:
+                print(f"\n  📝 STEP 1: Recovery Processing")
                 limit_orders_updated, _ = process_limit_orders_recovery(current_stage_drawdown)
             
-            # Process limit_orders.json (only if there's drawdown to recover)
-            signals_updated = False
-            if current_stage_drawdown > 0:
-                signals_updated, _ = process_signals_recovery(current_stage_drawdown)
             
             # ⭐ PRE-SCALING - ALWAYS RUNS INDEPENDENTLY WHEN ENABLED ⭐
             pre_scaling_updated = process_pre_scaling()
             stats["pre_scaling_applied"] = pre_scaling_updated
             
-            # Safety check (always run)
+            # ⭐ HIERARCHICAL SCALING - RUNS AFTER PRE-SCALING ⭐
+            hierarchical_scaling_updated = process_hierarchical_scaling()
+            stats["hierarchical_scaling_applied"] = hierarchical_scaling_updated
+            
+            # Safety check (always run) - This now only checks and logs, doesn't cancel
             safety_check_pending_orders()
             
-            stats["signals_modified"] = signals_updated
-            stats["limit_orders_modified"] = limit_orders_updated
+            # ========== STEP: FINAL CANCELLATION OF MISMATCHED ORDERS ==========
+            print(f"\n  🔥 FINAL STEP: Selective Cancellation of Mismatched Orders")
+            print(f"  {'─'*40}")
+            cancel_result = cancel_all_pending_orders_local()
+            if not cancel_result['success']:
+                print(f"  ⚠️ Warning during cancellation: {cancel_result.get('error', 'Unknown error')}")
+            else:
+                print(f"  ✓ Selective cancellation complete: {cancel_result.get('deleted', 0)} orders cancelled")
+                # Update safety_cancellations_count with the actual cancelled count
+                safety_cancellations_count = cancel_result.get('deleted', 0)
+            
+            stats["limit_orders_modified"] = limit_orders_updated or hierarchical_scaling_updated
             
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} COMPLETE")
+            print(f"  │ Pre-recorded orders: {record_result.get('recorded', 0)}")
             print(f"  │ Limit orders: {'✓' if limit_orders_updated else '−'}")
-            print(f"  │ Signals: {'✓' if signals_updated else '−'}")
             print(f"  │ Pre-scaling: {'✓' if pre_scaling_updated else '−'}")
-            print(f"  │ Orders cancelled: {safety_cancellations_count}")
+            print(f"  │ Hierarchical scaling: {'✓' if hierarchical_scaling_updated else '−'}")
+            print(f"  │ Orders cancelled (mismatched): {cancel_result.get('deleted', 0)}")
+            print(f"  │ Orders kept (matching): {cancel_result.get('kept_matching', 0)}")
+            print(f"  │ Orders kept (not in JSON): {cancel_result.get('kept_not_in_json', 0)}")
             print(f"{'='*50}")
-        
-        # Execute main
         main()
         
         stats["investors_processed"] += 1
@@ -14394,6 +15314,7 @@ def martingale(inv_id=None):
         print(f"  │ limit_orders.json: {'✓' if stats.get('limit_orders_modified') else '−'}")
         print(f"  │ limit_orders.json: {'✓' if stats.get('signals_modified') else '−'}")
         print(f"  │ Pre-scaling: {'✓' if stats.get('pre_scaling_applied') else '−'}")
+        print(f"  │ Hierarchical scaling: {'✓' if stats.get('hierarchical_scaling_applied') else '−'}")  # ADD THIS
         print(f"  │ Orders cancelled: {stats.get('safety_cancellations_count', 0)}")
         
         # Display risk validation details
@@ -14409,394 +15330,48 @@ def martingale(inv_id=None):
         if stats.get('pre_scaling_details'):
             print(f"\n  📈 Pre-scaling Details:")
             for key, details in stats['pre_scaling_details'].items():
-                file_type = details.get('file_type', 'unknown')
-                symbol = details.get('symbol', key)
-                print(f"  │ {symbol} ({file_type}):")
-                if details.get('expected_loss', 0) > 0:
-                    print(f"  │   ├─ Expected loss: ${details['expected_loss']:.2f}")
-                if details.get('highest_risk', 0) > 0:
-                    print(f"  │   ├─ Highest risk: ${details['highest_risk']:.2f}")
-                print(f"  │   ├─ Total extra: ${details['total_extra']:.2f}")
-                if details.get('additional_volume', 0) > 0:
-                    print(f"  │   └─ Additional volume: {details['additional_volume']:.2f} lots")
+                # Handle both old and new structure formats
+                if 'file_type' in details:
+                    # Old structure format
+                    file_type = details.get('file_type', 'unknown')
+                    symbol = details.get('symbol', key)
+                    print(f"  │ {symbol} ({file_type}):")
+                    if details.get('expected_loss', 0) > 0:
+                        print(f"  │   ├─ Expected loss: ${details['expected_loss']:.2f}")
+                    if details.get('highest_risk', 0) > 0:
+                        print(f"  │   ├─ Highest risk: ${details['highest_risk']:.2f}")
+                    if 'total_extra' in details:
+                        print(f"  │   ├─ Total extra: ${details['total_extra']:.2f}")
+                    if details.get('additional_volume', 0) > 0:
+                        print(f"  │   └─ Additional volume: {details['additional_volume']:.2f} lots")
+                else:
+                    # New structure format (from updated process_pre_scaling)
+                    symbol = details.get('symbol', key)
+                    print(f"  │ {symbol}:")
+                    if details.get('entry'):
+                        print(f"  │   ├─ Entry: {details['entry']:.5f}")
+                    if details.get('stop'):
+                        print(f"  │   ├─ Stop: {details['stop']:.5f}")
+                    if details.get('risk_per_lot'):
+                        print(f"  │   ├─ Risk per lot: ${details['risk_per_lot']:.2f}")
+                    if details.get('target_recovery'):
+                        print(f"  │   ├─ Target recovery: ${details['target_recovery']:.2f}")
+                    if details.get('calculated_volume'):
+                        print(f"  │   ├─ Calculated volume: {details['calculated_volume']:.3f} lots")
+                    if details.get('actual_risk'):
+                        print(f"  │   ├─ Actual risk: ${details['actual_risk']:.2f}")
+                    if details.get('orders_count'):
+                        print(f"  │   └─ Orders count: {details['orders_count']}")
+                    
     
     print(f"\n  Errors: {stats['errors']}")
     print(f"{'='*50}\n")
     
     return stats
 
-def close_unauthorized_orders_old(inv_id=None):
-    """
-    CLOSE UNAUTHORIZED ORDERS - ENFORCEMENT FUNCTION
-    
-    This function ensures that EVERY pending order and open position is properly
-    accounted for in tradeshistory.json. Any order/position NOT found in the
-    history file is immediately terminated (cancelled or closed).
-    
-    RULES:
-    1. Scans ALL open positions and pending orders in MT5
-    2. For each item, checks if it exists in tradeshistory.json (by ticket number)
-    3. If NOT found → IMMEDIATELY CANCEL/CLOSE (unauthorized)
-    4. If found → KEEP (authorized)
-    5. Does NOT modify any JSON files - only closes/cancels orders
-    
-    Args:
-        inv_id: Optional specific investor ID. If None, processes all investors.
-        
-    Returns:
-        dict: Statistics about closed/cancelled unauthorized orders
-    """
-    print("\n" + "="*80)
-    print("🔒 CLOSE UNAUTHORIZED ORDERS - ENFORCEMENT MODE")
-    print("="*80)
-    print("   RULE: EVERY order/position MUST be in tradeshistory.json")
-    print("   If NOT found → IMMEDIATE TERMINATION")
-    print("   NOTE: No JSON files are modified, only MT5 orders are cancelled/closed")
-    print("="*80)
-    
-    investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
-    
-    global_stats = {
-        'investors_processed': 0,
-        'investors_with_issues': 0,
-        'total_pending_orders_found': 0,
-        'total_positions_found': 0,
-        'total_pending_cancelled': 0,
-        'total_positions_closed': 0,
-        'total_unauthorized_found': 0,
-        'errors_encountered': 0
-    }
-    
-    for user_brokerid in investor_ids:
-        print(f"\n{'='*60}")
-        print(f"📋 INVESTOR: {user_brokerid}")
-        print(f"{'='*60}")
-        
-        investor_stats = {
-            'pending_orders_found': 0,
-            'positions_found': 0,
-            'pending_cancelled': 0,
-            'positions_closed': 0,
-            'unauthorized_count': 0,
-            'errors': 0
-        }
-        
-        inv_root = Path(INV_PATH) / user_brokerid
-        
-        if not inv_root.exists():
-            print(f"    Investor root not found: {inv_root}")
-            continue
-        
-        # Load tradeshistory.json
-        history_path = inv_root / "tradeshistory.json"
-        
-        if not history_path.exists():
-            print(f"    CRITICAL: tradeshistory.json NOT FOUND!")
-            print(f"   📁 Expected at: {history_path}")
-            print(f"    Cannot verify authorization - SKIPPING this investor")
-            global_stats['errors_encountered'] += 1
-            continue
-        
-        try:
-            with open(history_path, 'r', encoding='utf-8') as f:
-                history = json.load(f)
-            print(f"   ✅ Loaded tradeshistory.json ({len(history)} total records)")
-        except Exception as e:
-            print(f"    Failed to read tradeshistory.json: {e}")
-            global_stats['errors_encountered'] += 1
-            continue
-        
-        # Extract ALL valid ticket numbers from history
-        # Skip current_orders snapshot entries and non-dict items
-        authorized_tickets = set()
-        authorized_position_ids = set()
-        
-        for record in history:
-            if isinstance(record, dict) and 'current_orders' not in record:
-                # Check for order ticket
-                ticket = record.get('ticket')
-                if ticket:
-                    authorized_tickets.add(int(ticket))
-                
-                # Check for position ticket (if different from order ticket)
-                position_ticket = record.get('position_ticket')
-                if position_ticket:
-                    authorized_position_ids.add(int(position_ticket))
-                
-                # Check for position_id (might be stored differently)
-                position_id = record.get('position_id')
-                if position_id and isinstance(position_id, (int, str)):
-                    try:
-                        # Convert POS_123 to 123 if needed
-                        if isinstance(position_id, str) and position_id.startswith('POS_'):
-                            pos_num = int(position_id.split('_')[1])
-                            authorized_position_ids.add(pos_num)
-                        elif isinstance(position_id, int):
-                            authorized_position_ids.add(position_id)
-                    except (ValueError, IndexError):
-                        pass
-        
-        print(f"   🔑 Authorized tickets in history: {len(authorized_tickets)}")
-        if authorized_position_ids:
-            print(f"   🔑 Authorized position tickets: {len(authorized_position_ids)}")
-        
-        # Connect to MT5 account
-        broker_cfg = usersdictionary.get(user_brokerid)
-        if not broker_cfg:
-            print(f"    No broker configuration found")
-            continue
-        
-        login_id = int(broker_cfg['LOGIN_ID'])
-        mt5_path = broker_cfg["Terminal_path"]
-        
-        # Check if already connected to correct account
-        acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"    Not logged into correct account. Expected: {login_id}")
-            # Try to initialize MT5 connection
-            if not mt5.initialize(path=mt5_path, login=login_id, 
-                                   password=broker_cfg["PASSWORD"], 
-                                   server=broker_cfg["SERVER"]):
-                print(f"    Failed to initialize MT5 for {user_brokerid}")
-                global_stats['errors_encountered'] += 1
-                continue
-        else:
-            print(f"   ✅ Connected to account: {acc.login}")
-        
-        # STEP 1: SCAN ALL PENDING ORDERS
-        pending_orders = mt5.orders_get()
-        if pending_orders:
-            print(f"\n   📋 SCANNING PENDING ORDERS...")
-            investor_stats['pending_orders_found'] = len(pending_orders)
-            
-            for order in pending_orders:
-                order_ticket = order.ticket
-                order_symbol = order.symbol
-                order_type_map = {
-                    mt5.ORDER_TYPE_BUY_LIMIT: "BUY_LIMIT",
-                    mt5.ORDER_TYPE_SELL_LIMIT: "SELL_LIMIT",
-                    mt5.ORDER_TYPE_BUY_STOP: "BUY_STOP",
-                    mt5.ORDER_TYPE_SELL_STOP: "SELL_STOP",
-                    mt5.ORDER_TYPE_BUY_STOP_LIMIT: "BUY_STOP_LIMIT",
-                    mt5.ORDER_TYPE_SELL_STOP_LIMIT: "SELL_STOP_LIMIT"
-                }
-                order_type_name = order_type_map.get(order.type, f"TYPE_{order.type}")
-                
-                # Check if ticket is authorized
-                if order_ticket in authorized_tickets:
-                    print(f"      ✅ Pending #{order_ticket}: {order_type_name} {order_symbol} - AUTHORIZED")
-                    continue
-                
-                # UNAUTHORIZED - MUST CANCEL (USING SAME LOGIC AS check_pending_orders_risk)
-                print(f"      🚨 UNAUTHORIZED Pending #{order_ticket}: {order_type_name} {order_symbol}")
-                print(f"         → Ticket NOT found in tradeshistory.json")
-                print(f"         → Initiating IMMEDIATE CANCELLATION...")
-                
-                # USE SAME SIMPLE REQUEST AS check_pending_orders_risk
-                cancel_request = {
-                    "action": mt5.TRADE_ACTION_REMOVE,
-                    "order": order_ticket
-                }
-                
-                try:
-                    result = mt5.order_send(cancel_request)
-                    
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        print(f"         ✅ SUCCESS: Order #{order_ticket} CANCELLED")
-                        investor_stats['pending_cancelled'] += 1
-                        investor_stats['unauthorized_count'] += 1
-                    else:
-                        error_msg = result.comment if result else "No response"
-                        error_code = result.retcode if result else "Unknown"
-                        print(f"          FAILED: Could not cancel #{order_ticket}")
-                        print(f"            Error: {error_msg} (code: {error_code})")
-                        investor_stats['errors'] += 1
-                        
-                except Exception as e:
-                    print(f"          EXCEPTION: {e}")
-                    investor_stats['errors'] += 1
-        
-        else:
-            print(f"\n   ℹ️  No pending orders found")
-        
-        # STEP 2: SCAN ALL OPEN POSITIONS
-        open_positions = mt5.positions_get()
-        if open_positions:
-            print(f"\n   💼 SCANNING OPEN POSITIONS...")
-            investor_stats['positions_found'] = len(open_positions)
-            
-            for position in open_positions:
-                pos_ticket = position.ticket
-                pos_symbol = position.symbol
-                pos_type = "BUY" if position.type == mt5.POSITION_TYPE_BUY else "SELL"
-                
-                # Check if ticket is authorized (either as order or position)
-                is_authorized = False
-                
-                # Check direct position ticket
-                if pos_ticket in authorized_tickets:
-                    is_authorized = True
-                elif pos_ticket in authorized_position_ids:
-                    is_authorized = True
-                
-                # Also check if there's a record with this position_ticket
-                # (some brokers may use different ticket numbers)
-                if not is_authorized:
-                    # Search history for any record referencing this position
-                    for record in history:
-                        if isinstance(record, dict):
-                            if record.get('position_ticket') == pos_ticket:
-                                is_authorized = True
-                                break
-                            if record.get('ticket') == pos_ticket and record.get('status') == 'running_position':
-                                is_authorized = True
-                                break
-                
-                if is_authorized:
-                    print(f"      ✅ Position #{pos_ticket}: {pos_type} {pos_symbol} - AUTHORIZED")
-                    continue
-                
-                # UNAUTHORIZED - MUST CLOSE
-                print(f"      🚨 UNAUTHORIZED Position #{pos_ticket}: {pos_type} {pos_symbol}")
-                print(f"         → Ticket NOT found in tradeshistory.json")
-                print(f"         → Initiating IMMEDIATE CLOSURE...")
-                
-                # Get current market price
-                tick = mt5.symbol_info_tick(pos_symbol)
-                if not tick:
-                    print(f"          Cannot get price for {pos_symbol} - cannot close")
-                    investor_stats['errors'] += 1
-                    continue
-                
-                # Determine closing order type
-                if position.type == mt5.POSITION_TYPE_BUY:
-                    # Close BUY position by SELLING
-                    close_type = mt5.ORDER_TYPE_SELL
-                    close_price = tick.bid
-                else:
-                    # Close SELL position by BUYING
-                    close_type = mt5.ORDER_TYPE_BUY
-                    close_price = tick.ask
-                
-                close_request = {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": pos_symbol,
-                    "volume": position.volume,
-                    "type": close_type,
-                    "position": pos_ticket,
-                    "price": close_price,
-                    "deviation": 20,
-                    "magic": position.magic if hasattr(position, 'magic') else 0,
-                    "comment": "UNAUTHORIZED - Not in tradeshistory.json",
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": mt5.ORDER_FILLING_IOC,
-                }
-                
-                try:
-                    result = mt5.order_send(close_request)
-                    
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        print(f"         ✅ SUCCESS: Position #{pos_ticket} CLOSED")
-                        investor_stats['positions_closed'] += 1
-                        investor_stats['unauthorized_count'] += 1
-                    else:
-                        error_msg = result.comment if result else "No response"
-                        error_code = result.retcode if result else "Unknown"
-                        print(f"          FAILED: Could not close #{pos_ticket}")
-                        print(f"            Error: {error_msg} (code: {error_code})")
-                        
-                        # Try alternative approach if first attempt fails
-                        print(f"         🔄 Attempting alternative closure method...")
-                        
-                        alt_close_request = {
-                            "action": mt5.TRADE_ACTION_DEAL,
-                            "symbol": pos_symbol,
-                            "volume": position.volume,
-                            "type": close_type,
-                            "position": pos_ticket,
-                            "price": close_price,
-                            "deviation": 50,  # Increased deviation
-                            "comment": "UNAUTHORIZED - Retry",
-                            "type_filling": mt5.ORDER_FILLING_RETURN,  # Different filling mode
-                        }
-                        
-                        alt_result = mt5.order_send(alt_close_request)
-                        
-                        if alt_result and alt_result.retcode == mt5.TRADE_RETCODE_DONE:
-                            print(f"         ✅ SUCCESS (alt): Position #{pos_ticket} CLOSED")
-                            investor_stats['positions_closed'] += 1
-                            investor_stats['unauthorized_count'] += 1
-                        else:
-                            alt_error = alt_result.comment if alt_result else "No response"
-                            alt_code = alt_result.retcode if alt_result else "Unknown"
-                            print(f"          Alternative also FAILED: {alt_error} (code: {alt_code})")
-                            investor_stats['errors'] += 1
-                        
-                except Exception as e:
-                    print(f"          EXCEPTION: {e}")
-                    investor_stats['errors'] += 1
-        
-        else:
-            print(f"\n   ℹ️  No open positions found")
-        
-        # Investor summary (NO JSON UPDATES)
-        print(f"\n   📊 INVESTOR {user_brokerid} SUMMARY:")
-        print(f"      • Pending orders found: {investor_stats['pending_orders_found']}")
-        print(f"      • Open positions found: {investor_stats['positions_found']}")
-        if investor_stats['pending_cancelled'] > 0:
-            print(f"      •  Pending orders CANCELLED (unauthorized): {investor_stats['pending_cancelled']}")
-        if investor_stats['positions_closed'] > 0:
-            print(f"      •  Positions CLOSED (unauthorized): {investor_stats['positions_closed']}")
-        if investor_stats['unauthorized_count'] > 0:
-            print(f"      • 🚨 TOTAL UNAUTHORIZED: {investor_stats['unauthorized_count']}")
-        if investor_stats['errors'] > 0:
-            print(f"      •  Errors encountered: {investor_stats['errors']}")
-        
-        if investor_stats['unauthorized_count'] == 0:
-            print(f"      • ✅ ALL ORDERS AUTHORIZED - Clean account")
-        
-        # Update global stats
-        global_stats['investors_processed'] += 1
-        global_stats['total_pending_orders_found'] += investor_stats['pending_orders_found']
-        global_stats['total_positions_found'] += investor_stats['positions_found']
-        global_stats['total_pending_cancelled'] += investor_stats['pending_cancelled']
-        global_stats['total_positions_closed'] += investor_stats['positions_closed']
-        global_stats['total_unauthorized_found'] += investor_stats['unauthorized_count']
-        global_stats['errors_encountered'] += investor_stats['errors']
-        
-        if investor_stats['unauthorized_count'] > 0:
-            global_stats['investors_with_issues'] += 1
-    
-    # FINAL GLOBAL SUMMARY
-    print("\n" + "="*80)
-    print("🏁 ENFORCEMENT COMPLETE - FINAL REPORT")
-    print("="*80)
-    print(f"   Investors processed: {global_stats['investors_processed']}")
-    print(f"   Investors with unauthorized orders: {global_stats['investors_with_issues']}")
-    print(f"\n   📊 TOTAL SCANNED:")
-    print(f"      • Pending orders: {global_stats['total_pending_orders_found']}")
-    print(f"      • Open positions: {global_stats['total_positions_found']}")
-    print(f"\n   🔒 ENFORCEMENT ACTIONS:")
-    print(f"      • Pending orders CANCELLED: {global_stats['total_pending_cancelled']}")
-    print(f"      • Open positions CLOSED: {global_stats['total_positions_closed']}")
-    print(f"      • TOTAL UNAUTHORIZED REMOVED: {global_stats['total_unauthorized_found']}")
-    print(f"\n    Errors: {global_stats['errors_encountered']}")
-    
-    if global_stats['total_unauthorized_found'] > 0:
-        print(f"\n    WARNING: Unauthorized orders were found and terminated!")
-        print(f"   💡 Check strategy signals that generated these orders")
-        print(f"   💡 Run again to ensure all unauthorized orders are removed")
-    else:
-        print(f"\n   ✅ SUCCESS: All orders are authorized!")
-        print(f"   ✅ No unauthorized orders found in any account")
-    
-    print("="*80 + "\n")
-    
-    return global_stats
-
 def close_unauthorized_orders(inv_id=None):
     """
-    CLOSE UNAUTHORIZED ORDERS - ENFORCEMENT FUNCTION (MAGIC NUMBER STRATEGY)
+    CLOSE UNAUTHORIZED ORDERS - ENFORCEMENT FUNCTION (MAGIC NUMBER ONLY)
     
     This function uses Magic Number to identify authorized vs unauthorized orders.
     - Authorized Magic Number = LOGIN_ID + USER_ID (e.g., 5996427 + 10 = 599642710)
@@ -14807,7 +15382,6 @@ def close_unauthorized_orders(inv_id=None):
     2. For each item, checks if its magic number matches authorized_magic_number
     3. If magic number DOES NOT match → IMMEDIATELY CANCEL/CLOSE (unauthorized)
     4. If magic number matches → KEEP (authorized)
-    5. tradeshistory.json is ONLY used for closed order tracking, NOT for authorization
     
     Args:
         inv_id: Optional specific investor ID. If None, processes all investors.
@@ -14816,11 +15390,10 @@ def close_unauthorized_orders(inv_id=None):
         dict: Statistics about closed/cancelled unauthorized orders
     """
     print("\n" + "="*80)
-    print("🔒 CLOSE UNAUTHORIZED ORDERS - ENFORCEMENT MODE (MAGIC NUMBER STRATEGY)")
+    print("🔒 CLOSE UNAUTHORIZED ORDERS - ENFORCEMENT MODE (MAGIC NUMBER ONLY)")
     print("="*80)
     print("   RULE: Order/Position magic number MUST equal LOGIN_ID + USER_ID")
     print("   If magic number mismatch → IMMEDIATE TERMINATION")
-    print("   tradeshistory.json is for tracking only - NOT used for authorization")
     print("="*80)
     
     investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
@@ -14881,41 +15454,24 @@ def close_unauthorized_orders(inv_id=None):
             continue
         
         # ============================================================
-        # LOAD tradeshistory.json (FOR TRACKING ONLY - NOT AUTHORIZATION)
+        # VERIFY MT5 CONNECTION (Assume already initialized)
         # ============================================================
-        history_path = inv_root / "tradeshistory.json"
-        closed_trades_for_tracking = []
-        
-        if history_path.exists():
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    closed_trades_for_tracking = json.load(f)
-                print(f"   📝 Loaded tradeshistory.json ({len(closed_trades_for_tracking)} total records for tracking only)")
-            except Exception as e:
-                print(f"    ⚠️ Could not read tradeshistory.json: {e}")
-                print(f"    Continuing with magic number authorization only...")
-        else:
-            print(f"    ℹ️ tradeshistory.json not found - will create when orders close")
-        
-        # ============================================================
-        # CONNECT TO MT5 ACCOUNT
-        # ============================================================
-        mt5_path = broker_cfg.get("Terminal_path", "")
-        password = broker_cfg.get("PASSWORD", "")
-        server = broker_cfg.get("SERVER", "")
-        
-        # Check if already connected to correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != int(login_id):
-            print(f"    🔌 Connecting to account {login_id}...")
-            if not mt5.initialize(path=mt5_path, login=int(login_id), 
-                                   password=password, server=server):
-                print(f"    Failed to initialize MT5 for {user_brokerid}: {mt5.last_error()}")
-                global_stats['errors_encountered'] += 1
-                continue
-            print(f"   ✅ Connected to account: {login_id}")
+        if acc is None:
+            print(f"    ❌ MT5 not initialized or no account connected!")
+            print(f"    💡 This function expects MT5 to be already initialized and logged in")
+            global_stats['errors_encountered'] += 1
+            continue
+        elif acc.login != int(login_id):
+            print(f"    ⚠️ Connected to wrong account: {acc.login} (expected: {login_id})")
+            print(f"    💡 Cannot proceed - account mismatch")
+            global_stats['errors_encountered'] += 1
+            continue
         else:
-            print(f"   ✅ Already connected to account: {acc.login}")
+            print(f"   ✅ MT5 already connected to correct account: {acc.login}")
+        
+        # Track unauthorized actions for logging (console only)
+        unauthorized_actions_log = []
         
         # ============================================================
         # STEP 1: SCAN ALL PENDING ORDERS
@@ -14962,18 +15518,15 @@ def close_unauthorized_orders(inv_id=None):
                         investor_stats['pending_cancelled'] += 1
                         investor_stats['unauthorized_count'] += 1
                         
-                        # Record cancellation in tradeshistory.json (for tracking)
-                        cancellation_record = {
-                            'timestamp': datetime.now().isoformat(),
-                            'action': 'UNAUTHORIZED_ORDER_CANCELLED',
+                        # Log to console
+                        unauthorized_actions_log.append({
                             'ticket': order_ticket,
                             'symbol': order_symbol,
                             'type': order_type_name,
-                            'magic_number': order_magic,
-                            'expected_magic': authorized_magic_number,
-                            'reason': f'Magic number mismatch: {order_magic} != {authorized_magic_number}'
-                        }
-                        closed_trades_for_tracking.append(cancellation_record)
+                            'action': 'CANCELLED',
+                            'magic': order_magic,
+                            'expected_magic': authorized_magic_number
+                        })
                         
                     else:
                         error_msg = result.comment if result else "No response"
@@ -15040,8 +15593,8 @@ def close_unauthorized_orders(inv_id=None):
                     "position": pos_ticket,
                     "price": close_price,
                     "deviation": 20,
-                    "magic": pos_magic,  # Keep original magic for tracking
-                    "comment": f"UNAUTHORIZED - Magic {pos_magic} != {authorized_magic_number}",
+                    "magic": authorized_magic_number,  # Use authorized magic for closure
+                    "comment": f"UNAUTH-CLOSED|Magic:{pos_magic}",
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": mt5.ORDER_FILLING_IOC,
                 }
@@ -15054,21 +15607,17 @@ def close_unauthorized_orders(inv_id=None):
                         investor_stats['positions_closed'] += 1
                         investor_stats['unauthorized_count'] += 1
                         
-                        # Record closure in tradeshistory.json (for tracking)
-                        closure_record = {
-                            'timestamp': datetime.now().isoformat(),
-                            'action': 'UNAUTHORIZED_POSITION_CLOSED',
+                        # Log to console
+                        unauthorized_actions_log.append({
                             'ticket': pos_ticket,
                             'symbol': pos_symbol,
                             'type': pos_type,
-                            'volume': position.volume,
-                            'profit': current_profit,
-                            'magic_number': pos_magic,
+                            'action': 'CLOSED',
+                            'magic': pos_magic,
                             'expected_magic': authorized_magic_number,
-                            'close_price': close_price,
-                            'reason': f'Magic number mismatch: {pos_magic} != {authorized_magic_number}'
-                        }
-                        closed_trades_for_tracking.append(closure_record)
+                            'profit': current_profit,
+                            'close_price': close_price
+                        })
                         
                     else:
                         error_msg = result.comment if result else "No response"
@@ -15076,7 +15625,7 @@ def close_unauthorized_orders(inv_id=None):
                         print(f"          FAILED: Could not close #{pos_ticket}")
                         print(f"            Error: {error_msg} (code: {error_code})")
                         
-                        # Try alternative approach if first attempt fails
+                        # Try alternative approach with higher deviation
                         print(f"         🔄 Attempting alternative closure method...")
                         
                         alt_close_request = {
@@ -15087,7 +15636,8 @@ def close_unauthorized_orders(inv_id=None):
                             "position": pos_ticket,
                             "price": close_price,
                             "deviation": 50,  # Increased deviation
-                            "comment": f"UNAUTHORIZED - Retry (Magic mismatch)",
+                            "magic": authorized_magic_number,
+                            "comment": f"UNAUTH-CLOSED|Retry",
                             "type_filling": mt5.ORDER_FILLING_RETURN,
                         }
                         
@@ -15098,9 +15648,16 @@ def close_unauthorized_orders(inv_id=None):
                             investor_stats['positions_closed'] += 1
                             investor_stats['unauthorized_count'] += 1
                             
-                            # Record closure
-                            closure_record['note'] = 'Closed via alternative method'
-                            closed_trades_for_tracking.append(closure_record)
+                            unauthorized_actions_log.append({
+                                'ticket': pos_ticket,
+                                'symbol': pos_symbol,
+                                'type': pos_type,
+                                'action': 'CLOSED (alt)',
+                                'magic': pos_magic,
+                                'expected_magic': authorized_magic_number,
+                                'profit': current_profit,
+                                'close_price': close_price
+                            })
                         else:
                             alt_error = alt_result.comment if alt_result else "No response"
                             alt_code = alt_result.retcode if alt_result else "Unknown"
@@ -15115,26 +15672,17 @@ def close_unauthorized_orders(inv_id=None):
             print(f"\n   ℹ️  No open positions found")
         
         # ============================================================
-        # UPDATE tradeshistory.json (FOR TRACKING ONLY)
+        # DISPLAY UNAUTHORIZED ACTIONS LOG (Console Only)
         # ============================================================
-        if closed_trades_for_tracking and history_path.exists():
-            try:
-                # Load existing history if available
-                existing_history = []
-                if history_path.exists():
-                    with open(history_path, 'r', encoding='utf-8') as f:
-                        existing_history = json.load(f)
-                
-                # Append new records
-                updated_history = existing_history + closed_trades_for_tracking
-                
-                # Save back to file
-                with open(history_path, 'w', encoding='utf-8') as f:
-                    json.dump(updated_history, f, indent=4)
-                
-                print(f"\n   📝 Updated tradeshistory.json with {len(closed_trades_for_tracking)} enforcement actions")
-            except Exception as e:
-                print(f"\n   ⚠️ Could not update tradeshistory.json: {e}")
+        if unauthorized_actions_log:
+            print(f"\n   📋 UNAUTHORIZED ACTIONS LOG ({len(unauthorized_actions_log)} items):")
+            for idx, action in enumerate(unauthorized_actions_log[:10]):  # Show first 10
+                print(f"      {idx+1}. {action['action']} {action['type']} #{action['ticket']} {action['symbol']}")
+                print(f"         Magic: {action['magic']} (Expected: {action['expected_magic']})")
+                if 'profit' in action:
+                    print(f"         P&L: ${action['profit']:.2f}")
+            if len(unauthorized_actions_log) > 10:
+                print(f"      ... and {len(unauthorized_actions_log) - 10} more")
         
         # ============================================================
         # INVESTOR SUMMARY
@@ -15166,15 +15714,12 @@ def close_unauthorized_orders(inv_id=None):
         
         if investor_stats['unauthorized_count'] > 0:
             global_stats['investors_with_issues'] += 1
-        
-        # Shutdown MT5 connection
-        mt5.shutdown()
     
     # ============================================================
     # FINAL GLOBAL SUMMARY
     # ============================================================
     print("\n" + "="*80)
-    print("🏁 ENFORCEMENT COMPLETE - FINAL REPORT (MAGIC NUMBER STRATEGY)")
+    print("🏁 ENFORCEMENT COMPLETE - FINAL REPORT (MAGIC NUMBER ONLY)")
     print("="*80)
     print(f"   Investors processed: {global_stats['investors_processed']}")
     print(f"   Investors with unauthorized orders: {global_stats['investors_with_issues']}")
@@ -15191,6 +15736,7 @@ def close_unauthorized_orders(inv_id=None):
         print(f"\n   ⚠️  WARNING: Unauthorized orders were found and terminated!")
         print(f"   💡 Unauthorized orders had magic numbers that didn't match")
         print(f"   💡 Expected format: LOGIN_ID + USER_ID")
+        print(f"   💡 Example: LOGIN_ID=5996427 + USER_ID=10 = Magic=599642710")
         print(f"   💡 Run again to ensure all unauthorized orders are removed")
     else:
         print(f"\n   ✅ SUCCESS: All orders are authorized!")
@@ -15201,7 +15747,7 @@ def close_unauthorized_orders(inv_id=None):
     
     return global_stats
 
-def place_usd_orders(inv_id=None):
+def place_usd_orders_(inv_id=None):
     
     # --- SUFFIX DICTIONARY FOR RETRY LOGIC ---
     SYMBOL_SUFFIXES = [
@@ -15504,7 +16050,39 @@ def place_usd_orders(inv_id=None):
         
         # No volume field found
         return None
-   
+
+    # --- SUB-FUNCTION 6.5: CHECK IF TICKET EXISTS IN ACTIVE ORDERS/POSITIONS ---
+    def is_ticket_active_in_mt5(ticket_number):
+        """
+        Check if a ticket number exists as an active pending order OR open position.
+        Returns True if ticket is found active, False otherwise.
+        """
+        if not ticket_number:
+            return False
+        
+        try:
+            # Check pending orders
+            pending_orders = mt5.orders_get()
+            if pending_orders:
+                for order in pending_orders:
+                    if order.ticket == ticket_number:
+                        print(f"        🎫 Ticket {ticket_number} found as ACTIVE PENDING ORDER")
+                        return True
+            
+            # Check open positions
+            open_positions = mt5.positions_get()
+            if open_positions:
+                for position in open_positions:
+                    if position.ticket == ticket_number:
+                        print(f"        🎫 Ticket {ticket_number} found as ACTIVE POSITION")
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"        Error checking ticket {ticket_number}: {e}")
+            return False
+        
     # --- SUB-FUNCTION 7: CHECK PROXIMITY RISK ---
     def check_proximity_risk(order, existing_positions):
         """
@@ -15751,15 +16329,12 @@ def place_usd_orders(inv_id=None):
                     if ticket in active_pending_tickets:
                         if item.get("status") != "pending":
                             item["status"] = "pending"
-                            print(f"       - Ticket {ticket}: status updated to 'pending'")
                     elif ticket in active_position_tickets:
                         if item.get("status") != "running_position":
                             item["status"] = "running_position"
-                            print(f"       - Ticket {ticket}: status updated to 'running_position'")
                     else:
                         if item.get("status") != "closed":
                             item["status"] = "closed"
-                            print(f"       - Ticket {ticket}: status updated to 'closed'")
         
         # Check pending orders
         if pending_orders:
@@ -16016,7 +16591,6 @@ def place_usd_orders(inv_id=None):
                         trade['position_id'] = f"POS_{position_counter}"
                         position_counter += 1
                         needs_update = True
-                        print(f"      🆔 Assigned position ID {trade['position_id']} to ticket {ticket}")
                     
                     # Update position details (prices, profits, etc.)
                     trade['current_price'] = position.price_current
@@ -16043,7 +16617,6 @@ def place_usd_orders(inv_id=None):
                             trade['position_id'] = f"POS_{position_counter}"
                             position_counter += 1
                             needs_update = True
-                            print(f"      🆔 Assigned position ID {trade['position_id']} to ticket {ticket} (position: {position_ticket})")
                         
                         # Update position details
                         trade['current_price'] = position.price_current
@@ -16125,7 +16698,6 @@ def place_usd_orders(inv_id=None):
                         trade['position_id'] = f"POS_{position_counter}"
                         position_counter += 1
                         updated_count += 1
-                        print(f"      🆔 Assigned position ID {trade['position_id']} to running position ticket {trade.get('ticket')}")
             
             # Third pass: calculate total P&L for closed positions if not already calculated
             for trade in history:
@@ -16361,6 +16933,16 @@ def place_usd_orders(inv_id=None):
                     
                     # Create a copy of the original entry with ALL fields preserved
                     enhanced_entry = entry.copy()
+                    
+                    # ========== PRESERVE TICKET FIELD FOR DUPLICATE CHECKING ==========
+                    if 'ticket' in entry and entry['ticket']:
+                        try:
+                            ticket_value = int(entry['ticket'])
+                            print(f"            🎫 Signal has existing ticket: {ticket_value} (will check for duplicates)")
+                            enhanced_entry['ticket'] = ticket_value
+                        except (ValueError, TypeError):
+                            print(f"            ⚠️ Invalid ticket value in signal: {entry['ticket']}")
+                    # ========== END TICKET PRESERVATION ==========
                     
                     # ========== DYNAMIC VOLUME EXTRACTION (ANY *_volume FIELD) ==========
                     volume = None
@@ -17252,6 +17834,36 @@ def place_usd_orders(inv_id=None):
         
         # CRITICAL: USE AUTHORIZED MAGIC NUMBER (LOGIN_ID + USER_ID)
         magic_number = authorized_magic_number
+
+        # ========== NEW: CHECK TICKET FIELD FOR ACTIVE ORDERS ==========
+        # Check if order has a ticket field and if that ticket exists in MT5
+        existing_ticket = order_data.get('ticket', None)
+        if existing_ticket is not None:
+            try:
+                existing_ticket = int(existing_ticket)
+                print(f"        🎫 Order has existing ticket field: {existing_ticket}")
+                
+                # Check if this ticket is active in MT5
+                if is_ticket_active_in_mt5(existing_ticket):
+                    error_msg = f"Ticket {existing_ticket} already exists as active order/position - skipping duplicate"
+                    print(f"        ⏭️ {error_msg}")
+                    
+                    # Remove signal from limit_orders.json to prevent reprocessing
+                    signals_path = order_data.get('signals_path', '')
+                    if signals_path:
+                        signals_file = Path(signals_path)
+                        if signals_file.exists():
+                            remove_signal_from_limit_orders(signals_file, order_data)
+                            print(f"        🗑️ Removed duplicate signal from limit_orders.json")
+                    
+                    return False, None, error_msg, None
+                else:
+                    print(f"        ✅ Ticket {existing_ticket} not found in MT5 - safe to place new order")
+            except (ValueError, TypeError):
+                print(f"        ℹ️ Invalid ticket value: {existing_ticket} - treating as no ticket")
+        else:
+            print(f"        ℹ️ No ticket field in order - will place as new order")
+        # ========== END TICKET CHECK ==========
         
         # Fallback only if authorized_magic_number is None (should never happen)
         if magic_number is None:
@@ -17490,6 +18102,42 @@ def place_usd_orders(inv_id=None):
         
         syncing_orders_and_pnl_details(investor_root, trade_record, original_signal)
         
+        # ========== REMOVE SUCCESSFUL SIGNAL FROM LIMIT_ORDERS.JSON ==========
+        # After successful placement, remove ONLY the placed signal from limit_orders.json
+        signals_path = order_data.get('signals_path', '')
+        if signals_path and result.order:
+            try:
+                signals_file = Path(signals_path)
+                if signals_file.exists():
+                    with open(signals_file, 'r', encoding='utf-8') as f:
+                        signals = json.load(f)
+                    
+                    original_count = len(signals)
+                    
+                    # Filter out the placed signal
+                    filtered_signals = []
+                    for signal in signals:
+                        # Match by symbol, order_type, entry, and current_candle_time
+                        if not ((signal.get('symbol') == order_data.get('original_symbol', symbol) or
+                                signal.get('symbol') == symbol) and
+                            signal.get('order_type') == order_type and
+                            signal.get('entry') == entry_price and
+                            signal.get('current_candle_time') == order_data.get('current_candle_time')):
+                            filtered_signals.append(signal)
+                    
+                    if len(filtered_signals) < original_count:
+                        with open(signals_file, 'w', encoding='utf-8') as f:
+                            json.dump(filtered_signals, f, indent=4)
+                        print(f"        🗑️ Removed {original_count - len(filtered_signals)} placed signal(s) from {signals_file.name} ({len(filtered_signals)} remaining)")
+                    else:
+                        # If no match found, clear the whole file as fallback
+                        with open(signals_file, 'w', encoding='utf-8') as f:
+                            json.dump([], f, indent=4)
+                        print(f"        🗑️ CLEARED {signals_file.name} (no matching signal found, cleared all)")
+            except Exception as e:
+                print(f"        ⚠️ Could not process limit_orders.json: {e}")
+        # ========== END REMOVE SUCCESSFUL SIGNAL ==========
+        
         hedge_msg = " 🛡️[HEDGE]" if is_hedge else ""
         print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Magic: {magic_number}]{hedge_msg}")
         return True, result, None, cache_key
@@ -17545,8 +18193,10 @@ def place_usd_orders(inv_id=None):
                 if signals_path:
                     signals_file = Path(signals_path)
                     if signals_file.exists():
-                        remove_signal_from_limit_orders(signals_file, order_data)
-                        stats['records_removed'] += 1
+                        # Clear the whole file on failure too
+                        with open(signals_file, 'w', encoding='utf-8') as f:
+                            json.dump([], f, indent=4)
+                        print(f"        🗑️ CLEARED limit_orders.json on failure: {signals_file.name}")
         
         print(f"\n  🛡️ HEDGE ORDERS SUMMARY: {hedge_placed} placed, {hedge_failed} failed")
         return stats
@@ -18109,462 +18759,2500 @@ def place_usd_orders(inv_id=None):
         return any_orders_placed
     main()
 
-def clean_trades_history(inv_id=None):
-    """
-    Clean tradeshistory.json files - remove records older than execution start date.
-    Records without valid dates are ALWAYS removed.
-    If no start date found, ALL records are removed.
-    """
-    import json
-    from pathlib import Path
-    from datetime import datetime
+def place_usd_orders(inv_id=None):
     
-    print("\n" + "="*60)
-    print("🧹 CLEANING TRADES HISTORY")
-    print("="*60)
+    # --- SUFFIX DICTIONARY FOR RETRY LOGIC ---
+    SYMBOL_SUFFIXES = [
+        "",      # Original symbol first
+        "+",     # Common suffix for some brokers
+        ".m",    # Micro accounts
+        "pro",   # Pro accounts
+        ".pro",  # Pro accounts with dot
+        "c",     # Cent accounts
+        ".c",    # Cent accounts with dot
+        "fx",    # Forex suffix
+        ".fx",   # Forex with dot
+        "e",     # ECN accounts
+        ".e",    # ECN with dot
+        "std",   # Standard accounts
+        ".std",  # Standard with dot
+        "m",     # Mini accounts
+        ".mini", # Mini accounts
+        "micro", # Micro accounts
+        ".micro", # Micro with dot
+        "-",     # Dash suffix
+        ".-",    # Dot dash
+        "_",     # Underscore
+        "._",    # Dot underscore
+        "ecn",   # ECN suffix
+        ".ecn",  # Dot ECN
+        "real",  # Real account
+        ".real", # Dot real
+        "demo",  # Demo account
+        ".demo"  # Dot demo
+    ]
     
-    # Get investors
-    if inv_id:
-        investor_ids = [inv_id] if inv_id in usersdictionary else []
-        if not investor_ids:
-            print(f"Investor {inv_id} not found")
-            return {'error': f'Investor {inv_id} not found'}
-    else:
-        investor_ids = list(usersdictionary.keys())
-    
-    print(f"📋 Investors: {len(investor_ids)}\n")
-    
-    stats = {
-        'investors': 0,
-        'files': 0,
-        'records_removed': 0,
-        'files_deleted': 0,
-        'oldest_removed': None,
-        'newest_removed': None
-    }
-    
-    for user_brokerid in investor_ids:
-        investor_root = Path(INV_PATH) / user_brokerid
-        if not investor_root.exists():
-            continue
+    # --- SUB-FUNCTION 1: LOAD PROXIMITY RISK SETTING FROM ACCOUNTMANAGEMENT.JSON ---
+    def get_proximity_risk_setting(investor_root):
+        """
+        Load skip_orders_close_to_position setting from accountmanagement.json.
+        Returns True if orders should be skipped when too close to positions.
+        Returns False if orders should be placed regardless of proximity.
+        Default: False (don't skip)
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
         
-        # Get execution start date
-        start_datetime = None
+        if not acc_mgmt_path.exists():
+            print(f"    ℹ️  No accountmanagement.json found - proximity risk check DISABLED")
+            return False
         
-        # Check accountmanagement.json
-        acc_mgmt = investor_root / "accountmanagement.json"
-        if acc_mgmt.exists():
-            try:
-                with open(acc_mgmt, 'r') as f:
-                    config = json.load(f)
-                    start_date = config.get('execution_start_date')
-                    if start_date:
-                        for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%d/%m/%Y"]:
-                            try:
-                                start_datetime = datetime.strptime(start_date, fmt)
-                                break
-                            except:
-                                continue
-            except:
-                pass
-        
-        # Check activities.json if not found
-        if not start_datetime:
-            activities = investor_root / "activities.json"
-            if activities.exists():
-                try:
-                    with open(activities, 'r') as f:
-                        data = json.load(f)
-                        start_date = data.get('execution_start_date')
-                        if start_date:
-                            for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%d/%m/%Y"]:
-                                try:
-                                    start_datetime = datetime.strptime(start_date, fmt)
-                                    break
-                                except:
-                                    continue
-                except:
-                    pass
-        
-        delete_all = (start_datetime is None)
-        
-        if delete_all:
-            print(f"📁 Investor {user_brokerid}: NO START DATE - will delete ALL records")
-        else:
-            print(f"📁 Investor {user_brokerid}: Keeping records from {start_datetime.strftime('%Y-%m-%d')}")
-        
-        # Process all tradeshistory.json files
-        for history_path in investor_root.rglob("tradeshistory.json"):
-            if not history_path.exists():
-                continue
-            
-            try:
-                with open(history_path, 'r') as f:
-                    history = json.load(f)
-                
-                if not history:
-                    continue
-                
-                original_count = len(history)
-                kept = []
-                removed_records = []  # Store removed records with their ages
-                
-                for record in history:
-                    keep = False
-                    record_date = None
-                    date_source = None
-                    
-                    # Try multiple date fields in priority order
-                    date_fields = [
-                        ('placed_timestamp', record.get('placed_timestamp')),
-                        ('close_time', record.get('close_time')),
-                        ('current_candle_time', record.get('current_candle_time')),
-                        ('open_time', record.get('open_time')),
-                        ('cancelled_time', record.get('cancelled_time')),
-                        ('generated_at', record.get('generated_at')),
-                        ('calculated_at', record.get('calculated_at')),
-                        ('moved_to_signals_at', record.get('moved_to_signals_at')),
-                        ('timestamp', record.get('timestamp'))
-                    ]
-                    
-                    for field_name, date_str in date_fields:
-                        if date_str and isinstance(date_str, str):
-                            try:
-                                # Handle various formats
-                                if 'T' in date_str:
-                                    # ISO format
-                                    clean_date = date_str.split('.')[0] if '.' in date_str else date_str
-                                    record_date = datetime.strptime(clean_date, '%Y-%m-%dT%H:%M:%S')
-                                else:
-                                    # Standard format
-                                    record_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-                                date_source = field_name
-                                break
-                            except:
-                                continue
-                    
-                    if delete_all:
-                        # Remove everything
-                        removed_records.append({'date': record_date, 'source': date_source})
-                    elif record_date:
-                        # Keep if on or after start date
-                        if record_date >= start_datetime:
-                            keep = True
-                        else:
-                            removed_records.append({'date': record_date, 'source': date_source, 'age_days': (datetime.now() - record_date).days})
-                    else:
-                        # No valid date found - remove
-                        removed_records.append({'date': None, 'source': 'no_date', 'age_days': 'unknown'})
-                    
-                    if keep:
-                        kept.append(record)
-                
-                removed_count = len(removed_records)
-                
-                if removed_count > 0:
-                    # Calculate age statistics
-                    ages = []
-                    for r in removed_records:
-                        if r.get('age_days') and isinstance(r['age_days'], int):
-                            ages.append(r['age_days'])
-                    
-                    oldest_days = max(ages) if ages else None
-                    newest_days = min(ages) if ages else None
-                    
-                    # Format age string
-                    age_info = ""
-                    if oldest_days and newest_days:
-                        if oldest_days == newest_days:
-                            age_info = f" (all {oldest_days} days old)"
-                        else:
-                            age_info = f" (oldest: {oldest_days} days, newest: {newest_days} days)"
-                    
-                    if delete_all and len(kept) == 0:
-                        # Delete the file entirely
-                        history_path.unlink()
-                        stats['files_deleted'] += 1
-                        print(f"   🗑️ {history_path.parent.name}: DELETED ({removed_count} records{age_info})")
-                    else:
-                        # Write back kept records
-                        with open(history_path, 'w') as f:
-                            json.dump(kept, f, indent=4)
-                        print(f"   ✅ {history_path.parent.name}: {removed_count} removed{age_info}, {len(kept)} kept")
-                    
-                    stats['records_removed'] += removed_count
-                    stats['files'] += 1
-                    
-                    # Track global oldest/newest
-                    if ages:
-                        if stats['oldest_removed'] is None or max(ages) > stats['oldest_removed']:
-                            stats['oldest_removed'] = max(ages)
-                        if stats['newest_removed'] is None or min(ages) < stats['newest_removed']:
-                            stats['newest_removed'] = min(ages)
-                else:
-                    print(f"   ℹ️ {history_path.parent.name}: No old records")
-                    
-                stats['investors'] += 1
-                
-            except Exception as e:
-                print(f"   {history_path.parent.name}: {str(e)[:50]}")
-    
-    # Summary
-    print("\n" + "="*60)
-    print(f"📊 SUMMARY")
-    print(f"   Investors: {stats['investors']}")
-    print(f"   Files cleaned: {stats['files']}")
-    print(f"   Records removed: {stats['records_removed']}")
-    
-    if stats['records_removed'] > 0:
-        if stats['oldest_removed'] and stats['newest_removed']:
-            if stats['oldest_removed'] == stats['newest_removed']:
-                print(f"   Age of removed: {stats['oldest_removed']} days old")
-            else:
-                print(f"   Age range: {stats['newest_removed']} to {stats['oldest_removed']} days old")
-    
-    print(f"   Files deleted: {stats['files_deleted']}")
-    print("="*60 + "\n")
-    
-    return stats
-
-def update_orders_status_in_tradeshistory(inv_id=None):
-    """
-    Checks MT5 for current pending orders and open positions.
-    Records them in tradeshistory.json as a "current_orders" entry within the array.
-    Does NOT include closed orders or historical deals.
-    """
-
-    def get_current_orders_from_mt5():
-        """Fetch current pending orders and open positions from MT5."""
-        pending_orders = []
-        open_positions = []
-        
-        # Get all pending orders
-        orders = mt5.orders_get()
-        if orders:
-            for order in orders:
-                order_dict = {
-                    'ticket': order.ticket,
-                    'symbol': order.symbol,
-                    'type': order.type,
-                    'type_name': get_order_type_name(order.type),
-                    'volume_initial': order.volume_initial,
-                    'volume_current': order.volume_current,
-                    'price_open': order.price_open,
-                    'sl': order.sl,
-                    'tp': order.tp,
-                    'magic': order.magic,
-                    'comment': order.comment,
-                    'time_setup': datetime.fromtimestamp(order.time_setup).strftime('%Y-%m-%d %H:%M:%S')
-                }
-                pending_orders.append(order_dict)
-        
-        # Get all open positions
-        positions = mt5.positions_get()
-        if positions:
-            for pos in positions:
-                position_dict = {
-                    'ticket': pos.ticket,
-                    'symbol': pos.symbol,
-                    'type': pos.type,
-                    'type_name': get_position_type_name(pos.type),
-                    'volume': pos.volume,
-                    'price_open': pos.price_open,
-                    'price_current': pos.price_current,
-                    'sl': pos.sl,
-                    'tp': pos.tp,
-                    'magic': pos.magic,
-                    'comment': pos.comment,
-                    'time_open': datetime.fromtimestamp(pos.time).strftime('%Y-%m-%d %H:%M:%S'),
-                    'profit': pos.profit,
-                    'swap': pos.swap if hasattr(pos, 'swap') else 0,
-                    'commission': pos.commission if hasattr(pos, 'commission') else 0
-                }
-                open_positions.append(position_dict)
-        
-        return pending_orders, open_positions
-    
-    def get_order_type_name(order_type):
-        type_names = {
-            mt5.ORDER_TYPE_BUY: 'BUY',
-            mt5.ORDER_TYPE_SELL: 'SELL',
-            mt5.ORDER_TYPE_BUY_LIMIT: 'BUY_LIMIT',
-            mt5.ORDER_TYPE_SELL_LIMIT: 'SELL_LIMIT',
-            mt5.ORDER_TYPE_BUY_STOP: 'BUY_STOP',
-            mt5.ORDER_TYPE_SELL_STOP: 'SELL_STOP'
-        }
-        return type_names.get(order_type, f'UNKNOWN_{order_type}')
-    
-    def get_position_type_name(pos_type):
-        type_names = {
-            mt5.POSITION_TYPE_BUY: 'BUY',
-            mt5.POSITION_TYPE_SELL: 'SELL'
-        }
-        return type_names.get(pos_type, f'UNKNOWN_{pos_type}')
-    
-    def check_existing_ticket(history, ticket, ticket_type):
-        """Check if a ticket already exists in the current_orders snapshot."""
-        for item in history:
-            if isinstance(item, dict) and "current_orders" in item:
-                current_orders = item["current_orders"]
-                
-                # Check in pending orders
-                for order in current_orders.get("pending_orders", []):
-                    if order.get("ticket") == ticket:
-                        return True, "pending_order"
-                
-                # Check in open positions
-                for position in current_orders.get("open_positions", []):
-                    if position.get("ticket") == ticket:
-                        return True, "open_position"
-        return False, None
-    
-    def update_status_in_history(history, ticket, new_status):
-        """Update the status field for a specific ticket in all records."""
-        updated = False
-        for item in history:
-            if isinstance(item, dict):
-                # Check if this item has a ticket field (individual order/position record)
-                if item.get("ticket") == ticket:
-                    item["status"] = new_status
-                    updated = True
-                # Also check if it's part of current_orders (though we handle separately)
-                elif "current_orders" in item:
-                    for order in item["current_orders"].get("pending_orders", []):
-                        if order.get("ticket") == ticket:
-                            # This is in current_orders, we'll update in the main loop
-                            pass
-                    for position in item["current_orders"].get("open_positions", []):
-                        if position.get("ticket") == ticket:
-                            # This is in current_orders, we'll update in the main loop
-                            pass
-        return updated
-    
-    # --- MAIN EXECUTION ---
-    print("\n" + "="*60)
-    print("📊 CURRENT ORDERS & POSITIONS SNAPSHOT")
-    print("="*60)
-    
-    investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
-    any_updates = False
-    
-    for user_brokerid in investor_ids:
-        print(f"\n  👤 Investor: {user_brokerid}")
-        
-        investor_root = Path(INV_PATH) / user_brokerid
-        
-        if not investor_root.exists():
-            print(f"     Investor root not found: {investor_root}")
-            continue
-        
-        # Read existing tradeshistory.json first to check for duplicates
-        history_path = investor_root / "tradeshistory.json"
-        history = []
-        
-        if history_path.exists():
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-            except Exception as e:
-                print(f"     Error reading tradeshistory.json: {e}")
-                history = []
-        
-        # Fetch current state from MT5
-        print(f"    🔍 Fetching current orders and positions from MT5...")
-        pending_orders, open_positions = get_current_orders_from_mt5()
-        
-        # Create sets of active tickets for quick lookup
-        active_pending_tickets = {order['ticket'] for order in pending_orders}
-        active_position_tickets = {pos['ticket'] for pos in open_positions}
-        
-        # Print tickets found and check for duplicates
-        print(f"\n    📋 Found: {len(pending_orders)} pending orders, {len(open_positions)} open positions")
-        
-        # Update status for existing records in history (not just current_orders)
-        print(f"\n    🔄 Updating status for existing records...")
-        
-        # Iterate through all items in history to update status
-        for item in history:
-            if isinstance(item, dict):
-                # Skip the current_orders entry for now, handle separately
-                if "current_orders" in item:
-                    continue
-                
-                ticket = item.get("ticket")
-                if ticket:
-                    if ticket in active_pending_tickets:
-                        if item.get("status") != "pending":
-                            item["status"] = "pending"
-                            print(f"       - Ticket {ticket}: status updated to 'pending'")
-                        else:
-                            print(f"       - Ticket {ticket}: already 'pending'")
-                    elif ticket in active_position_tickets:
-                        if item.get("status") != "running_position":
-                            item["status"] = "running_position"
-                            print(f"       - Ticket {ticket}: status updated to 'running_position'")
-                        else:
-                            print(f"       - Ticket {ticket}: already 'running_position'")
-                    else:
-                        if item.get("status") != "closed":
-                            item["status"] = "closed"
-                            print(f"       - Ticket {ticket}: status updated to 'closed'")
-        
-        # Check pending orders
-        if pending_orders:
-            print(f"\n    🎫 Pending Orders Tickets:")
-            for order in pending_orders:
-                ticket = order['ticket']
-                exists, location = check_existing_ticket(history, ticket, "pending")
-                if exists:
-                    print(f"       - Ticket {ticket} ({order['type_name']}) - ✅ EXISTS! (in {location})")
-                else:
-                    print(f"       - Ticket {ticket} ({order['type_name']}) - 🆕 New")
-        
-        # Check open positions
-        if open_positions:
-            print(f"\n    💼 Open Positions Tickets:")
-            for position in open_positions:
-                ticket = position['ticket']
-                exists, location = check_existing_ticket(history, ticket, "position")
-                if exists:
-                    print(f"       - Ticket {ticket} ({position['type_name']}) - ✅ EXISTS! (in {location})")
-                else:
-                    print(f"       - Ticket {ticket} ({position['type_name']}) - 🆕 New")
-        
-        # Prepare current_orders data
-        current_orders_data = {
-            'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'pending_orders': pending_orders,
-            'open_positions': open_positions
-        }
-        
-        # Remove any existing "current_orders" entry
-        history = [item for item in history if not isinstance(item, dict) or "current_orders" not in item]
-        
-        # Append the new current_orders entry
-        history.append({"current_orders": current_orders_data})
-        
-        # Save back to file
         try:
-            with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump(history, f, indent=4)
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
             
-            print(f"\n    ✅ Saved current orders snapshot to tradeshistory.json")
-            print(f"       - Pending orders: {len(pending_orders)}")
-            print(f"       - Open positions: {len(open_positions)}")
+            settings = config.get("settings", {})
+            skip_close = settings.get("skip_orders_close_to_position", False)
             
-            any_updates = True
+            if skip_close:
+                print(f"     Proximity risk check ENABLED (skip_orders_close_to_position: true)")
+                print(f"       - Orders too close to existing positions will be SKIPPED")
+            else:
+                print(f"    ✅ Proximity risk check DISABLED (skip_orders_close_to_position: false)")
+                print(f"       - All orders will be placed regardless of proximity")
+            
+            return skip_close
             
         except Exception as e:
-            print(f"     Error saving tradeshistory.json: {e}")
+            print(f"     Error reading accountmanagement.json: {e}")
+            print(f"       - Defaulting to proximity risk check DISABLED")
+            return False
     
-    print("\n" + "="*60)
-    if any_updates:
-        print("✅ Current orders snapshot completed")
-    else:
-        print(" No updates made")
-    print("="*60)
+    # --- SUB-FUNCTION 2: LOAD INVALID ORDER CONVERSION SETTING ---
+    def get_switch_invalid_setting(investor_root):
+        """
+        Load switch_invalid_to_instant_order setting from accountmanagement.json.
+        Returns True if invalid stop orders should be converted to instant market orders.
+        Returns False if invalid orders should be rejected.
+        Default: False (don't convert)
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            print(f"    ℹ️  No accountmanagement.json found - invalid order conversion DISABLED")
+            return False
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            settings = config.get("settings", {})
+            switch_invalid = settings.get("switch_invalid_to_instant_order", False)
+            
+            if switch_invalid:
+                print(f"    🔄 Invalid order conversion ENABLED (switch_invalid_to_instant_order: true)")
+                print(f"       - Invalid BUY_STOP orders will convert to INSTANT_BUY")
+                print(f"       - Invalid SELL_STOP orders will convert to INSTANT_SELL")
+            else:
+                print(f"    ℹ️  Invalid order conversion DISABLED (switch_invalid_to_instant_order: false)")
+                print(f"       - Invalid stop orders will be REJECTED")
+            
+            return switch_invalid
+            
+        except Exception as e:
+            print(f"     Error reading switch_invalid_to_instant setting: {e}")
+            print(f"       - Defaulting to conversion DISABLED")
+            return False
     
-    return any_updates
+    # --- SUB-FUNCTION 3: REMOVE CANDLE TIME RECORD ON FAILURE ---
+    def remove_candle_time_record(investor_root, symbol, timeframe, current_candle_time):
+        """
+        Remove a candle time record when order placement fails.
+        This allows directional_bias to reprocess the same candle.
+        """
+        # Find the candle_time_records.json file in any strategy folder
+        records_files = list(investor_root.rglob("candle_time_records.json"))
+        
+        if not records_files:
+            print(f"        No candle_time_records.json found to remove record from")
+            return False
+        
+        removed_count = 0
+        
+        for records_file in records_files:
+            try:
+                if not records_file.exists():
+                    continue
+                
+                with open(records_file, 'r', encoding='utf-8') as f:
+                    records = json.load(f)
+                
+                original_count = len(records)
+                
+                # Find and remove matching record
+                filtered_records = []
+                for record in records:
+                    if (record.get('symbol') == symbol and 
+                        record.get('timeframe') == timeframe and 
+                        record.get('current_candle_time') == current_candle_time):
+                        print(f"        🗑️ Removing candle time record: {symbol} [{timeframe}] @ {current_candle_time}")
+                        removed_count += 1
+                        continue  # Skip this record
+                    filtered_records.append(record)
+                
+                if len(filtered_records) < original_count:
+                    # Save updated records
+                    with open(records_file, 'w', encoding='utf-8') as f:
+                        json.dump(filtered_records, f, indent=4)
+                    print(f"        ✅ Removed {original_count - len(filtered_records)} record(s) from {records_file.name}")
+                else:
+                    print(f"        ℹ️ No matching record found in {records_file.name}")
+                    
+            except Exception as e:
+                print(f"        Error processing {records_file}: {e}")
+        
+        return removed_count > 0
+    
+    # --- SUB-FUNCTION 3B: REMOVE SIGNAL FROM LIMIT_ORDERS.JSON ---
+    def remove_signal_from_limit_orders(limit_orders_path, signal_to_remove):
+        """
+        Remove a specific signal from limit_orders.json file.
+        This prevents reprocessing failed signals.
+        """
+        try:
+            if not limit_orders_path.exists():
+                return False
+            
+            with open(limit_orders_path, 'r', encoding='utf-8') as f:
+                signals = json.load(f)
+            
+            original_count = len(signals)
+            
+            # Find and remove the matching signal
+            filtered_signals = []
+            for signal in signals:
+                # Match by symbol, order_type, entry, and current_candle_time
+                if (signal.get('symbol') == signal_to_remove.get('symbol') and
+                    signal.get('order_type') == signal_to_remove.get('order_type') and
+                    signal.get('entry') == signal_to_remove.get('entry') and
+                    signal.get('current_candle_time') == signal_to_remove.get('current_candle_time')):
+                    print(f"        🗑️ Removing failed signal from limit_orders.json")
+                    continue
+                filtered_signals.append(signal)
+            
+            if len(filtered_signals) < original_count:
+                with open(limit_orders_path, 'w', encoding='utf-8') as f:
+                    json.dump(filtered_signals, f, indent=4)
+                print(f"        ✅ Removed {original_count - len(filtered_signals)} signal(s) from limit_orders.json")
+                return True
+            else:
+                print(f"        ℹ️ No matching signal found in limit_orders.json")
+                return False
+                
+        except Exception as e:
+            print(f"        Error removing signal from limit_orders.json: {e}")
+            return False
+    
+    # --- SUB-FUNCTION 4: CHECK AUTHORIZATION STATUS ---
+    def check_authorization_status_old(investor_root):
+        """Check activities.json for unauthorized actions and bypass status"""
+        activities_path = investor_root / "activities.json"
+        if not activities_path.exists():
+            print(f"    ✅ No activities.json found - proceeding with order placement")
+            return True, None
+        
+        try:
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities = json.load(f)
+            unauthorized_detected = activities.get('unauthorized_action_detected', False)
+            bypass_active = activities.get('bypass_restriction', False)
+            autotrading_active = activities.get('activate_autotrading', False)
+            
+            if unauthorized_detected:
+                if bypass_active and autotrading_active:
+                    print(f"     Unauthorized actions detected but BYPASS ACTIVE - proceeding")
+                    return True, activities
+                else:
+                    print(f"    🚫 Unauthorized actions detected - ORDER PLACEMENT BLOCKED")
+                    if not bypass_active: print(f"       - Bypass restriction: DISABLED")
+                    if not autotrading_active: print(f"       - Auto-trading: DISABLED")
+                    return False, activities
+            print(f"    ✅ No unauthorized actions detected - proceeding")
+            return True, activities
+        except Exception as e:
+            print(f"     Error reading activities.json: {e}")
+            return True, None
+    
+    # --- SUB-FUNCTION 4: CHECK AUTHORIZATION STATUS & GET MAGIC NUMBER ---
+    def check_authorization_status(investor_root, login_id=None, user_id=None):
+        """
+        Check activities.json for unauthorized actions and bypass status.
+        Also constructs and returns the authorized magic number.
+        
+        Returns:
+            tuple: (can_proceed, activities, authorized_magic_number)
+        """
+        activities_path = investor_root / "activities.json"
+        
+        # Construct magic number from login_id and user_id if provided
+        authorized_magic_number = None
+        if login_id is not None and user_id is not None:
+            try:
+                authorized_magic_number = int(str(login_id) + str(user_id))
+                print(f"    🔑 Authorized Magic Number: {authorized_magic_number}")
+            except (ValueError, TypeError):
+                print(f"    ⚠️ Could not create magic number from LOGIN_ID={login_id} and USER_ID={user_id}")
+        
+        if not activities_path.exists():
+            print(f"    ✅ No activities.json found - proceeding with order placement")
+            return True, None, authorized_magic_number
+        
+        try:
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities = json.load(f)
+            unauthorized_detected = activities.get('unauthorized_action_detected', False)
+            bypass_active = activities.get('bypass_restriction', False)
+            autotrading_active = activities.get('activate_autotrading', False)
+            
+            # Also try to get magic number from activities if not provided
+            if authorized_magic_number is None:
+                authorized_magic_number = activities.get('authorized_magic_number')
+            
+            if unauthorized_detected:
+                if bypass_active and autotrading_active:
+                    print(f"     Unauthorized actions detected but BYPASS ACTIVE - proceeding")
+                    return True, activities, authorized_magic_number
+                else:
+                    print(f"    🚫 Unauthorized actions detected - ORDER PLACEMENT BLOCKED")
+                    if not bypass_active: print(f"       - Bypass restriction: DISABLED")
+                    if not autotrading_active: print(f"       - Auto-trading: DISABLED")
+                    return False, activities, authorized_magic_number
+            print(f"    ✅ No unauthorized actions detected - proceeding")
+            return True, activities, authorized_magic_number
+        except Exception as e:
+            print(f"     Error reading activities.json: {e}")
+            return True, None, authorized_magic_number
+    
+    # --- SUB-FUNCTION 5: GET ORDER TYPE CONSTANTS ---
+    def get_mt5_order_type(order_type_str):
+        """Convert order type string to MT5 constant"""
+        order_type_map = {
+            'buy_stop': mt5.ORDER_TYPE_BUY_STOP,
+            'sell_stop': mt5.ORDER_TYPE_SELL_STOP,
+            'buy_limit': mt5.ORDER_TYPE_BUY_LIMIT,
+            'sell_limit': mt5.ORDER_TYPE_SELL_LIMIT,
+            'instant_buy': mt5.ORDER_TYPE_BUY,
+            'instant_sell': mt5.ORDER_TYPE_SELL
+        }
+        return order_type_map.get(order_type_str.lower())
+
+    # --- SUB-FUNCTION 6: GET VOLUME FROM SIGNAL ---
+    def get_volume_from_signal(order_data):
+        """
+        Extract volume from signal data dynamically.
+        Looks for any field ending with '_volume' (e.g., deriv_volume, bybit_volume, a_volume, etc.)
+        Returns None if no volume field is found (caller must handle).
+        """
+        # Look for any field ending with '_volume' (anonymous/dynamic broker prefix)
+        for key, value in order_data.items():
+            if key.endswith('_volume'):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        
+        # No volume field found
+        return None
+
+    # --- SUB-FUNCTION 6.5: CHECK IF TICKET EXISTS IN ACTIVE ORDERS/POSITIONS ---
+    def is_ticket_active_in_mt5(ticket_number):
+        """
+        Check if a ticket number exists as an active pending order OR open position.
+        Returns True if ticket is found active, False otherwise.
+        """
+        if not ticket_number:
+            return False
+        
+        try:
+            # Check pending orders
+            pending_orders = mt5.orders_get()
+            if pending_orders:
+                for order in pending_orders:
+                    if order.ticket == ticket_number:
+                        print(f"        🎫 Ticket {ticket_number} found as ACTIVE PENDING ORDER")
+                        return True
+            
+            # Check open positions
+            open_positions = mt5.positions_get()
+            if open_positions:
+                for position in open_positions:
+                    if position.ticket == ticket_number:
+                        print(f"        🎫 Ticket {ticket_number} found as ACTIVE POSITION")
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"        Error checking ticket {ticket_number}: {e}")
+            return False
+        
+    # --- SUB-FUNCTION 7: CHECK PROXIMITY RISK ---
+    def check_proximity_risk(order, existing_positions):
+        """
+        Check if order is too close to existing positions using risk-based calculation.
+        Returns (is_risk, closest_position, risk_amount, threshold)
+        """
+        symbol = order.get('symbol')
+        order_type = order.get('order_type', '').lower()
+        entry_price = float(order.get('entry', 0))
+        volume = get_volume_from_signal(order)
+        
+        is_buy = 'buy' in order_type
+        is_sell = 'sell' in order_type
+        
+        if not is_buy and not is_sell:
+            return False, None, 0, 0
+        
+        # Filter positions for this symbol (exact match, including suffixes)
+        symbol_positions = [p for p in existing_positions if p.symbol == symbol]
+        if not symbol_positions:
+            return False, None, 0, 0
+        
+        for position in symbol_positions:
+            position_type = position.type
+            position_entry = position.price_open
+            position_volume = position.volume
+            position_sl = position.sl
+            position_ticket = position.ticket
+            
+            is_position_buy = (position_type == mt5.ORDER_TYPE_BUY)
+            is_position_sell = (position_type == mt5.ORDER_TYPE_SELL)
+            
+            # Calculate position risk from SL
+            position_risk = 0
+            if position_sl and position_sl > 0:
+                if is_position_buy:
+                    risk_profit = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_BUY, symbol, position_volume,
+                        position_entry, position_sl
+                    )
+                else:
+                    risk_profit = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_SELL, symbol, position_volume,
+                        position_entry, position_sl
+                    )
+                if risk_profit:
+                    position_risk = abs(risk_profit)
+            
+            if position_risk == 0:
+                continue
+            
+            risk_threshold = position_risk / 2  # 50% threshold
+            
+            # SAME DIRECTION CHECK
+            if (is_buy and is_position_buy) or (is_sell and is_position_sell):
+                # Calculate potential risk if order triggers
+                if is_sell and is_position_sell:
+                    if entry_price < position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                elif is_buy and is_position_buy:
+                    if entry_price > position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                else:
+                    continue
+                
+                if potential_risk and potential_risk < risk_threshold:
+                    return True, position, potential_risk, risk_threshold
+            
+            # OPPOSITE DIRECTION CHECK
+            elif (is_buy and is_position_sell) or (is_sell and is_position_buy):
+                if is_buy and is_position_sell:
+                    if entry_price > position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                elif is_sell and is_position_buy:
+                    if entry_price < position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                else:
+                    continue
+                
+                if potential_risk and potential_risk < risk_threshold:
+                    return True, position, potential_risk, risk_threshold
+        
+        return False, None, 0, 0
+
+    def is_symbol_tradeable(symbol):
+        """
+        Check if a symbol exists AND trading is enabled (CASE-INSENSITIVE).
+        Returns True if tradeable, False otherwise.
+        FIXED: Uses the same working approach as fetch_ohlc_data_for_investor
+        """
+        # First try to select the symbol (this often resolves case issues)
+        selected = False
+        for attempt in range(3):
+            if mt5.symbol_select(symbol, True):
+                selected = True
+                break
+            time.sleep(0.1)
+        
+        if not selected:
+            # Try case-insensitive lookup
+            all_symbols = mt5.symbols_get()
+            if all_symbols:
+                symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+                symbol_lower = symbol.lower()
+                
+                if symbol_lower in symbols_lower_map:
+                    correct_symbol = symbols_lower_map[symbol_lower]
+                    if correct_symbol != symbol:
+                        print(f"          🔧 Case correction: '{symbol}' → '{correct_symbol}'")
+                    # Try to select the correctly cased symbol
+                    for attempt in range(3):
+                        if mt5.symbol_select(correct_symbol, True):
+                            selected = True
+                            symbol = correct_symbol
+                            break
+                        time.sleep(0.1)
+        
+        if not selected:
+            return False
+        
+        # Get symbol info
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            return False
+        
+        # Check if trading is enabled
+        if hasattr(symbol_info, 'trade_mode') and symbol_info.trade_mode == 0:
+            return False
+        
+        # Check contract size
+        if hasattr(symbol_info, 'trade_contract_size') and symbol_info.trade_contract_size <= 0:
+            return False
+        
+        # Try to get a tick (but don't fail if we can't - some symbols might not have ticks yet)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            # Symbol might be tradeable but no tick yet (e.g., market closed)
+            # Return True anyway if other checks passed
+            print(f"          ⚠️ No tick available for {symbol}, but symbol exists - assuming tradeable")
+            return True
+        
+        # Check if we have valid prices
+        if tick.ask == 0 and tick.bid == 0:
+            return False
+        
+        return True
+
+    def find_tradeable_symbol_with_retry(base_symbol, resolution_cache):
+        """
+        Try ALL suffixes one after another until a tradeable symbol is found.
+        FIRST tries the exact symbol with case-insensitive matching.
+        Returns (tradeable_symbol, used_suffix) or (None, None) if none found.
+        """
+        # Check cache first
+        cache_key = f"tradeable_{base_symbol.lower()}"
+        if cache_key in resolution_cache:
+            cached_result = resolution_cache[cache_key]
+            if cached_result is None:
+                return None, None
+            return cached_result, resolution_cache.get(f"suffix_{base_symbol.lower()}", "")
+        
+        print(f"        🔍 Searching for tradeable symbol for '{base_symbol}'...")
+        
+        # Get all symbols from MT5 once for case-insensitive lookups
+        all_symbols = mt5.symbols_get()
+        if not all_symbols:
+            print(f"          ERROR: Cannot get symbols from MT5")
+            resolution_cache[cache_key] = None
+            return None, None
+        
+        symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+        base_lower = base_symbol.lower()
+        
+        # ========== STEP 1: Try direct case-insensitive match (NO SUFFIX) ==========
+        # This is what works in fetch_ohlc_data_for_investor
+        if base_lower in symbols_lower_map:
+            exact_symbol = symbols_lower_map[base_lower]
+            if exact_symbol != base_symbol:
+                print(f"          🔧 Direct case correction: '{base_symbol}' → '{exact_symbol}'")
+            
+            # Try to select the symbol
+            if mt5.symbol_select(exact_symbol, True):
+                print(f"          ✅ SUCCESS! {exact_symbol} IS TRADEABLE (direct match)!")
+                resolution_cache[cache_key] = exact_symbol
+                resolution_cache[f"suffix_{base_symbol.lower()}"] = ""
+                return exact_symbol, ""
+            else:
+                print(f"          ⚠️ Symbol '{exact_symbol}' exists but cannot be selected")
+        else:
+            print(f"          ℹ️ No direct match for '{base_symbol}' in MT5 symbols")
+        
+        # ========== STEP 2: Try all suffixes ==========
+        for idx, suffix in enumerate(SYMBOL_SUFFIXES, 1):
+            test_symbol = base_symbol + suffix
+            
+            # Skip if we already know this exact symbol is not tradeable
+            symbol_cache_key = f"checked_{test_symbol.lower()}"
+            if symbol_cache_key in resolution_cache and not resolution_cache[symbol_cache_key]:
+                continue
+            
+            test_lower = test_symbol.lower()
+            
+            if test_lower in symbols_lower_map:
+                actual_symbol = symbols_lower_map[test_lower]
+                print(f"          Trying: {test_symbol} (suffix {idx}/{len(SYMBOL_SUFFIXES)}) - found as '{actual_symbol}'")
+                
+                # Try to select the symbol
+                if mt5.symbol_select(actual_symbol, True):
+                    print(f"          ✅ SUCCESS! {actual_symbol} IS TRADEABLE!")
+                    resolution_cache[cache_key] = actual_symbol
+                    resolution_cache[f"suffix_{base_symbol.lower()}"] = suffix
+                    resolution_cache[symbol_cache_key] = True
+                    return actual_symbol, suffix
+                else:
+                    print(f"          ⚠️ Symbol '{actual_symbol}' exists but cannot be selected")
+                    resolution_cache[symbol_cache_key] = False
+            else:
+                print(f"          Trying: {test_symbol} (suffix {idx}/{len(SYMBOL_SUFFIXES)}) - NOT FOUND")
+                resolution_cache[symbol_cache_key] = False
+        
+        # No tradeable symbol found
+        print(f"         FAILED: No tradeable symbol found for '{base_symbol}' after trying {len(SYMBOL_SUFFIXES)} suffixes")
+        resolution_cache[cache_key] = None
+        return None, None
+
+    # --- SUB-FUNCTION 13: COLLECT ORDERS FROM SIGNALS WITH FULL FIELD PRESERVATION ---
+    def collect_orders_from_signals(investor_root, resolution_cache):
+        """
+        Collect all orders from limit_orders.json files in ALL strategy subfolders.
+        PRESERVES ALL FIELDS from the original signal for later recording.
+        Separates hedge orders from regular orders.
+        """
+        entries_with_paths = []
+        hedge_entries = []
+        regular_entries = []
+        
+        # Find ALL limit_orders.json files in any subfolder of investor_root
+        signals_files = list(investor_root.rglob("limit_orders.json"))
+        
+        if not signals_files:
+            print(f"    ℹ️  No limit_orders.json files found in {investor_root} or its subfolders")
+            return [], [], []
+        
+        print(f"    📁 Found {len(signals_files)} limit_orders.json files in strategy folders:")
+        
+        for signals_path in signals_files:
+            # Extract strategy name from parent folder
+            strategy_name = signals_path.parent.name
+            print(f"       • Strategy: {strategy_name} - {signals_path}")
+            
+            try:
+                with open(signals_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if not data:
+                    print(f"          Empty limit_orders.json file")
+                    continue
+                
+                print(f"         📡 Found {len(data)} signals")
+                
+                for entry in data:
+                    # Check if this is a hedge order or grid order
+                    is_hedge = entry.get('is_hedge_order', False)
+                    is_grid = entry.get('is_grid_order', False)  # ADD THIS LINE
+                    
+                    # Get the raw symbol exactly as specified in the JSON
+                    raw_symbol = entry.get("symbol", "")
+                    
+                    # Find tradeable symbol by trying ALL suffixes
+                    tradeable_symbol, used_suffix = find_tradeable_symbol_with_retry(raw_symbol, resolution_cache)
+                    
+                    if tradeable_symbol is None:
+                        print(f"          Cannot find ANY tradeable symbol for '{raw_symbol}' - skipping signal")
+                        continue
+                    
+                    # Create a copy of the original entry with ALL fields preserved
+                    enhanced_entry = entry.copy()
+                    
+                    # ========== PRESERVE TICKET FIELD FOR DUPLICATE CHECKING ==========
+                    if 'ticket' in entry and entry['ticket']:
+                        try:
+                            ticket_value = int(entry['ticket'])
+                            print(f"            🎫 Signal has existing ticket: {ticket_value} (will check for duplicates)")
+                            enhanced_entry['ticket'] = ticket_value
+                        except (ValueError, TypeError):
+                            print(f"            ⚠️ Invalid ticket value in signal: {entry['ticket']}")
+                    # ========== END TICKET PRESERVATION ==========
+                    
+                    # ========== DYNAMIC VOLUME EXTRACTION (ANY *_volume FIELD) ==========
+                    volume = None
+                    for key, value in enhanced_entry.items():
+                        if key.endswith('_volume'):
+                            try:
+                                volume = float(value)
+                                print(f"         📊 Extracted volume from '{key}': {volume}")
+                                break
+                            except (ValueError, TypeError):
+                                continue
+                    
+                    # SKIP SIGNAL IF NO VOLUME FOUND
+                    if volume is None:
+                        print(f"          SKIPPING SIGNAL - No *_volume field found (required for placement)")
+                        continue
+                    
+                    # Store volume in guaranteed standard field
+                    enhanced_entry['volume'] = volume
+                    # ========== END VOLUME EXTRACTION ==========
+                    
+                    # Update symbol fields
+                    enhanced_entry['symbol'] = tradeable_symbol
+                    enhanced_entry['strategy_name'] = strategy_name
+                    enhanced_entry['original_symbol'] = raw_symbol
+                    enhanced_entry['used_suffix'] = used_suffix if used_suffix else "none"
+                    enhanced_entry['suffix_applied'] = used_suffix if used_suffix else "original"
+                    enhanced_entry['signals_path'] = str(signals_path)  # Store path for removal if needed
+                    
+                    # Store the complete original entry for later reference
+                    enhanced_entry['_original_signal'] = entry.copy()
+                    
+                    wrapper = {
+                        'data': enhanced_entry,
+                        'path': signals_path,
+                        'strategy': strategy_name,
+                        'original_signal': entry,  # Keep original for field preservation
+                        'is_hedge': is_hedge,
+                        'is_grid': is_grid  # ADD THIS LINE
+                    }
+                    
+                    entries_with_paths.append(wrapper)
+                    
+                    if is_hedge:
+                        hedge_entries.append(wrapper)
+                        print(f"            🛡️ HEDGE ORDER: {tradeable_symbol} - {entry.get('order_type')} (will ALWAYS be placed)")
+                    elif is_grid:
+                        regular_entries.append(wrapper)
+                        print(f"            📐 GRID ORDER: {tradeable_symbol} - {entry.get('order_type')} (grid order detected)")
+                    else:
+                        regular_entries.append(wrapper)
+                        print(f"            📊 REGULAR ORDER: {tradeable_symbol} - {entry.get('order_type')} (will follow uniqueness rules)")
+                    
+                    if used_suffix:
+                        print(f"               ✅ Using tradeable symbol: {tradeable_symbol} (original: {raw_symbol}, added suffix: '{used_suffix}')")
+                    else:
+                        print(f"               ✅ Using tradeable symbol: {tradeable_symbol} (original: {raw_symbol})")
+                    
+            except json.JSONDecodeError as e:
+                print(f"          Invalid JSON in {signals_path}: {e}")
+                continue
+            except Exception as e:
+                print(f"          Error reading {signals_path}: {e}")
+                continue
+        
+        print(f"    📡 Total signals collected: {len(entries_with_paths)} (Hedge: {len(hedge_entries)}, Regular: {len(regular_entries)})")
+        return entries_with_paths, hedge_entries, regular_entries
+
+    # --- SUB-FUNCTION 17: RISK MANAGEMENT FOR DUPLICATE ORDERS (FIXED WITH PROPER CANCELLATION) ---
+    def risk_management_for_duplicates(investor_root, new_order_data, existing_pending_orders, cancel_exceeding=True, check_only=False):
+        """
+        Check and manage duplicate orders risk.
+        
+        FOR SCAN MODE (check_only=True):
+            - Groups ALL pending orders AND open positions by (symbol, direction, ENTRY PRICE - exact match)
+            - Calculates total combined risk per unique entry
+            - Cancels/Closes orders ONE BY ONE until total directional risk is within maximum threshold
+        
+        FOR NEW ORDER MODE (check_only=False):
+            - Same cleanup first, then evaluates new order against TOTAL risk for SAME ENTRY PRICE
+        """
+        
+        def calculate_order_risk(order_entry, order_sl, symbol, volume, is_buy):
+            """Calculate risk in USD for an order or position"""
+            if order_sl == 0 or order_sl is None:
+                return 0
+            try:
+                calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+                risk_profit = mt5.order_calc_profit(calc_type, symbol, volume, order_entry, order_sl)
+                return abs(risk_profit) if risk_profit else 0
+            except Exception as e:
+                return 0
+        
+        def normalize_order_direction(order_type_or_constant):
+            """Get buy/sell direction from order type string or MT5 constant"""
+            if isinstance(order_type_or_constant, str):
+                order_lower = order_type_or_constant.lower()
+                if 'buy' in order_lower:
+                    return 'buy'
+                elif 'sell' in order_lower:
+                    return 'sell'
+            else:
+                # MT5 constant
+                if order_type_or_constant in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP, 
+                                            mt5.ORDER_TYPE_BUY_STOP_LIMIT, mt5.ORDER_TYPE_BUY]:
+                    return 'buy'
+                elif order_type_or_constant in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP,
+                                            mt5.ORDER_TYPE_SELL_STOP_LIMIT, mt5.ORDER_TYPE_SELL]:
+                    return 'sell'
+            return None
+        
+        def cancel_single_order(order_ticket, reason):
+            """Cancel a single pending order using MT5"""
+            try:
+                # First, verify the order still exists
+                orders = mt5.orders_get(ticket=order_ticket)
+                
+                if not orders or len(orders) == 0:
+                    print(f"            Order #{order_ticket} not found (may have been filled/cancelled)")
+                    return False
+                
+                order = orders[0]
+                
+                # Verify it's still a pending order
+                if order.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                    mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]:
+                    print(f"            Order #{order_ticket} is no longer a pending order (type: {order.type})")
+                    return False
+                
+                # Create cancellation request
+                cancel_request = {
+                    "action": mt5.TRADE_ACTION_REMOVE,
+                    "order": order_ticket
+                }
+                
+                print(f"            📤 Cancelling pending order #{order_ticket}...")
+                
+                # Send cancellation request
+                result = mt5.order_send(cancel_request)
+                
+                if result is None:
+                    print(f"             No response from MT5 for #{order_ticket}")
+                    error = mt5.last_error()
+                    print(f"            🔍 MT5 Last Error: {error}")
+                    return False
+                
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"            ✅ Successfully cancelled order #{order_ticket}")
+                    return True
+                else:
+                    error_codes = {
+                        10004: "Trade timeout",
+                        10006: "Invalid order",
+                        10009: "Order already canceled",
+                        10010: "Insufficient rights",
+                        10011: "Too many requests",
+                        10012: "Trade disabled",
+                        10013: "Market closed",
+                        10014: "Invalid price",
+                        10015: "Invalid stops",
+                        10016: "Invalid volume",
+                        10017: "Order not found",
+                        10018: "Order already filled",
+                        10019: "Order canceled",
+                        10020: "No changes",
+                        10021: "Order locked",
+                        10022: "Invalid order type"
+                    }
+                    error_msg = error_codes.get(result.retcode, f"Unknown error ({result.retcode})")
+                    print(f"             Failed to cancel #{order_ticket}: {error_msg}")
+                    if result.comment:
+                        print(f"            📝 Broker comment: {result.comment}")
+                    return False
+                        
+            except Exception as e:
+                print(f"             Exception cancelling #{order_ticket}: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        def close_single_position(position_ticket, symbol, volume, is_buy, reason):
+            """Close a single open position using MT5"""
+            try:
+                # First, verify the position still exists
+                positions = mt5.positions_get(ticket=position_ticket)
+                
+                if not positions or len(positions) == 0:
+                    print(f"            Position #{position_ticket} not found (may have been closed)")
+                    return False
+                
+                position = positions[0]
+                
+                # Get current market price for the symbol
+                tick = mt5.symbol_info_tick(symbol)
+                if not tick:
+                    print(f"             Cannot get price for {symbol}")
+                    return False
+                
+                # Determine order type for closing
+                if is_buy:
+                    # To close a buy position, we sell
+                    order_type = mt5.ORDER_TYPE_SELL
+                    price = tick.bid
+                else:
+                    # To close a sell position, we buy
+                    order_type = mt5.ORDER_TYPE_BUY
+                    price = tick.ask
+                
+                # Create close request
+                close_request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": symbol,
+                    "volume": volume,
+                    "type": order_type,
+                    "position": position_ticket,
+                    "price": price,
+                    "deviation": 20,
+                    "magic": position.magic if hasattr(position, 'magic') else 0,
+                    "comment": reason[:31],  # Max 31 characters
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                
+                print(f"            📤 Closing position #{position_ticket} ({symbol}, {volume} lots)...")
+                
+                # Send close request
+                result = mt5.order_send(close_request)
+                
+                if result is None:
+                    print(f"             No response from MT5 for position #{position_ticket}")
+                    error = mt5.last_error()
+                    print(f"            🔍 MT5 Last Error: {error}")
+                    return False
+                
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"            ✅ Successfully closed position #{position_ticket}")
+                    return True
+                else:
+                    error_codes = {
+                        10004: "Trade timeout",
+                        10006: "Invalid request",
+                        10009: "Position already closed",
+                        10010: "Insufficient rights",
+                        10011: "Too many requests",
+                        10012: "Trade disabled",
+                        10013: "Market closed",
+                        10014: "Invalid price",
+                        10015: "Invalid stops",
+                        10016: "Invalid volume",
+                        10017: "Position not found",
+                        10018: "Position already closed",
+                        10019: "Position closed",
+                        10020: "No changes",
+                        10021: "Position locked",
+                        10022: "Invalid order type"
+                    }
+                    error_msg = error_codes.get(result.retcode, f"Unknown error ({result.retcode})")
+                    print(f"             Failed to close position #{position_ticket}: {error_msg}")
+                    if result.comment:
+                        print(f"            📝 Broker comment: {result.comment}")
+                    return False
+                        
+            except Exception as e:
+                print(f"             Exception closing position #{position_ticket}: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+        
+        def load_risk_thresholds(investor_root, balance):
+            """Load risk thresholds from accountmanagement.json"""
+            acc_mgmt_path = investor_root / "accountmanagement.json"
+            if not acc_mgmt_path.exists():
+                return None, None, False
+            
+            try:
+                with open(acc_mgmt_path, 'r') as f:
+                    config = json.load(f)
+                
+                default_map = config.get("account_balance_default_risk_management", {})
+                maximum_map = config.get("account_balance_maximum_risk_management", {})
+                
+                default_risk = None
+                maximum_risk = None
+                
+                for range_str, r_val in default_map.items():
+                    try:
+                        parts = range_str.split("_")[0]
+                        low, high = map(float, parts.split("-"))
+                        if low <= balance <= high:
+                            default_risk = float(r_val)
+                            break
+                    except:
+                        continue
+                
+                for range_str, r_val in maximum_map.items():
+                    try:
+                        parts = range_str.split("_")[0]
+                        low, high = map(float, parts.split("-"))
+                        if low <= balance <= high:
+                            maximum_risk = float(r_val)
+                            break
+                    except:
+                        continue
+                
+                if default_risk is None and maximum_risk is None:
+                    return None, None, False
+                if default_risk is None:
+                    default_risk = maximum_risk
+                if maximum_risk is None:
+                    maximum_risk = default_risk
+                if maximum_risk < default_risk:
+                    maximum_risk = default_risk
+                
+                return default_risk, maximum_risk, True
+                
+            except Exception as e:
+                print(f"        Error loading risk thresholds: {e}")
+                return None, None, False
+        
+        # --- Get account balance and thresholds ---
+        account_info = mt5.account_info()
+        if not account_info:
+            print(f"         Cannot get account info")
+            return False, {'error': 'No account info'}
+        
+        balance = account_info.balance
+        default_risk, max_risk, found = load_risk_thresholds(investor_root, balance)
+        
+        if not found:
+            print(f"        ℹ️ No risk thresholds configured - skipping")
+            return True, {'skipped': True}
+        
+        print(f"        🎯 Risk Limits: Target=${default_risk:.2f}, Maximum=${max_risk:.2f}")
+        print(f"        🔍 AutoTrading: {'✅ ENABLED' if mt5.terminal_info().trade_allowed else ' DISABLED'}")
+        
+        # --- GET ALL OPEN POSITIONS ---
+        open_positions = mt5.positions_get() or []
+        print(f"        📊 Found {len(open_positions)} open position(s)")
+        
+        # --- AGGREGATE ALL PENDING ORDERS AND OPEN POSITIONS BY (SYMBOL, DIRECTION, ENTRY PRICE - EXACT) ---
+        # KEY CHANGE: Now grouping by symbol, direction, AND exact entry price (no rounding)
+        entry_groups = {}
+        
+        # Process pending orders
+        for order in existing_pending_orders:
+            # Skip non-pending order types
+            if order.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]:
+                continue
+            
+            direction = normalize_order_direction(order.type)
+            if not direction:
+                continue
+            
+            # KEY CHANGE: Group by symbol + direction + EXACT entry price (as float, no rounding)
+            # Use the raw float value - exact match required
+            entry_price = order.price_open
+            group_key = f"{order.symbol}_{direction}_{entry_price}"
+            
+            # Calculate risk for this order
+            is_buy = direction == 'buy'
+            risk = calculate_order_risk(order.price_open, order.sl, order.symbol, order.volume_initial, is_buy)
+            
+            if group_key not in entry_groups:
+                entry_groups[group_key] = {
+                    'symbol': order.symbol,
+                    'direction': direction,
+                    'entry_price': entry_price,
+                    'orders': [],
+                    'positions': [],
+                    'total_risk': 0
+                }
+            
+            entry_groups[group_key]['orders'].append({
+                'ticket': order.ticket,
+                'risk': risk,
+                'entry': order.price_open,
+                'volume': order.volume_initial,
+                'sl': order.sl,
+                'type': 'pending_order'
+            })
+            entry_groups[group_key]['total_risk'] += risk
+        
+        # Process open positions
+        for position in open_positions:
+            # Determine direction
+            direction = normalize_order_direction(position.type)
+            if not direction:
+                continue
+            
+            # KEY CHANGE: Group by symbol + direction + EXACT entry price
+            entry_price = position.price_open
+            group_key = f"{position.symbol}_{direction}_{entry_price}"
+            
+            # Calculate risk for this position
+            is_buy = direction == 'buy'
+            risk = calculate_order_risk(position.price_open, position.sl, position.symbol, position.volume, is_buy)
+            
+            if group_key not in entry_groups:
+                entry_groups[group_key] = {
+                    'symbol': position.symbol,
+                    'direction': direction,
+                    'entry_price': entry_price,
+                    'orders': [],
+                    'positions': [],
+                    'total_risk': 0
+                }
+            
+            entry_groups[group_key]['positions'].append({
+                'ticket': position.ticket,
+                'risk': risk,
+                'entry': position.price_open,
+                'volume': position.volume,
+                'is_buy': is_buy,
+                'type': 'open_position'
+            })
+            entry_groups[group_key]['total_risk'] += risk
+        
+        # --- SCAN AND CANCEL/CLOSE ORDERS/POSITIONS ONE BY ONE UNTIL WITHIN LIMITS ---
+        total_cancelled = 0
+        total_closed = 0
+        
+        # Log the grouping for debugging
+        if entry_groups:
+            print(f"        🔍 Found {len(entry_groups)} unique entry price group(s)")
+            for group_key, group in entry_groups.items():
+                total_items = len(group['orders']) + len(group['positions'])
+                print(f"           - {group['symbol']} {group['direction'].upper()} @ {group['entry_price']}: {total_items} item(s), total risk: ${group['total_risk']:.2f}")
+            
+            for group_key, group in entry_groups.items():
+                # Combine all items (orders and positions) and sort by risk (highest first)
+                all_items = []
+                all_items.extend([(item, 'order') for item in group['orders']])
+                all_items.extend([(item, 'position') for item in group['positions']])
+                
+                # Sort by risk (highest first) - remove most risky first
+                all_items.sort(key=lambda x: x[0]['risk'], reverse=True)
+                
+                current_risk = group['total_risk']
+                
+                total_items = len(group['orders']) + len(group['positions'])
+                print(f"\n        📋 Entry Group: {group['symbol']} {group['direction'].upper()} @ {group['entry_price']}")
+                print(f"           Total items: {total_items} ({len(group['orders'])} orders, {len(group['positions'])} positions) | Total risk: ${current_risk:.2f}")
+                
+                # If group risk exceeds maximum, cancel/close items one by one
+                if current_risk > max_risk and cancel_exceeding:
+                    print(f"           🚨 Total entry risk exceeds maximum (${current_risk:.2f} > ${max_risk:.2f})")
+                    print(f"           🔄 Closing/Cancelling items one by one until risk is within limit...")
+                    
+                    # Track what we close/cancel
+                    cancelled_in_group = 0
+                    closed_in_group = 0
+                    
+                    for item, item_type in all_items:
+                        # Check current risk after previous cancellations/closures
+                        if current_risk <= max_risk:
+                            print(f"           ✅ Risk now within limit: ${current_risk:.2f} ≤ ${max_risk:.2f}")
+                            print(f"           📊 Cancelled {cancelled_in_group} order(s), closed {closed_in_group} position(s)")
+                            break
+                        
+                        if item_type == 'order':
+                            # Try to cancel this order
+                            print(f"           🗑️ Attempting to cancel order #{item['ticket']} (entry: {item['entry']}, risk: ${item['risk']:.2f})")
+                            
+                            if cancel_single_order(item['ticket'], f"Entry risk ${current_risk:.2f} exceeds max ${max_risk:.2f}"):
+                                cancelled_in_group += 1
+                                total_cancelled += 1
+                                current_risk -= item['risk']
+                                print(f"           📊 Remaining entry risk: ${current_risk:.2f}")
+                            else:
+                                print(f"           Failed to cancel order #{item['ticket']}, skipping...")
+                                continue
+                                
+                        elif item_type == 'position':
+                            # Try to close this position
+                            print(f"           🔒 Attempting to close position #{item['ticket']} (entry: {item['entry']}, risk: ${item['risk']:.2f})")
+                            
+                            if close_single_position(
+                                item['ticket'], 
+                                group['symbol'], 
+                                item['volume'], 
+                                item['is_buy'],
+                                f"Entry risk ${current_risk:.2f} exceeds max ${max_risk:.2f}"
+                            ):
+                                closed_in_group += 1
+                                total_closed += 1
+                                current_risk -= item['risk']
+                                print(f"           📊 Remaining entry risk: ${current_risk:.2f}")
+                            else:
+                                print(f"           Failed to close position #{item['ticket']}, skipping...")
+                                continue
+                    
+                    # Final status for this group
+                    if current_risk > max_risk:
+                        print(f"           Group still exceeds limit after cleanup attempts! Risk: ${current_risk:.2f}")
+                        print(f"           💡 Some items may have been filled/closed by other processes")
+                    else:
+                        print(f"           ✅ Entry risk now within limit: ${current_risk:.2f} ≤ ${max_risk:.2f}")
+                
+                # Check individual items that exceed maximum by themselves (even if total is fine)
+                else:
+                    for item, item_type in all_items:
+                        if item['risk'] > max_risk and cancel_exceeding:
+                            if item_type == 'order':
+                                print(f"           🚨 Individual order #{item['ticket']} exceeds maximum (${item['risk']:.2f} > ${max_risk:.2f})")
+                                if cancel_single_order(item['ticket'], f"Individual risk ${item['risk']:.2f} exceeds max ${max_risk:.2f}"):
+                                    total_cancelled += 1
+                                else:
+                                    print(f"           Failed to cancel order #{item['ticket']}")
+                            elif item_type == 'position':
+                                print(f"           🚨 Individual position #{item['ticket']} exceeds maximum (${item['risk']:.2f} > ${max_risk:.2f})")
+                                if close_single_position(
+                                    item['ticket'], 
+                                    group['symbol'], 
+                                    item['volume'], 
+                                    item['is_buy'],
+                                    f"Individual risk ${item['risk']:.2f} exceeds max ${max_risk:.2f}"
+                                ):
+                                    total_closed += 1
+                                else:
+                                    print(f"           Failed to close position #{item['ticket']}")
+        else:
+            print(f"        ℹ️ No pending orders or open positions found to scan")
+        
+        if total_cancelled > 0 or total_closed > 0:
+            print(f"\n        ✅ Cleanup complete: Cancelled {total_cancelled} order(s), Closed {total_closed} position(s)")
+        else:
+            print(f"\n        ℹ️ No items needed to be cancelled or closed")
+        
+        # If check_only mode, return here
+        if check_only or new_order_data is None:
+            return True, {
+                'cancelled_count': total_cancelled, 
+                'closed_count': total_closed,
+                'check_only': True
+            }
+        
+        # Refresh pending orders and positions list after cleanup
+        import time
+        time.sleep(0.5)  # Small delay to ensure MT5 processes cancellations/closures
+        refreshed_pending = mt5.orders_get() or []
+        refreshed_positions = mt5.positions_get() or []
+        
+        # --- EVALUATE NEW ORDER AGAINST TOTAL RISK FOR EXACT ENTRY MATCH ---
+        new_symbol = new_order_data.get('symbol')
+        new_entry = new_order_data.get('entry')
+        
+        # Dynamic volume extraction for new order evaluation (same logic)
+        new_volume = None
+        for key, value in new_order_data.items():
+            if key.endswith('_volume'):
+                try:
+                    new_volume = float(value)
+                    break
+                except (ValueError, TypeError):
+                    continue
+        
+        # Also check standardized 'volume' field
+        if new_volume is None:
+            new_volume = new_order_data.get('volume', None)
+        
+        # Skip if no volume found
+        if new_volume is None:
+            print(f"         Cannot evaluate risk - no volume field in order data")
+            return False, {'reason': 'No volume field found'}
+        
+        new_sl = new_order_data.get('exit', 0)
+        new_type = new_order_data.get('order_type', '').lower()
+        new_direction = normalize_order_direction(new_type)
+        new_is_buy = new_direction == 'buy'
+        
+        print(f"\n        📋 Evaluating New Order: {new_direction.upper()} {new_symbol} @ {new_entry} vol {new_volume}")
+        
+        # Calculate new order risk
+        new_risk = calculate_order_risk(new_entry, new_sl, new_symbol, new_volume, new_is_buy)
+        print(f"        📊 New order risk: ${new_risk:.2f}")
+        
+        # KEY CHANGE: Calculate total risk for orders/positions with EXACT same entry price
+        new_entry_group_key = f"{new_symbol}_{new_direction}_{new_entry}"
+        existing_entry_risk = 0
+        
+        # Sum up risk from refreshed pending orders for same entry price
+        for order in refreshed_pending:
+            if order.type not in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                                mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP]:
+                continue
+            
+            dir = normalize_order_direction(order.type)
+            if not dir:
+                continue
+            
+            # IMPORTANT: Compare entry prices exactly (no rounding)
+            if order.symbol == new_symbol and dir == new_direction and order.price_open == new_entry:
+                is_buy = dir == 'buy'
+                rsk = calculate_order_risk(order.price_open, order.sl, order.symbol, order.volume_initial, is_buy)
+                existing_entry_risk += rsk
+                print(f"        📋 Existing order #{order.ticket}: {order.symbol} {dir} @ {order.price_open} vol {order.volume_initial} risk ${rsk:.2f}")
+        
+        # Sum up risk from refreshed positions for same entry price
+        for position in refreshed_positions:
+            dir = normalize_order_direction(position.type)
+            if not dir:
+                continue
+            
+            # IMPORTANT: Compare entry prices exactly (no rounding)
+            if position.symbol == new_symbol and dir == new_direction and position.price_open == new_entry:
+                is_buy = dir == 'buy'
+                rsk = calculate_order_risk(position.price_open, position.sl, position.symbol, position.volume, is_buy)
+                existing_entry_risk += rsk
+                print(f"        📋 Existing position #{position.ticket}: {position.symbol} {dir} @ {position.price_open} vol {position.volume} risk ${rsk:.2f}")
+        
+        print(f"        📊 Total existing risk for EXACT entry {new_entry}: ${existing_entry_risk:.2f}")
+        
+        # Calculate total risk including new order
+        total_entry_risk = existing_entry_risk + new_risk
+        print(f"        📊 Total entry risk if placed: ${total_entry_risk:.2f}")
+        
+        # Decision based on total risk for this specific entry price
+        if total_entry_risk > max_risk:
+            print(f"        🚨 TOTAL ENTRY RISK (${total_entry_risk:.2f}) EXCEEDS MAXIMUM (${max_risk:.2f})")
+            print(f"         ORDER REJECTED - would exceed maximum by ${total_entry_risk - max_risk:.2f}")
+            return False, {'reason': f'Entry risk ${total_entry_risk:.2f} exceeds max ${max_risk:.2f} for entry {new_entry}'}
+        
+        if total_entry_risk <= default_risk:
+            print(f"        ✅ Within TARGET range: ${total_entry_risk:.2f} ≤ ${default_risk:.2f}")
+        else:
+            print(f"        ✅ Within TOLERANCE range: ${default_risk:.2f} < ${total_entry_risk:.2f} ≤ ${max_risk:.2f}")
+        
+        return True, {
+            'total_risk': total_entry_risk, 
+            'existing_risk': existing_entry_risk, 
+            'new_risk': new_risk, 
+            'cancelled_count': total_cancelled,
+            'closed_count': total_closed
+        }
+
+    # --- SUB-FUNCTION: LOAD OPPOSITE DIRECTION RESTRICTION SETTING ---
+    def get_opposite_restriction_setting(investor_root):
+        """
+        Load opposite_order_restriction setting from accountmanagement.json.
+        Returns True if opposite direction checks should be performed.
+        Default: False
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            return False
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            settings = config.get("settings", {})
+            opposite_restriction = settings.get("opposite_order_restriction", False)
+            
+            if opposite_restriction:
+                print(f"    🔄 Opposite direction restriction ENABLED")
+            else:
+                print(f"    ℹ️  Opposite direction restriction DISABLED")
+            
+            return opposite_restriction
+            
+        except Exception as e:
+            print(f"     Error reading opposite_order_restriction: {e}")
+            return False
+    
+    # --- SUB-FUNCTION: CHECK PROXIMITY RISK (WITH OPPOSITE DIRECTION OPTION) ---
+    def check_proximity_risk(order, existing_positions, check_opposite=False):
+        """
+        Check if order is too close to existing positions using risk-based calculation.
+        
+        Args:
+            order: Order dictionary
+            existing_positions: List of MT5 positions
+            check_opposite: If True, also check opposite direction positions
+        
+        Returns:
+            tuple: (is_risk, closest_position, risk_amount, threshold, check_type)
+            check_type: 'same_direction', 'opposite_direction', or 'none'
+        """
+        symbol = order.get('symbol')
+        order_type = order.get('order_type', '').lower()
+        entry_price = float(order.get('entry', 0))
+        volume = get_volume_from_signal(order)
+        
+        is_buy = 'buy' in order_type and 'stop' in order_type
+        is_sell = 'sell' in order_type and 'stop' in order_type
+        
+        if not is_buy and not is_sell:
+            return False, None, 0, 0, 'none'
+        
+        # Filter positions for this symbol
+        symbol_positions = [p for p in existing_positions if p.symbol == symbol]
+        if not symbol_positions:
+            return False, None, 0, 0, 'none'
+        
+        for position in symbol_positions:
+            position_type = position.type
+            position_entry = position.price_open
+            position_volume = position.volume
+            position_sl = position.sl
+            position_ticket = position.ticket
+            
+            is_position_buy = (position_type == mt5.ORDER_TYPE_BUY)
+            is_position_sell = (position_type == mt5.ORDER_TYPE_SELL)
+            
+            # Calculate position risk from SL
+            position_risk = 0
+            if position_sl and position_sl > 0:
+                if is_position_buy:
+                    risk_profit = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_BUY, symbol, position_volume,
+                        position_entry, position_sl
+                    )
+                else:
+                    risk_profit = mt5.order_calc_profit(
+                        mt5.ORDER_TYPE_SELL, symbol, position_volume,
+                        position_entry, position_sl
+                    )
+                if risk_profit:
+                    position_risk = abs(risk_profit)
+            
+            if position_risk == 0:
+                continue
+            
+            risk_threshold = position_risk / 2  # 50% threshold
+            
+            # =============================================
+            # SAME DIRECTION CHECK (ALWAYS PERFORMED)
+            # =============================================
+            if (is_buy and is_position_buy) or (is_sell and is_position_sell):
+                # Calculate potential risk
+                if is_sell and is_position_sell:
+                    if entry_price < position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                elif is_buy and is_position_buy:
+                    if entry_price > position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                else:
+                    continue
+                
+                if potential_risk and potential_risk < risk_threshold:
+                    return True, position, potential_risk, risk_threshold, 'same_direction'
+            
+            # =============================================
+            # OPPOSITE DIRECTION CHECK (ONLY IF ENABLED)
+            # =============================================
+            elif check_opposite and ((is_buy and is_position_sell) or (is_sell and is_position_buy)):
+                if is_buy and is_position_sell:
+                    if entry_price > position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                elif is_sell and is_position_buy:
+                    if entry_price < position_entry:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_SELL, symbol, min(volume, position_volume),
+                            entry_price, position_entry
+                        ) or 0)
+                    else:
+                        potential_risk = abs(mt5.order_calc_profit(
+                            mt5.ORDER_TYPE_BUY, symbol, min(volume, position_volume),
+                            position_entry, entry_price
+                        ) or 0)
+                else:
+                    continue
+                
+                if potential_risk and potential_risk < risk_threshold:
+                    return True, position, potential_risk, risk_threshold, 'opposite_direction'
+        
+        return False, None, 0, 0, 'none'
+    
+    # --- SUB-FUNCTION: BUILD COMPACT COMMENT WITH METADATA ---
+    def build_compact_comment(strategy_name, order_data):
+        """
+        Build compact comment string with metadata encoded.
+        Format: {strategy_prefix}|H{hedge}|G{grid}|S{side}|L{levels}|M{mult}|R{rr}
+        
+        Returns string truncated to 31 characters max.
+        """
+        # Shorten strategy name to max 6 chars
+        strat_short = strategy_name[:6] if strategy_name else "unknown"
+        
+        # Extract metadata with defaults
+        is_hedge = order_data.get('is_hedge_order', False)
+        is_grid = order_data.get('is_grid_order', False)
+        grid_side = order_data.get('grid_side', '')
+        grid_levels = order_data.get('grid_levels', 0)
+        grid_multiplier = order_data.get('grid_multiplier', 0)
+        risk_reward = order_data.get('risk_reward', order_data.get('rr', '?'))
+        
+        # Build flags
+        hedge_flag = '1' if is_hedge else '0'
+        grid_flag = '1' if is_grid else '0'
+        
+        # Compact representation
+        parts = [strat_short]
+        
+        # Hedge and Grid flags (always include)
+        parts.append(f"H{hedge_flag}G{grid_flag}")
+        
+        # Grid details only if it IS a grid order
+        if is_grid:
+            side_short = grid_side[:2] if grid_side else ''
+            if side_short:
+                parts.append(f"S{side_short}")
+            if grid_levels > 0:
+                # Use L for levels, M for multiplier (truncate multiplier to 2 digits max)
+                mult_short = min(grid_multiplier, 99) if grid_multiplier > 0 else ''
+                if mult_short:
+                    parts.append(f"{grid_levels}x{mult_short}")
+                else:
+                    parts.append(f"L{grid_levels}")
+        
+        # Risk reward (always include)
+        rr_val = f"R{risk_reward}" if risk_reward != '?' else ''
+        if rr_val:
+            parts.append(rr_val)
+        
+        # Join with '|' delimiter (compact)
+        comment = '|'.join(parts)
+        
+        # Truncate to 31 characters (MT5 limit)
+        if len(comment) > 31:
+            comment = comment[:28] + '...'
+        
+        return comment
+    
+    def execute_order(order_data, investor_root, per_order_cache, existing_positions, 
+                  original_signal, skip_proximity_check, switch_invalid_to_instant,
+                  authorized_magic_number, opposite_restriction_enabled=False):
+        """
+        Execute a single order based on its order_type.
+        Uses the authorized magic number (LOGIN_ID + USER_ID) for ALL order placements.
+        """
+        
+        # --- SUB-FUNCTION: GET SUPPORTED FILLING MODES ---
+        def get_supported_filling_modes(symbol_info, is_pending_order=False):
+            # ... (same as before, no changes needed)
+            if is_pending_order:
+                return [mt5.ORDER_FILLING_RETURN]
+            
+            execution_mode = symbol_info.trade_exemode
+            filling_mode_mask = symbol_info.filling_mode
+            
+            SYMBOL_FILLING_FOK = 0x01
+            SYMBOL_FILLING_IOC = 0x02
+            SYMBOL_FILLING_BOC = 0x04
+            
+            filling_modes = []
+            
+            if execution_mode == mt5.SYMBOL_TRADE_EXECUTION_EXCHANGE:
+                if filling_mode_mask & SYMBOL_FILLING_BOC:
+                    filling_modes.append(mt5.ORDER_FILLING_BOC)
+                if filling_mode_mask & SYMBOL_FILLING_IOC:
+                    filling_modes.append(mt5.ORDER_FILLING_IOC)
+                if filling_mode_mask & SYMBOL_FILLING_FOK:
+                    filling_modes.append(mt5.ORDER_FILLING_FOK)
+                filling_modes.append(mt5.ORDER_FILLING_RETURN)
+            elif execution_mode == mt5.SYMBOL_TRADE_EXECUTION_MARKET:
+                if filling_mode_mask & SYMBOL_FILLING_IOC:
+                    filling_modes.append(mt5.ORDER_FILLING_IOC)
+                filling_modes.append(mt5.ORDER_FILLING_RETURN)
+                if filling_mode_mask & SYMBOL_FILLING_FOK:
+                    filling_modes.append(mt5.ORDER_FILLING_FOK)
+            elif execution_mode in [mt5.SYMBOL_TRADE_EXECUTION_INSTANT, mt5.SYMBOL_TRADE_EXECUTION_REQUEST]:
+                if filling_mode_mask & SYMBOL_FILLING_FOK:
+                    filling_modes.append(mt5.ORDER_FILLING_FOK)
+                filling_modes.append(mt5.ORDER_FILLING_RETURN)
+            else:
+                filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+            
+            unique_modes = []
+            for mode in filling_modes:
+                if mode not in unique_modes:
+                    unique_modes.append(mode)
+            
+            print(f"        📋 Will try filling modes in order: {unique_modes}")
+            return unique_modes
+        
+        # --- SUB-FUNCTION: SEND ORDER WITH AUTO FILLING MODE RETRY ---
+        def send_order_with_auto_filling(request_template, filling_modes, is_pending_order=False):
+            for filling_mode in filling_modes:
+                request = request_template.copy()
+                request["type_filling"] = filling_mode
+                
+                if is_pending_order:
+                    request["action"] = mt5.TRADE_ACTION_PENDING
+                else:
+                    request["action"] = mt5.TRADE_ACTION_DEAL
+                # ADD THIS DEBUG LINE
+                print(f"        💬 Sending order with comment: '{request.get('comment', '')}' (len={len(request.get('comment', ''))})")
+                
+                result = mt5.order_send(request)
+                
+                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"        ✅ Order successful with filling mode: {filling_mode}")
+                    return result, filling_mode, None
+                
+                if result is not None and result.retcode == 10009:
+                    print(f"         Filling mode {filling_mode} not supported, trying next...")
+                    continue
+                elif result is not None and result.retcode != mt5.TRADE_RETCODE_DONE:
+                    return result, filling_mode, f"Order failed: {result.comment} (code: {result.retcode})"
+            
+            return None, None, "All filling modes failed"
+        
+        # --- MAIN EXECUTION ---
+        symbol = order_data.get('symbol')
+        order_type = order_data.get('order_type', '').lower()
+        entry_price = float(order_data.get('entry', 0))
+        exit_price = float(order_data.get('exit', 0)) if order_data.get('exit') else 0
+        target_price = float(order_data.get('target', 0)) if order_data.get('target') else 0
+        volume = get_volume_from_signal(order_data)
+        
+        # SKIP ORDER IF NO VOLUME FOUND
+        if volume is None:
+            error_msg = "No volume field found in signal - cannot place order"
+            print(f"         {error_msg}")
+            
+            timeframe = order_data.get('timeframe', '')
+            current_candle_time = order_data.get('current_candle_time', '')
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to missing volume...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, None
+        
+        # CRITICAL: USE AUTHORIZED MAGIC NUMBER (LOGIN_ID + USER_ID)
+        magic_number = authorized_magic_number
+
+        # ========== NEW: CHECK TICKET FIELD FOR ACTIVE ORDERS ==========
+        # Check if order has a ticket field and if that ticket exists in MT5
+        existing_ticket = order_data.get('ticket', None)
+        if existing_ticket is not None:
+            try:
+                existing_ticket = int(existing_ticket)
+                print(f"        🎫 Order has existing ticket field: {existing_ticket}")
+                
+                # Check if this ticket is active in MT5
+                if is_ticket_active_in_mt5(existing_ticket):
+                    error_msg = f"Ticket {existing_ticket} already exists as active order/position - skipping duplicate"
+                    print(f"        ⏭️ {error_msg}")
+                    
+                    # Remove signal from limit_orders.json to prevent reprocessing
+                    signals_path = order_data.get('signals_path', '')
+                    if signals_path:
+                        signals_file = Path(signals_path)
+                        if signals_file.exists():
+                            remove_signal_from_limit_orders(signals_file, order_data)
+                            print(f"        🗑️ Removed duplicate signal from limit_orders.json")
+                    
+                    return False, None, error_msg, None
+                else:
+                    print(f"        ✅ Ticket {existing_ticket} not found in MT5 - safe to place new order")
+            except (ValueError, TypeError):
+                print(f"        ℹ️ Invalid ticket value: {existing_ticket} - treating as no ticket")
+        else:
+            print(f"        ℹ️ No ticket field in order - will place as new order")
+        # ========== END TICKET CHECK ==========
+        
+        # Fallback only if authorized_magic_number is None (should never happen)
+        if magic_number is None:
+            magic_number = int(order_data.get('magic', int(investor_root.name) if investor_root.name.isdigit() else 123456))
+            print(f"        ⚠️ WARNING: Using fallback magic number {magic_number} (authorized not available)")
+        
+        strategy_name = order_data.get('strategy_name', 'unknown')
+        timeframe = order_data.get('timeframe', '')
+        current_candle_time = order_data.get('current_candle_time', '')
+        signals_path = order_data.get('signals_path', '')
+        is_hedge = order_data.get('is_hedge_order', False)
+        
+        # Get symbol info - use exact symbol name
+        if not mt5.symbol_select(symbol, True):
+            error_msg = f"Failed to select symbol {symbol}"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to symbol selection failure...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, None
+        
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            error_msg = f"Cannot get symbol info for {symbol}"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to symbol info failure...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, None
+        
+        # Get current market prices for reference
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            error_msg = f"Cannot get tick for {symbol}"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to tick retrieval failure...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, None
+        
+        current_ask = tick.ask
+        current_bid = tick.bid
+        
+        print(f"        📊 {order_type.upper()} order: Entry={entry_price}, Current ASK={current_ask}, Current BID={current_bid}")
+        
+        # Round values to symbol digits
+        entry_price = round(entry_price, symbol_info.digits)
+        exit_price = round(exit_price, symbol_info.digits) if exit_price else 0
+        target_price = round(target_price, symbol_info.digits) if target_price else 0
+
+        # Clamp volume to symbol's min/max limits
+        volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
+        
+        print(f"        📊 Final volume: {volume} (min: {symbol_info.volume_min}, max: {symbol_info.volume_max})")
+        print(f"        🔑 Using Magic Number: {magic_number} (Authorized)")
+        
+        # Get MT5 order type constant
+        mt5_order_type = get_mt5_order_type(order_type)
+        if mt5_order_type is None:
+            error_msg = f"Invalid order type: {order_type}"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to invalid order type...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, None
+        
+        # Generate cache key (includes exact symbol with suffix)
+        cache_key = f"{symbol}_{mt5_order_type}_{entry_price}_{volume}_{magic_number}"
+        
+        # Check per-order cache
+        if cache_key in per_order_cache:
+            error_msg = "Already placed in this run"
+            print(f"        ⏭️  SKIP - {error_msg}")
+            return False, None, error_msg, cache_key
+        
+        # ========== RISK MANAGEMENT CHECK ==========
+        current_pending = mt5.orders_get() or []
+        
+        risk_allowed, risk_info = risk_management_for_duplicates(
+            investor_root, order_data, current_pending, cancel_exceeding=True
+        )
+        
+        if not risk_allowed:
+            error_msg = f"Risk management rejected: {risk_info.get('reason', 'Unknown reason')}"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), 
+                                        timeframe, current_candle_time)
+            
+            return False, None, error_msg, cache_key
+        elif risk_info.get('cancelled_count', 0) > 0:
+            print(f"        ✅ Cleaned up {risk_info['cancelled_count']} exceeding orders")
+        
+        # Check proximity risk
+        if is_hedge:
+            print(f"        🛡️ HEDGE ORDER: Skipping proximity risk check")
+        elif skip_proximity_check:
+            print(f"        ℹ️  Proximity risk check DISABLED - placing order regardless of position proximity")
+        else:
+            # First check SAME direction (always performed)
+            is_risk_same, risk_position_same, risk_amount_same, risk_threshold_same, check_type_same = check_proximity_risk(
+                order_data, existing_positions, check_opposite=False
+            )
+            
+            if is_risk_same:
+                error_msg = f"Too close to same-direction position #{risk_position_same.ticket if risk_position_same else 'unknown'}"
+                print(f"         RISK SKIP (SAME DIRECTION) - {error_msg} (risk: ${risk_amount_same:.2f} < threshold: ${risk_threshold_same:.2f})")
+                
+                if timeframe and current_candle_time:
+                    print(f"        🗑️ Removing candle time record due to proximity risk...")
+                    remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+                
+                return False, None, error_msg, cache_key
+            
+            # Then check OPPOSITE direction ONLY if opposite_restriction is enabled
+            if opposite_restriction_enabled:
+                is_risk_opposite, risk_position_opposite, risk_amount_opposite, risk_threshold_opposite, check_type_opposite = check_proximity_risk(
+                    order_data, existing_positions, check_opposite=True
+                )
+                
+                if is_risk_opposite:
+                    error_msg = f"Too close to opposite-direction position #{risk_position_opposite.ticket if risk_position_opposite else 'unknown'}"
+                    print(f"         RISK SKIP (OPPOSITE DIRECTION) - {error_msg} (risk: ${risk_amount_opposite:.2f} < threshold: ${risk_threshold_opposite:.2f})")
+                    
+                    if timeframe and current_candle_time:
+                        print(f"        🗑️ Removing candle time record due to opposite proximity risk...")
+                        remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+                    
+                    return False, None, error_msg, cache_key
+        
+        # --- GET SUPPORTED FILLING MODES ---
+        is_pending = order_type not in ['instant_buy', 'instant_sell']
+        filling_modes = get_supported_filling_modes(symbol_info, is_pending)
+        
+        # --- PREPARE REQUEST TEMPLATE ---
+        if order_type in ['instant_buy', 'instant_sell']:
+            price = current_ask if order_type == 'instant_buy' else current_bid
+            
+            # Build compact comment with metadata
+            compact_comment = build_compact_comment(strategy_name, order_data)
+
+            request_template = {
+                "symbol": symbol,
+                "volume": volume,
+                "type": mt5_order_type,
+                "price": price,
+                "deviation": 20,
+                "magic": magic_number,
+                "comment": compact_comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+            }
+            
+            if exit_price:
+                request_template["sl"] = exit_price
+            if target_price:
+                request_template["tp"] = target_price
+                
+        else:
+            # Build compact comment with metadata
+            compact_comment = build_compact_comment(strategy_name, order_data)
+            
+            request_template = {
+                "symbol": symbol,
+                "volume": volume,
+                "type": mt5_order_type,
+                "price": entry_price,
+                "deviation": 20,
+                "magic": magic_number,
+                "comment": compact_comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+            }
+            
+            if exit_price:
+                request_template["sl"] = exit_price
+            if target_price:
+                request_template["tp"] = target_price
+        
+        # --- SEND ORDER ---
+        result, used_filling_mode, error_msg = send_order_with_auto_filling(
+            request_template, filling_modes, is_pending
+        )
+        
+        if result is None:
+            error_msg = f"Order send failed: {error_msg or mt5.last_error()}"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to order send failure...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, cache_key
+        
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            error_msg = f"Order failed: {result.comment} (code: {result.retcode})"
+            print(f"         {error_msg}")
+            
+            if timeframe and current_candle_time:
+                print(f"        🗑️ Removing candle time record due to order placement failure...")
+                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
+            
+            return False, None, error_msg, cache_key
+        
+        # Create detailed trade record
+        trade_record = {}
+        
+        for key, value in order_data.items():
+            if not key.startswith('_'):
+                trade_record[key] = value
+        # ADD THIS SECTION - Preserve grid order metadata explicitly
+        trade_record['is_hedge_order'] = order_data.get('is_hedge_order', False)
+        trade_record['is_grid_order'] = order_data.get('is_grid_order', False)
+        trade_record['grid_side'] = order_data.get('grid_side', '')
+        trade_record['grid_levels'] = order_data.get('grid_levels', 0)
+        trade_record['grid_multiplier'] = order_data.get('grid_multiplier', 0)
+        trade_record['risk_reward'] = order_data.get('risk_reward', order_data.get('rr', None))
+        
+        if used_filling_mode:
+            trade_record['filling_mode_used'] = used_filling_mode
+        
+        trade_record.update({
+            'ticket': result.order,
+            'magic': magic_number,  # Record the authorized magic number used
+            'placed_timestamp': datetime.now().isoformat(),
+            'status': 'pending',
+            'mt5_retcode': result.retcode,
+            'mt5_comment': result.comment,
+            'placed_price': entry_price if order_type not in ['instant_buy', 'instant_sell'] else (request_template['price'] if 'price' in request_template else entry_price),
+            'placed_volume': volume,
+            'placed_order_type': order_type,
+            'strategy_name': strategy_name,
+            'symbol_used': symbol,
+            'original_symbol_requested': order_data.get('original_symbol', symbol),
+            'is_hedge_order': is_hedge
+        })
+        
+        if original_signal:
+            for key, value in original_signal.items():
+                if key not in trade_record:
+                    trade_record[f'original_{key}'] = value
+                    
+        print(f"        📝 Order placed - MT5 comment: '{compact_comment}'")
+        
+        # ========== REMOVE SUCCESSFUL SIGNAL FROM LIMIT_ORDERS.JSON ==========
+        # After successful placement, remove ONLY the placed signal from limit_orders.json
+        signals_path = order_data.get('signals_path', '')
+        if signals_path and result.order:
+            try:
+                signals_file = Path(signals_path)
+                if signals_file.exists():
+                    with open(signals_file, 'r', encoding='utf-8') as f:
+                        signals = json.load(f)
+                    
+                    original_count = len(signals)
+                    
+                    # Filter out the placed signal
+                    filtered_signals = []
+                    for signal in signals:
+                        # Match by symbol, order_type, entry, and current_candle_time
+                        if not ((signal.get('symbol') == order_data.get('original_symbol', symbol) or
+                                signal.get('symbol') == symbol) and
+                            signal.get('order_type') == order_type and
+                            signal.get('entry') == entry_price and
+                            signal.get('current_candle_time') == order_data.get('current_candle_time')):
+                            filtered_signals.append(signal)
+                    
+                    if len(filtered_signals) < original_count:
+                        with open(signals_file, 'w', encoding='utf-8') as f:
+                            json.dump(filtered_signals, f, indent=4)
+                        print(f"        🗑️ Removed {original_count - len(filtered_signals)} placed signal(s) from {signals_file.name} ({len(filtered_signals)} remaining)")
+                    else:
+                        # If no match found, clear the whole file as fallback
+                        with open(signals_file, 'w', encoding='utf-8') as f:
+                            json.dump([], f, indent=4)
+                        print(f"        🗑️ CLEARED {signals_file.name} (no matching signal found, cleared all)")
+            except Exception as e:
+                print(f"        ⚠️ Could not process limit_orders.json: {e}")
+        # ========== END REMOVE SUCCESSFUL SIGNAL ==========
+        
+        hedge_msg = " 🛡️[HEDGE]" if is_hedge else ""
+        print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Magic: {magic_number}]{hedge_msg}")
+        return True, result, None, cache_key
+
+    def process_hedge_orders(hedge_signals, investor_root, per_order_cache, existing_positions, 
+                      skip_proximity_check, switch_invalid_to_instant, stats, 
+                      authorized_magic_number, opposite_restriction_enabled=False):
+        """
+        Process all hedge orders without any uniqueness restrictions.
+        Uses authorized magic number for all placements.
+        """
+        if not hedge_signals:
+            return stats
+        
+        print(f"\n  🛡️ PROCESSING HEDGE ORDERS ({len(hedge_signals)} signals)")
+        print(f"     📌 Hedge orders are EXEMPT from uniqueness rules - ALL will be placed")
+        print(f"     🔑 Using authorized Magic Number: {authorized_magic_number}")
+        
+        hedge_placed = 0
+        hedge_failed = 0
+        
+        for idx, signal_wrapper in enumerate(hedge_signals):
+            order_data = signal_wrapper['data']
+            original_signal = signal_wrapper.get('original_signal', {})
+            signals_path = signal_wrapper.get('path')
+            strategy = signal_wrapper.get('strategy', 'unknown')
+            symbol = order_data.get('symbol', '')
+            order_type = order_data.get('order_type', '').lower()
+            hedge_id = order_data.get('hedge_id', 'N/A')
+            
+            print(f"\n      🛡️ Hedge Order {idx+1}/{len(hedge_signals)}: {order_type} {symbol} [ID: {hedge_id[:20]}...]")
+            
+            # Set the magic number in the order data
+            order_data['magic'] = authorized_magic_number
+            
+            success, result, error, cache_key = execute_order(
+                order_data, investor_root, per_order_cache, existing_positions,
+                original_signal, skip_proximity_check, switch_invalid_to_instant,
+                authorized_magic_number, opposite_restriction_enabled  # Add this
+            )
+            
+            if success:
+                print(f"      ✅ HEDGE ORDER SUCCESS: {order_type} {symbol} [Magic: {authorized_magic_number}]")
+                hedge_placed += 1
+                stats['orders_placed'] += 1
+                stats['per_order_cache'].add(cache_key)
+                stats['authorized_keys'].add(cache_key)
+            else:
+                print(f"       HEDGE ORDER FAILED: {error}")
+                hedge_failed += 1
+                stats['orders_failed'] += 1
+                
+                if signals_path:
+                    signals_file = Path(signals_path)
+                    if signals_file.exists():
+                        # Clear the whole file on failure too
+                        with open(signals_file, 'w', encoding='utf-8') as f:
+                            json.dump([], f, indent=4)
+                        print(f"        🗑️ CLEARED limit_orders.json on failure: {signals_file.name}")
+        
+        print(f"\n  🛡️ HEDGE ORDERS SUMMARY: {hedge_placed} placed, {hedge_failed} failed")
+        return stats
+
+    def process_regular_orders_with_fallback(regular_signals_by_key, investor_root, per_order_cache, existing_positions,
+                                      skip_proximity_check, switch_invalid_to_instant, stats, 
+                                      authorized_magic_number, opposite_restriction_enabled=False):
+        """
+        Process regular (non-hedge) orders with strict uniqueness rules.
+        Uses authorized magic number for all placements.
+        """
+        if not regular_signals_by_key:
+            return stats
+        
+        # --- CANCEL OLDER ORDERS SUB-FUNCTION ---
+        def cancel_older_orders_for_group(symbol, order_type, placed_ticket):
+            # ... (same as before, no changes needed)
+            try:
+                all_pending = mt5.orders_get(symbol=symbol)
+                
+                if not all_pending or len(all_pending) == 0:
+                    return 0
+                
+                order_type_lower = order_type.lower()
+                if 'buy' in order_type_lower and 'stop' in order_type_lower:
+                    mt5_type_to_match = mt5.ORDER_TYPE_BUY_STOP
+                elif 'sell' in order_type_lower and 'stop' in order_type_lower:
+                    mt5_type_to_match = mt5.ORDER_TYPE_SELL_STOP
+                elif 'buy' in order_type_lower and 'limit' in order_type_lower:
+                    mt5_type_to_match = mt5.ORDER_TYPE_BUY_LIMIT
+                elif 'sell' in order_type_lower and 'limit' in order_type_lower:
+                    mt5_type_to_match = mt5.ORDER_TYPE_SELL_LIMIT
+                else:
+                    print(f"         Unknown order type for cancellation: {order_type}")
+                    return 0
+                
+                orders_to_cancel = []
+                for order in all_pending:
+                    if order.type == mt5_type_to_match and order.ticket != placed_ticket:
+                        orders_to_cancel.append(order)
+                
+                if not orders_to_cancel:
+                    print(f"         ℹ️ No older orders to cancel for {symbol} {order_type}")
+                    return 0
+                
+                print(f"         🧹 Found {len(orders_to_cancel)} older order(s) for {symbol} {order_type} to clean up...")
+                
+                cancelled_count = 0
+                for order in orders_to_cancel:
+                    order_time = datetime.fromtimestamp(order.time_setup).strftime('%Y-%m-%d %H:%M:%S') if hasattr(order, 'time_setup') else 'unknown'
+                    
+                    print(f"         🗑️ Cancelling older order #{order.ticket} ({symbol} @ {order.price_open}, setup: {order_time})")
+                    
+                    cancel_request = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": order.ticket
+                    }
+                    
+                    result = mt5.order_send(cancel_request)
+                    
+                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        cancelled_count += 1
+                        print(f"         ✅ Successfully cancelled older order #{order.ticket}")
+                        
+                        print(f"         Order #{order.ticket} cancelled - reason: replaced by newer order #{placed_ticket}")
+                    else:
+                        error_msg = f"Unknown error ({result.retcode})" if result else "No response"
+                        if result and result.comment:
+                            error_msg = result.comment
+                        print(f"         Failed to cancel order #{order.ticket}: {error_msg}")
+                
+                print(f"         ✅ Cleanup complete: Cancelled {cancelled_count}/{len(orders_to_cancel)} older order(s)")
+                return cancelled_count
+                
+            except Exception as e:
+                print(f"         Error during order cleanup: {e}")
+                import traceback
+                traceback.print_exc()
+                return 0
+        
+        # --- LOAD CONFIGURATION SETTING FOR FALLBACK LOGIC ---
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+        enable_fallback = False
+        
+        if acc_mgmt_path.exists():
+            try:
+                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                settings = config.get("settings", {})
+                enable_fallback = settings.get("enable_latest_fallback_to_older_order", False)
+                
+                if enable_fallback:
+                    print(f"\n  📊 PROCESSING REGULAR ORDERS ({len(regular_signals_by_key)} groups)")
+                    print(f"     📌 Fallback logic ENABLED - only ONE order per symbol/type (newest first, fallback if needed)")
+                    print(f"     🧹 Older orders will be CANCELLED after latest is placed")
+                    print(f"     🔑 Using authorized Magic Number: {authorized_magic_number}")
+                else:
+                    print(f"\n  📊 PROCESSING REGULAR ORDERS - FALLBACK LOGIC DISABLED")
+                    print(f"     📌 Placing ALL regular orders unconditionally (no grouping, no fallback)")
+                    print(f"     🔑 Using authorized Magic Number: {authorized_magic_number}")
+            except Exception as e:
+                print(f"    Error reading accountmanagement.json: {e}")
+                print(f"    Defaulting to fallback logic DISABLED - placing all orders")
+                enable_fallback = False
+        else:
+            print(f"    ℹ️ No accountmanagement.json found - fallback logic DISABLED")
+            print(f"    📌 Placing ALL regular orders unconditionally")
+            print(f"    🔑 Using authorized Magic Number: {authorized_magic_number}")
+            enable_fallback = False
+        
+        # --- IF FALLBACK LOGIC IS DISABLED ---
+        if not enable_fallback:
+            print(f"\n  🚀 Placing ALL regular orders unconditionally (fallback logic OFF)")
+            
+            all_regular_signals = []
+            for key, symbol_signals in regular_signals_by_key.items():
+                all_regular_signals.extend(symbol_signals)
+            
+            print(f"     📊 Total regular signals to place: {len(all_regular_signals)}")
+            
+            for idx, signal_wrapper in enumerate(all_regular_signals):
+                order_data = signal_wrapper['data']
+                original_signal = signal_wrapper.get('original_signal', {})
+                signals_path = signal_wrapper.get('path')
+                symbol = order_data.get('symbol', '')
+                order_type = order_data.get('order_type', '')
+                
+                print(f"\n      📊 [{idx+1}/{len(all_regular_signals)}] Placing {order_type} for {symbol}...")
+                
+                # Set the magic number in the order data
+                order_data['magic'] = authorized_magic_number
+                
+                success, result, error, cache_key = execute_order(
+                    order_data, investor_root, per_order_cache, existing_positions,
+                    original_signal, skip_proximity_check, switch_invalid_to_instant,
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
+                )
+                
+                if success:
+                    print(f"      ✅ SUCCESS: {order_type} order placed for {symbol} [Magic: {authorized_magic_number}]")
+                    stats['orders_placed'] += 1
+                    per_order_cache.add(cache_key)
+                    stats['authorized_keys'].add(cache_key)
+                else:
+                    print(f"       FAILED: {error}")
+                    stats['orders_failed'] += 1
+                    
+                    if signals_path:
+                        signals_file = Path(signals_path)
+                        if signals_file.exists():
+                            remove_signal_from_limit_orders(signals_file, order_data)
+                            stats['records_removed'] += 1
+            
+            stats['fallback_used'] = 0
+            stats['older_orders_cancelled'] = 0
+            return stats
+        
+        # --- FALLBACK LOGIC IS ENABLED ---
+        print(f"\n  🔄 FALLBACK LOGIC ENABLED - applying latest-first ordering with fallback and old order cleanup")
+        
+        fallback_used_count = 0
+        older_orders_cancelled_count = 0
+        
+        for key, symbol_signals in regular_signals_by_key.items():
+            sorted_signals = sorted(symbol_signals, 
+                                key=lambda x: x['data'].get('current_candle_time', ''), 
+                                reverse=True)
+            
+            symbol = sorted_signals[0]['data'].get('symbol', '')
+            order_type = sorted_signals[0]['data'].get('order_type', '')
+            
+            print(f"\n    🎯 Processing group: {key} ({len(sorted_signals)} signals)")
+            print(f"       - Newest signal time: {sorted_signals[0]['data'].get('current_candle_time', 'N/A')}")
+            if len(sorted_signals) > 1:
+                print(f"       - Has {len(sorted_signals)-1} fallback/older signal(s) available")
+            
+            placed_ticket = None
+            
+            for idx, signal_wrapper in enumerate(sorted_signals):
+                order_data = signal_wrapper['data']
+                original_signal = signal_wrapper.get('original_signal', {})
+                signals_path = signal_wrapper.get('path')
+                
+                is_fallback = idx > 0
+                order_label = "FALLBACK" if is_fallback else "PRIMARY"
+                
+                print(f"\n      🔄 [{order_label}] Attempting to place {order_type} for {symbol}...")
+                
+                # Set the magic number in the order data
+                order_data['magic'] = authorized_magic_number
+                
+                success, result, error, cache_key = execute_order(
+                    order_data, investor_root, per_order_cache, existing_positions,
+                    original_signal, skip_proximity_check, switch_invalid_to_instant,
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
+                )
+                                
+                if success:
+                    placed_ticket = result.order
+                    print(f"      ✅ [{order_label}] SUCCESS: {order_type} order placed for {symbol} (Ticket: {placed_ticket}) [Magic: {authorized_magic_number}]")
+                    stats['orders_placed'] += 1
+                    per_order_cache.add(cache_key)
+                    stats['authorized_keys'].add(cache_key)
+                    
+                    if is_fallback:
+                        fallback_used_count += 1
+                        print(f"      🔄 FALLBACK SUCCESSFUL: Used fallback signal for {symbol} {order_type}")
+                    
+                    print(f"\n      🧹 CLEANUP: Cancelling older orders for {symbol} {order_type}...")
+                    cancelled = cancel_older_orders_for_group(symbol, order_type, placed_ticket)
+                    older_orders_cancelled_count += cancelled
+                    break
+                    
+                else:
+                    print(f"       [{order_label}] FAILED: {error}")
+                    
+                    if signals_path:
+                        signals_file = Path(signals_path)
+                        if signals_file.exists():
+                            remove_signal_from_limit_orders(signals_file, order_data)
+                            stats['records_removed'] += 1
+                    
+                    if idx == len(sorted_signals) - 1:
+                        print(f"       All attempts failed for {symbol} {order_type}")
+                        stats['orders_failed'] += 1
+        
+        stats['fallback_used'] = fallback_used_count
+        stats['older_orders_cancelled'] = older_orders_cancelled_count
+        
+        if older_orders_cancelled_count > 0:
+            print(f"\n  🧹 CLEANUP SUMMARY: Cancelled {older_orders_cancelled_count} older order(s) across all groups")
+        
+        return stats
+
+    # --- MAIN EXECUTION FLOW ---
+    def main():
+        print("\n" + "="*80)
+        print("🚀 STARTING ENHANCED ORDER PLACEMENT ENGINE (WITH HEDGE ORDER EXEMPTION & FALLBACK)")
+        print("="*80)
+        
+        investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
+        any_orders_placed = False
+        global_stats = {
+            'investors_processed': 0,
+            'investors_blocked': 0,
+            'total_signals_found': 0,
+            'total_hedge_signals': 0,
+            'total_regular_signals': 0,
+            'total_orders_placed': 0,
+            'total_orders_failed': 0,
+            'total_orders_cancelled_regulation': 0,
+            'total_suffix_retries_successful': 0,
+            'total_running_positions': 0,
+            'total_pending_orders': 0,
+            'total_candle_records_removed': 0,
+            'total_proximity_check_disabled': 0,
+            'total_orders_converted': 0,
+            'total_fallback_used': 0,
+            'total_hedge_orders_placed': 0,
+            'total_hedge_orders_failed': 0
+        }
+
+        for user_brokerid in investor_ids:
+            print(f"\n{'='*60}")
+            print(f"📋 INVESTOR: {user_brokerid}")
+            print(f"{'='*60}")
+            
+            resolution_cache = {}
+            investor_root = Path(INV_PATH) / user_brokerid
+            
+            if not investor_root.exists():
+                print(f"   Investor root not found: {investor_root}")
+                continue
+            
+            # ============================================================
+            # GET LOGIN_ID FROM BROKER CONFIG FOR MAGIC NUMBER
+            # ============================================================
+            broker_cfg = usersdictionary.get(user_brokerid)
+            if not broker_cfg:
+                print(f"  No broker config found for {user_brokerid}")
+                continue
+            
+            login_id = broker_cfg.get('LOGIN_ID', '')
+            if not login_id:
+                print(f"  No LOGIN_ID found for {user_brokerid}")
+                continue
+            
+            # Construct authorized magic number: LOGIN_ID + USER_ID
+            authorized_magic_number = None
+            try:
+                authorized_magic_number = int(str(login_id) + str(user_brokerid))
+                print(f"  🔑 Authorized Magic Number: {authorized_magic_number}")
+                print(f"     (LOGIN_ID: {login_id} + USER_ID: {user_brokerid})")
+            except (ValueError, TypeError) as e:
+                print(f"  Could not create magic number: {e}")
+                continue
+            
+            # ============================================================
+            # STEP 1: Check authorization status (bypass, auto-trading)
+            # ============================================================
+            can_proceed, activities, magic_from_activities = check_authorization_status(
+                investor_root, login_id, user_brokerid
+            )
+            
+            # Use the magic number from activities if available, otherwise use constructed
+            if magic_from_activities:
+                authorized_magic_number = magic_from_activities
+                print(f"  🔑 Using Magic Number from activities.json: {authorized_magic_number}")
+            
+            if not can_proceed:
+                print(f"  🚫 INVESTOR BLOCKED - unauthorized actions detected without bypass")
+                global_stats['investors_blocked'] += 1
+                continue
+            
+            # ============================================================
+            # STEP 2: Load proximity risk setting from accountmanagement.json
+            # ============================================================
+            print(f"\n  ⚙️  Loading configuration from accountmanagement.json...")
+            skip_proximity_check = not get_proximity_risk_setting(investor_root)
+
+            # Load opposite direction restriction setting
+            opposite_restriction_enabled = get_opposite_restriction_setting(investor_root)            
+            
+            if skip_proximity_check:
+                global_stats['total_proximity_check_disabled'] += 1
+            
+            # ============================================================
+            # STEP 3: Load invalid order conversion setting
+            # ============================================================
+            switch_invalid_to_instant = get_switch_invalid_setting(investor_root)
+            
+            
+            # ============================================================
+            # STEP 6: SCAN AND CLEANUP EXISTING PENDING ORDERS FOR RISK VIOLATIONS
+            # ============================================================
+            print(f"\n  🧹 SCANNING EXISTING PENDING ORDERS FOR RISK VIOLATIONS...")
+            current_pending_orders = mt5.orders_get() or []
+            
+            if current_pending_orders:
+                print(f"  📋 Found {len(current_pending_orders)} existing pending orders:")
+                for order in current_pending_orders:
+                    if order.type == mt5.ORDER_TYPE_BUY_STOP:
+                        order_type_name = "BUY_STOP"
+                    elif order.type == mt5.ORDER_TYPE_SELL_STOP:
+                        order_type_name = "SELL_STOP"
+                    elif order.type == mt5.ORDER_TYPE_BUY_LIMIT:
+                        order_type_name = "BUY_LIMIT"
+                    elif order.type == mt5.ORDER_TYPE_SELL_LIMIT:
+                        order_type_name = "SELL_LIMIT"
+                    else:
+                        order_type_name = f"TYPE_{order.type}"
+                    print(f"     - #{order.ticket}: {order_type_name} {order.symbol} @ {order.price_open} vol {order.volume_initial} [Magic: {order.magic}]")
+                
+                # Run cleanup scan without evaluating a new order
+                risk_allowed, cleanup_info = risk_management_for_duplicates(
+                    investor_root, None, current_pending_orders, cancel_exceeding=True, check_only=True
+                )
+                
+                if cleanup_info.get('cancelled_count', 0) > 0:
+                    print(f"\n  ✅ Cleaned up {cleanup_info['cancelled_count']} violating order(s)")
+                    global_stats['total_orders_cancelled_regulation'] += cleanup_info['cancelled_count']
+                    
+                    # Refresh tradeshistory after cleanup
+                else:
+                    print(f"\n  ✅ No risk violations found in existing orders")
+            else:
+                print(f"  ℹ️ No existing pending orders to scan")
+            
+            # ============================================================
+            # STEP 7: Collect signals from ALL strategy folders
+            # ============================================================
+            all_signals, hedge_signals, regular_signals = collect_orders_from_signals(investor_root, resolution_cache)
+            
+            if not all_signals:
+                print(f"  ℹ️  No signals found for {user_brokerid}")
+                continue
+            
+            global_stats['investors_processed'] += 1
+            global_stats['total_signals_found'] += len(all_signals)
+            global_stats['total_hedge_signals'] += len(hedge_signals)
+            global_stats['total_regular_signals'] += len(regular_signals)
+            
+            # Count successful suffix retries
+            suffix_retries = sum(1 for s in all_signals if s['data'].get('used_suffix', 'none') != 'none')
+            global_stats['total_suffix_retries_successful'] += suffix_retries
+            if suffix_retries > 0:
+                print(f"  🔄 Successfully applied suffix retry to {suffix_retries} signals")
+            
+            # ============================================================
+            # STEP 8: Get existing positions for risk check
+            # ============================================================
+            existing_positions = mt5.positions_get() or []
+            print(f"  📊 Found {len(existing_positions)} existing open positions for risk check")
+            
+            # ============================================================
+            # STEP 9: Group regular signals by symbol and order_type
+            # ============================================================
+            regular_signals_by_key = {}
+            
+            for signal_wrapper in regular_signals:
+                order_data = signal_wrapper['data']
+                symbol = order_data.get('symbol', '')
+                order_type = order_data.get('order_type', '').lower()
+                
+                # Only process stop orders for regular signals
+                if order_type not in ['buy_stop', 'sell_stop']:
+                    print(f"  ℹ️  Skipping non-stop regular order: {order_type} for {symbol}")
+                    continue
+                
+                key = f"{symbol}_{order_type}"
+                
+                if key not in regular_signals_by_key:
+                    regular_signals_by_key[key] = []
+                
+                regular_signals_by_key[key].append(signal_wrapper)
+            
+            print(f"  📊 Grouped regular signals into {len(regular_signals_by_key)} symbol/order_type groups")
+            print(f"  🛡️ Hedge signals: {len(hedge_signals)} (will ALL be placed)")
+            print(f"  🔑 All orders will use Magic Number: {authorized_magic_number}")
+            
+            # ============================================================
+            # STEP 10: Per-order cache for this run
+            # ============================================================
+            per_order_cache = set()
+            
+            # ============================================================
+            # STEP 11: Build authorized keys for regulation
+            # ============================================================
+            authorized_keys = set()
+            
+            # ============================================================
+            # STEP 12: Process hedge orders FIRST (no uniqueness rules)
+            # ============================================================
+            investor_stats = {
+                'orders_placed': 0,
+                'orders_failed': 0,
+                'records_removed': 0,
+                'per_order_cache': per_order_cache,
+                'authorized_keys': authorized_keys,
+                'fallback_used': 0,
+                'older_orders_cancelled': 0
+            }
+            
+            if hedge_signals:
+                investor_stats = process_hedge_orders(
+                    hedge_signals, investor_root, per_order_cache, existing_positions,
+                    skip_proximity_check, switch_invalid_to_instant, investor_stats,
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
+                )
+
+            if regular_signals_by_key:
+                investor_stats = process_regular_orders_with_fallback(
+                    regular_signals_by_key, investor_root, per_order_cache, existing_positions,
+                    skip_proximity_check, switch_invalid_to_instant, investor_stats,
+                    authorized_magic_number, opposite_restriction_enabled  # Add this
+                )
+            
+            # Update global stats
+            global_stats['total_orders_placed'] += investor_stats['orders_placed']
+            global_stats['total_orders_failed'] += investor_stats['orders_failed']
+            global_stats['total_candle_records_removed'] += investor_stats['records_removed']
+            global_stats['total_fallback_used'] += investor_stats['fallback_used']
+            
+            # Track hedge-specific stats (approximate - actual placed tracked in process_hedge_orders)
+            hedge_placed = investor_stats['orders_placed'] - len(regular_signals_by_key) if regular_signals_by_key else investor_stats['orders_placed']
+            global_stats['total_hedge_orders_placed'] += hedge_placed if hedge_placed > 0 else 0
+            global_stats['total_hedge_orders_failed'] += len(hedge_signals) - hedge_placed if hedge_signals else 0
+        
+            
+            # ============================================================
+            # STEP 16: Investor Summary
+            # ============================================================
+            print(f"\n  └─ 📈 INVESTOR {user_brokerid} SUMMARY")
+            print(f"       • Magic Number: {authorized_magic_number}")
+            print(f"       • Orders Placed: {investor_stats['orders_placed']}")
+            print(f"       • Orders Failed: {investor_stats['orders_failed']}")
+            print(f"       • Fallback Used: {investor_stats['fallback_used']}")
+            print(f"       • Old Orders Cancelled: {investor_stats['older_orders_cancelled']}")
+            
+            if investor_stats['orders_placed'] > 0:
+                any_orders_placed = True
+        
+        # ============================================================
+        # FINAL GLOBAL SUMMARY
+        # ============================================================
+        print("\n" + "="*80)
+        print("  📊 FINAL EXECUTION SUMMARY".ljust(79) + "=")
+        print("="*80)
+        print(f"│  Investors processed:        {global_stats['investors_processed']}")
+        print(f"│  Investors blocked:          {global_stats['investors_blocked']}")
+        print(f"│  Total signals found:        {global_stats['total_signals_found']}")
+        print(f"│    - Hedge signals:          {global_stats['total_hedge_signals']}")
+        print(f"│    - Regular signals:        {global_stats['total_regular_signals']}")
+        print(f"│  Orders placed:              {global_stats['total_orders_placed']}")
+        print(f"│  Orders failed:              {global_stats['total_orders_failed']}")
+        print(f"│  Orders cancelled (risk):    {global_stats['total_orders_cancelled_regulation']}")
+        print(f"│  Fallback used:              {global_stats['total_fallback_used']}")
+        print(f"│  Suffix retries successful:  {global_stats['total_suffix_retries_successful']}")
+        print(f"│  Candle records removed:     {global_stats['total_candle_records_removed']}")
+        print(f"│  Proximity check disabled:   {global_stats['total_proximity_check_disabled']}")
+        print("="*80)
+        
+        if any_orders_placed:
+            print("✅ ORDER PLACEMENT ENGINE COMPLETED SUCCESSFULLY")
+        else:
+            print("⚠️ NO ORDERS WERE PLACED")
+        print("="*80 + "\n")
+        
+        return any_orders_placed
+    main()
 
 def history_closed_orders_removal_in_pendingorders(inv_id=None):
     """
@@ -18698,6 +21386,8 @@ def check_pending_orders_risk(inv_id=None):
         "orders_removed_exceeded_max": 0,
         "orders_kept": 0,
         "default_risk_used": None,
+        "hierarchical_scaling_applied": False,  # ADD THIS
+        "hierarchical_scaling_details": {},     # ADD THIS
         "maximum_risk_used": None,
         "processing_success": False
     }
@@ -18987,7 +21677,7 @@ def check_pending_orders_risk(inv_id=None):
     print(f"\n{'='*10} 🏁 RISK AUDIT COMPLETE {'='*10}\n")
     return stats
 
-def orders_reward_correction(inv_id=None):
+def orders_reward_correction_old(inv_id=None):
     """
     Function: Checks both live pending orders AND open positions (LIMIT, STOP, and MARKET)
     and adjusts their take profit levels based on the NEAREST MATCHING strategy risk-reward ratio.
@@ -19821,6 +22511,809 @@ def orders_reward_correction(inv_id=None):
     print(f"\n{'='*10} 🏁 INTELLIGENT R:R CORRECTION COMPLETE {'='*10}\n")
     return stats
 
+def orders_reward_correction(inv_id=None):
+    """
+    Function: Checks both live pending orders AND open positions (LIMIT, STOP, and MARKET)
+    and adjusts their take profit levels based on the NEAREST MATCHING strategy risk-reward ratio.
+    
+    INTELLIGENT APPROACH:
+    1. Calculate current R:R from order's exit/target prices
+    2. Compare with strategy-specific R:R values from accountmanagement.json
+    3. Find the nearest matching R:R (next higher value) and use that
+    4. Fall back to default selected_risk_reward if no match found
+    5. Uses MT5 comment field to identify hedge orders (parses H1/H0 flags)
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the processing
+    """
+    print(f"\n{'='*10} 📐 INTELLIGENT R:R CORRECTION: FINDING NEAREST STRATEGY MATCH {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
+
+    # Track statistics
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "orders_checked": 0,
+        "orders_adjusted": 0,
+        "orders_skipped": 0,
+        "orders_error": 0,
+        "positions_checked": 0,
+        "positions_adjusted": 0,
+        "rr_matches": {},  # Track which R:R ratios were used
+        "rr_mismatches": 0,  # Track orders that didn't match any strategy
+        "hedge_orders_found": 0,  # Track hedge orders found via comment
+        "hedge_orders_adjusted": 0,  # Track hedge orders adjusted
+        "processing_success": False
+    }
+
+    # Determine which investors to process
+    investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
+    total_investors = len(investors_to_process) if not inv_id else 1
+    processed = 0
+
+    for user_brokerid in investors_to_process:
+        processed += 1
+        print(f"\n[{processed}/{total_investors}] {user_brokerid} 🔍 Loading R:R configurations...")
+        
+        # Get broker config
+        broker_cfg = usersdictionary.get(user_brokerid)
+        if not broker_cfg:
+            print(f"  └─  No broker config found")
+            continue
+        
+        inv_root = Path(INV_PATH) / user_brokerid
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+
+        if not acc_mgmt_path.exists():
+            print(f"  └─  Account config missing. Skipping.")
+            continue
+
+        # --- LOAD CONFIG AND EXTRACT ALL AVAILABLE R:R VALUES ---
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Check if risk_reward_correction is enabled
+            settings = config.get("settings", {})
+            if not settings.get("risk_reward_correction", False):
+                print(f"  └─ ⏭️  Risk-reward correction disabled in settings. Skipping.")
+                continue
+            
+            # Get ALL available R:R values (both default and strategy-specific)
+            all_rr_values = []
+            hedge_rr_values = []
+            regular_rr_values = []
+            
+            # Add default selected_risk_reward
+            selected_rr = config.get("selected_risk_reward", [2])
+            if isinstance(selected_rr, list) and selected_rr:
+                default_rr = float(selected_rr[0])
+            else:
+                default_rr = 2.0
+            
+            regular_rr_values.append(default_rr)
+            all_rr_values.append(default_rr)
+            
+            # Add hedge orders risk reward
+            hedge_rr_config = config.get("hedge_orders_risk_reward", [2])
+            if isinstance(hedge_rr_config, list) and hedge_rr_config:
+                hedge_default_rr = float(hedge_rr_config[0])
+            else:
+                hedge_default_rr = 2.0
+            
+            hedge_rr_values.append(hedge_default_rr)
+            if hedge_default_rr not in all_rr_values:
+                all_rr_values.append(hedge_default_rr)
+            
+            # Add all strategy-specific R:R values
+            strategies_rr = config.get("strategies_risk_reward", {})
+            strategy_rr_values = []
+            for strategy, rr_value in strategies_rr.items():
+                try:
+                    rr_float = float(rr_value)
+                    strategy_rr_values.append(rr_float)
+                    all_rr_values.append(rr_float)
+                    regular_rr_values.append(rr_float)
+                except (ValueError, TypeError):
+                    continue
+            
+            # Sort and deduplicate all available R:R values
+            all_rr_values = sorted(set(all_rr_values))
+            hedge_rr_values = sorted(set(hedge_rr_values))
+            regular_rr_values = sorted(set(regular_rr_values))
+            
+            print(f"  └─ 📊 Default R:R (Regular): 1:{default_rr}")
+            print(f"  └─ 📊 Default R:R (Hedge): 1:{hedge_default_rr}")
+            if strategy_rr_values:
+                print(f"  └─ 📋 Strategy R:R values: {', '.join([f'1:{v}' for v in sorted(set(strategy_rr_values))])}")
+            print(f"  └─ 🎯 All available R:R targets: {', '.join([f'1:{v}' for v in all_rr_values])}")
+            
+            # Get risk management mapping for balance-based risk
+            risk_map = config.get("account_balance_default_risk_management", {})
+            
+        except Exception as e:
+            print(f"  └─  Failed to read config: {e}")
+            stats["orders_error"] += 1
+            continue
+
+        # --- ACCOUNT INITIALIZATION ---
+        print(f"  └─ 🔌 Initializing account connection...")
+        
+        login_id = int(broker_cfg['LOGIN_ID'])
+        mt5_path = broker_cfg["Terminal_path"]
+        
+        print(f"      • Terminal Path: {mt5_path}")
+        print(f"      • Login ID: {login_id}")
+
+        # Check login status
+        acc = mt5.account_info()
+        if acc is None or acc.login != login_id:
+            print(f"      🔑 Logging into account...")
+            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
+                error = mt5.last_error()
+                print(f"  └─   login failed: {error}")
+                stats["orders_error"] += 1
+                continue
+            print(f"      ✅ Successfully logged into account")
+        else:
+            print(f"      ✅ Already logged into account")
+
+        acc_info = mt5.account_info()
+        if not acc_info:
+            print(f"  └─  Failed to get account info")
+            stats["orders_error"] += 1
+            continue
+            
+        balance = acc_info.balance
+
+        # Get terminal info for additional details
+        term_info = mt5.terminal_info()
+        
+        print(f"\n  └─ 📊 Account Details:")
+        print(f"      • Balance: ${acc_info.balance:,.2f}")
+        print(f"      • Equity: ${acc_info.equity:,.2f}")
+        print(f"      • Free Margin: ${acc_info.margin_free:,.2f}")
+        print(f"      • Margin Level: {acc_info.margin_level:.2f}%" if acc_info.margin_level else "      • Margin Level: N/A")
+        print(f"      • AutoTrading: {'✅ ENABLED' if term_info.trade_allowed else ' DISABLED'}")
+
+        # --- DETERMINE PRIMARY RISK VALUE BASED ON BALANCE ---
+        primary_risk = None
+        for range_str, r_val in risk_map.items():
+            try:
+                raw_range = range_str.split("_")[0]
+                low, high = map(float, raw_range.split("-"))
+                if low <= balance <= high:
+                    primary_risk = float(r_val)
+                    break
+            except Exception as e:
+                print(f"  └─  Error parsing range '{range_str}': {e}")
+                continue
+
+        if primary_risk is None:
+            print(f"  └─  No risk mapping for balance ${balance:,.2f}")
+            stats["orders_skipped"] += 1
+            continue
+
+        print(f"\n  └─ 💰 Balance: ${balance:,.2f} | Base Risk: ${primary_risk:.2f}")
+
+        # --- HELPER FUNCTION: Parse comment to determine if hedge order ---
+        def is_hedge_from_comment(comment):
+            """
+            Parse MT5 comment field to determine if this is a hedge order.
+            Expected format: {strategy}|H{0/1}|G{0/1}|...
+            Returns True if H1 (hedge flag is 1)
+            """
+            if not comment:
+                return False
+            
+            try:
+                # Split by pipe delimiter
+                parts = comment.split('|')
+                
+                for part in parts:
+                    # Look for H0 or H1 pattern
+                    if part.startswith('H') and len(part) >= 2:
+                        hedge_char = part[1]
+                        if hedge_char == '1':
+                            return True
+                        elif hedge_char == '0':
+                            return False
+                
+                # Also check for hedge indicators in raw comment (backup)
+                comment_lower = comment.lower()
+                hedge_indicators = ["hedge", "🛡️", "h_edge", "hedg", "[h]"]
+                for indicator in hedge_indicators:
+                    if indicator in comment_lower:
+                        return True
+                
+                return False
+            except Exception as e:
+                # If parsing fails, return False (treat as regular order)
+                return False
+        
+        # --- HELPER FUNCTION: Get strategy name from comment ---
+        def get_strategy_from_comment(comment):
+            """
+            Extract strategy name from comment.
+            Expected format: {strategy}|H0|...
+            Returns strategy name or None
+            """
+            if not comment:
+                return None
+            
+            try:
+                parts = comment.split('|')
+                if parts:
+                    return parts[0]
+                return None
+            except Exception:
+                return None
+
+        # --- HELPER FUNCTION: Find nearest matching R:R ---
+        def find_nearest_rr(current_rr, available_rr_values):
+            """
+            Find the nearest matching R:R value from available options.
+            Prefers next higher value, but if none exists, uses the closest.
+            """
+            if not available_rr_values:
+                return None, "none"
+            
+            # Sort available values
+            sorted_values = sorted(available_rr_values)
+            
+            # Find the next higher value (preferred)
+            next_higher = None
+            for val in sorted_values:
+                if val >= current_rr:
+                    next_higher = val
+                    break
+            
+            if next_higher is not None:
+                return next_higher, "next_higher"
+            
+            # If no higher value, use the closest (should be the maximum)
+            closest = min(sorted_values, key=lambda x: abs(x - current_rr))
+            return closest, "closest"
+
+        # --- HELPER FUNCTION: Calculate risk in USD ---
+        def calculate_risk_usd(volume, stop_distance_pips, tick_size, tick_value):
+            """
+            Calculate risk in USD using the proven formula.
+            """
+            if tick_size <= 0:
+                return 0
+            
+            ticks_in_stop = stop_distance_pips / tick_size
+            risk_usd = volume * ticks_in_stop * tick_value
+            return abs(risk_usd)
+
+        # --- HELPER FUNCTION: Calculate TP price based on risk, RR, and direction ---
+        def calculate_tp_price_from_risk(price_open, risk_usd, target_rr, is_buy, symbol_info, volume, tick_size, tick_value):
+            """
+            Calculate take profit price based on target risk-reward ratio.
+            """
+            target_profit_usd = risk_usd * target_rr
+            
+            if tick_size <= 0 or tick_value <= 0:
+                return None
+            
+            # Calculate required ticks for target profit
+            ticks_needed = target_profit_usd / (volume * tick_value)
+            
+            # Convert ticks to price movement
+            price_move_needed = ticks_needed * tick_size
+            
+            # Get symbol digits for rounding
+            digits = symbol_info.digits
+            
+            # Ensure minimum movement (at least 1 point)
+            min_move = symbol_info.point * 1
+            if abs(price_move_needed) < min_move:
+                price_move_needed = min_move if price_move_needed >= 0 else -min_move
+            
+            # Round to symbol digits
+            price_move_needed = round(price_move_needed, digits)
+            
+            # Calculate TP based on direction
+            if is_buy:
+                new_tp = round(price_open + price_move_needed, digits)
+            else:
+                new_tp = round(price_open - price_move_needed, digits)
+            
+            # Validate it's reasonable (max 100% move)
+            max_move = price_open * 1.0
+            move_abs = abs(new_tp - price_open)
+            if move_abs > max_move:
+                print(f"         Calculated move {move_abs:.{digits}f} exceeds 100% of price, capping...")
+                if is_buy:
+                    new_tp = round(price_open + max_move, digits)
+                else:
+                    new_tp = round(price_open - max_move, digits)
+            
+            return new_tp
+
+        # --- DEFINE ORDER AND POSITION TYPES WITH DIRECTION ---
+        BUY_TYPES = {
+            mt5.POSITION_TYPE_BUY: "BUY (MARKET)",
+            mt5.ORDER_TYPE_BUY_LIMIT: "BUY LIMIT",
+            mt5.ORDER_TYPE_BUY_STOP: "BUY STOP",
+            mt5.ORDER_TYPE_BUY_STOP_LIMIT: "BUY STOP-LIMIT"
+        }
+        
+        SELL_TYPES = {
+            mt5.POSITION_TYPE_SELL: "SELL (MARKET)",
+            mt5.ORDER_TYPE_SELL_LIMIT: "SELL LIMIT",
+            mt5.ORDER_TYPE_SELL_STOP: "SELL STOP",
+            mt5.ORDER_TYPE_SELL_STOP_LIMIT: "SELL STOP-LIMIT"
+        }
+        
+        PENDING_ORDER_TYPES = set(BUY_TYPES.keys()) | set(SELL_TYPES.keys())
+        PENDING_ORDER_TYPES.discard(mt5.POSITION_TYPE_BUY)
+        PENDING_ORDER_TYPES.discard(mt5.POSITION_TYPE_SELL)
+
+        # --- PROCESS OPEN POSITIONS (MARKET ORDERS) ---
+        positions = mt5.positions_get()
+        investor_positions_checked = 0
+        investor_positions_adjusted = 0
+        investor_positions_skipped = 0
+        investor_positions_error = 0
+
+        if positions:
+            print(f"\n  └─ 🔍 Scanning {len(positions)} open positions (MARKET)...")
+            
+            for position in positions:
+                investor_positions_checked += 1
+                stats["positions_checked"] += 1
+                
+                # Determine position direction
+                is_buy = position.type in BUY_TYPES
+                position_type_name = BUY_TYPES.get(position.type, SELL_TYPES.get(position.type, f"Unknown Type {position.type}"))
+                
+                # Get symbol info
+                symbol_info = mt5.symbol_info(position.symbol)
+                if not symbol_info:
+                    print(f"    └─  Cannot get symbol info for {position.symbol}")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Ensure symbol is selected
+                mt5.symbol_select(position.symbol, True)
+                symbol_info = mt5.symbol_info(position.symbol)
+                
+                # Get comment for hedge detection
+                position_comment = position.comment if hasattr(position, 'comment') else ""
+                
+                print(f"\n    └─ 📋 Position #{position.ticket} | {position_type_name} | {position.symbol}")
+                if position_comment:
+                    print(f"       Comment: {position_comment[:50]}")
+                
+                # Check if this is a hedge position by parsing the comment
+                is_hedge = is_hedge_from_comment(position_comment)
+                strategy_name = get_strategy_from_comment(position_comment)
+                
+                if is_hedge:
+                    print(f"       🛡️  HEDGE POSITION IDENTIFIED (via comment flag H1)")
+                    stats["hedge_orders_found"] += 1
+                    position_default_rr, position_rr_values = hedge_default_rr, hedge_rr_values
+                else:
+                    print(f"       📊 REGULAR POSITION (via comment flag H0 or missing)")
+                    position_default_rr, position_rr_values = default_rr, regular_rr_values
+                
+                if strategy_name:
+                    print(f"       📌 Strategy: {strategy_name}")
+                
+                # Calculate current risk using the proven formula
+                if position.sl == 0:
+                    print(f"        No SL set - cannot calculate risk. Skipping TP adjustment.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Get tick size and tick value from symbol info
+                tick_size = symbol_info.trade_tick_size
+                tick_value = symbol_info.trade_tick_value
+                
+                if tick_size <= 0 or tick_value <= 0:
+                    print(f"        Invalid tick size/value for {position.symbol}")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate stop distance in price units
+                if is_buy:
+                    stop_distance = position.price_open - position.sl
+                else:
+                    stop_distance = position.sl - position.price_open
+                
+                if stop_distance <= 0:
+                    print(f"        Invalid stop distance: {stop_distance}")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate current risk in USD with more precision
+                current_risk_usd = calculate_risk_usd(position.volume, stop_distance, tick_size, tick_value)
+                
+                print(f"       Volume: {position.volume} | Stop distance: {stop_distance:.{symbol_info.digits}f} | Risk: ${current_risk_usd:.2f}")
+                print(f"       Using {'HEDGE' if is_hedge else 'REGULAR'} R:R default: 1:{position_default_rr}")
+                
+                # Calculate current R:R if TP exists
+                current_rr = None
+                if position.tp != 0:
+                    if is_buy:
+                        tp_distance = position.tp - position.price_open
+                    else:
+                        tp_distance = position.price_open - position.tp
+                    
+                    if stop_distance > 0:
+                        current_rr = round(tp_distance / stop_distance, 2)
+                        print(f"       Current R:R: 1:{current_rr}")
+                    else:
+                        current_rr = None
+                
+                # Find target R:R based on current value using appropriate R:R values
+                if current_rr is not None:
+                    target_rr, match_type = find_nearest_rr(current_rr, position_rr_values)
+                    
+                    if match_type == "next_higher":
+                        print(f"       🔍 Using next higher R:R: 1:{target_rr} (from 1:{current_rr})")
+                    elif match_type == "closest":
+                        print(f"       🔍 Using closest R:R: 1:{target_rr} (from 1:{current_rr}) - no higher value")
+                    else:
+                        target_rr = position_default_rr
+                        print(f"       ℹ️  Using default R:R: 1:{target_rr}")
+                    
+                    # Track R:R usage
+                    rr_key = f"{'hedge' if is_hedge else 'regular'}_{str(target_rr)}"
+                    if rr_key not in stats["rr_matches"]:
+                        stats["rr_matches"][rr_key] = 0
+                    stats["rr_matches"][rr_key] += 1
+                else:
+                    target_rr = position_default_rr
+                    print(f"       ℹ️  No current R:R found, using default: 1:{target_rr}")
+                    stats["rr_mismatches"] += 1
+                
+                # Calculate new take profit price with full precision
+                new_tp = calculate_tp_price_from_risk(position.price_open, current_risk_usd, target_rr, 
+                                                     is_buy, symbol_info, position.volume, tick_size, tick_value)
+                
+                if new_tp is None:
+                    print(f"        Cannot calculate TP price. Skipping.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Validate TP price makes sense for direction with tolerance
+                digits = symbol_info.digits
+                tolerance = symbol_info.point * 0.1
+                
+                if is_buy and new_tp <= position.price_open + tolerance:
+                    print(f"        Calculated TP {new_tp:.{digits}f} is not above entry {position.price_open:.{digits}f} (with tolerance). Skipping.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                elif not is_buy and new_tp >= position.price_open - tolerance:
+                    print(f"        Calculated TP {new_tp:.{digits}f} is not below entry {position.price_open:.{digits}f} (with tolerance). Skipping.")
+                    investor_positions_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate target profit with full precision
+                target_profit = current_risk_usd * target_rr
+                print(f"       Target R:R: 1:{target_rr} | Risk: ${current_risk_usd:.4f} | Target Profit: ${target_profit:.4f}")
+                
+                # Check if TP needs adjustment
+                if position.tp == 0:
+                    target_move = abs(new_tp - position.price_open)
+                    print(f"       📝 No TP currently set")
+                    print(f"       Target TP: {new_tp:.{digits}f} (Move from entry: {target_move:.{digits}f})")
+                    should_adjust = True
+                else:
+                    current_move = abs(position.tp - position.price_open)
+                    target_move = abs(new_tp - position.price_open)
+                    
+                    # Use absolute difference threshold (1 point)
+                    point_threshold = symbol_info.point * 1
+                    
+                    if abs(current_move - target_move) > point_threshold:
+                        print(f"       📐 TP needs adjustment (difference: {abs(current_move - target_move):.{digits}f} > {point_threshold:.{digits}f})")
+                        print(f"       Current TP: {position.tp:.{digits}f} (Move: {current_move:.{digits}f})")
+                        print(f"       Target TP:  {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
+                        should_adjust = True
+                    else:
+                        print(f"       ✅ TP already correct (within {point_threshold:.{digits}f})")
+                        investor_positions_skipped += 1
+                        stats["orders_skipped"] += 1
+                        continue
+                
+                if should_adjust:
+                    # Prepare modification request for position
+                    modify_request = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": position.ticket,
+                        "sl": position.sl,
+                        "tp": new_tp,
+                    }
+                    
+                    # Send modification
+                    result = mt5.order_send(modify_request)
+                    
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        investor_positions_adjusted += 1
+                        stats["positions_adjusted"] += 1
+                        stats["orders_adjusted"] += 1
+                        if is_hedge:
+                            stats["hedge_orders_adjusted"] += 1
+                        print(f"       ✅ TP adjusted successfully to {new_tp:.{digits}f}")
+                    else:
+                        investor_positions_error += 1
+                        stats["orders_error"] += 1
+                        error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                        print(f"        Modification failed: {error_msg}")
+
+        # --- PROCESS PENDING ORDERS (LIMIT AND STOP) ---
+        pending_orders = mt5.orders_get()
+        investor_orders_checked = 0
+        investor_orders_adjusted = 0
+        investor_orders_skipped = 0
+        investor_orders_error = 0
+
+        if pending_orders:
+            print(f"\n  └─ 🔍 Scanning {len(pending_orders)} pending orders (LIMIT & STOP)...")
+            
+            for order in pending_orders:
+                # Skip if not a pending order
+                if order.type not in PENDING_ORDER_TYPES:
+                    continue
+                
+                investor_orders_checked += 1
+                stats["orders_checked"] += 1
+                
+                # Determine order direction
+                is_buy = order.type in BUY_TYPES
+                order_type_name = BUY_TYPES.get(order.type, SELL_TYPES.get(order.type, f"Unknown Type {order.type}"))
+                
+                # Get symbol info
+                symbol_info = mt5.symbol_info(order.symbol)
+                if not symbol_info:
+                    print(f"    └─  Cannot get symbol info for {order.symbol}")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Ensure symbol is selected
+                mt5.symbol_select(order.symbol, True)
+                symbol_info = mt5.symbol_info(order.symbol)
+                
+                # Get comment for hedge detection
+                order_comment = order.comment if hasattr(order, 'comment') else ""
+                
+                print(f"\n    └─ 📋 Order #{order.ticket} | {order_type_name} | {order.symbol}")
+                if order_comment:
+                    print(f"       Comment: {order_comment[:50]}")
+                
+                # Check if this is a hedge order by parsing the comment
+                is_hedge = is_hedge_from_comment(order_comment)
+                strategy_name = get_strategy_from_comment(order_comment)
+                
+                if is_hedge:
+                    print(f"       🛡️  HEDGE ORDER IDENTIFIED (via comment flag H1)")
+                    stats["hedge_orders_found"] += 1
+                    order_default_rr, order_rr_values = hedge_default_rr, hedge_rr_values
+                else:
+                    print(f"       📊 REGULAR ORDER (via comment flag H0 or missing)")
+                    order_default_rr, order_rr_values = default_rr, regular_rr_values
+                
+                if strategy_name:
+                    print(f"       📌 Strategy: {strategy_name}")
+                
+                # Calculate current risk using the proven formula
+                if order.sl == 0:
+                    print(f"        No SL set - cannot calculate risk. Skipping TP adjustment.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Get tick size and tick value from symbol info
+                tick_size = symbol_info.trade_tick_size
+                tick_value = symbol_info.trade_tick_value
+                
+                if tick_size <= 0 or tick_value <= 0:
+                    print(f"        Invalid tick size/value for {order.symbol}")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate stop distance in price units
+                stop_distance = abs(order.price_open - order.sl)
+                
+                if stop_distance <= 0:
+                    print(f"        Invalid stop distance: {stop_distance}")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate current risk in USD with full precision
+                current_risk_usd = calculate_risk_usd(order.volume_initial, stop_distance, tick_size, tick_value)
+                
+                print(f"       Volume: {order.volume_initial} | Stop distance: {stop_distance:.{symbol_info.digits}f} | Risk: ${current_risk_usd:.2f}")
+                print(f"       Using {'HEDGE' if is_hedge else 'REGULAR'} R:R default: 1:{order_default_rr}")
+                
+                # Calculate current R:R if TP exists
+                current_rr = None
+                if order.tp != 0:
+                    if is_buy:
+                        tp_distance = order.tp - order.price_open
+                    else:
+                        tp_distance = order.price_open - order.tp
+                    
+                    if stop_distance > 0:
+                        current_rr = round(tp_distance / stop_distance, 2)
+                        print(f"       Current R:R: 1:{current_rr}")
+                    else:
+                        current_rr = None
+                
+                # Find target R:R based on current value using appropriate R:R values
+                if current_rr is not None:
+                    target_rr, match_type = find_nearest_rr(current_rr, order_rr_values)
+                    
+                    if match_type == "next_higher":
+                        print(f"       🔍 Using next higher R:R: 1:{target_rr} (from 1:{current_rr})")
+                    elif match_type == "closest":
+                        print(f"       🔍 Using closest R:R: 1:{target_rr} (from 1:{current_rr}) - no higher value")
+                    else:
+                        target_rr = order_default_rr
+                        print(f"       ℹ️  Using default R:R: 1:{target_rr}")
+                    
+                    # Track R:R usage
+                    rr_key = f"{'hedge' if is_hedge else 'regular'}_{str(target_rr)}"
+                    if rr_key not in stats["rr_matches"]:
+                        stats["rr_matches"][rr_key] = 0
+                    stats["rr_matches"][rr_key] += 1
+                else:
+                    target_rr = order_default_rr
+                    print(f"       ℹ️  No current R:R found, using default: 1:{target_rr}")
+                    stats["rr_mismatches"] += 1
+                
+                # Calculate new take profit price with full precision
+                new_tp = calculate_tp_price_from_risk(order.price_open, current_risk_usd, target_rr, 
+                                                     is_buy, symbol_info, order.volume_initial, tick_size, tick_value)
+                
+                if new_tp is None:
+                    print(f"        Cannot calculate TP price. Skipping.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Validate TP price with tolerance
+                digits = symbol_info.digits
+                tolerance = symbol_info.point * 0.1
+                
+                if is_buy and new_tp <= order.price_open + tolerance:
+                    print(f"        Calculated TP {new_tp:.{digits}f} is not above entry {order.price_open:.{digits}f} (with tolerance). Skipping.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                elif not is_buy and new_tp >= order.price_open - tolerance:
+                    print(f"        Calculated TP {new_tp:.{digits}f} is not below entry {order.price_open:.{digits}f} (with tolerance). Skipping.")
+                    investor_orders_skipped += 1
+                    stats["orders_skipped"] += 1
+                    continue
+                
+                # Calculate target profit with full precision
+                target_profit = current_risk_usd * target_rr
+                print(f"       Target R:R: 1:{target_rr} | Risk: ${current_risk_usd:.4f} | Target Profit: ${target_profit:.4f}")
+                
+                # Check if TP needs adjustment
+                current_move = abs(order.tp - order.price_open) if order.tp != 0 else 0
+                target_move = abs(new_tp - order.price_open)
+                
+                should_adjust = False
+                
+                if order.tp == 0:
+                    print(f"       📝 No TP currently set")
+                    print(f"       Target TP: {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
+                    should_adjust = True
+                else:
+                    # Use absolute 1-point threshold
+                    point_threshold = symbol_info.point * 1
+                    
+                    if abs(current_move - target_move) > point_threshold:
+                        print(f"       📐 TP needs adjustment (difference: {abs(current_move - target_move):.{digits}f} > {point_threshold:.{digits}f})")
+                        print(f"       Current TP: {order.tp:.{digits}f} (Move: {current_move:.{digits}f})")
+                        print(f"       Target TP:  {new_tp:.{digits}f} (Move: {target_move:.{digits}f})")
+                        should_adjust = True
+                    else:
+                        print(f"       ✅ TP already correct (within {point_threshold:.{digits}f})")
+                        investor_orders_skipped += 1
+                        stats["orders_skipped"] += 1
+                        continue
+                
+                if should_adjust:
+                    # Prepare modification request for pending order
+                    modify_request = {
+                        "action": mt5.TRADE_ACTION_MODIFY,
+                        "order": order.ticket,
+                        "price": order.price_open,
+                        "sl": order.sl,
+                        "tp": new_tp,
+                    }
+                    
+                    # Send modification
+                    result = mt5.order_send(modify_request)
+                    
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        investor_orders_adjusted += 1
+                        stats["orders_adjusted"] += 1
+                        if is_hedge:
+                            stats["hedge_orders_adjusted"] += 1
+                        print(f"       ✅ TP adjusted successfully to {new_tp:.{digits}f}")
+                    else:
+                        investor_orders_error += 1
+                        stats["orders_error"] += 1
+                        error_msg = result.comment if result else f"Error code: {result.retcode if result else 'Unknown'}"
+                        print(f"        Modification failed: {error_msg}")
+
+        # --- INVESTOR SUMMARY ---
+        total_checked = investor_positions_checked + investor_orders_checked
+        total_adjusted = investor_positions_adjusted + investor_orders_adjusted
+        
+        if total_checked > 0:
+            print(f"\n  └─ 📊 Intelligent R:R Correction Results for {user_brokerid}:")
+            if investor_positions_checked > 0:
+                print(f"       • Positions checked: {investor_positions_checked}")
+                print(f"       • Positions adjusted: {investor_positions_adjusted}")
+                print(f"       • Positions skipped: {investor_positions_skipped}")
+            if investor_orders_checked > 0:
+                print(f"       • Pending orders checked: {investor_orders_checked}")
+                print(f"       • Pending orders adjusted: {investor_orders_adjusted}")
+                print(f"       • Pending orders skipped: {investor_orders_skipped}")
+            if investor_positions_error + investor_orders_error > 0:
+                print(f"       • Errors: {investor_positions_error + investor_orders_error}")
+            else:
+                print(f"       ✅ All adjustments completed successfully")
+            stats["processing_success"] = True
+        else:
+            print(f"  └─ 🔘 No positions or pending orders found.")
+
+    # --- FINAL SUMMARY ---
+    print(f"\n{'='*10} 📊 INTELLIGENT R:R CORRECTION SUMMARY {'='*10}")
+    print(f"   Investor ID: {stats['investor_id']}")
+    print(f"   Positions checked: {stats['positions_checked']}")
+    print(f"   Positions adjusted: {stats['positions_adjusted']}")
+    print(f"   Pending orders checked: {stats['orders_checked']}")
+    print(f"   Pending orders adjusted: {stats['orders_adjusted']}")
+    print(f"   Total checked: {stats['positions_checked'] + stats['orders_checked']}")
+    print(f"   Total adjusted: {stats['positions_adjusted'] + stats['orders_adjusted']}")
+    print(f"   Orders skipped: {stats['orders_skipped']}")
+    print(f"   Errors: {stats['orders_error']}")
+    
+    if stats["hedge_orders_found"] > 0:
+        print(f"\n   🛡️  Hedge Orders:")
+        print(f"       • Found via comment parsing: {stats['hedge_orders_found']}")
+        print(f"       • Adjusted: {stats['hedge_orders_adjusted']}")
+    
+    if stats["rr_matches"]:
+        print(f"\n   📊 R:R Usage Breakdown:")
+        for rr, count in sorted(stats["rr_matches"].items()):
+            rr_type, rr_value = rr.split('_', 1)
+            print(f"       • [{rr_type.upper()}] 1:{rr_value}: {count} orders")
+    if stats["rr_mismatches"] > 0:
+        print(f"    Orders using default R:R (no match): {stats['rr_mismatches']}")
+    
+    total_checked = stats['positions_checked'] + stats['orders_checked']
+    total_adjusted = stats['positions_adjusted'] + stats['orders_adjusted']
+    if total_checked > 0:
+        success_rate = (total_adjusted / total_checked) * 100
+        print(f"   Adjustment success rate: {success_rate:.1f}%")
+    
+    print(f"\n{'='*10} 🏁 INTELLIGENT R:R CORRECTION COMPLETE {'='*10}\n")
+    return stats
+
 def apply_dynamic_breakeven(inv_id=None):
     """
     Function: Dynamically moves stop loss to breakeven or partial profit levels based on
@@ -20077,33 +23570,6 @@ def trades_analytics(inv_id=None):
     # Dictionary to keep track of generated analytics structures for synchronization later
     generated_analytics_registry = {}
     
-    # Define the empty analytics structure template
-    EMPTY_ANALYTICS_STRUCTURE = {
-        "from_execution_start_date": {
-            "start_date": "",
-            "end_date": "",
-            "last_updated": "",
-            "trades_within_risks_config": {
-                "summaries": {
-                    "summaries_of_profits_only": {}
-                },
-                "regular_data": {
-                    "authorized": {},
-                    "unauthorized": {}
-                }
-            },
-            "trades_outside_risks_config": {
-                "summaries": {
-                    "summaries_of_profits_only": {}
-                },
-                "regular_data": {
-                    "authorized": {},
-                    "unauthorized": {}
-                }
-            }
-        },
-        "last_28_days": {}
-    }
     
     # Iterate System Investors
     for user_brokerid in investor_ids:
@@ -20972,7 +24438,6 @@ def trades_analytics(inv_id=None):
             activities_data.pop(old_key, None)
             
         activities_data['analytics'] = final_analytics_payload
-        activities_data['analytics_structure'] = EMPTY_ANALYTICS_STRUCTURE
         
         try:
             with open(activities_path, 'w', encoding='utf-8') as f:
@@ -21055,8 +24520,7 @@ def trades_analytics(inv_id=None):
                     "profitandloss": "0.00",
                     "execution_start_date": datetime.now().strftime('%Y-%m-%d'),
                     "accountmanagement": {},
-                    "analytics": {},
-                    "analytics_structure": EMPTY_ANALYTICS_STRUCTURE
+                    "analytics": {}
                 }
             updated_data[current_id] = destination_record
 
@@ -21082,12 +24546,6 @@ def trades_analytics(inv_id=None):
                 except Exception:
                     destination_record["analytics"] = {}
                     has_mutated_database = True
-        
-        # ACTION C2: Ensure analytics_structure field exists with empty template
-        if "analytics_structure" not in destination_record:
-            destination_record["analytics_structure"] = EMPTY_ANALYTICS_STRUCTURE
-            has_mutated_database = True
-            print(f" │   📋 Added empty analytics_structure template for {current_id}")
 
         # ACTION D: Inject fresh analytics data blocks if generated during this execution run
         if current_id in generated_analytics_registry:
@@ -21122,10 +24580,6 @@ def trades_analytics(inv_id=None):
                             has_mutated_database = True
                             print(f" │   🔄 Synced unauthorized_action_detected for {current_id}: {inv_activities_data['unauthorized_action_detected']}")
                     
-                    # Also sync analytics_structure from activities.json if present
-                    if 'analytics_structure' in inv_activities_data:
-                        destination_record['analytics_structure'] = inv_activities_data['analytics_structure']
-                        has_mutated_database = True
             except Exception as e:
                 print(f" │   ⚠️ Could not sync unauthorized flags for {current_id}: {e}")
 
@@ -21145,13 +24599,12 @@ def trades_analytics(inv_id=None):
     print(" ✅ ANALYTICS RUN PROCESSING TASK COMPLETED".ljust(79) + "=")
     print("="*80)
     return stats
-  
+
 #  accounts 
 def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Dynamically initializes MT5 on whatever instance is globally available
-    on the system, completely decoupled from specific process tracking.
+    Connects directly to MT5 using the investor's credentials.
     
     CONDITIONAL EXECUTION:
     - fetch_ohlc_data_and_directional_bias_for_investor = TRUE: Execute OHLC/directional bias functions
@@ -21260,7 +24713,7 @@ def process_single_investor(inv_folder):
     move_fetched_investors()
 
     # =====================================================================
-    # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
+    # DIRECT MT5 INITIALIZATION WITH CREDENTIALS
     # =====================================================================
     delay = random.uniform(0.2, 1.5)
     time.sleep(delay) 
@@ -21272,46 +24725,69 @@ def process_single_investor(inv_folder):
     configured_path = broker_cfg.get("Terminal_path", "")
     init_successful = False
     
-    # Attempt 1: Dynamic Attachment Strategy
-    print(f"🔗 Attempting dynamic routing connection to any active global MT5 module...")
-    if mt5.initialize(timeout=30000):
-        init_successful = True
-        print(f"✅ Connected seamlessly to an active background MT5 system engine.")
-    
-    # Attempt 2: Fallback to direct pathing routing matrix
-    if not init_successful and configured_path:
-        print(f"⚠️ [WARN] Dynamic routing failed. Falling back to targeted terminal initialization profile...")
-        fallback_path = os.path.abspath(configured_path)
-        if os.path.exists(fallback_path):
-            if mt5.initialize(path=fallback_path, timeout=60000, portable=True):
+    # Attempt 1: Try to initialize with terminal path if provided
+    if configured_path:
+        terminal_path = os.path.abspath(configured_path)
+        if os.path.exists(terminal_path):
+            print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
+            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
                 init_successful = True
-                print(f"🧭 Successfully hooked terminal via explicit path matrix shortcut.")
+                print(f"✅ MT5 initialized successfully with terminal path")
+            else:
+                print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
+        else:
+            print(f"⚠️ Terminal path does not exist: {terminal_path}")
+    
+    # Attempt 2: Fallback to default initialization without path
+    if not init_successful:
+        print(f"🔗 Attempting default MT5 initialization...")
+        if mt5.initialize(timeout=30000):
+            init_successful = True
+            print(f"✅ MT5 initialized successfully with default settings")
+        else:
+            print(f"⚠️ Failed default initialization: {mt5.last_error()}")
 
     if not init_successful:
-        print(f"[FAIL] 🛑 System Engine Error: Failed to discover, initialize, or bind to any available MT5 module.")
-        print(f"   Terminal Last Reported Internal Error Context: {mt5.last_error()}")
-        account_stats["skip_reason"] = "MT5 Dynamic Initialization Engine Failure"
+        print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
+        print(f"   Last Error: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Initialization Failure"
         return account_stats
 
     # =====================================================================
-    # SESSION ACCOUNT RE-AUTHENTICATION GATEWAY
+    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
     # =====================================================================
     try:
+        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
+        
+        # Shutdown any existing connection first to ensure clean state
+        mt5.shutdown()
+        time.sleep(1)
+        
+        # Re-initialize and login
+        if configured_path and os.path.exists(os.path.abspath(configured_path)):
+            if mt5.initialize(path=os.path.abspath(configured_path), timeout=60000, portable=True):
+                print(f"✅ Re-initialized with terminal path for login")
+            else:
+                print(f"⚠️ Re-initialization with path failed, trying default...")
+                mt5.initialize(timeout=30000)
+        else:
+            mt5.initialize(timeout=30000)
+        
+        # Perform login with credentials
+        if not mt5.login(login_id, password=password_str, server=server_str):
+            print(f"[FAIL] Login failed for ID: {login_id}")
+            print(f"       Error: {mt5.last_error()}")
+            mt5.shutdown()
+            return account_stats
+        
+        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
+        
+        # Verify account info
         acc = mt5.account_info()
         
-        if acc is None or acc.login != login_id:
-            print(f"🔐 Account focus shift detected. Swapping session terminal context to ID: {login_id}...")
-            
-            if not mt5.login(login_id, password=password_str, server=server_str):
-                print(f"[FAIL] Server rejected routing authentication parameters for ID: {login_id}.")
-                print(f"       Rejection details from API: {mt5.last_error()}")
-                mt5.shutdown()
-                return account_stats
-                
-            acc = mt5.account_info()
-            
         if acc is None:
-            print(f"[FAIL] Critical terminal memory fault. Bound data stream context returned empty parameters.")
+            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"       Error: {mt5.last_error()}")
             mt5.shutdown()
             return account_stats
 
@@ -21351,6 +24827,8 @@ def process_single_investor(inv_folder):
         account_stats["is_real_account"] = is_real
         
         print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+        print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
+        print(f"[{inv_id}] Account Leverage: {acc.leverage}")
 
         # Synchronize finalized account authentication parameters with database records
         try:
@@ -21358,6 +24836,9 @@ def process_single_investor(inv_folder):
                 with open(fetched_json_path, 'r') as f_inv:
                     investors_data = json.load(f_inv)
                 investors_data[inv_str_id]["account_mode"] = mode_label
+                investors_data[inv_str_id]["account_balance"] = acc.balance
+                investors_data[inv_str_id]["account_currency"] = acc.currency
+                investors_data[inv_str_id]["account_leverage"] = acc.leverage
                 with open(fetched_json_path, 'w') as f_inv:
                     json.dump(investors_data, f_inv, indent=2)
         except Exception as update_err:
@@ -21435,7 +24916,7 @@ def process_single_investor(inv_folder):
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
         if not is_restricted:
-            trades_analytics(inv_id=inv_id)
+            orders_reward_correction(inv_id=inv_id)
             
 
             account_stats["success"] = True
@@ -21466,317 +24947,7 @@ def process_single_investor(inv_folder):
 def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Dynamically initializes MT5 on whatever instance is globally available
-    on the system, completely decoupled from specific process tracking.
-    """
-    global restricted_timerange_alert
-    
-    inv_id = inv_folder.name
-    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
-    
-    account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
-        "price_collection_stats": {},
-        "candle_fetch_stats": {},
-        "crosser_analysis_stats": {},
-        "trapped_analysis_stats": {},
-        "liquidator_analysis_stats": {},
-        "ranging_analysis_stats": {},
-        "order_placement_stats": {},
-        "risk_correction_stats": {},
-        "risk_audit_stats": {},
-        "symbols_filtered": 0,
-        "orders_filtered": 0,
-        "symbols_processed": 0,
-        "symbols_successful": 0,
-        "orders_placed": 0,
-        "counter_orders_placed": 0,
-        "total_active_orders": 0,
-        "orders_adjusted": 0,
-        "orders_removed": 0,
-        "current_candle_forming": False,
-        "bid_wins": 0,
-        "ask_wins": 0,
-        "trapped_candles_found": 0,
-        "symbols_with_trapped": 0,
-        "symbols_with_liquidator": 0,
-        "liquidator_candles_found": 0,
-        "bullish_liquidators": 0,
-        "bearish_liquidators": 0,
-        "symbols_ranging": 0,
-        "avg_ranging_cycles": 0,
-        "spread_check_skipped": False,
-        "spread_warning_details": None,
-        "restricted_timerange_purge": False,
-        "execution_skipped": False,
-        "skip_reason": None,
-        "account_type": "UNKNOWN",
-        "account_mode": "UNKNOWN",  
-        "is_real_account": False 
-    }
-    
-    # 1. Extract structural demo permission policies from investor JSON log
-    allow_demo_processing = True 
-    try:
-        if Path(INVESTOR_USERS).exists():
-            with open(INVESTOR_USERS, 'r') as f:
-                investor_registry = json.load(f)
-            
-            user_meta = investor_registry.get(str(inv_id))
-            if user_meta:
-                demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
-                if str(demo_rule).strip().lower() in ["0", "false"]:
-                    allow_demo_processing = False
-                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
-                else:
-                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
-    except Exception as json_err:
-        print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
-
-    broker_cfg = usersdictionary.get(inv_id)
-    if not broker_cfg:
-        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
-        return account_stats
-
-    # =====================================================================
-    # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
-    # =====================================================================
-    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
-    fetched_json_path = Path(FETCHED_INVESTORS)
-    inv_str_id = str(inv_id)
-    
-    try:
-        investors_data = {}
-        if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
-            with open(fetched_json_path, 'r') as f_inv:
-                investors_data = json.load(f_inv)
-        
-        if inv_str_id not in investors_data:
-            investors_data[inv_str_id] = {}
-            
-        print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
-    except Exception as io_err:
-        print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
-    
-    # Always fire tracking file-movement tasks regardless of connection state
-    move_fetched_investors()
-
-    # =====================================================================
-    # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
-    # =====================================================================
-    delay = random.uniform(0.2, 1.5)
-    time.sleep(delay) 
-    
-    login_id = int(broker_cfg['LOGIN_ID'])
-    password_str = broker_cfg["PASSWORD"]
-    server_str = broker_cfg["SERVER"]
-    
-    configured_path = broker_cfg.get("Terminal_path", "")
-    init_successful = False
-    
-    # Attempt 1: Dynamic Attachment Strategy
-    print(f"🔗 Attempting dynamic routing connection to any active global MT5 module...")
-    if mt5.initialize(timeout=30000):
-        init_successful = True
-        print(f"✅ Connected seamlessly to an active background MT5 system engine.")
-    
-    # Attempt 2: Fallback to direct pathing routing matrix
-    if not init_successful and configured_path:
-        print(f"⚠️ [WARN] Dynamic routing failed. Falling back to targeted terminal initialization profile...")
-        fallback_path = os.path.abspath(configured_path)
-        if os.path.exists(fallback_path):
-            if mt5.initialize(path=fallback_path, timeout=60000, portable=True):
-                init_successful = True
-                print(f"🧭 Successfully hooked terminal via explicit path matrix shortcut.")
-
-    if not init_successful:
-        print(f"[FAIL] 🛑 System Engine Error: Failed to discover, initialize, or bind to any available MT5 module.")
-        print(f"   Terminal Last Reported Internal Error Context: {mt5.last_error()}")
-        account_stats["skip_reason"] = "MT5 Dynamic Initialization Engine Failure"
-        return account_stats
-
-    # =====================================================================
-    # SESSION ACCOUNT RE-AUTHENTICATION GATEWAY
-    # =====================================================================
-    try:
-        acc = mt5.account_info()
-        
-        if acc is None or acc.login != login_id:
-            print(f"🔐 Account focus shift detected. Swapping session terminal context to ID: {login_id}...")
-            
-            if not mt5.login(login_id, password=password_str, server=server_str):
-                print(f"[FAIL] Server rejected routing authentication parameters for ID: {login_id}.")
-                print(f"       Rejection details from API: {mt5.last_error()}")
-                mt5.shutdown()
-                return account_stats
-                
-            acc = mt5.account_info()
-            
-        if acc is None:
-            print(f"[FAIL] Critical terminal memory fault. Bound data stream context returned empty parameters.")
-            mt5.shutdown()
-            return account_stats
-
-        # =================================================================
-        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
-        # =================================================================
-        is_real = False
-        type_label = "UNKNOWN"
-        mode_label = "demo"
-
-        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
-            is_real = True
-            type_label = "REAL"
-        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
-            is_real = False
-            type_label = "DEMO"
-        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
-            is_real = False
-            type_label = "CONTEST"
-        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
-            is_real = False
-            type_label = "DEMO (MONETARY SO FOOTPRINT)"
-        else:
-            server_upper = acc.server.upper() if acc.server else ""
-            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
-                is_real = False
-                type_label = "DEMO (SERVER STR MATCH)"
-            else:
-                is_real = True
-                type_label = "REAL (FALLBACK)"
-
-        if is_real:
-            mode_label = "real"
-
-        account_stats["account_type"] = type_label
-        account_stats["account_mode"] = mode_label
-        account_stats["is_real_account"] = is_real
-        
-        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
-
-        # Synchronize finalized account authentication parameters with database records
-        try:
-            if fetched_json_path.exists():
-                with open(fetched_json_path, 'r') as f_inv:
-                    investors_data = json.load(f_inv)
-                investors_data[inv_str_id]["account_mode"] = mode_label
-                with open(fetched_json_path, 'w') as f_inv:
-                    json.dump(investors_data, f_inv, indent=2)
-        except Exception as update_err:
-            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
-
-        # Safety policy gate check
-        if not is_real and not allow_demo_processing:
-            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
-            account_stats["execution_skipped"] = True
-            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
-            mt5.shutdown()
-            return account_stats
-
-        # =====================================================================
-        # MASTER CONDITIONAL ROUTING (TIME RANGE FILTER)
-        # =====================================================================
-        print(f"🔍 [{inv_id}] Evaluating system run constraints...")
-        
-        timerange_result = restricted_timerange(inv_id=inv_id)
-        
-        is_restricted = False
-        if isinstance(timerange_result, dict):
-            is_restricted = timerange_result.get('is_restricted', False)
-        elif str(timerange_result).strip().lower() in ["true", "1"]:
-            is_restricted = True
-            
-        # =====================================================================
-        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
-        # =====================================================================
-        if not is_restricted:
-            print(f"🛡️ [{inv_id}] Validation Clear. Explicitly OUTSIDE restricted window -> Running core trade logic...")
-            
-            check_and_record_unauthorized_actions(inv_id=inv_id)
-            delete_unauthorized_symbol_files(inv_id=inv_id)
-            
-            # directional bias execution #
-            additional_candles_for_orders_limitation(inv_id=inv_id)
-            fetch_ohlc_data_for_investor(inv_id=inv_id)
-            directional_bias(inv_id=inv_id)
-            additional_candles_for_orders_limitation(inv_id=inv_id)
-            create_position_hedge(inv_id=inv_id)
-            # directional bias execution #
-
-            
-
-            # grid execution #
-            symbols_dynamic_grid_prices(inv_id=inv_id)
-            # grid execution #
-            
-           
-            # grid single position and pending #
-            manage_position_and_pending_orders_in_signals(inv_id=inv_id)
-            # single position and pending #
-
-            # grid single position and pending #
-            convert_grid_prices_to_limit_orders(inv_id=inv_id)
-            # grid single position and pending #
-
-            deduplicate_orders(inv_id=inv_id)
-            filter_unauthorized_symbols(inv_id=inv_id)
-            filter_unauthorized_timeframes(inv_id=inv_id)
-            backup_limit_orders(inv_id=inv_id)
-            populate_orders_missing_fields(inv_id=inv_id)
-            activate_usd_based_risk_on_empty_pricelevels(inv_id=inv_id)
-            enforce_investor_symbols_specific_risks(inv_id=inv_id)
-            calculate_investor_symbols_orders(inv_id=inv_id)
-            #padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
-            maximum_risk_distance(inv_id=inv_id) 
-            live_usd_risk_and_scaling(inv_id=inv_id)
-            apply_default_prices(inv_id=inv_id)
-            martingale(inv_id=inv_id)
-
-            clean_trades_history(inv_id=inv_id)
-            place_usd_orders(inv_id=inv_id)
-
-            #grid affliate
-            manage_position_and_pending_orders(inv_id=inv_id)
-            manage_single_position_and_pending(inv_id=inv_id)
-            #grid affliate
-
-            close_unauthorized_orders(inv_id=inv_id)
-            orders_reward_correction(inv_id=inv_id)
-            check_pending_orders_risk(inv_id=inv_id)
-            history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
-            apply_dynamic_breakeven(inv_id=inv_id)
-            check_and_record_unauthorized_actions(inv_id=inv_id)
-            trades_analytics(inv_id=inv_id)
-
-            account_stats["success"] = True
-            print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
-
-        # =====================================================================
-        # CONDITION B: INSIDE RESTRICTED TIME RANGE -> SKIP ENGINE
-        # =====================================================================
-        else:
-            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time range block.")
-            print(f"⏭️ in restricted timerange")
-            
-            delete_all_orders_and_positions(inv_id=inv_id)
-        
-        mt5.shutdown()
-        
-    except Exception as e:
-        print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
-        try:
-            mt5.shutdown()
-        except:
-            pass
-    
-    return account_stats
-
-def process_single_investor_(inv_folder):
-    """
-    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Dynamically initializes MT5 on whatever instance is globally available
-    on the system, completely decoupled from specific process tracking.
+    Connects directly to MT5 using the investor's credentials.
     
     CONDITIONAL EXECUTION:
     - fetch_ohlc_data_and_directional_bias_for_investor = TRUE: Execute OHLC/directional bias functions
@@ -21885,7 +25056,7 @@ def process_single_investor_(inv_folder):
     move_fetched_investors()
 
     # =====================================================================
-    # DYNAMIC MT5 INITIALIZATION & PASSIVE ROUTING LAYER
+    # DIRECT MT5 INITIALIZATION WITH CREDENTIALS
     # =====================================================================
     delay = random.uniform(0.2, 1.5)
     time.sleep(delay) 
@@ -21897,46 +25068,69 @@ def process_single_investor_(inv_folder):
     configured_path = broker_cfg.get("Terminal_path", "")
     init_successful = False
     
-    # Attempt 1: Dynamic Attachment Strategy
-    print(f"🔗 Attempting dynamic routing connection to any active global MT5 module...")
-    if mt5.initialize(timeout=30000):
-        init_successful = True
-        print(f"✅ Connected seamlessly to an active background MT5 system engine.")
-    
-    # Attempt 2: Fallback to direct pathing routing matrix
-    if not init_successful and configured_path:
-        print(f"⚠️ [WARN] Dynamic routing failed. Falling back to targeted terminal initialization profile...")
-        fallback_path = os.path.abspath(configured_path)
-        if os.path.exists(fallback_path):
-            if mt5.initialize(path=fallback_path, timeout=60000, portable=True):
+    # Attempt 1: Try to initialize with terminal path if provided
+    if configured_path:
+        terminal_path = os.path.abspath(configured_path)
+        if os.path.exists(terminal_path):
+            print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
+            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
                 init_successful = True
-                print(f"🧭 Successfully hooked terminal via explicit path matrix shortcut.")
+                print(f"✅ MT5 initialized successfully with terminal path")
+            else:
+                print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
+        else:
+            print(f"⚠️ Terminal path does not exist: {terminal_path}")
+    
+    # Attempt 2: Fallback to default initialization without path
+    if not init_successful:
+        print(f"🔗 Attempting default MT5 initialization...")
+        if mt5.initialize(timeout=30000):
+            init_successful = True
+            print(f"✅ MT5 initialized successfully with default settings")
+        else:
+            print(f"⚠️ Failed default initialization: {mt5.last_error()}")
 
     if not init_successful:
-        print(f"[FAIL] 🛑 System Engine Error: Failed to discover, initialize, or bind to any available MT5 module.")
-        print(f"   Terminal Last Reported Internal Error Context: {mt5.last_error()}")
-        account_stats["skip_reason"] = "MT5 Dynamic Initialization Engine Failure"
+        print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
+        print(f"   Last Error: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Initialization Failure"
         return account_stats
 
     # =====================================================================
-    # SESSION ACCOUNT RE-AUTHENTICATION GATEWAY
+    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
     # =====================================================================
     try:
+        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
+        
+        # Shutdown any existing connection first to ensure clean state
+        mt5.shutdown()
+        time.sleep(1)
+        
+        # Re-initialize and login
+        if configured_path and os.path.exists(os.path.abspath(configured_path)):
+            if mt5.initialize(path=os.path.abspath(configured_path), timeout=60000, portable=True):
+                print(f"✅ Re-initialized with terminal path for login")
+            else:
+                print(f"⚠️ Re-initialization with path failed, trying default...")
+                mt5.initialize(timeout=30000)
+        else:
+            mt5.initialize(timeout=30000)
+        
+        # Perform login with credentials
+        if not mt5.login(login_id, password=password_str, server=server_str):
+            print(f"[FAIL] Login failed for ID: {login_id}")
+            print(f"       Error: {mt5.last_error()}")
+            mt5.shutdown()
+            return account_stats
+        
+        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
+        
+        # Verify account info
         acc = mt5.account_info()
         
-        if acc is None or acc.login != login_id:
-            print(f"🔐 Account focus shift detected. Swapping session terminal context to ID: {login_id}...")
-            
-            if not mt5.login(login_id, password=password_str, server=server_str):
-                print(f"[FAIL] Server rejected routing authentication parameters for ID: {login_id}.")
-                print(f"       Rejection details from API: {mt5.last_error()}")
-                mt5.shutdown()
-                return account_stats
-                
-            acc = mt5.account_info()
-            
         if acc is None:
-            print(f"[FAIL] Critical terminal memory fault. Bound data stream context returned empty parameters.")
+            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"       Error: {mt5.last_error()}")
             mt5.shutdown()
             return account_stats
 
@@ -21976,6 +25170,8 @@ def process_single_investor_(inv_folder):
         account_stats["is_real_account"] = is_real
         
         print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+        print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
+        print(f"[{inv_id}] Account Leverage: {acc.leverage}")
 
         # Synchronize finalized account authentication parameters with database records
         try:
@@ -21983,6 +25179,9 @@ def process_single_investor_(inv_folder):
                 with open(fetched_json_path, 'r') as f_inv:
                     investors_data = json.load(f_inv)
                 investors_data[inv_str_id]["account_mode"] = mode_label
+                investors_data[inv_str_id]["account_balance"] = acc.balance
+                investors_data[inv_str_id]["account_currency"] = acc.currency
+                investors_data[inv_str_id]["account_leverage"] = acc.leverage
                 with open(fetched_json_path, 'w') as f_inv:
                     json.dump(investors_data, f_inv, indent=2)
         except Exception as update_err:
@@ -22123,13 +25322,13 @@ def process_single_investor_(inv_folder):
             activate_usd_based_risk_on_empty_pricelevels(inv_id=inv_id)
             enforce_investor_symbols_specific_risks(inv_id=inv_id)
             calculate_investor_symbols_orders(inv_id=inv_id)
-            #padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
+            padding_stoploss_below_minimum_risk_to_minimum_risk(inv_id=inv_id)   
             maximum_risk_distance(inv_id=inv_id) 
             live_usd_risk_and_scaling(inv_id=inv_id)
             apply_default_prices(inv_id=inv_id)
             martingale(inv_id=inv_id)
 
-            clean_trades_history(inv_id=inv_id)
+            #clean_trades_history(inv_id=inv_id)
             place_usd_orders(inv_id=inv_id)
 
             if grid_strategy_enabled:
@@ -22240,7 +25439,6 @@ def place_orders_parallel():
             results = pool.map(process_single_investor, active_batch)
     except Exception as pool_err:
         print(f"[CRITICAL] Error executing multiprocessing pool: {pool_err}")
-
 
 def place_orders_parallel_loop():
     """
