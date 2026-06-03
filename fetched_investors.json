@@ -8,13 +8,13 @@
     "login": "5996427",
     "password": "@Techknowdge12#",
     "application_status": "approved",
-    "broker_balance": "90033.77",
+    "broker_balance": "8984.51",
     "balance_verification": "verified",
     "profitandloss": "0.00",
     "passkey": "$2y$10$1p7neBZgjHaC2flqHnolLOWbF/6BTifrKiPLZ3CBdr0K69txedOry",
     "submitted_at": "0000-00-00 00:00:00",
     "balance_display": "hide",
-    "execution_start_date": "2026-05-01",
+    "execution_start_date": "2026-06-03",
     "analytics_history": "NULL",
     "revenue_history": [
       {
@@ -366,10 +366,11 @@
         "symbols_grid_strategy": true,
         "enable_single_position_and_pending": false,
         "manage_position_and_pending_orders": {
-          "count": 2
+          "count": 6
         },
         "skip_orders_close_to_position": true,
-        "opposite_order_restriction": false,
+        "cancel_orders_close_to_position": true,
+        "also_restrict_opposite_order_too_close_to_position": true,
         "switch_invalid_to_instant_order": false,
         "enable_order_type_conversion": false,
         "restrict_orders_in_time_range_of": {
@@ -426,12 +427,12 @@
           "martingale_loss_recovery_adder_percentage": "10%",
           "pre_scaling": {
             "martingale_pre_scaling": true,
+            "martingale_linear_scaling": true,
             "martingale_pre_scale_highest_risk_adder": true,
             "highest_risk_reduction_percentage": "0%",
             "martingale_pre_scale_expected_loss_adder": true,
             "expected_loss_reduction_percentage": "0%"
-          },
-          "hierarchical_scaling": true
+          }
         },
         "enable_breakeven": true,
         "breakeven_dictionary": [
@@ -543,7 +544,7 @@
     "demo_account": "1",
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe",
-    "account_balance": 8984.51,
+    "account_balance": 8997.18,
     "account_currency": "USD",
     "account_leverage": 1000
   }
