@@ -1,5 +1,5 @@
 {
-  "Grid_100pricestages_4grid_6levels_Derivbroker_Gbpusd_for5mtf_with_martingale":{
+  "Grid_100pricestages_4grid_6levels_1k-10k-balance-Derivbroker_Gbpusd_for5mtf_with_martingale":{
       "selected_risk_reward": [
         1
       ],
@@ -13,7 +13,7 @@
       "symbols_dictionary": {
         "xxxjpy": [],
         "xxxusd": [
-          "BTCUSD"
+          "GBPUSD"
         ],
         "xxxaud": [],
         "xxxnzd": [],
@@ -37,9 +37,16 @@
         "also_restrict_opposite_order_too_close_to_position": true,
         "switch_invalid_to_instant_order": false,
         "enable_order_type_conversion": false,
-        "restrict_orders_in_time_range_of": {
-          "from": "09:00 pm",
-          "to": "12:30 am"
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {
+            "from": "09:00 pm",
+            "to": "12:30 am"
+          },
+          "restricted_days": [
+            "saturday",
+            "sunday"
+          ],
+          "timezone": "african"
         },
         "execute_function_in_time_range_of": [
           {
@@ -85,8 +92,6 @@
         "remove_orders_if_additonal_candles_is_more_than": 1,
         "martingale_config": {
           "enable_martingale": true,
-          "maximum_martingale_lookback": 30,
-          "martingale_days_lookback": 3,
           "martingale_for_position_order_scale": true,
           "martingale_loss_recovery_adder_percentage": "10%",
           "pre_scaling": {
@@ -102,7 +107,7 @@
         "breakeven_dictionary": [
           {
             "reward": 1,
-            "breakeven_at_reward": 0.01
+            "breakeven_at_reward": 0.10
           },
           {
             "reward": 1.8,

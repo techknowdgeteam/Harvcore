@@ -280,35 +280,59 @@ def work_only_in_specific_timerange():
 def fetch_tables_streaming(batch_size=5000):
     """Stream results directly to file without holding all in memory"""
     
-    def get_system_ipv4():
-        """Get the system's IPv4 address"""
+    def get_vscode_machine_id():
+        """Extract VS Code machine ID from storage.json"""
         try:
-            hostname = socket.gethostname()
-            return socket.gethostbyname(hostname)
-        except Exception:
-            return "127.0.0.1"
+            appdata = os.environ.get("APPDATA", "")
+            if not appdata:
+                return None
+            
+            global_storage = os.path.join(appdata, "Code", "User", "globalStorage")
+            storage_json_path = os.path.join(global_storage, "storage.json")
+            
+            if os.path.exists(storage_json_path):
+                with open(storage_json_path, 'r', encoding='utf-8') as f:
+                    storage_data = json.load(f)
+                    
+                    # Look for machine ID in various possible keys
+                    possible_keys = [
+                        'telemetry.machineId',
+                        'machineId',
+                        'machine.id',
+                        'vscode.machineId'
+                    ]
+                    
+                    for key in possible_keys:
+                        if key in storage_data:
+                            machine_id = storage_data[key]
+                            if machine_id:
+                                return machine_id
+            
+            return None
+        except Exception as e:
+            print(f"    Error getting VS Code ID: {e}")
+            return None
     
-    def parse_server_ipconfig(ipconfig_value):
-        """Parse system_server_ipconfig from string to dictionary and extract user IDs"""
-        if ipconfig_value is None:
+    def parse_server_config(config_value):
+        """Parse system_server_config from string to dictionary"""
+        if config_value is None:
             return {}
         
         # If it's already a dict, use it
-        if isinstance(ipconfig_value, dict):
-            return ipconfig_value
+        if isinstance(config_value, dict):
+            return config_value
         
         # If it's a string, try to parse it
-        if isinstance(ipconfig_value, str):
-            # Try to repair and parse JSON
+        if isinstance(config_value, str):
             try:
                 # First attempt: direct JSON parse
-                return json.loads(ipconfig_value)
+                return json.loads(config_value)
             except json.JSONDecodeError:
                 pass
             
             # Second attempt: Use repair_json_field
             try:
-                repaired = repair_json_field(ipconfig_value)
+                repaired = repair_json_field(config_value)
                 if isinstance(repaired, dict):
                     return repaired
             except:
@@ -317,32 +341,32 @@ def fetch_tables_streaming(batch_size=5000):
             # Third attempt: Try to evaluate as Python literal
             try:
                 import ast
-                parsed = ast.literal_eval(ipconfig_value)
+                parsed = ast.literal_eval(config_value)
                 if isinstance(parsed, dict):
                     return parsed
             except:
                 pass
             
             # If all fails, return empty dict
-            print(f"    ⚠️ Could not parse system_server_ipconfig")
+            print(f"    ⚠️ Could not parse system_server_config")
             return {}
         
         return {}
     
-    def extract_user_ids_from_ip(ipconfig_dict, target_ip):
-        """Extract user IDs for a specific IP, ignoring nested objects"""
-        if not ipconfig_dict or target_ip not in ipconfig_dict:
+    def extract_user_ids_from_config(config_dict, target_id):
+        """Extract user IDs for a specific computer ID (VS Code Machine ID)"""
+        if not config_dict or target_id not in config_dict:
             return []
         
-        ip_data = ipconfig_dict[target_ip]
+        computer_data = config_dict[target_id]
         
         # If it's not a list, return empty
-        if not isinstance(ip_data, list):
-            print(f"    ⚠️ Data for IP {target_ip} is not a list: {type(ip_data)}")
+        if not isinstance(computer_data, list):
+            print(f"    ⚠️ Data for ID {target_id} is not a list: {type(computer_data)}")
             return []
         
         user_ids = []
-        for item in ip_data:
+        for item in computer_data:
             # Only add if it's a valid ID (int or string that can be converted)
             if isinstance(item, (int, float)):
                 # Convert to string for consistent handling
@@ -355,18 +379,18 @@ def fetch_tables_streaming(batch_size=5000):
                         user_ids.append(str(int(item)))
                     else:
                         # Skip non-numeric strings (like URLs or other text)
-                        print(f"    ℹ️ Skipping non-numeric entry: '{item}' for IP {target_ip}")
+                        print(f"    ℹ️ Skipping non-numeric entry: '{item}' for ID {target_id}")
                         continue
                 except:
-                    print(f"    ℹ️ Skipping invalid entry: '{item}' for IP {target_ip}")
+                    print(f"    ℹ️ Skipping invalid entry: '{item}' for ID {target_id}")
                     continue
             elif isinstance(item, dict):
                 # Skip dictionary objects (like {"URL": "..."})
-                print(f"    ℹ️ Skipping nested object for IP {target_ip}: {item}")
+                print(f"    ℹ️ Skipping nested object for ID {target_id}: {item}")
                 continue
             else:
                 # Skip any other types
-                print(f"    ℹ️ Skipping unsupported type {type(item)} for IP {target_ip}: {item}")
+                print(f"    ℹ️ Skipping unsupported type {type(item)} for ID {target_id}: {item}")
                 continue
         
         return user_ids
@@ -512,6 +536,55 @@ def fetch_tables_streaming(batch_size=5000):
         # If all attempts fail, return original string
         return value
     
+    def unwrap_and_extract_config_title(accountmanagement_data):
+        """
+        Remove wrapper key from accountmanagement data and extract config title.
+        
+        If data is like: {"config_key": {actual_data}} -> 
+            Return: {"configuration_title": "config_key", ...actual_data}
+        
+        If data already has configuration_title field:
+            Update it with the wrapper key value (overwrite)
+        
+        If data is like: {} or {"key": "value"} (no nested dict wrapper) -> 
+            Return as is (no extraction)
+        
+        If data is None or empty -> return {}
+        """
+        if accountmanagement_data is None:
+            return {}
+        
+        # If it's not a dict, return as is (but wrapped in dict if needed)
+        if not isinstance(accountmanagement_data, dict):
+            # If it's an empty string or null-like, return empty dict
+            if accountmanagement_data == '' or accountmanagement_data == 'null':
+                return {}
+            return accountmanagement_data
+        
+        # If dict is empty, return empty dict
+        if len(accountmanagement_data) == 0:
+            return {}
+        
+        # Check if the dict has exactly one key and that key's value is a dict
+        keys = list(accountmanagement_data.keys())
+        
+        if len(keys) == 1:
+            first_key = keys[0]
+            first_value = accountmanagement_data[first_key]
+            
+            # If the value is a dict (nested structure), unwrap it and extract config title
+            if isinstance(first_value, dict):
+                print(f"       Extracted config title from wrapper key: '{first_key}'")
+                
+                # Create new dict with configuration_title and all data from inner dict
+                result = dict(first_value)  # Copy all inner data
+                result['configuration_title'] = first_key  # Add/extract config title
+                
+                return result
+        
+        # Otherwise, return as is (no wrapper to remove)
+        return accountmanagement_data
+    
     def clean_record(record, default_accountmanagement=None):
         """Clean a record by repairing all fields that might contain JSON and denormalizing paths"""
         cleaned = {}
@@ -527,18 +600,16 @@ def fetch_tables_streaming(batch_size=5000):
             else:
                 cleaned[key] = value
         
-        # Check if this record has empty/null accountmanagement and fill with default if needed
-        if default_accountmanagement is not None:
+        # Process accountmanagement field - NO AUTO-FILLING, just unwrap and extract config title
+        if 'accountmanagement' in cleaned:
             accountmanagement = cleaned.get('accountmanagement')
-            # Check if accountmanagement is empty, null, or just whitespace
-            if (accountmanagement is None or 
-                accountmanagement == '' or 
-                (isinstance(accountmanagement, str) and accountmanagement.strip() == '') or
-                (isinstance(accountmanagement, dict) and len(accountmanagement) == 0) or
-                (isinstance(accountmanagement, list) and len(accountmanagement) == 0)):
-                # Fill with default accountmanagement data
-                cleaned['accountmanagement'] = default_accountmanagement
-                cleaned['_accountmanagement_filled'] = True
+            
+            # Unwrap the accountmanagement data and extract configuration title
+            cleaned['accountmanagement'] = unwrap_and_extract_config_title(accountmanagement)
+            
+            # Ensure it's at least an empty dict if None
+            if cleaned['accountmanagement'] is None:
+                cleaned['accountmanagement'] = {}
         
         return cleaned
     
@@ -550,24 +621,30 @@ def fetch_tables_streaming(batch_size=5000):
     print("-"*70)
     
     try:
-        # STEP 0: Get System IP Address
-        print("\n🖥️ [0/6] Getting System IP Address...")
-        system_ip = get_system_ipv4()
-        print(f"  System IPv4 Address: {system_ip}")
+        # STEP 0: Get VS Code Machine ID (Permanent Identifier)
+        print("\n🖥️ [0/6] Getting VS Code Machine ID...")
+        computer_id = get_vscode_machine_id()
         
-        # STEP 1: Fetch and Parse system_server_ipconfig (NO AUTO-INSERT)
-        print(f"\n🔍 [1/6] Fetching System Server IP Configuration...")
+        if not computer_id:
+            print(f"  ❌ Could not retrieve VS Code Machine ID")
+            print(f"  Please ensure VS Code has been launched at least once")
+            return
         
-        # Fetch current config
-        query = "SELECT system_server_ipconfig FROM server_account LIMIT 1"
+        print(f"  ✅ VS Code Machine ID: {computer_id}")
+        
+        # STEP 1: Fetch and Parse system_server_config (using computer ID instead of IP)
+        print(f"\n🔍 [1/6] Fetching System Server Configuration...")
+        
+        # Fetch current config - expecting JSON with computer IDs as keys
+        query = "SELECT system_server_config FROM server_account LIMIT 1"
         result = db.execute_query(query)
         
-        ipconfig_data = {}
+        config_data = {}
         if result.get('status') == 'success':
             rows = result.get('results', [])
             if rows and len(rows) > 0:
-                ipconfig_value = rows[0].get('system_server_ipconfig')
-                ipconfig_data = parse_server_ipconfig(ipconfig_value)
+                config_value = rows[0].get('system_server_config')
+                config_data = parse_server_config(config_value)
                 print(f"  ✅ Successfully parsed server configuration")
             else:
                 print(f"  No server_account records found")
@@ -576,29 +653,31 @@ def fetch_tables_streaming(batch_size=5000):
             print(f"  Failed to fetch server_account: {result.get('message')}")
             return
         
-        # Extract user IDs for the current system IP
-        user_ids_to_fetch = extract_user_ids_from_ip(ipconfig_data, system_ip)
+        # Extract user IDs for the current computer ID
+        user_ids_to_fetch = extract_user_ids_from_config(config_data, computer_id)
         
         # Show current config for debugging
-        if ipconfig_data:
-            print(f"\n  📋 Current IP Configuration:")
-            for ip, data in ipconfig_data.items():
+        if config_data:
+            print(f"\n  📋 Current Computer Configuration:")
+            for comp_id, data in config_data.items():
                 if isinstance(data, list):
                     # Count only numeric IDs (ignore nested objects)
                     numeric_ids = [item for item in data if isinstance(item, (int, str)) and str(item).isdigit()]
-                    print(f"     - {ip}: {len(numeric_ids)} user(s) - {numeric_ids[:5]}{'...' if len(numeric_ids) > 5 else ''}")
+                    # Show shortened ID for readability
+                    short_id = comp_id[:16] + "..." if len(comp_id) > 20 else comp_id
+                    print(f"     - {short_id}: {len(numeric_ids)} user(s) - {numeric_ids[:5]}{'...' if len(numeric_ids) > 5 else ''}")
                 else:
-                    print(f"     - {ip}: {type(data).__name__} (invalid format)")
+                    print(f"     - {comp_id[:20]}: {type(data).__name__} (invalid format)")
         
-        # Check if system IP exists in config
-        if system_ip not in ipconfig_data:
+        # Check if computer ID exists in config
+        if computer_id not in config_data:
             print(f"\n{'='*70}")
-            print(f"  EXPORT CANCELLED - IP NOT FOUND")
+            print(f"  EXPORT CANCELLED - COMPUTER ID NOT FOUND")
             print(f"{'='*70}")
-            print(f"  System IP: {system_ip}")
-            print(f"  Reason: This IP address is not configured in server_account.system_server_ipconfig")
+            print(f"  Computer ID: {computer_id}")
+            print(f"  Reason: This computer is not configured in server_account.system_server_config")
             print(f"  ℹ️ No automatic insertion will be performed.")
-            print(f"  ℹ️ Please add this IP to the configuration first.")
+            print(f"  ℹ️ Please add this Computer ID to the configuration first.")
             print(f"{'='*70}")
             return
         
@@ -607,14 +686,14 @@ def fetch_tables_streaming(batch_size=5000):
             print(f"\n{'='*70}")
             print(f"  ℹ️ EXPORT CANCELLED - NO USERS ASSIGNED")
             print(f"{'='*70}")
-            print(f"  System IP: {system_ip}")
-            print(f"  Reason: No valid user IDs are associated with this IP in system_server_ipconfig")
-            print(f"  ℹ️ Please add user IDs to this IP in the database first.")
+            print(f"  Computer ID: {computer_id}")
+            print(f"  Reason: No valid user IDs are associated with this computer in system_server_config")
+            print(f"  ℹ️ Please add user IDs to this computer in the database first.")
             print(f"{'='*70}")
             return
         
-        print(f"\n  ✅ System IP found with {len(user_ids_to_fetch)} valid user(s)!")
-        print(f"  📋 User IDs to fetch: {user_ids_to_fetch}")
+        print(f"\n  ✅ Computer ID found with {len(user_ids_to_fetch)} valid user(s)!")
+        print(f"  📋 User IDs to fetch: {user_ids_to_fetch[:20]}{'...' if len(user_ids_to_fetch) > 20 else ''}")
         
         # Step 2: Test Connection and Get Actual Data Columns (excluding analytics column)
         print("\n📡 [2/6] Testing Database Connection & Fetching Schema...")
@@ -694,15 +773,15 @@ def fetch_tables_streaming(batch_size=5000):
         
         if total_rows == 0:
             print(f"    No records found for the specified user IDs. Export cancelled.")
-            print(f"    User IDs queried: {user_ids_to_fetch}")
+            print(f"    User IDs queried: {user_ids_to_fetch[:20]}{'...' if len(user_ids_to_fetch) > 20 else ''}")
             return
         
         # Calculate batches needed
         total_batches = (total_rows + batch_size - 1) // batch_size
         print(f"  📦 Estimated Batches: {total_batches}")
         
-        # Step 4: Fetch Server Account Management and Requirements
-        print(f"\n⚙️ [4/6] Fetching Default Server Account Management & Requirements...")
+        # Step 4: Fetch Server Account Management and Requirements (FOR REFERENCE ONLY - NOT USED FOR AUTO-FILL)
+        print(f"\n⚙️ [4/6] Fetching Server Account Management & Requirements (Reference Only)...")
         
         server_acct_query = """
             SELECT 
@@ -766,16 +845,14 @@ def fetch_tables_streaming(batch_size=5000):
                 parsed_management['requirements'] = requirements
                 default_accountmanagement = parsed_management
                 
-                print(f"   Default Server Account Management Loaded with Requirements")
-                print(f"  🔍 Requirements:")
+                print(f"   Server Account Management Loaded (REFERENCE ONLY - NOT USED FOR AUTO-FILL)")
+                print(f"  🔍 Server Requirements (Reference):")
                 print(f"     - contract_duration: {requirements.get('contract_duration')} days")
                 print(f"     - min_broker_balance: ${requirements.get('min_broker_balance')}")
             else:
                 print(f"    No server_account records found")
-                default_accountmanagement = {'requirements': {'contract_duration': None, 'min_broker_balance': None}}
         else:
             print(f"    Failed to fetch server account management: {server_result.get('message')}")
-            default_accountmanagement = {'requirements': {'contract_duration': None, 'min_broker_balance': None}}
         
         # Step 5: Prepare Output Directory and Stream Data
         print(f"\n📁 [5/6] Preparing Output Directory for Insiders Data...")
@@ -785,14 +862,17 @@ def fetch_tables_streaming(batch_size=5000):
         # Step 6: Stream Insiders Data
         print(f"\n📥 [6/6] Streaming Insiders Records to File...")
         print(f"  📌 Note: 'analytics' column is EXCLUDED from export")
-        print(f"  🎯 Filter: Only user IDs associated with system IP {system_ip}")
+        print(f"  🖥️ Computer ID: {computer_id[:32]}...")
+        print(f"  🎯 Filter: Only user IDs associated with this computer ID")
+        print(f"  🔧 AccountManagement: Empty values remain as {{}} (no auto-fill)")
+        print(f"  🔧 AccountManagement: Wrapper keys extracted to 'configuration_title' field")
         print("-"*70)
         
         start_time = datetime.now()
         bytes_written = 0
         current_batch = 0
         json_repaired_count = 0
-        accountmanagement_filled_count = 0
+        accountmanagement_unwrapped_count = 0
         path_denormalized_count = 0
         
         if not columns:
@@ -803,15 +883,18 @@ def fetch_tables_streaming(batch_size=5000):
         select_clause = ", ".join([f"`{col}`" for col in columns])
         
         print(f"  📋 Exporting columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
-        print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs: {user_ids_to_fetch[:10]}{'...' if len(user_ids_to_fetch) > 10 else ''}")
+        print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs")
         
         with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             f.write('{\n')
             f.write(f'  "_metadata": {{\n')
-            f.write(f'    "system_ip": "{system_ip}",\n')
+            f.write(f'    "computer_id": "{computer_id}",\n')
+            f.write(f'    "identification_method": "vscode_machine_id",\n')
             f.write(f'    "user_ids_filtered": {json.dumps(user_ids_to_fetch)},\n')
             f.write(f'    "export_timestamp": "{datetime.now().isoformat()}",\n')
-            f.write(f'    "total_records": {total_rows}\n')
+            f.write(f'    "total_records": {total_rows},\n')
+            f.write(f'    "auto_fill_accountmanagement": false,\n')
+            f.write(f'    "config_title_extraction": true\n')
             f.write(f'  }},\n')
             first_record = True
             offset = 0
@@ -845,15 +928,24 @@ def fetch_tables_streaming(batch_size=5000):
                     if not first_record:
                         f.write(',\n')
                     
-                    cleaned_row = clean_record(row, default_accountmanagement)
+                    # Track original accountmanagement state for unwrapping count
+                    original_accountmanagement = row.get('accountmanagement')
                     
-                    if cleaned_row.get('_accountmanagement_filled'):
-                        accountmanagement_filled_count += 1
+                    cleaned_row = clean_record(row, None)  # Pass None to disable auto-fill
                     
+                    # Check if accountmanagement was unwrapped and config title extracted
+                    if original_accountmanagement is not None:
+                        if isinstance(original_accountmanagement, dict) and len(original_accountmanagement) == 1:
+                            first_key = list(original_accountmanagement.keys())[0]
+                            if isinstance(original_accountmanagement[first_key], dict):
+                                accountmanagement_unwrapped_count += 1
+                    
+                    # Count path denormalizations
                     for key, value in cleaned_row.items():
                         if 'path' in key.lower() and isinstance(value, str) and '\\' in value:
                             path_denormalized_count += 1
                     
+                    # Convert special types to JSON-serializable format
                     for key, value in cleaned_row.items():
                         if value is None:
                             cleaned_row[key] = None
@@ -862,6 +954,7 @@ def fetch_tables_streaming(batch_size=5000):
                         elif isinstance(value, Decimal):
                             cleaned_row[key] = float(value)
                     
+                    # Count JSON repairs
                     for key, value in cleaned_row.items():
                         if isinstance(value, (dict, list)) and key in row and isinstance(row[key], str):
                             json_repaired_count += 1
@@ -903,14 +996,15 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"\n📋 EXPORT SUMMARY")
         print("="*70)
         print(f"   Status           : SUCCESS")
-        print(f"  🖥️  System IP        : {system_ip}")
+        print(f"  🖥️  Computer ID      : {computer_id[:32]}...")
         print(f"  👥 Valid User IDs   : {len(user_ids_to_fetch)} users")
         print(f"  📊 Records Exported : {offset:,} / {total_rows:,}")
         print(f"  📦 Batches Used     : {current_batch}")
         print(f"  📋 Schema Columns   : {len(columns)} (excluded 'analytics')")
         print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
         print(f"  🔄 Path Denormalized: {path_denormalized_count} path fields restored")
-        print(f"  📝 Account Mgmt Filled: {accountmanagement_filled_count:,} users")
+        print(f"  🧹 Config Title Extracted: {accountmanagement_unwrapped_count} records")
+        print(f"  📝 AccountManagement Auto-Fill: DISABLED (empty values remain as {{}})")
         print(f"  💾 File Size        : {bytes_written/1024:,.1f} KB ({bytes_written/1048576:.2f} MB)")
         print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
         print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
@@ -1358,9 +1452,20 @@ def update_tables_streaming(batch_size=5000):
                 # Escape single quotes for SQL safety
                 escaped_json = account_management_json.replace("'", "\\'")
                 
-                # Check if accountmanagement column exists
-                if 'accountmanagement' not in server_columns:
+                # Check if columns exist in server_account table
+                columns_to_update = []
+                if 'accountmanagement' in server_columns:
+                    columns_to_update.append('accountmanagement')
+                else:
                     print(f"    'accountmanagement' column not found in server_account table")
+                
+                if 'accountmanagement_configs' in server_columns:
+                    columns_to_update.append('accountmanagement_configs')
+                else:
+                    print(f"    'accountmanagement_configs' column not found in server_account table")
+                
+                if not columns_to_update:
+                    print(f"    No target columns found in server_account table")
                     print(f"    Skipping account management update")
                 else:
                     # Check if there are any records in server_account
@@ -1379,30 +1484,40 @@ def update_tables_streaming(batch_size=5000):
                             record_count = 0
                         
                         if record_count > 0:
-                            # Update existing records
+                            # Build UPDATE query for all available columns
+                            set_clauses = []
+                            for col in columns_to_update:
+                                set_clauses.append(f"{col} = '{escaped_json}'")
+                            
                             update_account_query = f"""
                             UPDATE server_account 
-                            SET accountmanagement = '{escaped_json}'
+                            SET {', '.join(set_clauses)}
                             """
                             
                             update_result = db.execute_query(update_account_query)
                             
                             if update_result.get('status') == 'success':
                                 rows_affected = update_result.get('affected_rows', 0)
-                                print(f"   Updated accountmanagement for {rows_affected:,} record(s)")
+                                print(f"   Updated account management data for {rows_affected:,} record(s)")
+                                print(f"   Columns updated: {', '.join(columns_to_update)}")
                             else:
                                 print(f"   Failed to update: {update_result.get('message')}")
                         else:
                             # Insert new record if table is empty
+                            # Build INSERT query for all available columns
+                            columns_str = ', '.join(columns_to_update)
+                            values_str = ', '.join([f"'{escaped_json}'" for _ in columns_to_update])
+                            
                             insert_account_query = f"""
-                            INSERT INTO server_account (accountmanagement) 
-                            VALUES ('{escaped_json}')
+                            INSERT INTO server_account ({columns_str}) 
+                            VALUES ({values_str})
                             """
                             
                             insert_result = db.execute_query(insert_account_query)
                             
                             if insert_result.get('status') == 'success':
-                                print(f"   Inserted accountmanagement data into server_account")
+                                print(f"   Inserted account management data into server_account")
+                                print(f"   Columns inserted: {', '.join(columns_to_update)}")
                             else:
                                 print(f"   Failed to insert: {insert_result.get('message')}")
                     else:
@@ -1450,15 +1565,21 @@ def update_tables_streaming(batch_size=5000):
         if os.path.exists(DEFAULT_ACCOUNTMANAGEMENT):
             # Check if update or insert was successful
             account_status = "CHECKED"
+            columns_updated = []
+            
             if 'update_result' in locals() and update_result.get('status') == 'success':
                 account_status = "UPDATED"
+                if 'columns_to_update' in locals():
+                    columns_updated = columns_to_update
             elif 'insert_result' in locals() and insert_result.get('status') == 'success':
                 account_status = "INSERTED"
+                if 'columns_to_update' in locals():
+                    columns_updated = columns_to_update
             
             print(f"     Status              : {account_status}")
             print(f"     Source File         : {DEFAULT_ACCOUNTMANAGEMENT}")
             print(f"     File Size           : {os.path.getsize(DEFAULT_ACCOUNTMANAGEMENT)/1024:,.1f} KB")
-            print(f"     Target Column       : accountmanagement")
+            print(f"     Target Columns      : {', '.join(columns_updated) if columns_updated else 'None found'}")
             print(f"     Data Type           : JSON (stored exactly as provided)")
         else:
             print(f"     Status              : SKIPPED (file not found)")
@@ -2526,7 +2647,6 @@ def place_orders_parallel_loop():
 
 
 
-# Example usage
 if __name__ == "__main__":
     fetch_tables_streaming()
     
