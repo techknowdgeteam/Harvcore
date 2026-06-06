@@ -1,5 +1,5 @@
 {
-  "Grid_100pricestages_4grid_6levels_Gbpusd_for5mtf_with_martingale":{
+  "Grid_100pricestages_4grid_6levels_Derivbroker_Gbpusd_for5mtf_with_martingale":{
       "selected_risk_reward": [
         1
       ],
@@ -13,7 +13,7 @@
       "symbols_dictionary": {
         "xxxjpy": [],
         "xxxusd": [
-          "GBPUSD"
+          "BTCUSD"
         ],
         "xxxaud": [],
         "xxxnzd": [],
@@ -180,15 +180,18 @@
       "maximum_balance_risk_distance": {
         "1-10000000.99_risk": 4
       },
+      "martingale_per_stage_drawdown_amount": {
+        "1-10000000.99_risk": 50
+      },
       "account_balance_default_risk_management": {
         "1-10000000.99_risk": 3
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 150
+        "1-10000000.99_risk": 550
       },
       "grid_prices_setup": {
         "grid_levels": 4,
-        "grid_multiplier": 100,
+        "grid_multiplier": 250,
         "bid_prices_order_type": "buy_stop",
         "ask_prices_order_type": "sell_stop"
       },

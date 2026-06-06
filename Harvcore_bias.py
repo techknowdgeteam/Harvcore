@@ -13064,7 +13064,7 @@ def martingale(inv_id=None):
         
         def get_stage_max_risk():
             """Get martingale maximum risk per stage based on current balance"""
-            martingale_risk_map = config.get("account_balance_maximum_risk_management", {})
+            martingale_risk_map = config.get("martingale_per_stage_drawdown_amount", {})
             
             if martingale_risk_map:
                 for range_str, risk_value in martingale_risk_map.items():
@@ -13943,6 +13943,8 @@ def martingale(inv_id=None):
             
             KEY FIX: First order in each linear group retains original volume.
             Scaling starts from second order onward.
+            
+            NEW: Removes invalid price levels before scaling.
             """
             if not martingale_pre_scaling:
                 return False
@@ -13970,6 +13972,96 @@ def martingale(inv_id=None):
             print(f"  │ Stage drawdown: ${current_stage_drawdown:.2f}")
             print(f"{'─'*60}")
             
+            def remove_invalid_price_levels(orders_data, symbol):
+                """
+                Remove orders with invalid price levels based on current market price.
+                
+                For STEPUP orders (buy_stop, sell_limit):
+                - Valid if entry price is ABOVE current ASK price
+                
+                For STEPDOWN orders (sell_stop, buy_limit):
+                - Valid if entry price is BELOW current BID price
+                
+                Returns: (filtered_orders, removed_count, removed_details)
+                """
+                if not orders_data or not isinstance(orders_data, list):
+                    return orders_data, 0, []
+                
+                # Get current market prices
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    print(f"     ⚠️ Cannot get symbol info for {symbol} - skipping price validation")
+                    return orders_data, 0, []
+                
+                current_bid = symbol_info.bid
+                current_ask = symbol_info.ask
+                
+                if current_bid is None or current_ask is None:
+                    print(f"     ⚠️ Cannot get current bid/ask for {symbol} - skipping price validation")
+                    return orders_data, 0, []
+                
+                print(f"\n     🔍 Validating price levels for {symbol}:")
+                print(f"        Current BID: {current_bid:.2f}")
+                print(f"        Current ASK: {current_ask:.2f}")
+                
+                filtered_orders = []
+                removed_count = 0
+                removed_details = []
+                
+                for order in orders_data:
+                    if not isinstance(order, dict):
+                        filtered_orders.append(order)
+                        continue
+                    
+                    order_symbol = order.get('symbol')
+                    if order_symbol != symbol:
+                        filtered_orders.append(order)
+                        continue
+                    
+                    entry = order.get('entry')
+                    order_type = order.get('order_type', '').lower()
+                    
+                    if entry is None:
+                        filtered_orders.append(order)
+                        continue
+                    
+                    is_valid = True
+                    reason = None
+                    
+                    # Classify and validate
+                    if order_type in ['buy_stop', 'sell_limit']:
+                        # STEPUP orders - should be ABOVE current ASK
+                        if entry <= current_ask:
+                            is_valid = False
+                            reason = f"STEPUP order at {entry:.2f} is NOT above ASK ({current_ask:.2f})"
+                        else:
+                            print(f"        ✓ VALID STEPUP: {order_type} @ {entry:.2f} > ASK {current_ask:.2f}")
+                            
+                    elif order_type in ['sell_stop', 'buy_limit']:
+                        # STEPDOWN orders - should be BELOW current BID
+                        if entry >= current_bid:
+                            is_valid = False
+                            reason = f"STEPDOWN order at {entry:.2f} is NOT below BID ({current_bid:.2f})"
+                        else:
+                            print(f"        ✓ VALID STEPDOWN: {order_type} @ {entry:.2f} < BID {current_bid:.2f}")
+                    else:
+                        # Unknown order type - keep it
+                        print(f"        ⚠️ Unknown order type: {order_type} - keeping")
+                    
+                    if is_valid:
+                        filtered_orders.append(order)
+                    else:
+                        removed_count += 1
+                        removed_details.append({
+                            'order_type': order_type,
+                            'entry': entry,
+                            'reason': reason,
+                            'original_order': order
+                        })
+                        print(f"        ✗ REMOVED: {order_type} @ {entry:.2f} - {reason}")
+                
+                return filtered_orders, removed_count, removed_details
+            
             try:
                 # Get open positions
                 positions = mt5.positions_get()
@@ -13995,12 +14087,41 @@ def martingale(inv_id=None):
                     print(f"  │ No limit_orders.json data found")
                     return False
                 
+                # ========== NEW: REMOVE INVALID PRICE LEVELS ==========
+                print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
+                print(f"{'─'*60}")
+                
+                # Group orders by symbol
+                symbols_in_orders = set()
+                for order in limit_orders_data:
+                    if isinstance(order, dict) and order.get('symbol'):
+                        symbols_in_orders.add(order['symbol'])
+                
+                total_removed = 0
+                all_removed_details = []
+                
+                for symbol in symbols_in_orders:
+                    filtered_orders, removed_count, removed_details = remove_invalid_price_levels(limit_orders_data, symbol)
+                    if removed_count > 0:
+                        total_removed += removed_count
+                        all_removed_details.extend(removed_details)
+                        limit_orders_data = filtered_orders
+                
+                # Save if any orders were removed
+                if total_removed > 0:
+                    print(f"\n  📝 Removing {total_removed} invalid order(s) from limit_orders.json...")
+                    save_limit_orders(limit_orders_path, limit_orders_data)
+                    print(f"  ✓ Removed {total_removed} invalid order(s) - scaling will start from valid price levels")
+                else:
+                    print(f"  ℹ️ All orders have valid price levels")
+                
+                # Continue with current volumes after removal
                 current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
-                print(f"\n  📄 Current limit_orders.json volumes:")
+                print(f"\n  📄 Current limit_orders.json volumes (after validation):")
                 for symbol, vol in current_limit_volumes.items():
                     print(f"     {symbol}: {vol:.2f} lots")
                 
-                # Analyze highest risk orders from limit_orders.json
+                # Analyze highest risk orders from limit_orders.json (using filtered data)
                 limit_highest_risk_orders = {}
                 if martingale_pre_scale_highest_risk_adder:
                     print(f"\n  🔍 Analyzing highest risk orders from limit_orders.json:")
@@ -14187,8 +14308,8 @@ def martingale(inv_id=None):
                         print(f"           Order {i+1}: {vol:.2f} lots → ${risk:.2f} risk")
                     
                     return linear_updates
-
-                # Get all unique symbols from limit_orders.json
+                
+                # Get all unique symbols from limit_orders.json (after removal)
                 all_symbols = set()
                 for order in limit_orders_data:
                     if isinstance(order, dict) and order.get('symbol'):
@@ -14288,7 +14409,7 @@ def martingale(inv_id=None):
                     
                     print(f"\n     TOTAL EXTRA RISK FOR {symbol}: ${total_extra_limit:.2f}")
                     
-                    # Get all orders for this symbol with their indices
+                    # Get all orders for this symbol with their indices (after removal)
                     symbol_orders_with_indices = []
                     for idx, order in enumerate(limit_orders_data):
                         if isinstance(order, dict) and order.get('symbol') == symbol:
@@ -20386,7 +20507,7 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -20730,7 +20851,7 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -21311,3 +21432,4 @@ if __name__ == "__main__":
    place_orders_parallel()
 
 
+ 

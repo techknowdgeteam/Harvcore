@@ -8,7 +8,7 @@
     "login": "5996427",
     "password": "@Techknowdge12#",
     "application_status": "approved",
-    "broker_balance": "8984.51",
+    "broker_balance": "9000.00",
     "balance_verification": "verified",
     "profitandloss": "0.00",
     "passkey": "$2y$10$1p7neBZgjHaC2flqHnolLOWbF/6BTifrKiPLZ3CBdr0K69txedOry",
@@ -349,7 +349,7 @@
       "symbols_dictionary": {
         "xxxjpy": [],
         "xxxusd": [
-          "GBPUSD"
+          "BTCUSD"
         ],
         "xxxaud": [],
         "xxxnzd": [],
@@ -516,15 +516,18 @@
       "maximum_balance_risk_distance": {
         "1-10000000.99_risk": 4
       },
+      "martingale_per_stage_drawdown_amount": {
+        "1-10000000.99_risk": 50
+      },
       "account_balance_default_risk_management": {
         "1-10000000.99_risk": 3
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 150
+        "1-10000000.99_risk": 550
       },
       "grid_prices_setup": {
         "grid_levels": 4,
-        "grid_multiplier": 100,
+        "grid_multiplier": 250,
         "bid_prices_order_type": "buy_stop",
         "ask_prices_order_type": "sell_stop"
       },
@@ -544,7 +547,7 @@
     "demo_account": "1",
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe",
-    "account_balance": 8997.18,
+    "account_balance": 9003.44,
     "account_currency": "USD",
     "account_leverage": 1000
   }
