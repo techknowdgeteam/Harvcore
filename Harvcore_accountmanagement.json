@@ -48,44 +48,6 @@
           ],
           "timezone": "african"
         },
-        "execute_function_in_time_range_of": [
-          {
-            "from": "8:00 am",
-            "to": "12:30 am"
-          },
-          {
-            "from": "12:00 pm",
-            "to": "12:30 pm"
-          },
-          {
-            "from": "2:00 pm",
-            "to": "2:30 pm"
-          },
-          {
-            "from": "4:00 pm",
-            "to": "4:30 pm"
-          },
-          {
-            "from": "6:00 pm",
-            "to": "6:30 pm"
-          },
-          {
-            "from": "10:00 pm",
-            "to": "10:30 pm"
-          },
-          {
-            "from": "12:00 am",
-            "to": "12:30 am"
-          },
-          {
-            "from": "4:00 am",
-            "to": "4:30 am"
-          },
-          {
-            "from": "6:00 am",
-            "to": "6:30 am"
-          }
-        ],
         "fetch_ohlc_data_and_directional_bias_for_investor": false,
         "create_hedge_order": false,
         "enable_latest_fallback_to_older_order": false,
@@ -251,44 +213,6 @@
         "from": "08:00 pm",
         "to": "12:30 am"
       },
-      "execute_function_in_time_range_of": [
-        {
-          "from": "8:00 am",
-          "to": "12:30 am"
-        },
-        {
-          "from": "12:00 pm",
-          "to": "12:30 pm"
-        },
-        {
-          "from": "2:00 pm",
-          "to": "2:30 pm"
-        },
-        {
-          "from": "4:00 pm",
-          "to": "4:30 pm"
-        },
-        {
-          "from": "6:00 pm",
-          "to": "6:30 pm"
-        },
-        {
-          "from": "10:00 pm",
-          "to": "10:30 pm"
-        },
-        {
-          "from": "12:00 am",
-          "to": "12:30 am"
-        },
-        {
-          "from": "4:00 am",
-          "to": "4:30 am"
-        },
-        {
-          "from": "6:00 am",
-          "to": "6:30 am"
-        }
-      ],
       "fetch_ohlc_data_and_directional_bias_for_investor": true,
       "create_hedge_order": true,
       "enable_latest_fallback_to_older_order": true,
@@ -414,5 +338,44 @@
   "requirements": {
     "contract_duration": "30",
     "min_broker_balance": "50.00"
-  }
+  },
+  "working_hours": [
+    
+        {
+          "from": "8:00 am",
+          "to": "12:30 am"
+        },
+        {
+          "from": "12:00 pm",
+          "to": "12:30 pm"
+        },
+        {
+          "from": "2:00 pm",
+          "to": "2:30 pm"
+        },
+        {
+          "from": "4:00 pm",
+          "to": "4:30 pm"
+        },
+        {
+          "from": "6:00 pm",
+          "to": "6:30 pm"
+        },
+        {
+          "from": "10:00 pm",
+          "to": "10:30 pm"
+        },
+        {
+          "from": "12:00 am",
+          "to": "12:30 am"
+        },
+        {
+          "from": "4:00 am",
+          "to": "4:30 am"
+        },
+        {
+          "from": "6:00 am",
+          "to": "6:30 am"
+        }
+  ]
 }

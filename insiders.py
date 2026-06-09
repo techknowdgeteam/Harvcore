@@ -35,6 +35,8 @@ def work_only_in_specific_timerange():
     Function will ONLY work during specified time windows.
     Does NOT need MT5 connection - just checks time configuration.
     
+    Looks for 'working_hours' key at the root level of the JSON.
+    
     If 'from' or 'to' values parse to 0 (e.g., "0", "0.00", "0:00 am", "00:00"), 
     it overrides all restrictions and assumes work is always allowed.
     
@@ -49,6 +51,9 @@ def work_only_in_specific_timerange():
     
     print(f"\n{'='*10} ⏰ WORK TIME CHECK (Only work during specified hours) {'='*10}")
     
+    # --- DISPLAY JSON PATH ---
+    print(f"\n   📂 Looking for config at: {DEFAULT_ACCOUNTMANAGEMENT}")
+    
     # --- TIME CHECK ---
     current_time = datetime.now()
     
@@ -59,7 +64,9 @@ def work_only_in_specific_timerange():
         "should_work": False,
         "has_time_restriction": False,
         "time_windows": [],
-        "errors": []
+        "errors": [],
+        "config_path_checked": str(DEFAULT_ACCOUNTMANAGEMENT),
+        "json_structure_found": None
     }
     
     # Load default configuration
@@ -67,21 +74,53 @@ def work_only_in_specific_timerange():
     default_config_path = Path(DEFAULT_ACCOUNTMANAGEMENT)
     
     if not default_config_path.exists():
-        print(f"   Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+        print(f"   ❌ Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
         stats["errors"].append(f"Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
         stats["processing_success"] = True  
         stats["should_work"] = True  
+        stats["json_structure_found"] = "FILE_NOT_FOUND"
         return stats
     
     try:
         with open(default_config_path, 'r', encoding='utf-8') as f:
             default_config = json.load(f)
+        print(f"   ✅ Config file loaded successfully")
     except Exception as e:
-        print(f"   Error loading default config: {e}")
+        print(f"   ❌ Error loading default config: {e}")
         stats["errors"].append(f"Error loading default config: {e}")
         stats["processing_success"] = True
         stats["should_work"] = True  
+        stats["json_structure_found"] = "ERROR_LOADING"
         return stats
+    
+    # --- DISPLAY JSON STRUCTURE FOUND ---
+    print(f"\n   📋 JSON Structure Analysis:")
+    print(f"   {'-'*40}")
+    
+    # Check root level keys
+    root_keys = list(default_config.keys())
+    
+    # Look for 'working_hours' at root level
+    time_ranges = []
+    has_time_restriction = False
+    time_windows_list = []
+    is_within_any_window = False
+    matched_window = None
+    zero_override_triggered = False
+    
+    if "working_hours" in default_config:
+        print(f"   ✅ Found 'working_hours' key at root level")
+        stats["json_structure_found"] = "ROOT_LEVEL_WORKING_HOURS"
+        time_ranges = default_config.get("working_hours", [])
+        
+        if isinstance(time_ranges, dict):
+            time_ranges = [time_ranges]
+        
+        print(f"   📊 Found {len(time_ranges) if time_ranges else 0} time window(s) in working_hours")
+    else:
+        print(f"   ❌ No 'working_hours' key found at root level")
+        stats["json_structure_found"] = "NO_WORKING_HOURS_KEY"
+        time_ranges = []
     
     # Parse time strings (e.g., "12:00 am" or "12:30 pm" or "21:00" or "0:00 am")
     def parse_time_string(time_str):
@@ -123,21 +162,9 @@ def work_only_in_specific_timerange():
             hour_12 = 12
         return f"{hour_12}:{minute:02d} {period}"
     
-    # Try to load from default accountmanagement.json (global setting)
-    has_time_restriction = False
-    time_windows_list = []
-    is_within_any_window = False
-    matched_window = None
-    zero_override_triggered = False
-    
     try:
-        default_settings = default_config.get("settings", {})
-        time_ranges = default_settings.get("execute_function_in_time_range_of", [])
-        
-        if isinstance(time_ranges, dict):
-            time_ranges = [time_ranges]
-        
         if time_ranges and len(time_ranges) > 0:
+            print(f"\n   🎯 Processing {len(time_ranges)} time window(s)")
             
             # FIRST: Safely parse and check ALL windows for any true 0 value override rule
             for idx, time_range in enumerate(time_ranges):
@@ -206,38 +233,41 @@ def work_only_in_specific_timerange():
                             if is_in_window:
                                 is_within_any_window = True
                                 matched_window = window_info
-                                print(f"   Documented Window {idx + 1}: {time_range['from']} - {time_range['to']}  WITHIN")
+                                print(f"   ✅ Window {idx + 1}: {time_range['from']} - {time_range['to']}  WITHIN")
                             else:
-                                print(f"   Documented Window {idx + 1}: {time_range['from']} - {time_range['to']}  OUTSIDE")
+                                print(f"   ❌ Window {idx + 1}: {time_range['from']} - {time_range['to']}  OUTSIDE")
                                 
                         except Exception as e:
                             stats["errors"].append(f"Failed to parse time range {idx}: {e}")
-                            print(f"    Failed to parse window {idx + 1}: {e}")
+                            print(f"   ⚠️ Failed to parse window {idx + 1}: {e}")
                 
                 if has_time_restriction:
                     print(f"   📋 System evaluated {len(time_windows_list)} filtering time window(s)")
                     if is_within_any_window and matched_window:
-                        print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is WITHIN window {matched_window['index']}: {matched_window['from']} - {matched_window['to']}")
+                        print(f"\n   🕐 Current time {current_time.strftime('%I:%M:%S %p')} is WITHIN window {matched_window['index']}: {matched_window['from']} - {matched_window['to']}")
                     else:
-                        print(f"\n   Current time {current_time.strftime('%I:%M:%S %p')} is NOT within ANY work window")
+                        print(f"\n   🕐 Current time {current_time.strftime('%I:%M:%S %p')} is NOT within ANY work window")
             else:
                 # Force settings to wide open execution state
                 has_time_restriction = False
                 is_within_any_window = True
                 time_windows_list = []
                 matched_window = None
+                print(f"   🚫 Zero override active - all time restrictions bypassed")
                 
     except Exception as e:
-        stats["errors"].append(f"Error loading time ranges: {e}")
-        print(f"   Error processing time ranges: {e}")
+        stats["errors"].append(f"Error processing time ranges: {e}")
+        print(f"   ❌ Error processing time ranges: {e}")
     
     # If no time restriction defined or zero override caught = work always allowed
-    if not has_time_restriction:
+    if not has_time_restriction and not zero_override_triggered:
         is_within_any_window = True
-        print(f"   No active time restriction - work always allowed")
+        print(f"   ℹ️ No active time restriction - work always allowed")
+    elif not has_time_restriction and zero_override_triggered:
+        print(f"   ℹ️ Zero override active - work always allowed")
     
     # Display current time
-    print(f"   🕐 Current time: {current_time.strftime('%I:%M:%S %p')}")
+    print(f"\n   🕐 Current time: {current_time.strftime('%I:%M:%S %p')}")
     
     # Final decision
     if is_within_any_window:
@@ -263,6 +293,8 @@ def work_only_in_specific_timerange():
 
     # --- FINAL SUMMARY ---
     print(f"\n{'='*10} 📊 SUMMARY {'='*10}")
+    print(f"   Config path: {DEFAULT_ACCOUNTMANAGEMENT}")
+    print(f"   JSON structure: {stats['json_structure_found']}")
     print(f"   Has time restriction: {has_time_restriction}")
     if has_time_restriction:
         print(f"   Total active windows: {len(time_windows_list)}")
@@ -270,7 +302,10 @@ def work_only_in_specific_timerange():
         if matched_window:
             print(f"   Matched window: {matched_window['from']} - {matched_window['to']}")
     else:
-        print(f"   Within work window: {is_within_any_window} (Always allowed due to '0/0.00' override or blank configuration)")
+        if zero_override_triggered:
+            print(f"   Within work window: {is_within_any_window} (Always allowed due to '0/0.00' override)")
+        else:
+            print(f"   Within work window: {is_within_any_window} (Always allowed - no working_hours configured)")
     print(f"   Function should work: {is_within_any_window}")
     
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
@@ -585,7 +620,7 @@ def fetch_tables_streaming(batch_size=5000):
         # Otherwise, return as is (no wrapper to remove)
         return accountmanagement_data
     
-    def clean_record(record, default_accountmanagement=None):
+    def clean_record(record):
         """Clean a record by repairing all fields that might contain JSON and denormalizing paths"""
         cleaned = {}
         for key, value in record.items():
@@ -612,6 +647,85 @@ def fetch_tables_streaming(batch_size=5000):
                 cleaned['accountmanagement'] = {}
         
         return cleaned
+    
+    def save_metadata_to_default_accountmanagement(computer_id, user_ids_to_fetch, total_rows, export_timestamp):
+        """Save export metadata to the default accountmanagement field in server_account table"""
+        try:
+            print(f"\n💾 Saving metadata to default server_account.accountmanagement...")
+            
+            # First, fetch current server_account data
+            query = "SELECT accountmanagement FROM server_account LIMIT 1"
+            result = db.execute_query(query)
+            
+            current_management = {}
+            if result.get('status') == 'success' and result.get('results'):
+                row = result['results'][0]
+                if row.get('accountmanagement'):
+                    try:
+                        if isinstance(row['accountmanagement'], str):
+                            current_management = repair_json_field(row['accountmanagement'])
+                        elif isinstance(row['accountmanagement'], dict):
+                            current_management = row['accountmanagement']
+                        else:
+                            current_management = {}
+                    except:
+                        current_management = {}
+            
+            # Ensure current_management is a dict
+            if not isinstance(current_management, dict):
+                current_management = {}
+            
+            # Create metadata object (this is the "_metadata" that was previously in the file)
+            metadata = {
+                'computer_id': computer_id,
+                'identification_method': 'vscode_machine_id',
+                'user_ids_filtered': user_ids_to_fetch,
+                'export_timestamp': export_timestamp,
+                'total_records': total_rows,
+                'batch_size': batch_size,
+                'auto_fill_accountmanagement': False,
+                'config_title_extraction': True,
+                'export_history': current_management.get('export_history', [])
+            }
+            
+            # Add to history (keep last 10 exports)
+            export_record = {
+                'computer_id': computer_id,
+                'export_timestamp': export_timestamp,
+                'total_records': total_rows,
+                'user_ids_count': len(user_ids_to_fetch)
+            }
+            metadata['export_history'].insert(0, export_record)
+            if len(metadata['export_history']) > 10:
+                metadata['export_history'] = metadata['export_history'][:10]
+            
+            # Preserve existing data like requirements and configuration_title
+            if 'requirements' in current_management:
+                metadata['requirements'] = current_management['requirements']
+            if 'configuration_title' in current_management:
+                metadata['configuration_title'] = current_management['configuration_title']
+            
+            # Update the server_account table
+            update_query = """
+                UPDATE server_account 
+                SET accountmanagement = %s 
+                WHERE id = (SELECT MIN(id) FROM server_account)
+            """
+            
+            metadata_json = json.dumps(metadata, default=str, indent=2)
+            update_result = db.execute_query(update_query, params=(metadata_json,))
+            
+            if update_result.get('status') == 'success':
+                print(f"  ✅ Metadata saved successfully to default accountmanagement")
+                print(f"  📊 Export history now contains {len(metadata['export_history'])} records")
+                return True
+            else:
+                print(f"  ⚠️ Failed to save metadata: {update_result.get('message')}")
+                return False
+                
+        except Exception as e:
+            print(f"  ⚠️ Error saving metadata: {str(e)}")
+            return False
     
     print("\n" + "="*70)
     print(f"  FETCHING TABLES")
@@ -866,6 +980,7 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"  🎯 Filter: Only user IDs associated with this computer ID")
         print(f"  🔧 AccountManagement: Empty values remain as {{}} (no auto-fill)")
         print(f"  🔧 AccountManagement: Wrapper keys extracted to 'configuration_title' field")
+        print(f"  💾 Metadata: Will be saved to default server_account.accountmanagement (not in export file)")
         print("-"*70)
         
         start_time = datetime.now()
@@ -886,16 +1001,8 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs")
         
         with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+            # Write opening brace - NO METADATA SECTION
             f.write('{\n')
-            f.write(f'  "_metadata": {{\n')
-            f.write(f'    "computer_id": "{computer_id}",\n')
-            f.write(f'    "identification_method": "vscode_machine_id",\n')
-            f.write(f'    "user_ids_filtered": {json.dumps(user_ids_to_fetch)},\n')
-            f.write(f'    "export_timestamp": "{datetime.now().isoformat()}",\n')
-            f.write(f'    "total_records": {total_rows},\n')
-            f.write(f'    "auto_fill_accountmanagement": false,\n')
-            f.write(f'    "config_title_extraction": true\n')
-            f.write(f'  }},\n')
             first_record = True
             offset = 0
             
@@ -931,7 +1038,7 @@ def fetch_tables_streaming(batch_size=5000):
                     # Track original accountmanagement state for unwrapping count
                     original_accountmanagement = row.get('accountmanagement')
                     
-                    cleaned_row = clean_record(row, None)  # Pass None to disable auto-fill
+                    cleaned_row = clean_record(row)
                     
                     # Check if accountmanagement was unwrapped and config title extracted
                     if original_accountmanagement is not None:
@@ -988,6 +1095,10 @@ def fetch_tables_streaming(batch_size=5000):
             
             f.write('\n}')
         
+        # Save metadata to default accountmanagement after successful export
+        export_timestamp = datetime.now().isoformat()
+        save_metadata_to_default_accountmanagement(computer_id, user_ids_to_fetch, total_rows, export_timestamp)
+        
         # Final Summary
         elapsed_time = (datetime.now() - start_time).total_seconds()
         avg_speed = offset / elapsed_time if elapsed_time > 0 else 0
@@ -1004,11 +1115,11 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
         print(f"  🔄 Path Denormalized: {path_denormalized_count} path fields restored")
         print(f"  🧹 Config Title Extracted: {accountmanagement_unwrapped_count} records")
-        print(f"  📝 AccountManagement Auto-Fill: DISABLED (empty values remain as {{}})")
         print(f"  💾 File Size        : {bytes_written/1024:,.1f} KB ({bytes_written/1048576:.2f} MB)")
         print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
         print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
         print(f"  📁 Output File      : {FETCHED_INVESTORS}")
+        print(f"  💾 Metadata Saved   : server_account.accountmanagement (default)")
         print("="*70)
         print(f"  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
@@ -1024,7 +1135,7 @@ def fetch_tables_streaming(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-
+        
 def update_tables_streaming(batch_size=5000):
     """Stream updates from UPDATED_INVESTORS JSON to database without holding all in memory"""
     
@@ -2637,7 +2748,7 @@ def place_orders_parallel_loop():
                 print("   Retrying in 5 seconds...")
                 time.sleep(5)
                 
-            time.sleep(1)
+            time.sleep(120)
 
     except KeyboardInterrupt:
         print("\n🛑 Received shutdown signal. Disposing worker process tree gracefully...")
@@ -2648,5 +2759,5 @@ def place_orders_parallel_loop():
 
 
 if __name__ == "__main__":
-    fetch_tables_streaming()
+    place_orders_parallel_loop()
     

@@ -1,1 +1,36 @@
-{}
+{
+  "1": {
+    "id": "1",
+    "broker": "Deriv",
+    "email": "kennyking8128@gmail.com",
+    "fullname": "Arobieke kehinde",
+    "server": "Deriv-Demo",
+    "login": "5996427",
+    "password": "@Techknowdge12#",
+    "application_status": "just-joined-and-valid_credentials",
+    "broker_balance": "9001.56",
+    "balance_verification": "NULL",
+    "profitandloss": "NULL",
+    "passkey": "NULL",
+    "submitted_at": "NULL",
+    "balance_display": "NULL",
+    "execution_start_date": "NULL",
+    "analytics_history": "NULL",
+    "revenue_history": "NULL",
+    "loyalties": "NULL",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "NULL",
+    "notifications": "NULL",
+    "executions_notification": "NULL",
+    "server_decision": "NULL",
+    "accountmanagement": "NULL",
+    "invested_with": "NULL",
+    "enable_autotrading": "1",
+    "bypass_restriction": "0",
+    "demo_account": "0",
+    "account_mode": "NULL",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe"
+  }
+}
