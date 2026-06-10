@@ -1938,7 +1938,13 @@ def get_investors_balance():
     - Fresh login (MT5 initialized and logged in now)
     - Login failed (could not authenticate)
     
-    Only processes investors with 'just-joined' status. On success, updates:
+    NEW: Checks account mode and demo permissions before processing.
+    - If account_mode is "real" → proceed
+    - If account_mode is "demo" AND demo_account == "1" → proceed
+    - If account_mode is "demo" AND demo_account == "0" → skip
+    - If account_mode is unknown/null → check both possibilities
+    
+    ONLY processes investors with EXACT 'just-joined' status. On success, updates:
     - broker_balance with current account balance
     - application_status to 'just-joined-and-valid_credentials'
     
@@ -1985,20 +1991,45 @@ def get_investors_balance():
     already_logged_in_count = 0
     fresh_login_count = 0
     failed_login_count = 0
+    demo_skipped = 0
     
     investors_modified = False
     
-    # Define valid just-joined statuses
-    just_joined_statuses = ['just-joined', 'just_joined', 'just joined', 'justjoined']
-    
+    # STRICT CHECK: Only exact 'just-joined' status
     for investor_id, investor_data in investors_data.items():
-        app_status = investor_data.get('application_status', '').strip().lower()
+        app_status = investor_data.get('application_status', '').strip()
         
-        # Skip if not just-joined
-        if app_status not in just_joined_statuses:
-            if app_status:
-                print(f"⏭️ ID:{investor_id} → Status: {app_status}")
+        # STRICT SKIP - Only proceed if status is EXACTLY 'just-joined'
+        if app_status != 'just-joined':
+            print(f"⏭️ ID:{investor_id} → Status: '{app_status}' (not 'just-joined') - SKIPPING")
+            skipped += 1
             continue
+        
+        # ============================================================
+        # ACCOUNT MODE AND DEMO PERMISSION CHECK
+        # ============================================================
+        account_mode = investor_data.get('account_mode', '').strip().lower()
+        demo_account = investor_data.get('demo_account', '').strip()
+        
+        # Check if demo account is allowed
+        if account_mode == 'demo':
+            if demo_account == '0':
+                print(f"⏭️ ID:{investor_id} → DEMO account but demo_account=0 (DISABLED) - Skipping")
+                demo_skipped += 1
+                continue
+            elif demo_account == '1':
+                print(f"✅ ID:{investor_id} → DEMO account with demo_account=1 (ENABLED) - Proceeding")
+            else:
+                print(f"⚠️ ID:{investor_id} → DEMO account but demo_account not set to '1' (value: {demo_account}) - Skipping")
+                demo_skipped += 1
+                continue
+        elif account_mode == 'real':
+            print(f"✅ ID:{investor_id} → REAL account - Proceeding")
+        else:
+            # account_mode is unknown/null - check both possibilities
+            print(f"⚠️ ID:{investor_id} → account_mode not set or unknown: '{account_mode}'")
+            print(f"   → Will check credentials first, then determine account type from MT5")
+            # Don't skip - let MT5 determine the actual account type
         
         # Extract credentials
         login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
@@ -2030,6 +2061,7 @@ def get_investors_balance():
         # Step 1: Check if MT5 is already running and logged in with this account
         mt5_already_running = False
         already_logged_in_account = None
+        actual_account_mode = None
         
         try:
             # Try to initialize without path first (use existing running instance)
@@ -2037,10 +2069,36 @@ def get_investors_balance():
                 account_info = mt5.account_info()
                 if account_info is not None:
                     already_logged_in_account = account_info.login
+                    
+                    # Determine actual account mode from MT5
+                    if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+                        actual_account_mode = 'real'
+                    elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+                        actual_account_mode = 'demo'
+                    elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+                        actual_account_mode = 'demo'
+                    else:
+                        actual_account_mode = 'unknown'
+                    
                     if account_info.login == login_id_int:
                         # CASE 1: Already logged in with this exact account
                         print(f"    ALREADY LOGGED IN STATUS: Investor {login_id_int} is already logged into MT5")
-                        print(f"      → No initialization or login needed, using existing session")
+                        print(f"      → Account type detected: {actual_account_mode.upper()}")
+                        
+                        # Re-check demo permission after detecting actual account type
+                        if actual_account_mode == 'demo':
+                            if demo_account == '0':
+                                print(f"      → SKIPPING: DEMO account detected but demo_account=0 (DISABLED)")
+                                demo_skipped += 1
+                                mt5.shutdown()
+                                continue
+                            elif demo_account != '1':
+                                print(f"      → SKIPPING: DEMO account detected but demo_account not set to '1'")
+                                demo_skipped += 1
+                                mt5.shutdown()
+                                continue
+                            else:
+                                print(f"      → DEMO account with demo_account=1 (ENABLED) - Proceeding")
                         
                         # Get account info directly
                         balance = account_info.balance
@@ -2058,6 +2116,12 @@ def get_investors_balance():
                         # Update status
                         old_status = investor_data.get('application_status', 'unknown')
                         investor_data['application_status'] = 'just-joined-and-valid_credentials'
+                        
+                        # Update account_mode in JSON if it was unknown
+                        if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
+                            investor_data['account_mode'] = actual_account_mode
+                            print(f"      → Updated account_mode to: {actual_account_mode}")
+                        
                         investors_modified = True
                         print(f"   📝 Status: {old_status} → just-joined-and-valid_credentials")
                         
@@ -2124,6 +2188,33 @@ def get_investors_balance():
                     errors += 1
                     continue
                 
+                # Determine actual account mode from MT5
+                if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+                    actual_account_mode = 'real'
+                elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+                    actual_account_mode = 'demo'
+                elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+                    actual_account_mode = 'demo'
+                else:
+                    actual_account_mode = 'unknown'
+                
+                print(f"      → Account type detected: {actual_account_mode.upper()}")
+                
+                # Check demo permission after login
+                if actual_account_mode == 'demo':
+                    if demo_account == '0':
+                        print(f"      → SKIPPING: DEMO account detected but demo_account=0 (DISABLED)")
+                        demo_skipped += 1
+                        mt5.shutdown()
+                        continue
+                    elif demo_account != '1':
+                        print(f"      → SKIPPING: DEMO account detected but demo_account not set to '1'")
+                        demo_skipped += 1
+                        mt5.shutdown()
+                        continue
+                    else:
+                        print(f"      → DEMO account with demo_account=1 (ENABLED) - Proceeding")
+                
                 # Get balance
                 balance = account_info.balance
                 currency = account_info.currency
@@ -2142,6 +2233,12 @@ def get_investors_balance():
                 # Update status
                 old_status = investor_data.get('application_status', 'unknown')
                 investor_data['application_status'] = 'just-joined-and-valid_credentials'
+                
+                # Update account_mode in JSON if it was unknown or different
+                if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
+                    investor_data['account_mode'] = actual_account_mode
+                    print(f"      → Updated account_mode to: {actual_account_mode}")
+                
                 investors_modified = True
                 print(f"   📝 Status: {old_status} → just-joined-and-valid_credentials")
                 
@@ -2214,6 +2311,18 @@ def get_investors_balance():
     else:
         print(f" No investors with 'just-joined-and-valid_credentials' status found to copy")
     
+    # Print summary with demo skips
+    print(f"\n{'='*60}")
+    print(f"✅ GET BALANCES SUMMARY")
+    print(f"{'='*60}")
+    print(f" Processed: {processed}")
+    print(f" Updated: {updated}")
+    print(f" Demo accounts skipped (disabled): {demo_skipped}")
+    print(f" Skipped (non 'just-joined' status): {skipped}")
+    print(f" Errors: {errors}")
+    print(f"🔄 Already logged in: {already_logged_in_count}")
+    print(f"🔐 Fresh logins: {fresh_login_count}")
+    print(f" Failed logins: {failed_login_count}")
     
     # Final cleanup
     try:
@@ -2227,6 +2336,12 @@ def get_investors_balance():
 def verify_investors_balance():
     """
     Verify balance for investors who have applied for verification.
+    
+    NEW: Checks account mode and demo permissions before processing.
+    - If account_mode is "real" → proceed
+    - If account_mode is "demo" AND demo_account == "1" → proceed
+    - If account_mode is "demo" AND demo_account == "0" → skip
+    - If account_mode is unknown/null → check both possibilities
     
     Processes investors with balance_verification status = 'applied-for-verification' or 'applied_for_verification'
     
@@ -2268,6 +2383,7 @@ def verify_investors_balance():
     already_logged_in_count = 0
     fresh_login_count = 0
     failed_login_count = 0
+    demo_skipped = 0
     
     investors_modified = False
     
@@ -2282,6 +2398,32 @@ def verify_investors_balance():
             if balance_verification_status:
                 print(f"⏭️ ID:{investor_id} → Balance Verification Status: {balance_verification_status}")
             continue
+        
+        # ============================================================
+        # NEW: ACCOUNT MODE AND DEMO PERMISSION CHECK
+        # ============================================================
+        account_mode = investor_data.get('account_mode', '').strip().lower()
+        demo_account = investor_data.get('demo_account', '').strip()
+        
+        # Check if demo account is allowed
+        if account_mode == 'demo':
+            if demo_account == '0':
+                print(f"⏭️ ID:{investor_id} → DEMO account but demo_account=0 (DISABLED) - Skipping verification")
+                demo_skipped += 1
+                continue
+            elif demo_account == '1':
+                print(f"✅ ID:{investor_id} → DEMO account with demo_account=1 (ENABLED) - Proceeding with verification")
+            else:
+                print(f"⚠️ ID:{investor_id} → DEMO account but demo_account not set to '1' (value: {demo_account}) - Skipping verification")
+                demo_skipped += 1
+                continue
+        elif account_mode == 'real':
+            print(f"✅ ID:{investor_id} → REAL account - Proceeding with verification")
+        else:
+            # account_mode is unknown/null - check both possibilities
+            print(f"⚠️ ID:{investor_id} → account_mode not set or unknown: '{account_mode}'")
+            print(f"   → Will check credentials first, then determine account type from MT5")
+            # Don't skip - let MT5 determine the actual account type
         
         # Extract credentials
         login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
@@ -2312,14 +2454,42 @@ def verify_investors_balance():
         
         # Check if already logged in with this account
         already_logged_in_account = None
+        actual_account_mode = None
         
         try:
             if mt5.initialize():
                 account_info = mt5.account_info()
                 if account_info is not None:
                     already_logged_in_account = account_info.login
+                    
+                    # Determine actual account mode from MT5
+                    if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+                        actual_account_mode = 'real'
+                    elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+                        actual_account_mode = 'demo'
+                    elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+                        actual_account_mode = 'demo'
+                    else:
+                        actual_account_mode = 'unknown'
+                    
                     if account_info.login == login_id_int:
                         print(f"    ✅ Already logged in as {login_id_int}")
+                        print(f"      → Account type detected: {actual_account_mode.upper()}")
+                        
+                        # NEW: Re-check demo permission after detecting actual account type
+                        if actual_account_mode == 'demo':
+                            if demo_account == '0':
+                                print(f"      → SKIPPING VERIFICATION: DEMO account detected but demo_account=0 (DISABLED)")
+                                demo_skipped += 1
+                                mt5.shutdown()
+                                continue
+                            elif demo_account != '1':
+                                print(f"      → SKIPPING VERIFICATION: DEMO account detected but demo_account not set to '1'")
+                                demo_skipped += 1
+                                mt5.shutdown()
+                                continue
+                            else:
+                                print(f"      → DEMO account with demo_account=1 (ENABLED) - Proceeding with verification")
                         
                         balance = account_info.balance
                         currency = account_info.currency
@@ -2327,6 +2497,12 @@ def verify_investors_balance():
                         balance_str = f"{balance:.2f}"
                         investor_data['broker_balance'] = balance_str
                         investor_data['balance_verification'] = 'verified'
+                        
+                        # Update account_mode in JSON if it was unknown
+                        if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
+                            investor_data['account_mode'] = actual_account_mode
+                            print(f"      → Updated account_mode to: {actual_account_mode}")
+                        
                         investors_modified = True
                         
                         print(f"    💰 Balance: {currency} {balance:,.2f}")
@@ -2373,12 +2549,45 @@ def verify_investors_balance():
                 errors += 1
                 continue
             
+            # Determine actual account mode from MT5
+            if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+                actual_account_mode = 'real'
+            elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+                actual_account_mode = 'demo'
+            elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+                actual_account_mode = 'demo'
+            else:
+                actual_account_mode = 'unknown'
+            
+            print(f"      → Account type detected: {actual_account_mode.upper()}")
+            
+            # NEW: Check demo permission after login
+            if actual_account_mode == 'demo':
+                if demo_account == '0':
+                    print(f"      → SKIPPING VERIFICATION: DEMO account detected but demo_account=0 (DISABLED)")
+                    demo_skipped += 1
+                    mt5.shutdown()
+                    continue
+                elif demo_account != '1':
+                    print(f"      → SKIPPING VERIFICATION: DEMO account detected but demo_account not set to '1'")
+                    demo_skipped += 1
+                    mt5.shutdown()
+                    continue
+                else:
+                    print(f"      → DEMO account with demo_account=1 (ENABLED) - Proceeding with verification")
+            
             balance = account_info.balance
             currency = account_info.currency
             
             balance_str = f"{balance:.2f}"
             investor_data['broker_balance'] = balance_str
             investor_data['balance_verification'] = 'verified'
+            
+            # Update account_mode in JSON if it was unknown or different
+            if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
+                investor_data['account_mode'] = actual_account_mode
+                print(f"      → Updated account_mode to: {actual_account_mode}")
+            
             investors_modified = True
             
             print(f"    💰 Balance: {currency} {balance:,.2f}")
@@ -2429,11 +2638,12 @@ def verify_investors_balance():
     else:
         print(f"⚠️ No verified investors to copy")
     
-    # Print summary
+    # Print summary with demo skips
     print(f"\n{'='*60}")
     print(f"✅ BALANCE VERIFICATION SUMMARY")
     print(f"{'='*60}")
     print(f"✅ Verified: {verified}")
+    print(f" Demo accounts skipped (disabled): {demo_skipped}")
     print(f" Errors: {errors}")
     print(f"🔄 Already logged in: {already_logged_in_count}")
     print(f"🔐 Fresh logins: {fresh_login_count}")
@@ -2518,7 +2728,7 @@ def process_single_investor(inv_id):
     
     try:
         # Execute the operations only if within time range
-        update_tables_streaming()
+        #update_tables_streaming()
         fetch_tables_streaming()
         create_investor_mt5_files(inv_id=inv_id)
         get_investors_balance()
