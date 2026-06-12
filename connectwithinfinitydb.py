@@ -158,13 +158,13 @@ def initialize_browser(force_new=False):
             except Exception as e:
                 print_warning(f"Profile copy failed: {e}")
 
-        # Chrome Options
+        # Chrome Options Configured with Option B (Dynamic Hand-off)
         chrome_options = Options()
         if os.path.exists(CHROME_PATH):
             chrome_options.binary_location = CHROME_PATH
-            print_info(f"Chrome binary: {CHROME_PATH}")
+            print_info(f"Using manual Chrome path: {CHROME_PATH}")
         else:
-            print_warning(f"Chrome binary not found at: {CHROME_PATH}")
+            print_info("CHROME_PATH location not found. Allowing Selenium to auto-detect the Chrome binary...")
         
         chrome_options.add_argument(f"--user-data-dir={selenium_profile}")
         chrome_options.add_argument("--profile-directory=Default")
@@ -231,7 +231,7 @@ def initialize_browser(force_new=False):
 
         print_error("All servers failed authentication")
         return False
-
+    
 def append_to_json_log(server_type, server_url):
     """Append the server used to the JSON log file."""
     log_entry = {
@@ -338,221 +338,6 @@ def check_server_availability(url):
         return response.status_code == 200
     except requests.RequestException:
         return False
-
-def execute_query_(sql_query, params=None, reuse_browser=True):
-    """Execute SQL query via Selenium browser automation.
-    
-    Args:
-        sql_query (str): SQL query string (can contain %s placeholders)
-        params (tuple, optional): Parameters to substitute for placeholders
-        reuse_browser (bool): If True, reuse existing browser instance; 
-                             if False, create new instance
-    
-    Returns:
-        dict: Query results
-    """
-    global driver, session
-    
-    # If params provided, build the final query by substituting values
-    if params:
-        # Escape and quote string values
-        final_query_parts = []
-        param_index = 0
-        i = 0
-        
-        while i < len(sql_query):
-            # Look for placeholder %s
-            if sql_query[i:i+2] == '%s':
-                if param_index < len(params):
-                    param_value = params[param_index]
-                    
-                    # Format based on type
-                    if param_value is None:
-                        final_query_parts.append('NULL')
-                    elif isinstance(param_value, bool):
-                        final_query_parts.append('1' if param_value else '0')
-                    elif isinstance(param_value, (int, float)):
-                        final_query_parts.append(str(param_value))
-                    elif isinstance(param_value, str):
-                        # Escape single quotes for SQL
-                        escaped = param_value.replace("'", "''").replace("\\", "\\\\")
-                        final_query_parts.append(f"'{escaped}'")
-                    else:
-                        # For other types, convert to string and quote
-                        escaped = str(param_value).replace("'", "''").replace("\\", "\\\\")
-                        final_query_parts.append(f"'{escaped}'")
-                    
-                    param_index += 1
-                    i += 2
-                    continue
-            
-            final_query_parts.append(sql_query[i])
-            i += 1
-        
-        final_sql = ''.join(final_query_parts)
-    else:
-        final_sql = sql_query
-    print_divider()
-    
-    try:
-        # Initialize browser (reuse existing if available and reuse_browser=True)
-        if not initialize_browser(force_new=not reuse_browser):
-            return {
-                'status': 'error', 
-                'message': 'Browser initialization failed', 
-                'results': []
-            }
-
-        # Step 4: Inject SQL Query
-        print_step(4, 6, "Injecting SQL Query")
-        try:
-            query_textarea = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "sql-query"))
-            )
-            # Clear previous content
-            driver.execute_script("arguments[0].value = '';", query_textarea)
-            
-            # Set the final SQL query
-            driver.execute_script("arguments[0].value = arguments[1];", query_textarea, final_sql)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", query_textarea)
-            
-            # Small delay to ensure UI updates
-            time.sleep(0.5)
-            
-            execute_button = driver.find_element(By.XPATH, "//button[text()='Execute Query']")
-            execute_button.click()
-            print_success("Query injected and executed")
-        except Exception as e:
-            print_error("Failed to inject query", str(e))
-            return {
-                'status': 'error', 
-                'message': f"Query input failed: {str(e)}", 
-                'results': []
-            }
-
-        # Step 5: Wait for Results
-        print_step(5, 6, "Waiting for Server Response")
-        results = []
-        
-        try:
-            is_select = final_sql.strip().upper().startswith("SELECT")
-
-            if is_select:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "#query-result table, #column-data table"))
-                )
-                print_success("Result table detected")
-            else:
-                # For UPDATE, INSERT, DELETE - wait for message
-                try:
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.ID, "message"))
-                    )
-                    print_success("Server response received")
-                except:
-                    # Some UPDATE queries might return empty results
-                    print_info("No explicit response message (may be normal for this query)")
-                    return {
-                        'status': 'success',
-                        'results': [{'message': 'Query executed - no response message'}]
-                    }
-
-        except Exception as e:
-            print_warning(f"Timeout waiting for results: {str(e)[:100]}")
-            # Don't fail immediately - check if there are any results
-            try:
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
-                error_msg = soup.find('div', class_='error') or soup.find('div', id='error')
-                if error_msg:
-                    return {
-                        'status': 'error',
-                        'message': error_msg.text.strip(),
-                        'results': []
-                    }
-            except:
-                pass
-            
-            return {
-                'status': 'success', 
-                'results': [{'message': 'Query executed (no visible results)'}]
-            }
-
-        # Step 6: Parse Results
-        print_step(6, 6, "Parsing Query Results")
-        
-        try:
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            
-            container = soup.find('div', id='query-result') or soup.find('div', id='column-data')
-            table = container.find('table') if container else soup.find('table')
-
-            if table:
-                headers = [th.text.strip() for th in table.find_all('th')]
-                
-                for row in table.find_all('tr')[1:]:
-                    cols = row.find_all('td')
-                    if len(cols) > 0:
-                        row_dict = {
-                            headers[i]: cols[i].text.strip() 
-                            for i in range(len(cols)) 
-                            if i < len(headers)
-                        }
-                        results.append(row_dict)
-                
-                print_success(f"Parsed {len(results)} rows with {len(headers)} columns")
-                
-                if headers:
-                    print_info(f"Columns: {', '.join(headers[:5])}{'...' if len(headers) > 5 else ''}")
-                
-            else:
-                # Check for non-SELECT query success message
-                msg_element = soup.find('div', id='message')
-                if msg_element:
-                    msg_text = msg_element.get_text().strip()
-                    
-                    if "Affected rows" in msg_text or "success" in msg_text.lower():
-                        results = [{'status': 'done', 'message': msg_text}]
-                        print_success("Non-SELECT query executed successfully")
-                    elif "error" in msg_text.lower():
-                        return {
-                            'status': 'error',
-                            'message': msg_text,
-                            'results': []
-                        }
-                    else:
-                        results = [{'message': msg_text}]
-                        print_info(f"Server message: {msg_text[:100]}")
-                else:
-                    print_warning("No result table or message found in response")
-                    results = [{'status': 'executed', 'message': 'Query completed'}]
-
-        except Exception as e:
-            print_error("Failed to parse results", str(e))
-            return {
-                'status': 'error', 
-                'message': f"Parse error: {str(e)}", 
-                'results': []
-            }
-
-        # Summary
-        print_divider()
-        print_success(f"Query execution complete - {len(results)} results returned")
-        print_divider("═")
-        
-        return {
-            'status': 'success', 
-            'results': results
-        }
-
-    except Exception as e:
-        print_error("Critical error during query execution", str(e))
-        print_divider()
-        traceback.print_exc()
-        return {
-            'status': 'error', 
-            'message': str(e), 
-            'results': []
-        }
 
 def execute_query(sql_query, params=None, reuse_browser=True):
     """Execute SQL query via Selenium browser automation with proper parameter handling.
