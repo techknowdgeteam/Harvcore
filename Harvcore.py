@@ -121,20 +121,26 @@ def move_fetched_investors():
         return '1' if value else '0'
     
     def normalize_date(date_value):
-        """Convert invalid date values (0000-00-00, 0000-00-00 00:00:00, etc.) to empty string"""
+        """Convert invalid date values (0000-00-00, NULL, None, etc.) to empty string"""
         if date_value is None:
             return ""
         if not isinstance(date_value, str):
             date_value = str(date_value)
         date_value = date_value.strip()
+        
+        # Check for literal NULL/None strings
+        if date_value.upper() in ['NULL', 'NONE', '']:
+            return ""
+        
         # Check for patterns like 0000-00-00, 0000-00-00 00:00:00, 0000-00-00T00:00:00
         if date_value.replace('-', '').replace(':', '').replace(' ', '').replace('T', '').strip('0') == '':
             return ""
+        
         # Also check if it starts with 0000-00-00
         if date_value.startswith('0000-00-00'):
             return ""
+        
         return date_value
-    
     # Helper function to get the last message for a specific section
     def get_last_message(notifications_dict, section_key):
         """Get the most recent message for a specific section"""
@@ -347,7 +353,11 @@ def move_fetched_investors():
     for inv_id, investor_data in verified_data.items():
         # Extract required fields (case-insensitive)
         invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
-        execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
+        execution_start_raw = investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', ''))
+        if isinstance(execution_start_raw, str) and execution_start_raw.upper() in ['NULL', 'NONE', '']:
+            execution_start = ""
+        else:
+            execution_start = normalize_date(execution_start_raw)
         Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
         password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
@@ -2628,6 +2638,139 @@ def restricted_timerange(inv_id=None):
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
     return stats
+
+def check_investor_restrictions(inv_id):
+    """
+    SIMPLE FUNCTION: Returns only restriction status for a single investor.
+    Returns: dict with 'is_restricted', 'is_day_restricted', 'is_time_restricted', etc.
+    """
+    inv_root = Path(INV_PATH) / inv_id
+    acc_mgmt_path = inv_root / "accountmanagement.json"
+    
+    result = {
+        'is_restricted': False,
+        'is_day_restricted': False,
+        'is_time_restricted': False,
+        'restricted_day': None,
+        'current_hour': None
+    }
+    
+    if not acc_mgmt_path.exists():
+        return result
+    
+    try:
+        with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        
+        settings = config.get("settings", {})
+        restrictions = settings.get("restrictions_duration", {})
+        restricted_days = restrictions.get("restricted_days", [])
+        timezone_config = restrictions.get("timezone", "")
+        time_range = restrictions.get("restrict_orders_in_time_range_of", {})
+        
+        # Get current time in specified timezone
+        def get_current_time_in_timezone(timezone_str=None):
+            if not timezone_str:
+                return datetime.now()
+            
+            timezone_str = timezone_str.lower().strip()
+            try:
+                import pytz
+                from zoneinfo import ZoneInfo
+                
+                timezone_map = {
+                    'african': 'Africa/Lagos',
+                    'american': 'America/New_York',
+                    'australian': 'Australia/Sydney'
+                }
+                
+                if timezone_str in timezone_map:
+                    try:
+                        tz = ZoneInfo(timezone_map[timezone_str])
+                        return datetime.now(tz)
+                    except:
+                        tz = pytz.timezone(timezone_map[timezone_str])
+                        return datetime.now(tz)
+            except:
+                pass
+            return datetime.now()
+        
+        current_datetime = get_current_time_in_timezone(timezone_config)
+        current_day = current_datetime.strftime("%A").lower()
+        
+        # Check day restriction
+        if restricted_days and current_day in [d.lower() for d in restricted_days]:
+            result['is_restricted'] = True
+            result['is_day_restricted'] = True
+            result['restricted_day'] = current_datetime.strftime("%A")
+            return result
+        
+        # Check time restriction
+        if time_range and "from" in time_range and "to" in time_range:
+            from_str = time_range["from"]
+            to_str = time_range["to"]
+            
+            def is_zero_value(time_str):
+                if not time_str:
+                    return True
+                clean = time_str.lower().strip().replace(" ", "").replace("am", "").replace("pm", "").replace(":", "")
+                try:
+                    if float(clean) == 0.0:
+                        return True
+                except ValueError:
+                    pass
+                return False
+            
+            if not (is_zero_value(from_str) or is_zero_value(to_str)):
+                def parse_time_string(time_str):
+                    time_str = time_str.lower().strip().replace(" ", "")
+                    is_pm = "pm" in time_str
+                    is_am = "am" in time_str
+                    clean_time = time_str.replace("pm", "").replace("am", "")
+                    
+                    if ":" in clean_time:
+                        parts = clean_time.split(":")
+                        hour = int(parts[0])
+                        minute = int(parts[1]) if len(parts) > 1 else 0
+                    else:
+                        hour = int(clean_time)
+                        minute = 0
+                    
+                    if is_pm and hour != 12:
+                        hour += 12
+                    elif is_am and hour == 12:
+                        hour = 0
+                    
+                    return hour, minute
+                
+                window_start_hour, window_start_minute = parse_time_string(from_str)
+                window_end_hour, window_end_minute = parse_time_string(to_str)
+                
+                if window_end_hour == 0 and window_end_minute == 0:
+                    window_end_hour = 23
+                    window_end_minute = 59
+                
+                window_start_minutes = window_start_hour * 60 + window_start_minute
+                window_end_minutes = window_end_hour * 60 + window_end_minute
+                current_time_minutes = current_datetime.hour * 60 + current_datetime.minute
+                
+                crosses_midnight = window_end_minutes < window_start_minutes
+                
+                if crosses_midnight:
+                    is_within_window = (current_time_minutes >= window_start_minutes or 
+                                        current_time_minutes <= window_end_minutes)
+                else:
+                    is_within_window = window_start_minutes <= current_time_minutes <= window_end_minutes
+                
+                if is_within_window:
+                    result['is_restricted'] = True
+                    result['is_time_restricted'] = True
+                    result['current_hour'] = current_datetime.strftime("%I:%M %p")
+        
+    except Exception as e:
+        print(f"Error checking restrictions for {inv_id}: {e}")
+    
+    return result
 
 def investor_broker_symbols(inv_id=None):
     """
@@ -9314,6 +9457,8 @@ def convert_grid_prices_to_limit_orders(inv_id=None):
     READS from and SAVES BACK to the same file: prices/pending/limit_orders.json
     
     Only processes if symbols_grid_strategy is enabled in accountmanagement.json
+    
+    IMPORTANT: If no valid orders found, the file will be overwritten with an empty array []
     """
     print(f"\n{'='*10} 🔄 CONVERT GRID PRICES TO FLAT LIMIT ORDERS {'='*10}")
     
@@ -9530,10 +9675,11 @@ def convert_grid_prices_to_limit_orders(inv_id=None):
                             stats["sell_stop_orders"] += 1
             
             # ========== SAVE BACK TO THE SAME FILE as flat array ==========
+            # ALWAYS save - even if flat_orders is empty (will save [])
+            with open(signals_file, 'w', encoding='utf-8') as f:
+                json.dump(flat_orders, f, indent=4)
+            
             if flat_orders:
-                with open(signals_file, 'w', encoding='utf-8') as f:
-                    json.dump(flat_orders, f, indent=4)
-                
                 stats["investors_processed"] += 1
                 stats["total_orders"] += len(flat_orders)
                 stats["files_updated"] += 1
@@ -9552,11 +9698,13 @@ def convert_grid_prices_to_limit_orders(inv_id=None):
                 
                 if len(flat_orders) > 5:
                     print(f"     ... and {len(flat_orders) - 5} more orders")
-                    
             else:
-                print(f"  ⚠️ No valid orders found to convert")
-                stats["skipped_investors"] += 1
-                stats["skip_reasons"].append(f"{investor_id}: no valid orders found")
+                print(f"\n  ✅ EMPTIED limit_orders.json - No valid orders found, saved as empty array []")
+                print(f"     • Original file had: categories={len(categories)}")
+                print(f"     • Original bid orders: {total_bid_orders_found}")
+                print(f"     • Original ask orders: {total_ask_orders_found}")
+                stats["investors_processed"] += 1
+                stats["files_updated"] += 1
                 
         except json.JSONDecodeError as e:
             print(f"  ❌ JSON parsing error: {e}")
@@ -11804,7 +11952,7 @@ def deduplicate_orders(inv_id=None):
         current_inv_id = inv_folder.name
         print(f"\n [{current_inv_id}] 🔍 Checking for duplicate entries...")
 
-        # 2. Search for pending_orders folders
+        # Search for pending_orders folders
         pending_orders_folders = list(inv_folder.rglob("*/pending_orders/"))
         
         investor_limit_duplicates = 0
@@ -11822,12 +11970,17 @@ def deduplicate_orders(inv_id=None):
                     with open(limit_file, 'r', encoding='utf-8') as f:
                         orders = json.load(f)
 
-                    if orders:
+                    # Check if orders is a list and not empty
+                    if isinstance(orders, list) and orders:
                         original_count = len(orders)
                         seen_orders = set()
                         unique_orders = []
 
                         for order in orders:
+                            # Skip if order is not a dictionary
+                            if not isinstance(order, dict):
+                                continue
+                                
                             # Create a unique key based on Symbol, Timeframe, Order Type, and Entry
                             unique_key = (
                                 str(order.get("symbol", "")).strip(),
@@ -11854,7 +12007,12 @@ def deduplicate_orders(inv_id=None):
                             
                             folder_name = pending_folder.parent.name
                             print(f"  └─ 📄 {folder_name}/limit_orders.json - Removed {removed} duplicates")
+                    elif isinstance(orders, dict) and orders:
+                        # Handle case where JSON is an object instead of array
+                        print(f"  └─ ⚠️ {limit_file} contains a dictionary instead of a list - skipping")
 
+                except json.JSONDecodeError as e:
+                    print(f"  └─  Error decoding JSON from {limit_file}: {e}")
                 except Exception as e:
                     print(f"  └─  Error processing {limit_file}: {e}")
 
@@ -11865,12 +12023,17 @@ def deduplicate_orders(inv_id=None):
                     with open(limit_backup_file, 'r', encoding='utf-8') as f:
                         backup_orders = json.load(f)
 
-                    if backup_orders:
+                    # Check if backup_orders is a list and not empty
+                    if isinstance(backup_orders, list) and backup_orders:
                         original_count = len(backup_orders)
                         seen_orders = set()
                         unique_backup_orders = []
 
                         for order in backup_orders:
+                            # Skip if order is not a dictionary
+                            if not isinstance(order, dict):
+                                continue
+                                
                             # Create a unique key based on Symbol, Timeframe, Order Type, and Entry
                             unique_key = (
                                 str(order.get("symbol", "")).strip(),
@@ -11897,52 +12060,14 @@ def deduplicate_orders(inv_id=None):
                             
                             folder_name = pending_folder.parent.name
                             print(f"  └─ 📄 {folder_name}/limit_orders_backup.json - Removed {removed} duplicates")
+                    elif isinstance(backup_orders, dict) and backup_orders:
+                        # Handle case where JSON is an object instead of array
+                        print(f"  └─ ⚠️ {limit_backup_file} contains a dictionary instead of a list - skipping")
 
+                except json.JSONDecodeError as e:
+                    print(f"  └─  Error decoding JSON from {limit_backup_file}: {e}")
                 except Exception as e:
                     print(f"  └─  Error processing {limit_backup_file}: {e}")
-
-            # Process limit_orders.json
-            signals_file = pending_folder / "limit_orders.json"
-            if signals_file.exists():
-                try:
-                    with open(signals_file, 'r', encoding='utf-8') as f:
-                        signals = json.load(f)
-
-                    if signals:
-                        original_count = len(signals)
-                        seen_orders = set()
-                        unique_signals = []
-
-                        for signal in signals:
-                            # Create a unique key based on Symbol, Timeframe, Order Type, and Entry
-                            unique_key = (
-                                str(signal.get("symbol", "")).strip(),
-                                str(signal.get("timeframe", "")).strip(),
-                                str(signal.get("order_type", "")).strip(),
-                                float(signal.get("entry", 0))
-                            )
-
-                            if unique_key not in seen_orders:
-                                seen_orders.add(unique_key)
-                                unique_signals.append(signal)
-                        
-                        # Only write back if duplicates were actually found
-                        if len(unique_signals) < original_count:
-                            removed = original_count - len(unique_signals)
-                            with open(signals_file, 'w', encoding='utf-8') as f:
-                                json.dump(unique_signals, f, indent=4)
-                            
-                            investor_signal_duplicates += removed
-                            investor_signal_files_cleaned += 1
-                            total_signal_duplicates += removed
-                            total_signal_files_cleaned += 1
-                            any_duplicates_removed = True
-                            
-                            folder_name = pending_folder.parent.name
-                            print(f"  └─ 📄 {folder_name}/limit_orders.json - Removed {removed} duplicates")
-
-                except Exception as e:
-                    print(f"  └─  Error processing {signals_file}: {e}")
 
         # Summary for the current investor
         if investor_limit_duplicates > 0 or investor_signal_duplicates > 0 or investor_limit_backup_duplicates > 0:
@@ -11968,7 +12093,6 @@ def deduplicate_orders(inv_id=None):
         print(f"\n Breakdown by file type:")
         print(f"   • limit_orders.json:        {total_limit_files_cleaned} files | {total_limit_duplicates} duplicates")
         print(f"   • limit_orders_backup.json: {total_limit_backup_files_cleaned} files | {total_limit_backup_duplicates} duplicates")
-        print(f"   • limit_orders.json:             {total_signal_files_cleaned} files | {total_signal_duplicates} duplicates")
     else:
         print(" ✅ Everything was already clean - no duplicates found!")
     print(f"{'='*33}\n")
@@ -21103,12 +21227,6 @@ def process_single_investor_(inv_folder):
         else:
             mt5.initialize(timeout=30000)
         
-        # Perform login with credentials
-        if not mt5.login(login_id, password=password_str, server=server_str):
-            print(f"[FAIL] Login failed for ID: {login_id}")
-            print(f"       Error: {mt5.last_error()}")
-            mt5.shutdown()
-            return account_stats
         
         print(f"✅ Successfully logged in with credentials for ID: {login_id}")
         
@@ -21234,7 +21352,7 @@ def process_single_investor_(inv_folder):
         # =====================================================================
         print(f"🔍 [{inv_id}] Evaluating system run constraints...")
         
-        timerange_result = restricted_timerange(inv_id=inv_id)
+        timerange_result = check_investor_restrictions(inv_id=inv_id)
         
         is_restricted = False
         if isinstance(timerange_result, dict):
@@ -21437,13 +21555,6 @@ def process_single_investor(inv_folder):
         else:
             mt5.initialize(timeout=30000)
         
-        # Perform login with credentials
-        if not mt5.login(login_id, password=password_str, server=server_str):
-            print(f"[FAIL] Login failed for ID: {login_id}")
-            print(f"       Error: {mt5.last_error()}")
-            mt5.shutdown()
-            return account_stats
-        
         print(f"✅ Successfully logged in with credentials for ID: {login_id}")
         
         # Verify account info
@@ -21568,20 +21679,32 @@ def process_single_investor(inv_folder):
         # =====================================================================
         print(f"🔍 [{inv_id}] Evaluating system run constraints...")
         
-        timerange_result = restricted_timerange(inv_id=inv_id)
+        timerange_result = check_investor_restrictions(inv_id=inv_id)
         
-        is_restricted = False
+        # Extract both day and time restrictions
+        is_restricted_day = False
+        is_restricted_time = False
+        restriction_day_name = None
+        restriction_current_hour = None
+        
         if isinstance(timerange_result, dict):
             is_restricted = timerange_result.get('is_restricted', False)
+            is_restricted_day = timerange_result.get('is_day_restricted', False)
+            is_restricted_time = timerange_result.get('is_time_restricted', False)
+            restriction_day_name = timerange_result.get('restricted_day', None)
+            restriction_current_hour = timerange_result.get('current_hour', None)
         elif str(timerange_result).strip().lower() in ["true", "1"]:
             is_restricted = True
-            
+            # Legacy format - treat as time restriction
+            is_restricted_time = True
+        
         # =====================================================================
-        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
+        # CONDITION A: NO RESTRICTIONS - EXECUTE ALL ENGINES
         # =====================================================================
         trades_analytics(inv_id=inv_id)
-        if not is_restricted:
-            print(f"🛡️ [{inv_id}] Validation Clear. Explicitly OUTSIDE restricted window -> Running core trade logic...")
+        
+        if not is_restricted_day and not is_restricted_time:
+            print(f"✅ [{inv_id}] No restrictions active - Running full trading logic...")
             
             # =================================================================
             # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
@@ -21596,13 +21719,11 @@ def process_single_investor(inv_folder):
                 print(f"\n{'='*10} 🎯 EXECUTING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
                 
                 # directional bias execution - all these functions are conditionally executed together
-                # directional bias execution #
                 additional_candles_for_orders_limitation(inv_id=inv_id)
                 fetch_ohlc_data_for_investor(inv_id=inv_id)
                 directional_bias(inv_id=inv_id)
                 additional_candles_for_orders_limitation(inv_id=inv_id)
                 create_position_hedge(inv_id=inv_id)
-                # directional bias execution #
                 
                 print(f"{'='*10} ✅ OHLC/DIRECTIONAL BIAS FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
             else:
@@ -21617,7 +21738,6 @@ def process_single_investor(inv_folder):
                 symbols_dynamic_grid_prices(inv_id=inv_id)
                 # grid execution #
                 
-
                 # grid single position and pending #
                 convert_grid_prices_to_limit_orders(inv_id=inv_id)
                 # grid single position and pending #
@@ -21670,18 +21790,42 @@ def process_single_investor(inv_folder):
             apply_dynamic_breakeven(inv_id=inv_id)
             check_and_record_unauthorized_actions(inv_id=inv_id)
             
-
             account_stats["success"] = True
             print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
 
         # =====================================================================
-        # CONDITION B: INSIDE RESTRICTED TIME RANGE -> SKIP ENGINE
+        # CONDITION B: DAY RESTRICTED - NO TRADING ALLOWED (CLEANUP ONLY)
+        # =====================================================================
+        elif is_restricted_day:
+            print(f"🚨 [ALERT] Account {inv_id} is operating on a restricted trading day.")
+            if restriction_day_name:
+                print(f"   📅 Trading is NOT ALLOWED on {restriction_day_name}s")
+            else:
+                print(f"   📅 Trading is NOT ALLOWED on this day (day-based restriction active)")
+            
+            print(f"   ⏭️  Skipping all trading functions - cleanup only mode")
+            
+            # Only perform cleanup - delete all orders and positions
+            delete_all_orders_and_positions(inv_id=inv_id)
+            
+            print(f"   ✅ Cleanup complete for day-restricted investor {inv_id}")
+        
+        # =====================================================================
+        # CONDITION C: TIME RESTRICTED - NO TRADING ALLOWED (CLEANUP ONLY)
         # =====================================================================
         else:
-            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time range block.")
-            print(f"⏭️ in restricted timerange")
+            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time window.")
+            if restriction_current_hour:
+                print(f"   🕐 Trading is NOT ALLOWED during {restriction_current_hour}")
+            else:
+                print(f"   🕐 Trading is NOT ALLOWED during this time window")
             
+            print(f"   ⏭️  Skipping all trading functions - cleanup only mode")
+            
+            # Only perform cleanup - delete all orders and positions
             delete_all_orders_and_positions(inv_id=inv_id)
+            
+            print(f"   ✅ Cleanup complete for time-restricted investor {inv_id}")
         
         mt5.shutdown()
         
@@ -21841,6 +21985,8 @@ def place_orders_parallel_loop():
             time.sleep(5)
             
         time.sleep(1)
+
+
 
 if __name__ == "__main__":
    place_orders_parallel()
