@@ -76,7 +76,7 @@
         "contract_days_left": "NULL",
         "paymentdetails": "Amount: $300.00, Coin: btc, Confirmed_at: 2026-06-09 04:16:44",
         "message": "NULL",
-        "unauthorized_actions": "1",
+        "unauthorized_actions": "NULL",
         "notifications": {
             "1": {
                 "section": "AccountMode",
@@ -434,6 +434,319 @@
         "server_decision": "NULL",
         "accountmanagement": {
             "selected_risk_reward": [
+                3
+            ],
+            "hedge_orders_risk_reward": [
+                2
+            ],
+            "timeframe": [
+                "5m"
+            ],
+            "bars": 3,
+            "symbols_dictionary": {
+                "xxxjpy": [],
+                "xxxusd": [
+                    "GBPUSD"
+                ],
+                "xxxaud": [],
+                "xxxnzd": [],
+                "usdxxx": [],
+                "xxxchf": [],
+                "xxxcad": [],
+                "xxxbasket": [],
+                "indices": [],
+                "metals": [],
+                "energies": [],
+                "synthetics": []
+            },
+            "settings": {
+                "fetch_ohlc_data_and_directional_bias_for_investor": true,
+                "create_hedge_order": true,
+                "enable_latest_fallback_to_older_order": true,
+                "remove_orders_if_additonal_candles_is_more_than": 1,
+                "skip_orders_close_to_position": false,
+                "also_restrict_opposite_order_too_close_to_position": false,
+                "switch_invalid_to_instant_order": false,
+                "enable_order_type_conversion": false,
+                "restrict_orders_in_time_range_of": {
+                    "from": "08:00 pm",
+                    "to": "12:30 am"
+                },
+                "martingale_config": {
+                    "enable_martingale": true,
+                    "martingale_for_position_order_scale": true,
+                    "martingale_loss_recovery_adder_percentage": "10%",
+                    "pre_scaling": {
+                        "martingale_pre_scaling": true,
+                        "martingale_linear_scaling": true,
+                        "martingale_pre_scale_highest_risk_adder": true,
+                        "highest_risk_reduction_percentage": "0%",
+                        "martingale_pre_scale_expected_loss_adder": true,
+                        "expected_loss_reduction_percentage": "0%"
+                    }
+                },
+                "enable_breakeven": true,
+                "breakeven_dictionary": [
+                    {
+                        "reward": 1,
+                        "breakeven_at_reward": 0.1
+                    },
+                    {
+                        "reward": 1.8,
+                        "breakeven_at_reward": 0.5
+                    },
+                    {
+                        "reward": 2,
+                        "breakeven_at_reward": 0.5
+                    },
+                    {
+                        "reward": 2.8,
+                        "breakeven_at_reward": 1
+                    },
+                    {
+                        "reward": 3,
+                        "breakeven_at_reward": 1.5
+                    },
+                    {
+                        "reward": 3.8,
+                        "breakeven_at_reward": 1.7
+                    },
+                    {
+                        "reward": 4,
+                        "breakeven_at_reward": 2
+                    },
+                    {
+                        "reward": 4.8,
+                        "breakeven_at_reward": 2.2
+                    },
+                    {
+                        "reward": 5,
+                        "breakeven_at_reward": 2.5
+                    },
+                    {
+                        "reward": 5.8,
+                        "breakeven_at_reward": 2.8
+                    },
+                    {
+                        "reward": 6,
+                        "breakeven_at_reward": 3
+                    },
+                    {
+                        "reward": 7,
+                        "breakeven_at_reward": 3.5
+                    },
+                    {
+                        "reward": 7.8,
+                        "breakeven_at_reward": 3.8
+                    },
+                    {
+                        "reward": 8,
+                        "breakeven_at_reward": 4
+                    },
+                    {
+                        "reward": 8.8,
+                        "breakeven_at_reward": 4.2
+                    },
+                    {
+                        "reward": 9,
+                        "breakeven_at_reward": 4.5
+                    },
+                    {
+                        "reward": 10,
+                        "breakeven_at_reward": 5
+                    }
+                ],
+                "restrict_order_from_timeframe": "none",
+                "default_price": false,
+                "risk_reward_correction": true,
+                "enable_martingale": true
+            },
+            "minimum_balance_risk_distance": {
+                "1-10000000.99_risk": 0.4
+            },
+            "maximum_balance_risk_distance": {
+                "1-10000000.99_risk": 1.8
+            },
+            "account_balance_default_risk_management": {
+                "1-10000000.99_risk": 0.5
+            },
+            "account_balance_maximum_risk_management": {
+                "1-10000000.99_risk": 1.6
+            },
+            "requirements": {
+                "contract_duration": "30",
+                "min_broker_balance": "50.00"
+            },
+            "bypass_restriction": true,
+            "activate_autotrading": true,
+            "broker_balance": 9024.15,
+            "account_mode": "demo",
+            "demo_account": "1"
+        },
+        "invested_with": "techknowdge_revenue",
+        "enable_autotrading": "1",
+        "bypass_restriction": "1",
+        "demo_account": "1",
+        "account_mode": "demo",
+        "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe",
+        "account_balance": 9000.87,
+        "account_currency": "USD",
+        "account_leverage": 1000,
+        "last_updated": "2026-06-15 11:20:21",
+        "has_error": false,
+        "processed": true,
+        "folder_created": true,
+        "contract_expiry_date_calculated": "July 10, 2026",
+        "meets_balance_requirement": true,
+        "min_broker_balance": 50.0,
+        "error_messages": [],
+        "strategies": [
+            "techknowdge_revenue"
+        ],
+        "demo_account_restricted": false
+    },
+    "4": {
+        "id": "4",
+        "broker": "Deriv",
+        "email": "taiwostandarddemo@gmail.com",
+        "fullname": "Arobieke Taiwo",
+        "server": "Deriv-demo",
+        "login": "201763239",
+        "password": "@Techknowdge12#",
+        "application_status": "approved",
+        "broker_balance": "10000.00",
+        "balance_verification": "NULL",
+        "profitandloss": "NULL",
+        "passkey": "NULL",
+        "submitted_at": "NULL",
+        "balance_display": "NULL",
+        "execution_start_date": "June 14, 2026",
+        "analytics_history": "NULL",
+        "revenue_history": "NULL",
+        "loyalties": "NULL",
+        "contract_days_left": "NULL",
+        "paymentdetails": "NULL",
+        "message": "NULL",
+        "unauthorized_actions": "NULL",
+        "notifications": {
+            "1": {
+                "section": "AccountMode",
+                "message": "\u2705 ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "2": {
+                "section": "Strategies",
+                "message": "Your account has been configured with the following trading strategy(s): techknowdge_revenue. The system will execute trades according to this strategy configuration.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "3": {
+                "section": "StartDate",
+                "message": "Your trading program is active as of June 14, 2026. Welcome aboard!",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "4": {
+                "section": "Autotrading",
+                "message": "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "5": {
+                "section": "BypassRestriction",
+                "message": "Standard trading restrictions are in place. Ensure to avoid unauthorized actions such as manual trades, withdrawals and deposits during this contract duration.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "6": {
+                "section": "ContractDuration",
+                "message": "Your trading contract duration is set to 30 days. Your contract will expire on July 14, 2026. You are currently within your active trading period.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "7": {
+                "section": "TerminalPath",
+                "message": "Your trading terminal has been configured and is ready for automated trading.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "8": {
+                "section": "BalanceCheck",
+                "message": "\ud83d\udcb0 BALANCE VERIFICATION: Investor's broker balance of $10000.00 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            }
+        },
+        "executions_notification": {
+            "1": {
+                "section": "AccountMode",
+                "message": "\u2705 ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "2": {
+                "section": "Strategies",
+                "message": "SERVER NOTIFICATION: Investor 4 successfully configured with strategies: techknowdge_revenue",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "3": {
+                "section": "StartDate",
+                "message": "SERVER NOTIFICATION: Investor 4 enrollment confirmed. Start date: June 14, 2026",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "4": {
+                "section": "Autotrading",
+                "message": "SERVER NOTIFICATION: Investor 4 auto-trading is active and ready for automated execution.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "5": {
+                "section": "BypassRestriction",
+                "message": "SERVER NOTIFICATION: Investor 4 has bypass_restriction disabled.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "6": {
+                "section": "ContractDuration",
+                "message": "SERVER NOTIFICATION: Investor 4 contract duration configured: 30 days.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "7": {
+                "section": "TerminalPath",
+                "message": "SERVER NOTIFICATION: Investor 4 terminal path configured successfully.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            },
+            "8": {
+                "section": "BalanceCheck",
+                "message": "\ud83d\udcb0 BALANCE VERIFICATION: Investor's broker balance of $10000.00 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+                "time": "2026-06-16 20:08:07",
+                "type": "success",
+                "update": "new"
+            }
+        },
+        "server_decision": "NULL",
+        "accountmanagement": {
+            "selected_risk_reward": [
                 1
             ],
             "hedge_orders_risk_reward": [
@@ -446,7 +759,7 @@
             "symbols_dictionary": {
                 "xxxjpy": [],
                 "xxxusd": [
-                    "BTCUSD"
+                    "GBPUSD"
                 ],
                 "xxxaud": [],
                 "xxxnzd": [],
@@ -463,7 +776,7 @@
                 "symbols_grid_strategy": true,
                 "enable_single_position_and_pending": false,
                 "manage_grid_levels_count": {
-                    "count": 6
+                    "count": 2
                 },
                 "skip_orders_close_to_position": true,
                 "cancel_orders_close_to_position": true,
@@ -475,10 +788,7 @@
                         "from": "08:00 pm",
                         "to": "12:00 am"
                     },
-                    "restricted_days": [
-                        "saturday",
-                        "sunday"
-                    ],
+                    "restricted_days": [],
                     "timezone": "african"
                 },
                 "fetch_ohlc_data_and_directional_bias_for_investor": false,
@@ -608,1741 +918,25 @@
         },
         "invested_with": "techknowdge_revenue",
         "enable_autotrading": "1",
-        "bypass_restriction": "1",
+        "bypass_restriction": "0",
         "demo_account": "1",
         "account_mode": "demo",
-        "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe",
-        "account_balance": 9001.56,
+        "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv\\terminal64.exe",
+        "mt5_folder_name": "MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv",
+        "account_balance": 10015.74,
         "account_currency": "USD",
         "account_leverage": 1000,
-        "last_updated": "2026-06-13 21:44:02",
+        "last_updated": "2026-06-16 22:38:18",
         "has_error": false,
         "processed": true,
         "folder_created": true,
-        "contract_expiry_date_calculated": "July 10, 2026",
+        "contract_expiry_date_calculated": "July 14, 2026",
         "meets_balance_requirement": true,
         "min_broker_balance": 50.0,
         "error_messages": [],
         "strategies": [
             "techknowdge_revenue"
         ],
-        "demo_account_restricted": false,
-        "current_time_window_status": "in_window",
-        "last_time_window_check": "2026-06-13T21:44:04.556783+01:00",
-        "time_window_config": {
-            "start": "12:00 AM",
-            "end": "11:59 PM",
-            "has_restriction": true,
-            "restricted_days": [
-                "saturday",
-                "sunday"
-            ],
-            "timezone": "african",
-            "current_day": "Saturday",
-            "is_day_restricted": true,
-            "day_restriction_only": false
-        },
-        "analytics": {
-            "from_execution_start_date": {
-                "start_date": "May 01, 2026",
-                "end_date": "2026-07-10",
-                "last_updated": "2026-06-13T21:44:04.619809",
-                "trades_within_risks_config": {
-                    "summaries": {
-                        "summaries_of_profits_only": {
-                            "total_lost_trades": 0,
-                            "total_won_trades": 0,
-                            "total_lost_trades_amount": 0,
-                            "total_won_trades_amount": 0,
-                            "lowest_trades_per_day": 0,
-                            "highest_trades_per_day": 0,
-                            "average_trades_per_day": 0,
-                            "lowest_trade_dates": [],
-                            "highest_trade_dates": [],
-                            "average_trade_dates": []
-                        }
-                    },
-                    "regular_data": {
-                        "authorized": {
-                            "total_trades": 0,
-                            "total_pnl": 0,
-                            "profit_trades": 0,
-                            "loss_trades": 0,
-                            "profit_amount": 0,
-                            "loss_amount": 0,
-                            "win_rate_by_count_percentage": 0.0,
-                            "loss_rate_by_count_percentage": 0.0,
-                            "win_rate_by_revenue_percentage": 0.0,
-                            "loss_rate_by_revenue_percentage": 0.0,
-                            "lowest_trades_per_day": 0,
-                            "highest_trades_per_day": 0,
-                            "average_trades_per_day": 0,
-                            "lowest_trade_dates": [],
-                            "highest_trade_dates": [],
-                            "average_trade_dates": [],
-                            "all_traded_symbols": {},
-                            "symbols_traded": 0,
-                            "closed_deals_with_sl_tp": 0,
-                            "closed_deals_without_sl_tp": 0,
-                            "highest_sequential_losses": {},
-                            "highest_sequential_days_in_loss": {}
-                        },
-                        "unauthorized": {
-                            "total_trades": 0,
-                            "total_pnl": 0,
-                            "profit_trades": 0,
-                            "loss_trades": 0,
-                            "profit_amount": 0,
-                            "loss_amount": 0,
-                            "win_rate_by_count_percentage": 0.0,
-                            "loss_rate_by_count_percentage": 0.0,
-                            "win_rate_by_revenue_percentage": 0.0,
-                            "loss_rate_by_revenue_percentage": 0.0,
-                            "lowest_trades_per_day": 0,
-                            "highest_trades_per_day": 0,
-                            "average_trades_per_day": 0,
-                            "lowest_trade_dates": [],
-                            "highest_trade_dates": [],
-                            "average_trade_dates": [],
-                            "all_traded_symbols": {},
-                            "symbols_traded": 0,
-                            "closed_deals_with_sl_tp": 0,
-                            "closed_deals_without_sl_tp": 0,
-                            "highest_sequential_losses": {},
-                            "highest_sequential_days_in_loss": {}
-                        }
-                    }
-                },
-                "trades_outside_risks_config": {
-                    "summaries": {
-                        "summaries_of_profits_only": {
-                            "total_lost_trades": 0,
-                            "total_won_trades": 0,
-                            "total_lost_trades_amount": 0,
-                            "total_won_trades_amount": 0,
-                            "lowest_trades_per_day": 0,
-                            "highest_trades_per_day": 0,
-                            "average_trades_per_day": 0,
-                            "lowest_trade_dates": [],
-                            "highest_trade_dates": [],
-                            "average_trade_dates": []
-                        }
-                    },
-                    "regular_data": {
-                        "authorized": {
-                            "total_trades": 0,
-                            "total_pnl": 0,
-                            "profit_trades": 0,
-                            "loss_trades": 0,
-                            "profit_amount": 0,
-                            "loss_amount": 0,
-                            "win_rate_by_count_percentage": 0.0,
-                            "loss_rate_by_count_percentage": 0.0,
-                            "win_rate_by_revenue_percentage": 0.0,
-                            "loss_rate_by_revenue_percentage": 0.0,
-                            "lowest_trades_per_day": 0,
-                            "highest_trades_per_day": 0,
-                            "average_trades_per_day": 0,
-                            "lowest_trade_dates": [],
-                            "highest_trade_dates": [],
-                            "average_trade_dates": [],
-                            "all_traded_symbols": {},
-                            "symbols_traded": 0,
-                            "closed_deals_with_sl_tp": 0,
-                            "closed_deals_without_sl_tp": 0,
-                            "highest_sequential_losses": {},
-                            "highest_sequential_days_in_loss": {}
-                        },
-                        "unauthorized": {
-                            "total_trades": 0,
-                            "total_pnl": 0,
-                            "profit_trades": 0,
-                            "loss_trades": 0,
-                            "profit_amount": 0,
-                            "loss_amount": 0,
-                            "win_rate_by_count_percentage": 0.0,
-                            "loss_rate_by_count_percentage": 0.0,
-                            "win_rate_by_revenue_percentage": 0.0,
-                            "loss_rate_by_revenue_percentage": 0.0,
-                            "lowest_trades_per_day": 0,
-                            "highest_trades_per_day": 0,
-                            "average_trades_per_day": 0,
-                            "lowest_trade_dates": [],
-                            "highest_trade_dates": [],
-                            "average_trade_dates": [],
-                            "all_traded_symbols": {},
-                            "symbols_traded": 0,
-                            "closed_deals_with_sl_tp": 0,
-                            "closed_deals_without_sl_tp": 0,
-                            "highest_sequential_losses": {},
-                            "highest_sequential_days_in_loss": {}
-                        }
-                    }
-                }
-            },
-            "last_28_days": {
-                "may_09_2026_to_june_06_2026": {
-                    "start_date": "May 09, 2026",
-                    "end_date": "2026-06-06",
-                    "last_updated": "2026-06-06T10:13:36.782095",
-                    "trades_within_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "inherited_and_claimed_trades_by_risk_reward_0.95": 11,
-                                "inherited_and_claimed_trades_by_risk_reward_0.96": 10,
-                                "inherited_and_claimed_trades_by_risk_reward_1": 9,
-                                "inherited_and_claimed_trades_by_risk_reward_2": 2,
-                                "total_lost_trades": 10,
-                                "total_won_trades": 11,
-                                "total_lost_trades_amount": 127.89,
-                                "total_won_trades_amount": 107.18,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-05-21",
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ]
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 19,
-                                "total_pnl": -21.91,
-                                "profit_trades": 9,
-                                "loss_trades": 10,
-                                "profit_amount": 105.98,
-                                "loss_amount": 127.89,
-                                "win_rate_by_count_percentage": 47.37,
-                                "loss_rate_by_count_percentage": 52.63,
-                                "win_rate_by_revenue_percentage": 45.32,
-                                "loss_rate_by_revenue_percentage": 54.68,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ],
-                                "all_traded_symbols": {
-                                    "BTCUSD": {
-                                        "symbol": "BTCUSD",
-                                        "total_trades": 9,
-                                        "total_profit": 24.61,
-                                        "total_loss": 8.85
-                                    },
-                                    "GBPUSD": {
-                                        "symbol": "GBPUSD",
-                                        "total_trades": 10,
-                                        "total_profit": 81.37,
-                                        "total_loss": 119.04
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 19,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {
-                                    "consecutive_losses_count": 4,
-                                    "total_loss_pnl": -100.84,
-                                    "trades": [
-                                        {
-                                            "ticket": 5674798119,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.346,
-                                            "take_profit": 1.348,
-                                            "trade_risk": 3.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -0.36,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.03,
-                                            "time_open": "2026-06-02 10:30:26",
-                                            "time_close": "2026-06-02 10:44:33",
-                                            "magic": 59964271,
-                                            "total_pnl": -1.08,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675045987,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.34813,
-                                            "stoploss": 1.34714,
-                                            "take_profit": 1.34906,
-                                            "trade_risk": 23.76,
-                                            "risk_reward": 0.94,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.24,
-                                            "time_open": "2026-06-02 15:42:12",
-                                            "time_close": "2026-06-02 15:51:08",
-                                            "magic": 59964271,
-                                            "total_pnl": -23.76,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675062468,
-                                            "symbol": "GBPUSD",
-                                            "type": "SELL",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.348,
-                                            "take_profit": 1.346,
-                                            "trade_risk": 26.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.26,
-                                            "time_open": "2026-06-02 15:53:23",
-                                            "time_close": "2026-06-02 16:09:25",
-                                            "magic": 59964271,
-                                            "total_pnl": -26.0,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675102265,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.348,
-                                            "stoploss": 1.347,
-                                            "take_profit": 1.349,
-                                            "trade_risk": 50.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.5,
-                                            "time_open": "2026-06-02 16:57:35",
-                                            "time_close": "2026-06-02 17:29:50",
-                                            "magic": 59964271,
-                                            "total_pnl": -50.0,
-                                            "state": "CLOSED"
-                                        }
-                                    ]
-                                },
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 2,
-                                "total_pnl": 1.2,
-                                "profit_trades": 2,
-                                "loss_trades": 0,
-                                "profit_amount": 1.2,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 100.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 100.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [
-                                    "2026-05-21"
-                                ],
-                                "all_traded_symbols": {
-                                    "Wall Street 30": {
-                                        "symbol": "Wall Street 30",
-                                        "total_trades": 1,
-                                        "total_profit": 1.08,
-                                        "total_loss": 0.0
-                                    },
-                                    "Volatility 250 (1s) Index": {
-                                        "symbol": "Volatility 250 (1s) Index",
-                                        "total_trades": 1,
-                                        "total_profit": 0.12,
-                                        "total_loss": 0.0
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 1,
-                                "closed_deals_without_sl_tp": 1,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    },
-                    "trades_outside_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "total_lost_trades": 0,
-                                "total_won_trades": 0,
-                                "total_lost_trades_amount": 0,
-                                "total_won_trades_amount": 0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": []
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    }
-                },
-                "may_12_2026_to_june_09_2026": {
-                    "start_date": "May 12, 2026",
-                    "end_date": "2026-06-09",
-                    "last_updated": "2026-06-09T08:08:31.585178",
-                    "trades_within_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "inherited_and_claimed_trades_by_risk_reward_0.95": 8,
-                                "inherited_and_claimed_trades_by_risk_reward_0.96": 7,
-                                "inherited_and_claimed_trades_by_risk_reward_1": 6,
-                                "inherited_and_claimed_trades_by_risk_reward_2": 2,
-                                "total_lost_trades": 8,
-                                "total_won_trades": 8,
-                                "total_lost_trades_amount": 20.01,
-                                "total_won_trades_amount": 22.72,
-                                "lowest_trades_per_day": 1,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 3,
-                                "lowest_trade_dates": [
-                                    "2026-06-02"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-03",
-                                    "2026-06-06"
-                                ]
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 12,
-                                "total_pnl": 3.39,
-                                "profit_trades": 6,
-                                "loss_trades": 6,
-                                "profit_amount": 21.52,
-                                "loss_amount": 18.13,
-                                "win_rate_by_count_percentage": 50.0,
-                                "loss_rate_by_count_percentage": 50.0,
-                                "win_rate_by_revenue_percentage": 54.27,
-                                "loss_rate_by_revenue_percentage": 45.73,
-                                "lowest_trades_per_day": 1,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 3,
-                                "lowest_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-03"
-                                ],
-                                "all_traded_symbols": {
-                                    "BTCUSD": {
-                                        "symbol": "BTCUSD",
-                                        "total_trades": 8,
-                                        "total_profit": 18.46,
-                                        "total_loss": 8.85
-                                    },
-                                    "GBPUSD": {
-                                        "symbol": "GBPUSD",
-                                        "total_trades": 4,
-                                        "total_profit": 3.06,
-                                        "total_loss": 9.28
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 12,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {
-                                    "consecutive_losses_count": 3,
-                                    "total_loss_pnl": -8.85,
-                                    "trades": [
-                                        {
-                                            "ticket": 5666418495,
-                                            "symbol": "BTCUSD",
-                                            "type": "SELL",
-                                            "entry_price": 75398.828,
-                                            "stoploss": 75829.982,
-                                            "take_profit": 74970.018,
-                                            "trade_risk": 4.31,
-                                            "risk_reward": 0.99,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -0.43,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.01,
-                                            "time_open": "2026-05-23 18:36:58",
-                                            "time_close": "2026-05-23 19:10:56",
-                                            "magic": 59964271,
-                                            "total_pnl": -1.86,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5666412569,
-                                            "symbol": "BTCUSD",
-                                            "type": "SELL",
-                                            "entry_price": 75399.783,
-                                            "stoploss": 75829.982,
-                                            "take_profit": 74970.018,
-                                            "trade_risk": 4.3,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -0.39,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.01,
-                                            "time_open": "2026-05-23 18:20:27",
-                                            "time_close": "2026-05-23 19:11:01",
-                                            "magic": 59964271,
-                                            "total_pnl": -1.69,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5666466850,
-                                            "symbol": "BTCUSD",
-                                            "type": "SELL",
-                                            "entry_price": 75743.7,
-                                            "stoploss": 75975.8,
-                                            "take_profit": 75080.796,
-                                            "trade_risk": 4.64,
-                                            "risk_reward": 2.86,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.14,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.02,
-                                            "time_open": "2026-05-23 20:02:05",
-                                            "time_close": "2026-05-23 20:18:31",
-                                            "magic": 59964271,
-                                            "total_pnl": -5.3,
-                                            "state": "CLOSED"
-                                        }
-                                    ]
-                                },
-                                "highest_sequential_days_in_loss": {
-                                    "consecutive_days_count": 2,
-                                    "total_loss_pnl": -6.22,
-                                    "days": {
-                                        "2026-06-02": [
-                                            {
-                                                "ticket": 5674798119,
-                                                "symbol": "GBPUSD",
-                                                "type": "BUY",
-                                                "entry_price": 1.347,
-                                                "stoploss": 1.346,
-                                                "take_profit": 1.348,
-                                                "trade_risk": 3.0,
-                                                "risk_reward": 1.0,
-                                                "trade_owned_by_risk_reward": "N/A",
-                                                "beneficiaries": "none",
-                                                "closed_at_reward": -0.36,
-                                                "claimed_reason": "unclaimed because trade closed out at a loss",
-                                                "volume": 0.03,
-                                                "time_open": "2026-06-02 10:30:26",
-                                                "time_close": "2026-06-02 10:44:33",
-                                                "magic": 59964271,
-                                                "total_pnl": -1.08,
-                                                "state": "CLOSED"
-                                            }
-                                        ],
-                                        "2026-06-03": [
-                                            {
-                                                "ticket": 5675684745,
-                                                "symbol": "GBPUSD",
-                                                "type": "SELL",
-                                                "entry_price": 1.34495,
-                                                "stoploss": 1.346,
-                                                "take_profit": 1.344,
-                                                "trade_risk": 3.15,
-                                                "risk_reward": 0.9,
-                                                "trade_owned_by_risk_reward": "N/A",
-                                                "beneficiaries": "none",
-                                                "closed_at_reward": -1.0,
-                                                "claimed_reason": "unclaimed because trade closed out at a loss",
-                                                "volume": 0.03,
-                                                "time_open": "2026-06-03 09:13:43",
-                                                "time_close": "2026-06-03 11:06:12",
-                                                "magic": 59964271,
-                                                "total_pnl": -3.15,
-                                                "state": "CLOSED"
-                                            },
-                                            {
-                                                "ticket": 5675783439,
-                                                "symbol": "GBPUSD",
-                                                "type": "SELL",
-                                                "entry_price": 1.34498,
-                                                "stoploss": 1.346,
-                                                "take_profit": 1.344,
-                                                "trade_risk": 3.06,
-                                                "risk_reward": 0.96,
-                                                "trade_owned_by_risk_reward": "primary target:0.96",
-                                                "beneficiaries": "none",
-                                                "closed_at_reward": 1.0,
-                                                "claimed_reason": "claimed by the actual trade risk reward potential of 0.96",
-                                                "volume": 0.03,
-                                                "time_open": "2026-06-03 11:16:44",
-                                                "time_close": "2026-06-03 13:30:30",
-                                                "magic": 59964271,
-                                                "total_pnl": 3.06,
-                                                "state": "CLOSED"
-                                            },
-                                            {
-                                                "ticket": 5675918186,
-                                                "symbol": "GBPUSD",
-                                                "type": "SELL",
-                                                "entry_price": 1.34299,
-                                                "stoploss": 1.344,
-                                                "take_profit": 1.342,
-                                                "trade_risk": 5.05,
-                                                "risk_reward": 0.98,
-                                                "trade_owned_by_risk_reward": "N/A",
-                                                "beneficiaries": "none",
-                                                "closed_at_reward": -1.0,
-                                                "claimed_reason": "unclaimed because trade closed out at a loss",
-                                                "volume": 0.05,
-                                                "time_open": "2026-06-03 13:52:25",
-                                                "time_close": "2026-06-03 16:45:31",
-                                                "magic": 59964271,
-                                                "total_pnl": -5.05,
-                                                "state": "CLOSED"
-                                            }
-                                        ]
-                                    }
-                                }
-                            },
-                            "unauthorized": {
-                                "total_trades": 4,
-                                "total_pnl": -0.68,
-                                "profit_trades": 2,
-                                "loss_trades": 2,
-                                "profit_amount": 1.2,
-                                "loss_amount": 1.88,
-                                "win_rate_by_count_percentage": 50.0,
-                                "loss_rate_by_count_percentage": 50.0,
-                                "win_rate_by_revenue_percentage": 38.96,
-                                "loss_rate_by_revenue_percentage": 61.04,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [
-                                    "2026-05-21",
-                                    "2026-06-06"
-                                ],
-                                "all_traded_symbols": {
-                                    "Wall Street 30": {
-                                        "symbol": "Wall Street 30",
-                                        "total_trades": 1,
-                                        "total_profit": 1.08,
-                                        "total_loss": 0.0
-                                    },
-                                    "Volatility 250 (1s) Index": {
-                                        "symbol": "Volatility 250 (1s) Index",
-                                        "total_trades": 1,
-                                        "total_profit": 0.12,
-                                        "total_loss": 0.0
-                                    },
-                                    "TRUUSD": {
-                                        "symbol": "TRUUSD",
-                                        "total_trades": 2,
-                                        "total_profit": 0.0,
-                                        "total_loss": 1.88
-                                    }
-                                },
-                                "symbols_traded": 3,
-                                "closed_deals_with_sl_tp": 1,
-                                "closed_deals_without_sl_tp": 3,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    },
-                    "trades_outside_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "inherited_and_claimed_trades_by_risk_reward_1": 3,
-                                "total_lost_trades": 4,
-                                "total_won_trades": 3,
-                                "total_lost_trades_amount": 109.76,
-                                "total_won_trades_amount": 84.46,
-                                "lowest_trades_per_day": 1,
-                                "highest_trades_per_day": 4,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-06-02"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-03"
-                                ]
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 7,
-                                "total_pnl": -25.3,
-                                "profit_trades": 3,
-                                "loss_trades": 4,
-                                "profit_amount": 84.46,
-                                "loss_amount": 109.76,
-                                "win_rate_by_count_percentage": 42.86,
-                                "loss_rate_by_count_percentage": 57.14,
-                                "win_rate_by_revenue_percentage": 43.49,
-                                "loss_rate_by_revenue_percentage": 56.51,
-                                "lowest_trades_per_day": 1,
-                                "highest_trades_per_day": 4,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-06-02"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-03"
-                                ],
-                                "all_traded_symbols": {
-                                    "GBPUSD": {
-                                        "symbol": "GBPUSD",
-                                        "total_trades": 6,
-                                        "total_profit": 78.31,
-                                        "total_loss": 109.76
-                                    },
-                                    "BTCUSD": {
-                                        "symbol": "BTCUSD",
-                                        "total_trades": 1,
-                                        "total_profit": 6.15,
-                                        "total_loss": 0.0
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 7,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {
-                                    "consecutive_losses_count": 3,
-                                    "total_loss_pnl": -99.76,
-                                    "trades": [
-                                        {
-                                            "ticket": 5675045987,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.34813,
-                                            "stoploss": 1.34714,
-                                            "take_profit": 1.34906,
-                                            "trade_risk": 23.76,
-                                            "risk_reward": 0.94,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.24,
-                                            "time_open": "2026-06-02 15:42:12",
-                                            "time_close": "2026-06-02 15:51:08",
-                                            "magic": 59964271,
-                                            "total_pnl": -23.76,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675062468,
-                                            "symbol": "GBPUSD",
-                                            "type": "SELL",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.348,
-                                            "take_profit": 1.346,
-                                            "trade_risk": 26.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.26,
-                                            "time_open": "2026-06-02 15:53:23",
-                                            "time_close": "2026-06-02 16:09:25",
-                                            "magic": 59964271,
-                                            "total_pnl": -26.0,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675102265,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.348,
-                                            "stoploss": 1.347,
-                                            "take_profit": 1.349,
-                                            "trade_risk": 50.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.5,
-                                            "time_open": "2026-06-02 16:57:35",
-                                            "time_close": "2026-06-02 17:29:50",
-                                            "magic": 59964271,
-                                            "total_pnl": -50.0,
-                                            "state": "CLOSED"
-                                        }
-                                    ]
-                                },
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    }
-                },
-                "may_13_2026_to_june_10_2026": {
-                    "start_date": "May 13, 2026",
-                    "end_date": "2026-06-10",
-                    "last_updated": "2026-06-10T15:40:47.606047",
-                    "trades_within_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "inherited_and_claimed_trades_by_risk_reward_0.95": 11,
-                                "inherited_and_claimed_trades_by_risk_reward_0.96": 10,
-                                "inherited_and_claimed_trades_by_risk_reward_1": 9,
-                                "inherited_and_claimed_trades_by_risk_reward_2": 2,
-                                "total_lost_trades": 12,
-                                "total_won_trades": 11,
-                                "total_lost_trades_amount": 129.77,
-                                "total_won_trades_amount": 107.18,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-05-21"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ]
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 19,
-                                "total_pnl": -21.91,
-                                "profit_trades": 9,
-                                "loss_trades": 10,
-                                "profit_amount": 105.98,
-                                "loss_amount": 127.89,
-                                "win_rate_by_count_percentage": 47.37,
-                                "loss_rate_by_count_percentage": 52.63,
-                                "win_rate_by_revenue_percentage": 45.32,
-                                "loss_rate_by_revenue_percentage": 54.68,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ],
-                                "all_traded_symbols": {
-                                    "BTCUSD": {
-                                        "symbol": "BTCUSD",
-                                        "total_trades": 9,
-                                        "total_profit": 24.61,
-                                        "total_loss": 8.85
-                                    },
-                                    "GBPUSD": {
-                                        "symbol": "GBPUSD",
-                                        "total_trades": 10,
-                                        "total_profit": 81.37,
-                                        "total_loss": 119.04
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 19,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {
-                                    "consecutive_losses_count": 4,
-                                    "total_loss_pnl": -100.84,
-                                    "trades": [
-                                        {
-                                            "ticket": 5674798119,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.346,
-                                            "take_profit": 1.348,
-                                            "trade_risk": 3.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -0.36,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.03,
-                                            "time_open": "2026-06-02 10:30:26",
-                                            "time_close": "2026-06-02 10:44:33",
-                                            "magic": 59964271,
-                                            "total_pnl": -1.08,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675045987,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.34813,
-                                            "stoploss": 1.34714,
-                                            "take_profit": 1.34906,
-                                            "trade_risk": 23.76,
-                                            "risk_reward": 0.94,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.24,
-                                            "time_open": "2026-06-02 15:42:12",
-                                            "time_close": "2026-06-02 15:51:08",
-                                            "magic": 59964271,
-                                            "total_pnl": -23.76,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675062468,
-                                            "symbol": "GBPUSD",
-                                            "type": "SELL",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.348,
-                                            "take_profit": 1.346,
-                                            "trade_risk": 26.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.26,
-                                            "time_open": "2026-06-02 15:53:23",
-                                            "time_close": "2026-06-02 16:09:25",
-                                            "magic": 59964271,
-                                            "total_pnl": -26.0,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675102265,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.348,
-                                            "stoploss": 1.347,
-                                            "take_profit": 1.349,
-                                            "trade_risk": 50.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.5,
-                                            "time_open": "2026-06-02 16:57:35",
-                                            "time_close": "2026-06-02 17:29:50",
-                                            "magic": 59964271,
-                                            "total_pnl": -50.0,
-                                            "state": "CLOSED"
-                                        }
-                                    ]
-                                },
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 4,
-                                "total_pnl": -0.68,
-                                "profit_trades": 2,
-                                "loss_trades": 2,
-                                "profit_amount": 1.2,
-                                "loss_amount": 1.88,
-                                "win_rate_by_count_percentage": 50.0,
-                                "loss_rate_by_count_percentage": 50.0,
-                                "win_rate_by_revenue_percentage": 38.96,
-                                "loss_rate_by_revenue_percentage": 61.04,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [
-                                    "2026-05-21",
-                                    "2026-06-06"
-                                ],
-                                "all_traded_symbols": {
-                                    "Wall Street 30": {
-                                        "symbol": "Wall Street 30",
-                                        "total_trades": 1,
-                                        "total_profit": 1.08,
-                                        "total_loss": 0.0
-                                    },
-                                    "Volatility 250 (1s) Index": {
-                                        "symbol": "Volatility 250 (1s) Index",
-                                        "total_trades": 1,
-                                        "total_profit": 0.12,
-                                        "total_loss": 0.0
-                                    },
-                                    "TRUUSD": {
-                                        "symbol": "TRUUSD",
-                                        "total_trades": 2,
-                                        "total_profit": 0.0,
-                                        "total_loss": 1.88
-                                    }
-                                },
-                                "symbols_traded": 3,
-                                "closed_deals_with_sl_tp": 1,
-                                "closed_deals_without_sl_tp": 3,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    },
-                    "trades_outside_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "total_lost_trades": 0,
-                                "total_won_trades": 0,
-                                "total_lost_trades_amount": 0,
-                                "total_won_trades_amount": 0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": []
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    }
-                },
-                "may_15_2026_to_june_12_2026": {
-                    "start_date": "May 15, 2026",
-                    "end_date": "2026-06-12",
-                    "last_updated": "2026-06-12T21:20:12.630127",
-                    "trades_within_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "inherited_and_claimed_trades_by_risk_reward_0.95": 11,
-                                "inherited_and_claimed_trades_by_risk_reward_0.96": 10,
-                                "inherited_and_claimed_trades_by_risk_reward_1": 9,
-                                "inherited_and_claimed_trades_by_risk_reward_2": 2,
-                                "total_lost_trades": 12,
-                                "total_won_trades": 11,
-                                "total_lost_trades_amount": 129.77,
-                                "total_won_trades_amount": 107.18,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-05-21"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ]
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 19,
-                                "total_pnl": -21.91,
-                                "profit_trades": 9,
-                                "loss_trades": 10,
-                                "profit_amount": 105.98,
-                                "loss_amount": 127.89,
-                                "win_rate_by_count_percentage": 47.37,
-                                "loss_rate_by_count_percentage": 52.63,
-                                "win_rate_by_revenue_percentage": 45.32,
-                                "loss_rate_by_revenue_percentage": 54.68,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ],
-                                "all_traded_symbols": {
-                                    "BTCUSD": {
-                                        "symbol": "BTCUSD",
-                                        "total_trades": 9,
-                                        "total_profit": 24.61,
-                                        "total_loss": 8.85
-                                    },
-                                    "GBPUSD": {
-                                        "symbol": "GBPUSD",
-                                        "total_trades": 10,
-                                        "total_profit": 81.37,
-                                        "total_loss": 119.04
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 19,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {
-                                    "consecutive_losses_count": 4,
-                                    "total_loss_pnl": -100.84,
-                                    "trades": [
-                                        {
-                                            "ticket": 5674798119,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.346,
-                                            "take_profit": 1.348,
-                                            "trade_risk": 3.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -0.36,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.03,
-                                            "time_open": "2026-06-02 10:30:26",
-                                            "time_close": "2026-06-02 10:44:33",
-                                            "magic": 59964271,
-                                            "total_pnl": -1.08,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675045987,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.34813,
-                                            "stoploss": 1.34714,
-                                            "take_profit": 1.34906,
-                                            "trade_risk": 23.76,
-                                            "risk_reward": 0.94,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.24,
-                                            "time_open": "2026-06-02 15:42:12",
-                                            "time_close": "2026-06-02 15:51:08",
-                                            "magic": 59964271,
-                                            "total_pnl": -23.76,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675062468,
-                                            "symbol": "GBPUSD",
-                                            "type": "SELL",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.348,
-                                            "take_profit": 1.346,
-                                            "trade_risk": 26.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.26,
-                                            "time_open": "2026-06-02 15:53:23",
-                                            "time_close": "2026-06-02 16:09:25",
-                                            "magic": 59964271,
-                                            "total_pnl": -26.0,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675102265,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.348,
-                                            "stoploss": 1.347,
-                                            "take_profit": 1.349,
-                                            "trade_risk": 50.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.5,
-                                            "time_open": "2026-06-02 16:57:35",
-                                            "time_close": "2026-06-02 17:29:50",
-                                            "magic": 59964271,
-                                            "total_pnl": -50.0,
-                                            "state": "CLOSED"
-                                        }
-                                    ]
-                                },
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 4,
-                                "total_pnl": -0.68,
-                                "profit_trades": 2,
-                                "loss_trades": 2,
-                                "profit_amount": 1.2,
-                                "loss_amount": 1.88,
-                                "win_rate_by_count_percentage": 50.0,
-                                "loss_rate_by_count_percentage": 50.0,
-                                "win_rate_by_revenue_percentage": 38.96,
-                                "loss_rate_by_revenue_percentage": 61.04,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [
-                                    "2026-05-21",
-                                    "2026-06-06"
-                                ],
-                                "all_traded_symbols": {
-                                    "Wall Street 30": {
-                                        "symbol": "Wall Street 30",
-                                        "total_trades": 1,
-                                        "total_profit": 1.08,
-                                        "total_loss": 0.0
-                                    },
-                                    "Volatility 250 (1s) Index": {
-                                        "symbol": "Volatility 250 (1s) Index",
-                                        "total_trades": 1,
-                                        "total_profit": 0.12,
-                                        "total_loss": 0.0
-                                    },
-                                    "TRUUSD": {
-                                        "symbol": "TRUUSD",
-                                        "total_trades": 2,
-                                        "total_profit": 0.0,
-                                        "total_loss": 1.88
-                                    }
-                                },
-                                "symbols_traded": 3,
-                                "closed_deals_with_sl_tp": 1,
-                                "closed_deals_without_sl_tp": 3,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    },
-                    "trades_outside_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "total_lost_trades": 0,
-                                "total_won_trades": 0,
-                                "total_lost_trades_amount": 0,
-                                "total_won_trades_amount": 0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": []
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    }
-                },
-                "may_16_2026_to_june_13_2026": {
-                    "start_date": "May 16, 2026",
-                    "end_date": "2026-06-13",
-                    "last_updated": "2026-06-13T21:44:04.619809",
-                    "trades_within_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "inherited_and_claimed_trades_by_risk_reward_0.95": 11,
-                                "inherited_and_claimed_trades_by_risk_reward_0.96": 10,
-                                "inherited_and_claimed_trades_by_risk_reward_1": 9,
-                                "inherited_and_claimed_trades_by_risk_reward_2": 2,
-                                "total_lost_trades": 12,
-                                "total_won_trades": 11,
-                                "total_lost_trades_amount": 129.77,
-                                "total_won_trades_amount": 107.18,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-05-21"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ]
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 19,
-                                "total_pnl": -21.91,
-                                "profit_trades": 9,
-                                "loss_trades": 10,
-                                "profit_amount": 105.98,
-                                "loss_amount": 127.89,
-                                "win_rate_by_count_percentage": 47.37,
-                                "loss_rate_by_count_percentage": 52.63,
-                                "win_rate_by_revenue_percentage": 45.32,
-                                "loss_rate_by_revenue_percentage": 54.68,
-                                "lowest_trades_per_day": 2,
-                                "highest_trades_per_day": 7,
-                                "average_trades_per_day": 5,
-                                "lowest_trade_dates": [
-                                    "2026-06-06"
-                                ],
-                                "highest_trade_dates": [
-                                    "2026-05-23"
-                                ],
-                                "average_trade_dates": [
-                                    "2026-06-02",
-                                    "2026-06-03"
-                                ],
-                                "all_traded_symbols": {
-                                    "BTCUSD": {
-                                        "symbol": "BTCUSD",
-                                        "total_trades": 9,
-                                        "total_profit": 24.61,
-                                        "total_loss": 8.85
-                                    },
-                                    "GBPUSD": {
-                                        "symbol": "GBPUSD",
-                                        "total_trades": 10,
-                                        "total_profit": 81.37,
-                                        "total_loss": 119.04
-                                    }
-                                },
-                                "symbols_traded": 2,
-                                "closed_deals_with_sl_tp": 19,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {
-                                    "consecutive_losses_count": 4,
-                                    "total_loss_pnl": -100.84,
-                                    "trades": [
-                                        {
-                                            "ticket": 5674798119,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.346,
-                                            "take_profit": 1.348,
-                                            "trade_risk": 3.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -0.36,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.03,
-                                            "time_open": "2026-06-02 10:30:26",
-                                            "time_close": "2026-06-02 10:44:33",
-                                            "magic": 59964271,
-                                            "total_pnl": -1.08,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675045987,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.34813,
-                                            "stoploss": 1.34714,
-                                            "take_profit": 1.34906,
-                                            "trade_risk": 23.76,
-                                            "risk_reward": 0.94,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.24,
-                                            "time_open": "2026-06-02 15:42:12",
-                                            "time_close": "2026-06-02 15:51:08",
-                                            "magic": 59964271,
-                                            "total_pnl": -23.76,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675062468,
-                                            "symbol": "GBPUSD",
-                                            "type": "SELL",
-                                            "entry_price": 1.347,
-                                            "stoploss": 1.348,
-                                            "take_profit": 1.346,
-                                            "trade_risk": 26.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.26,
-                                            "time_open": "2026-06-02 15:53:23",
-                                            "time_close": "2026-06-02 16:09:25",
-                                            "magic": 59964271,
-                                            "total_pnl": -26.0,
-                                            "state": "CLOSED"
-                                        },
-                                        {
-                                            "ticket": 5675102265,
-                                            "symbol": "GBPUSD",
-                                            "type": "BUY",
-                                            "entry_price": 1.348,
-                                            "stoploss": 1.347,
-                                            "take_profit": 1.349,
-                                            "trade_risk": 50.0,
-                                            "risk_reward": 1.0,
-                                            "trade_owned_by_risk_reward": "N/A",
-                                            "beneficiaries": "none",
-                                            "closed_at_reward": -1.0,
-                                            "claimed_reason": "unclaimed because trade closed out at a loss",
-                                            "volume": 0.5,
-                                            "time_open": "2026-06-02 16:57:35",
-                                            "time_close": "2026-06-02 17:29:50",
-                                            "magic": 59964271,
-                                            "total_pnl": -50.0,
-                                            "state": "CLOSED"
-                                        }
-                                    ]
-                                },
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 4,
-                                "total_pnl": -0.68,
-                                "profit_trades": 2,
-                                "loss_trades": 2,
-                                "profit_amount": 1.2,
-                                "loss_amount": 1.88,
-                                "win_rate_by_count_percentage": 50.0,
-                                "loss_rate_by_count_percentage": 50.0,
-                                "win_rate_by_revenue_percentage": 38.96,
-                                "loss_rate_by_revenue_percentage": 61.04,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 2,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [
-                                    "2026-05-21",
-                                    "2026-06-06"
-                                ],
-                                "all_traded_symbols": {
-                                    "Wall Street 30": {
-                                        "symbol": "Wall Street 30",
-                                        "total_trades": 1,
-                                        "total_profit": 1.08,
-                                        "total_loss": 0.0
-                                    },
-                                    "Volatility 250 (1s) Index": {
-                                        "symbol": "Volatility 250 (1s) Index",
-                                        "total_trades": 1,
-                                        "total_profit": 0.12,
-                                        "total_loss": 0.0
-                                    },
-                                    "TRUUSD": {
-                                        "symbol": "TRUUSD",
-                                        "total_trades": 2,
-                                        "total_profit": 0.0,
-                                        "total_loss": 1.88
-                                    }
-                                },
-                                "symbols_traded": 3,
-                                "closed_deals_with_sl_tp": 1,
-                                "closed_deals_without_sl_tp": 3,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    },
-                    "trades_outside_risks_config": {
-                        "summaries": {
-                            "summaries_of_profits_only": {
-                                "total_lost_trades": 0,
-                                "total_won_trades": 0,
-                                "total_lost_trades_amount": 0,
-                                "total_won_trades_amount": 0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": []
-                            }
-                        },
-                        "regular_data": {
-                            "authorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            },
-                            "unauthorized": {
-                                "total_trades": 0,
-                                "total_pnl": 0,
-                                "profit_trades": 0,
-                                "loss_trades": 0,
-                                "profit_amount": 0,
-                                "loss_amount": 0,
-                                "win_rate_by_count_percentage": 0.0,
-                                "loss_rate_by_count_percentage": 0.0,
-                                "win_rate_by_revenue_percentage": 0.0,
-                                "loss_rate_by_revenue_percentage": 0.0,
-                                "lowest_trades_per_day": 0,
-                                "highest_trades_per_day": 0,
-                                "average_trades_per_day": 0,
-                                "lowest_trade_dates": [],
-                                "highest_trade_dates": [],
-                                "average_trade_dates": [],
-                                "all_traded_symbols": {},
-                                "symbols_traded": 0,
-                                "closed_deals_with_sl_tp": 0,
-                                "closed_deals_without_sl_tp": 0,
-                                "highest_sequential_losses": {},
-                                "highest_sequential_days_in_loss": {}
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "unauthorized_action_detected": true,
-        "audit_history": [
-            {
-                "audit_timestamp": "2026-06-13T21:44:04.750912",
-                "application_status": "approved",
-                "unauthorized_detected": false,
-                "unauthorized_orders_count": 0,
-                "unauthorized_positions_count": 0,
-                "balance_discrepancy": 0,
-                "calculated_balance": 9001.56,
-                "mt5_actual_balance": 9001.56,
-                "profit_and_loss": 0.0,
-                "authorized_trades_count": 0
-            },
-            {
-                "audit_timestamp": "2026-06-13T21:44:19.465824",
-                "application_status": "approved",
-                "unauthorized_detected": false,
-                "unauthorized_orders_count": 0,
-                "unauthorized_positions_count": 0,
-                "balance_discrepancy": 0,
-                "calculated_balance": 9001.56,
-                "mt5_actual_balance": 9001.56,
-                "profit_and_loss": 0.0,
-                "authorized_trades_count": 0
-            }
-        ],
-        "last_audit_status": "approved",
-        "last_audit_timestamp": "2026-06-13T21:44:19.465824",
-        "current_unauthorized_detected": false,
-        "current_balance": 9001.56,
-        "current_pnl": 0.0
+        "demo_account_restricted": false
     }
 }

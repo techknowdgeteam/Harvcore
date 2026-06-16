@@ -10965,16 +10965,10 @@ def martingale(inv_id=None):
         def process_pre_scaling():
             """
             Process pre-scaling based on:
-            1. Current stage drawdown (ALWAYS included)
-            2. Open MT5 positions with valid stop losses (if they exist)
-            3. Highest risk from pending limit orders (if enabled)
-            
-            Only affects limit_orders.json.
-            
-            KEY FIX: First order in each linear group retains original volume.
-            Scaling starts from second order onward.
-            
-            NEW: Removes invalid price levels before scaling.
+            1. Sequential losses from closed trades
+            2. Last trade's expected risk becomes the current drawdown
+            3. Stage drawdown clarification
+            4. Linear scaling on limit orders
             """
             if not martingale_pre_scaling:
                 return False
@@ -10983,8 +10977,8 @@ def martingale(inv_id=None):
             martingale_linear_scaling = False
             try:
                 with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                settings = config.get("settings", {})
+                    config_data = json.load(f)
+                settings = config_data.get("settings", {})
                 martingale_config = settings.get("martingale_config", {})
                 pre_scaling_config = martingale_config.get("pre_scaling", {})
                 martingale_linear_scaling = pre_scaling_config.get("martingale_linear_scaling", False)
@@ -10999,44 +10993,27 @@ def martingale(inv_id=None):
             print(f"  │   - Reduction: {highest_risk_reduction_percentage}%")
             print(f"  │ Expected loss adder: {'✓ ENABLED' if martingale_pre_scale_expected_loss_adder else '✗ DISABLED'}")
             print(f"  │   - Reduction: {expected_loss_reduction_percentage}%")
-            print(f"  │ Stage drawdown: ${current_stage_drawdown:.2f}")
+            print(f"  │ Stage max risk: ${stage_max_risk:.2f}")
+            print(f"  │ Recovery adder: {recovery_adder_percentage}%")
             print(f"{'─'*60}")
             
+            # ========== DEFINE HELPER FUNCTIONS INSIDE ==========
             def remove_invalid_price_levels(orders_data, symbol):
-                """
-                Remove orders with invalid price levels based on current market price.
-                
-                For STEPUP orders (buy_stop, sell_limit):
-                - Valid if entry price is ABOVE current ASK price
-                
-                For STEPDOWN orders (sell_stop, buy_limit):
-                - Valid if entry price is BELOW current BID price
-                
-                Returns: (filtered_orders, removed_count, removed_details)
-                """
                 if not orders_data or not isinstance(orders_data, list):
                     return orders_data, 0, []
                 
-                # Get current market prices
                 symbol_info = mt5.symbol_info(symbol)
                 if not symbol_info:
-                    print(f"     ⚠️ Cannot get symbol info for {symbol} - skipping price validation")
                     return orders_data, 0, []
                 
                 current_bid = symbol_info.bid
                 current_ask = symbol_info.ask
                 
                 if current_bid is None or current_ask is None:
-                    print(f"     ⚠️ Cannot get current bid/ask for {symbol} - skipping price validation")
                     return orders_data, 0, []
-                
-                print(f"\n     🔍 Validating price levels for {symbol}:")
-                print(f"        Current BID: {current_bid:.2f}")
-                print(f"        Current ASK: {current_ask:.2f}")
                 
                 filtered_orders = []
                 removed_count = 0
-                removed_details = []
                 
                 for order in orders_data:
                     if not isinstance(order, dict):
@@ -11056,41 +11033,620 @@ def martingale(inv_id=None):
                         continue
                     
                     is_valid = True
-                    reason = None
                     
-                    # Classify and validate
                     if order_type in ['buy_stop', 'sell_limit']:
-                        # STEPUP orders - should be ABOVE current ASK
                         if entry <= current_ask:
                             is_valid = False
-                            reason = f"STEPUP order at {entry:.2f} is NOT above ASK ({current_ask:.2f})"
-                        else:
-                            print(f"        ✓ VALID STEPUP: {order_type} @ {entry:.2f} > ASK {current_ask:.2f}")
-                            
                     elif order_type in ['sell_stop', 'buy_limit']:
-                        # STEPDOWN orders - should be BELOW current BID
                         if entry >= current_bid:
                             is_valid = False
-                            reason = f"STEPDOWN order at {entry:.2f} is NOT below BID ({current_bid:.2f})"
-                        else:
-                            print(f"        ✓ VALID STEPDOWN: {order_type} @ {entry:.2f} < BID {current_bid:.2f}")
-                    else:
-                        # Unknown order type - keep it
-                        print(f"        ⚠️ Unknown order type: {order_type} - keeping")
                     
                     if is_valid:
                         filtered_orders.append(order)
                     else:
                         removed_count += 1
-                        removed_details.append({
-                            'order_type': order_type,
-                            'entry': entry,
-                            'reason': reason,
-                            'original_order': order
-                        })
-                        print(f"        ✗ REMOVED: {order_type} @ {entry:.2f} - {reason}")
                 
-                return filtered_orders, removed_count, removed_details
+                return filtered_orders, removed_count, []
+
+            def load_limit_orders():
+                strategy_name = None
+                if FETCHED_INVESTORS:
+                    try:
+                        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                            investor_users = json.load(f)
+                        
+                        investor_cfg = investor_users.get(user_brokerid)
+                        if investor_cfg:
+                            strategy_name = investor_cfg.get("invested_with", "")
+                    except:
+                        pass
+
+                if not strategy_name:
+                    return None, None
+
+                limit_orders_path = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
+                
+                if limit_orders_path.exists():
+                    with open(limit_orders_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    return limit_orders_path, data
+                
+                return None, None
+
+            def save_limit_orders(file_path, data):
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+            def analyze_highest_risk_from_limit_orders(limit_orders_data):
+                highest_risk_orders = {}
+                
+                if not limit_orders_data or not isinstance(limit_orders_data, list):
+                    return highest_risk_orders
+                
+                symbol_orders = {}
+                for order in limit_orders_data:
+                    if isinstance(order, dict):
+                        symbol = order.get('symbol')
+                        if symbol:
+                            if symbol not in symbol_orders:
+                                symbol_orders[symbol] = []
+                            symbol_orders[symbol].append(order)
+                
+                for symbol, orders_list in symbol_orders.items():
+                    highest_risk = 0
+                    highest_risk_order_info = None
+                    
+                    for order in orders_list:
+                        entry = order.get('entry')
+                        stop = order.get('exit') or order.get('stop_loss')
+                        volume_key, volume = get_volume_field_from_order(order)
+                        order_type = order.get('order_type', 'Unknown')
+                        
+                        if entry and stop and volume and volume > 0:
+                            symbol_info = mt5.symbol_info(symbol)
+                            if symbol_info:
+                                contract_size = symbol_info.trade_contract_size
+                                price_diff = abs(entry - stop)
+                                risk = price_diff * volume * contract_size
+                                
+                                if risk > highest_risk:
+                                    highest_risk = risk
+                                    highest_risk_order_info = {
+                                        'order_type': order_type,
+                                        'entry': entry,
+                                        'stop': stop,
+                                        '_volume': volume,
+                                        'risk': risk,
+                                        'original_risk': risk,
+                                        'source': 'limit_orders'
+                                    }
+                    
+                    if highest_risk_order_info:
+                        if highest_risk_reduction_percentage > 0:
+                            reduction_amount = highest_risk * (highest_risk_reduction_percentage / 100)
+                            highest_risk = highest_risk - reduction_amount
+                            highest_risk_order_info['risk'] = highest_risk
+                            highest_risk_order_info['reduction_applied'] = reduction_amount
+                        
+                        highest_risk_orders[symbol] = highest_risk_order_info
+                
+                return highest_risk_orders
+
+            def get_volume_field_from_order(order):
+                for key, value in order.items():
+                    if '_volume' in key.lower() and isinstance(value, (int, float)):
+                        return key, value
+                return None, None
+
+            def get_current_volumes_from_limit_orders(orders_data):
+                volumes = {}
+                if isinstance(orders_data, list):
+                    for order in orders_data:
+                        if isinstance(order, dict):
+                            symbol = order.get('symbol')
+                            if symbol:
+                                volume_key, volume = get_volume_field_from_order(order)
+                                if volume:
+                                    volumes[symbol] = volume
+                return volumes
+
+            def fetch_and_analyze_trades_with_sequential_loss():
+                """
+                Fetches all closed trades and analyzes sequential losses per symbol.
+                Returns: (closed_positions, sequential_losses_by_symbol, last_expected_risk, stage_info)
+                """
+                print(f"\n  📊 CLOSED TRADE HISTORY WITH SEQUENTIAL LOSS ANALYSIS")
+                print(f"{'─'*60}")
+                
+                try:
+                    try:
+                        from dateutil import parser as date_parser
+                        has_dateutil = True
+                    except ImportError:
+                        has_dateutil = False
+                    
+                    activities_path = inv_root / "activities.json"
+                    execution_start_date = None
+                    start_timestamp = None
+                    
+                    if activities_path.exists():
+                        with open(activities_path, 'r', encoding='utf-8') as f:
+                            activities = json.load(f)
+                        execution_start_date = activities.get('execution_start_date')
+                        
+                        if execution_start_date:
+                            try:
+                                if isinstance(execution_start_date, str):
+                                    if has_dateutil:
+                                        start_datetime = date_parser.parse(execution_start_date)
+                                        start_timestamp = int(start_datetime.timestamp())
+                                    else:
+                                        date_str = execution_start_date.strip()
+                                        date_formats = [
+                                            '%B %d, %Y', '%b %d, %Y', '%B %d %Y', '%b %d %Y',
+                                            '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%Y/%m/%d %H:%M:%S',
+                                            '%Y/%m/%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y',
+                                            '%d/%m/%Y %H:%M:%S', '%d/%m/%Y',
+                                            '%m-%d-%Y %H:%M:%S', '%m-%d-%Y',
+                                            '%m/%d/%Y %H:%M:%S', '%m/%d/%Y',
+                                        ]
+                                        for fmt in date_formats:
+                                            try:
+                                                start_datetime = datetime.strptime(date_str, fmt)
+                                                start_timestamp = int(start_datetime.timestamp())
+                                                break
+                                            except ValueError:
+                                                continue
+                            except:
+                                pass
+                    
+                    if start_timestamp is None:
+                        start_timestamp = int((datetime.now() - timedelta(days=30)).timestamp())
+                    
+                    current_timestamp = int(datetime.now().timestamp())
+                    if start_timestamp > current_timestamp:
+                        start_timestamp = current_timestamp - (30 * 24 * 60 * 60)
+                    
+                    print(f"  │ Execution start date: {execution_start_date if execution_start_date else 'Not found'}")
+                    print(f"  │ From timestamp: {start_timestamp} ({datetime.fromtimestamp(start_timestamp).strftime('%Y-%m-%d %H:%M:%S')})")
+                    print(f"  │ Present time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"{'─'*60}")
+                    
+                    closed_trades = mt5.history_deals_get(start_timestamp, int(datetime.now().timestamp()))
+                    
+                    if closed_trades is None or len(closed_trades) == 0:
+                        print(f"  │ ℹ️ No closed trades found")
+                        return [], {}, 0, {}
+                    
+                    positions_map = {}
+                    for deal in closed_trades:
+                        if deal.type in [0, 1]:
+                            if deal.entry == 0:
+                                positions_map[deal.position_id] = {
+                                    'position_id': deal.position_id,
+                                    'symbol': deal.symbol,
+                                    'entry_time': deal.time,
+                                    'entry_price': deal.price,
+                                    'volume': deal.volume,
+                                    'entry_type': 'BUY' if deal.type == 0 else 'SELL',
+                                    'profit': 0,
+                                    'exit_time': None,
+                                    'exit_price': None,
+                                    'swap': deal.swap or 0,
+                                    'commission': deal.commission or 0,
+                                    'magic': deal.magic,
+                                    'comment': deal.comment or ''
+                                }
+                            elif deal.entry in [1, 3]:
+                                if deal.position_id in positions_map:
+                                    positions_map[deal.position_id]['exit_time'] = deal.time
+                                    positions_map[deal.position_id]['exit_price'] = deal.price
+                                    positions_map[deal.position_id]['profit'] = deal.profit or 0
+                                    if deal.swap:
+                                        positions_map[deal.position_id]['swap'] += deal.swap
+                                    if deal.commission:
+                                        positions_map[deal.position_id]['commission'] += deal.commission
+                    
+                    closed_positions = []
+                    for pos_id, pos_data in positions_map.items():
+                        if pos_data['exit_time'] is not None:
+                            holding_seconds = pos_data['exit_time'] - pos_data['entry_time']
+                            holding_days = holding_seconds / (24 * 60 * 60)
+                            
+                            symbol_info = mt5.symbol_info(pos_data['symbol'])
+                            if symbol_info:
+                                pip_size = symbol_info.point * 10 if 'JPY' in pos_data['symbol'] else symbol_info.point
+                                if pos_data['entry_type'] == 'BUY':
+                                    pips = (pos_data['exit_price'] - pos_data['entry_price']) / pip_size
+                                else:
+                                    pips = (pos_data['entry_price'] - pos_data['exit_price']) / pip_size
+                            else:
+                                pips = 0
+                            
+                            total_profit = pos_data['profit'] + pos_data['swap'] + pos_data['commission']
+                            pos_data['holding_days'] = holding_days
+                            pos_data['pips'] = pips
+                            pos_data['total_profit'] = total_profit
+                            closed_positions.append(pos_data)
+                    
+                    closed_positions.sort(key=lambda x: x['entry_time'])
+                    
+                    if not closed_positions:
+                        print(f"  │ ℹ️ No fully closed positions found")
+                        return [], {}, 0, {}
+                    
+                    # ========== TRACK SEQUENTIAL LOSSES PER SYMBOL ==========
+                    symbol_loss_tracking = {}
+                    sequential_losses_by_symbol = {}
+                    
+                    for pos in closed_positions:
+                        symbol = pos['symbol']
+                        profit = pos['total_profit']
+                        is_loss = profit < 0
+                        is_profit = profit > 0
+                        
+                        if symbol not in symbol_loss_tracking:
+                            symbol_loss_tracking[symbol] = {
+                                'current_losses': [],
+                                'current_loss_total': 0,
+                                'in_loss_sequence': False
+                            }
+                        
+                        tracking = symbol_loss_tracking[symbol]
+                        
+                        if is_loss:
+                            tracking['current_losses'].append(pos)
+                            tracking['current_loss_total'] += abs(profit)
+                            tracking['in_loss_sequence'] = True
+                        elif is_profit:
+                            if tracking['in_loss_sequence'] and tracking['current_losses']:
+                                if symbol not in sequential_losses_by_symbol:
+                                    sequential_losses_by_symbol[symbol] = []
+                                sequential_losses_by_symbol[symbol].append({
+                                    'losses': tracking['current_losses'].copy(),
+                                    'total_loss': tracking['current_loss_total'],
+                                    'count': len(tracking['current_losses'])
+                                })
+                                tracking['current_losses'] = []
+                                tracking['current_loss_total'] = 0
+                                tracking['in_loss_sequence'] = False
+                    
+                    for symbol, tracking in symbol_loss_tracking.items():
+                        if tracking['in_loss_sequence'] and tracking['current_losses']:
+                            if symbol not in sequential_losses_by_symbol:
+                                sequential_losses_by_symbol[symbol] = []
+                            sequential_losses_by_symbol[symbol].append({
+                                'losses': tracking['current_losses'].copy(),
+                                'total_loss': tracking['current_loss_total'],
+                                'count': len(tracking['current_losses'])
+                            })
+                    
+                    # ========== BUILD TRADE TO SEQUENCE MAP ==========
+                    trade_to_sequence = {}
+                    for symbol, sequences in sequential_losses_by_symbol.items():
+                        for seq in sequences:
+                            for idx, trade in enumerate(seq['losses']):
+                                trade_to_sequence[trade['position_id']] = {
+                                    'sequence': seq,
+                                    'position': idx,
+                                    'total_in_sequence': len(seq['losses']),
+                                    'is_first': idx == 0,
+                                    'is_last': idx == len(seq['losses']) - 1,
+                                    'symbol': symbol
+                                }
+                    
+                    trade_follows_loss = {}
+                    for i, pos in enumerate(closed_positions):
+                        if i > 0:
+                            prev_trade = closed_positions[i - 1]
+                            prev_is_loss = prev_trade['total_profit'] < 0
+                            if prev_is_loss:
+                                trade_follows_loss[pos['position_id']] = {
+                                    'previous_loss': prev_trade,
+                                    'loss_position_id': prev_trade['position_id']
+                                }
+                    
+                    # ========== PRINT TRADES WITH ANALYSIS ==========
+                    print(f"\n  📈 CLOSED POSITIONS ({len(closed_positions)} total):")
+                    print(f"{'─'*70}")
+                    
+                    total_profit = 0
+                    winning_count = 0
+                    losing_count = 0
+                    total_pips = 0
+                    total_trades = 0
+                    
+                    # Store the last trade's expected risk
+                    last_expected_risk = 0
+                    last_actual_risk = 0
+                    last_trade_symbol = ""
+                    total_mismatch_sum = 0
+                    
+                    for i, pos in enumerate(closed_positions, 1):
+                        entry_time = datetime.fromtimestamp(pos['entry_time']).strftime('%Y-%m-%d %H:%M')
+                        exit_time = datetime.fromtimestamp(pos['exit_time']).strftime('%Y-%m-%d %H:%M')
+                        
+                        profit = pos['total_profit']
+                        total_profit += profit
+                        total_trades += 1
+                        
+                        if profit > 0:
+                            winning_count += 1
+                            profit_symbol = '+'
+                        elif profit < 0:
+                            losing_count += 1
+                            profit_symbol = ''
+                        else:
+                            profit_symbol = ' '
+                        
+                        total_pips += pos['pips']
+                        
+                        print(f"\n  {i:2d}. {pos['symbol']:8s} | {pos['entry_type']:4s} | Vol: {pos['volume']:.2f}")
+                        print(f"      ├─ Entry: {pos['entry_price']:.5f} @ {entry_time}")
+                        print(f"      ├─ Exit:  {pos['exit_price']:.5f} @ {exit_time}")
+                        print(f"      ├─ Pips:  {pos['pips']:.1f}  |  Holding: {pos['holding_days']:.2f} days")
+                        print(f"      ├─ Profit: {profit_symbol}${profit:.2f}")
+                        if pos.get('comment'):
+                            print(f"      └─ Comment: {pos['comment']}")
+                        else:
+                            print(f"      └─ Magic: {pos['magic']}")
+                        
+                        # ========== CHECK IF THIS TRADE SHOULD BE ANALYZED ==========
+                        should_analyze = False
+                        seq_info = None
+                        cumulative_loss = 0
+                        previous_losses = []
+                        actual_risk = abs(profit)
+                        
+                        if pos['position_id'] in trade_to_sequence:
+                            should_analyze = True
+                            seq_info = trade_to_sequence[pos['position_id']]
+                            seq = seq_info['sequence']
+                            cumulative_loss = sum(abs(t['total_profit']) for t in seq['losses'][:seq_info['position'] + 1])
+                            previous_losses = seq['losses'][:seq_info['position']]
+                            
+                        elif pos['position_id'] in trade_follows_loss:
+                            should_analyze = True
+                            loss_info = trade_follows_loss[pos['position_id']]
+                            prev_loss = loss_info['previous_loss']
+                            
+                            if prev_loss['position_id'] in trade_to_sequence:
+                                seq_info = trade_to_sequence[prev_loss['position_id']]
+                                seq = seq_info['sequence']
+                                cumulative_loss = sum(abs(t['total_profit']) for t in seq['losses'])
+                                previous_losses = seq['losses']
+                            else:
+                                cumulative_loss = abs(prev_loss['total_profit'])
+                                previous_losses = [prev_loss]
+                        
+                        if should_analyze:
+                            # Show previous losses
+                            if previous_losses:
+                                print(f"\n      📊 SEQUENTIAL LOSS ANALYSIS:")
+                                print(f"      ├─ Previous losses in sequence:")
+                                for p_idx, prev_trade in enumerate(previous_losses):
+                                    print(f"      │   └─ Trade {p_idx+1}: ${prev_trade['total_profit']:.2f}")
+                            else:
+                                print(f"\n      📊 SEQUENTIAL LOSS ANALYSIS:")
+                                print(f"      ├─ Previous losses: None (first loss)")
+                            
+                            # ========== CALCULATE EXPECTED RISK ==========
+                            base_risk = cumulative_loss
+                            
+                            # Add highest risk adder if enabled
+                            highest_risk_adder = 0
+                            if martingale_pre_scale_highest_risk_adder:
+                                highest_risk_adder = actual_risk
+                                base_risk += highest_risk_adder
+                            
+                            # Apply recovery adder
+                            if recovery_adder_percentage > 0:
+                                expected_risk = base_risk * (1 + recovery_adder_percentage / 100)
+                            else:
+                                expected_risk = base_risk
+                            
+                            # Apply reductions
+                            if martingale_pre_scale_highest_risk_adder and highest_risk_reduction_percentage > 0:
+                                expected_risk = expected_risk * (1 - highest_risk_reduction_percentage / 100)
+                            
+                            if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0:
+                                expected_risk = expected_risk * (1 - expected_loss_reduction_percentage / 100)
+                            
+                            # Calculate mismatch
+                            mismatch = expected_risk - actual_risk
+                            total_mismatch_sum += mismatch
+                            
+                            print(f"      ├─ Cumulative loss: ${cumulative_loss:.2f}")
+                            if martingale_pre_scale_highest_risk_adder:
+                                print(f"      ├─ Highest risk adder: ${highest_risk_adder:.2f}")
+                            print(f"      ├─ Base risk: ${base_risk:.2f}")
+                            if recovery_adder_percentage > 0:
+                                print(f"      ├─ Recovery adder ({recovery_adder_percentage}%): ${base_risk * recovery_adder_percentage / 100:.2f}")
+                            print(f"      ├─ Expected risk: ${expected_risk:.2f}")
+                            print(f"      ├─ Actual risk: ${actual_risk:.2f}")
+                            print(f"      ├─ Mismatch: ${mismatch:+.2f}")
+                            
+                            if expected_risk > 0:
+                                if abs(expected_risk - actual_risk) < 0.01:
+                                    print(f"      ✅ MATCH: Expected ${expected_risk:.2f} = Actual ${actual_risk:.2f}")
+                                else:
+                                    ratio = actual_risk / expected_risk if expected_risk > 0 else 0
+                                    print(f"      ⚠️ MISMATCH: Expected ${expected_risk:.2f} vs Actual ${actual_risk:.2f} (Ratio: {ratio:.2f}x)")
+                                    if ratio < 1:
+                                        print(f"      │   └─ Under-risked by ${mismatch:.2f} ({(1-ratio)*100:.1f}% below expected)")
+                                    else:
+                                        print(f"      │   └─ Over-risked by ${abs(mismatch):.2f} ({(ratio-1)*100:.1f}% above expected)")
+                            
+                            # ========== STAGE DRAWDOWN CLARIFICATION ==========
+                            print(f"\n      📌 STAGE DRAWDOWN CLARIFICATION:")
+                            
+                            # Check if expected risk is within the current stage drawdown
+                            if expected_risk <= stage_max_risk:
+                                print(f"      │   ├─ Expected risk ${expected_risk:.2f} is WITHIN Stage 1 drawdown (${stage_max_risk:.2f})")
+                                print(f"      │   └─ ✓ Falls in Stage 1 - Risks as expected")
+                            else:
+                                # Calculate which stage this falls into
+                                stage_number = int(expected_risk // stage_max_risk) + 1
+                                remaining_in_stage = expected_risk % stage_max_risk
+                                if remaining_in_stage == 0:
+                                    stage_number = int(expected_risk // stage_max_risk)
+                                    remaining_in_stage = stage_max_risk
+                                print(f"      │   ├─ Expected risk ${expected_risk:.2f} EXCEEDS Stage 1 drawdown (${stage_max_risk:.2f})")
+                                print(f"      │   ├─ Falls into Stage {stage_number} drawdown")
+                                print(f"      │   └─ Stage {stage_number} remaining: ${remaining_in_stage:.2f}")
+                            
+                            # Store for last trade
+                            last_expected_risk = expected_risk
+                            last_actual_risk = actual_risk
+                            last_trade_symbol = pos['symbol']
+                            
+                            # ========== CHECK NEXT TRADE ==========
+                            if i < len(closed_positions):
+                                next_trade = closed_positions[i]
+                                next_cumulative = cumulative_loss + abs(next_trade['total_profit']) if next_trade['total_profit'] < 0 else cumulative_loss
+                                next_base = next_cumulative
+                                
+                                if martingale_pre_scale_highest_risk_adder:
+                                    next_base += highest_risk_adder
+                                
+                                if recovery_adder_percentage > 0:
+                                    next_expected = next_base * (1 + recovery_adder_percentage / 100)
+                                else:
+                                    next_expected = next_base
+                                
+                                if martingale_pre_scale_highest_risk_adder and highest_risk_reduction_percentage > 0:
+                                    next_expected = next_expected * (1 - highest_risk_reduction_percentage / 100)
+                                
+                                if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0:
+                                    next_expected = next_expected * (1 - expected_loss_reduction_percentage / 100)
+                                
+                                next_actual = abs(next_trade['total_profit'])
+                                next_is_profit = next_trade['total_profit'] > 0
+                                
+                                print(f"\n      🎯 NEXT TRADE (Trade #{i+1}) SHOULD RISK: ${next_expected:.2f}")
+                                if next_is_profit:
+                                    print(f"      │   └─ Next trade is a PROFIT trade")
+                                else:
+                                    print(f"      │   └─ Next trade is a LOSS trade")
+                                
+                                # Stage clarification for next trade
+                                if next_expected <= stage_max_risk:
+                                    print(f"      │   └─ Falls in Stage 1 - Risks as expected")
+                                else:
+                                    next_stage = int(next_expected // stage_max_risk) + 1
+                                    print(f"      │   └─ Falls in Stage {next_stage}")
+                                
+                                if abs(next_expected - next_actual) < 0.01:
+                                    print(f"      ✅ NEXT TRADE MATCHES: ${next_expected:.2f}")
+                                else:
+                                    print(f"      ⚠️ NEXT TRADE MISMATCH: Expected ${next_expected:.2f} vs Actual ${next_actual:.2f}")
+                                    if next_actual < next_expected:
+                                        print(f"      │   └─ Next trade is under-risked by ${next_expected - next_actual:.2f}")
+                                    else:
+                                        print(f"      │   └─ Next trade is over-risked by ${next_actual - next_expected:.2f}")
+                            else:
+                                # ========== THIS IS THE LAST TRADE ==========
+                                print(f"\n      🎯 NEXT TRADE RISK SHOULD BE: ${expected_risk:.2f}")
+                                print(f"      │   └─ This becomes the CURRENT DRAWDOWN for limit order scaling")
+                                
+                                # Stage clarification for the last trade's next risk
+                                if expected_risk <= stage_max_risk:
+                                    print(f"      │   └─ Falls in Stage 1 - Risks as expected")
+                                    print(f"      │   └─ ✓ Within current stage drawdown (${stage_max_risk:.2f})")
+                                else:
+                                    stage_number = int(expected_risk // stage_max_risk) + 1
+                                    remaining = expected_risk % stage_max_risk
+                                    if remaining == 0:
+                                        stage_number = int(expected_risk // stage_max_risk)
+                                        remaining = stage_max_risk
+                                    print(f"      │   └─ Falls in Stage {stage_number}")
+                                    print(f"      │   └─ Stage {stage_number} remaining: ${remaining:.2f}")
+                                
+                                print(f"      │   └─ Actual risk for this trade: ${actual_risk:.2f}")
+                                if abs(expected_risk - actual_risk) < 0.01:
+                                    print(f"      ✅ MATCH: Expected ${expected_risk:.2f} = Actual ${actual_risk:.2f}")
+                                else:
+                                    print(f"      ⚠️ MISMATCH: Expected ${expected_risk:.2f} vs Actual ${actual_risk:.2f}")
+                                
+                                # Store the last expected risk as the current drawdown
+                                last_expected_risk = expected_risk
+                                last_actual_risk = actual_risk
+                                last_trade_symbol = pos['symbol']
+                        
+                        print()
+                    
+                    # ========== SUMMARY ==========
+                    print(f"{'─'*70}")
+                    print(f"  📊 SUMMARY:")
+                    print(f"  │ Total closed positions: {len(closed_positions)}")
+                    if total_trades > 0:
+                        print(f"  │ Winning: {winning_count} ({(winning_count/total_trades*100):.1f}%)")
+                        print(f"  │ Losing: {losing_count} ({(losing_count/total_trades*100):.1f}%)")
+                    print(f"  │ Total profit: ${total_profit:.2f}")
+                    print(f"  │ Total pips: {total_pips:.1f}")
+                    
+                    print(f"\n  │ 🔑 LAST TRADE'S EXPECTED RISK (CURRENT DRAWDOWN): ${last_expected_risk:.2f}")
+                    print(f"  │   └─ Symbol: {last_trade_symbol}")
+                    print(f"  │   └─ Actual risk: ${last_actual_risk:.2f}")
+                    print(f"  │   └─ Mismatch: ${last_expected_risk - last_actual_risk:+.2f}")
+                    
+                    # Stage clarification for the current drawdown
+                    if last_expected_risk <= stage_max_risk:
+                        print(f"  │   └─ ✓ Falls in Stage 1 - Within current stage drawdown (${stage_max_risk:.2f})")
+                        print(f"  │   └─ This will be used as LEADER amount for limit order scaling")
+                    else:
+                        stage_number = int(last_expected_risk // stage_max_risk) + 1
+                        remaining = last_expected_risk % stage_max_risk
+                        if remaining == 0:
+                            stage_number = int(last_expected_risk // stage_max_risk)
+                            remaining = stage_max_risk
+                        print(f"  │   └─ Falls in Stage {stage_number}")
+                        print(f"  │   └─ Stage {stage_number} remaining: ${remaining:.2f}")
+                        print(f"  │   └─ This will be split across stages for limit order scaling")
+                    
+                    print(f"{'─'*70}")
+                    
+                    return closed_positions, sequential_losses_by_symbol, last_expected_risk, {
+                        'last_expected_risk': last_expected_risk,
+                        'last_actual_risk': last_actual_risk,
+                        'last_symbol': last_trade_symbol,
+                        'stage_max_risk': stage_max_risk,
+                        'stage_number': int(last_expected_risk // stage_max_risk) + 1 if last_expected_risk > 0 else 1
+                    }
+                    
+                except Exception as e:
+                    print(f"  │ ✗ Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return [], {}, 0, {}
+            
+            # ========== CALL THE ANALYSIS ==========
+            closed_positions, sequential_losses_by_symbol, last_expected_risk, stage_info = fetch_and_analyze_trades_with_sequential_loss()
+            
+            # ========== APPLY SMART SCALING TO LIMIT ORDERS ==========
+            # The last_expected_risk becomes the current drawdown for scaling
+            
+            print(f"\n{'='*60}")
+            print(f"  🎯 APPLYING SMART SCALING TO LIMIT ORDERS")
+            print(f"{'='*60}")
+            print(f"  │ Current drawdown from last trade: ${last_expected_risk:.2f}")
+            print(f"  │ Stage max risk: ${stage_max_risk:.2f}")
+            
+            if last_expected_risk <= stage_max_risk:
+                print(f"  │ ✓ Falls in Stage 1 - Within current stage drawdown")
+                print(f"  │ Using ${last_expected_risk:.2f} as LEADER amount for scaling")
+            else:
+                stage_num = int(last_expected_risk // stage_max_risk) + 1
+                remaining = last_expected_risk % stage_max_risk
+                if remaining == 0:
+                    stage_num = int(last_expected_risk // stage_max_risk)
+                    remaining = stage_max_risk
+                print(f"  │ Falls in Stage {stage_num}")
+                print(f"  │ Stage {stage_num} remaining: ${remaining:.2f}")
+                print(f"  │ Using ${remaining:.2f} as LEADER amount for scaling")
+            
+            print(f"{'─'*60}")
             
             try:
                 # Get open positions
@@ -11099,7 +11655,7 @@ def martingale(inv_id=None):
                     positions = []
                 
                 if positions:
-                    print(f"  │ 📊 Open Positions: {len(positions)}")
+                    print(f"\n  │ 📊 Open Positions: {len(positions)}")
                     for pos in positions:
                         print(f"\n    Position #{pos.ticket}: {pos.symbol}")
                         print(f"      ├─ Type: {'BUY' if pos.type == 0 else 'SELL'}")
@@ -11109,7 +11665,7 @@ def martingale(inv_id=None):
                         print(f"      ├─ Stop Loss: {pos.sl if pos.sl else 'None'}")
                         print(f"      └─ Profit: ${pos.profit:.2f}")
                 else:
-                    print(f"  │ ℹ️ No open positions found - using stage drawdown only")
+                    print(f"\n  │ ℹ️ No open positions found")
                 
                 limit_orders_path, limit_orders_data = load_limit_orders()
                 
@@ -11117,41 +11673,34 @@ def martingale(inv_id=None):
                     print(f"  │ No limit_orders.json data found")
                     return False
                 
-                # ========== NEW: REMOVE INVALID PRICE LEVELS ==========
+                # ========== REMOVE INVALID PRICE LEVELS ==========
                 print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
                 print(f"{'─'*60}")
                 
-                # Group orders by symbol
                 symbols_in_orders = set()
                 for order in limit_orders_data:
                     if isinstance(order, dict) and order.get('symbol'):
                         symbols_in_orders.add(order['symbol'])
                 
                 total_removed = 0
-                all_removed_details = []
-                
                 for symbol in symbols_in_orders:
-                    filtered_orders, removed_count, removed_details = remove_invalid_price_levels(limit_orders_data, symbol)
+                    filtered_orders, removed_count, _ = remove_invalid_price_levels(limit_orders_data, symbol)
                     if removed_count > 0:
                         total_removed += removed_count
-                        all_removed_details.extend(removed_details)
                         limit_orders_data = filtered_orders
                 
-                # Save if any orders were removed
                 if total_removed > 0:
                     print(f"\n  📝 Removing {total_removed} invalid order(s) from limit_orders.json...")
                     save_limit_orders(limit_orders_path, limit_orders_data)
-                    print(f"  ✓ Removed {total_removed} invalid order(s) - scaling will start from valid price levels")
-                else:
-                    print(f"  ℹ️ All orders have valid price levels")
+                    print(f"  ✓ Removed {total_removed} invalid order(s)")
                 
-                # Continue with current volumes after removal
+                # Get current volumes after removal
                 current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
-                print(f"\n  📄 Current limit_orders.json volumes (after validation):")
+                print(f"\n  📄 Current limit_orders.json volumes:")
                 for symbol, vol in current_limit_volumes.items():
                     print(f"     {symbol}: {vol:.2f} lots")
                 
-                # Analyze highest risk orders from limit_orders.json (using filtered data)
+                # ========== ANALYZE HIGHEST RISK FROM LIMIT ORDERS ==========
                 limit_highest_risk_orders = {}
                 if martingale_pre_scale_highest_risk_adder:
                     print(f"\n  🔍 Analyzing highest risk orders from limit_orders.json:")
@@ -11159,31 +11708,42 @@ def martingale(inv_id=None):
                     limit_highest_risk_orders = analyze_highest_risk_from_limit_orders(limit_orders_data)
                     
                     for symbol, order_info in limit_highest_risk_orders.items():
-                        print(f"\n    📌 {symbol} (from limit_orders.json) - Highest Risk Order:")
+                        print(f"\n    📌 {symbol} - Highest Risk Order:")
                         print(f"       ├─ Type: {order_info['order_type']}")
                         print(f"       ├─ Entry: {order_info['entry']:.5f}")
                         print(f"       ├─ Stop: {order_info['stop']:.5f}")
                         print(f"       ├─ Volume: {order_info['_volume']:.2f} lots")
-                        print(f"       ├─ Original Risk: ${order_info['original_risk']:.2f}")
-                        if highest_risk_reduction_percentage > 0:
-                            print(f"       ├─ Reduction ({highest_risk_reduction_percentage}%): ${order_info.get('reduction_applied', 0):.2f}")
-                            print(f"       └─ Adjusted Risk: ${order_info['risk']:.2f}")
-                        else:
-                            print(f"       └─ Risk: ${order_info['risk']:.2f}")
+                        print(f"       └─ Risk: ${order_info['risk']:.2f}")
                 
-                # Store updates per order (by index)
+                # ========== CALCULATE TOTAL EXTRA RISK ==========
+                # The current drawdown is the last trade's expected risk
+                current_drawdown = last_expected_risk
+                
+                # If current drawdown exceeds stage_max_risk, use the remainder for the current stage
+                if current_drawdown > stage_max_risk:
+                    # Calculate which stage and remainder
+                    stage_num = int(current_drawdown // stage_max_risk) + 1
+                    remainder = current_drawdown % stage_max_risk
+                    if remainder == 0:
+                        stage_num = int(current_drawdown // stage_max_risk)
+                        remainder = stage_max_risk
+                    print(f"\n  📌 Current drawdown splits across stages:")
+                    print(f"  │ Total: ${current_drawdown:.2f}")
+                    print(f"  │ Stage {stage_num} remainder: ${remainder:.2f}")
+                    print(f"  │ Using Stage {stage_num} remainder ${remainder:.2f} for current scaling")
+                    current_drawdown = remainder
+                
+                print(f"\n  📈 SCALING CONFIGURATION:")
+                print(f"  ├─ Current drawdown for scaling: ${current_drawdown:.2f}")
+                print(f"  └─ This will be used as the LEADER amount for linear scaling")
+                
                 order_updates = {}
                 pre_scaling_details = {}
                 
-                print(f"\n{'─'*60}")
-                print(f"  📈 Calculating pre-scaling requirements:")
-                print(f"{'─'*60}")
-                
                 # Helper function to group orders by linear groups
                 def group_orders_by_linear(orders_data):
-                    """Group orders into stepup_linear and stepdown_linear based on order types"""
-                    stepup_linear = []   # sell_limit & buy_stop
-                    stepdown_linear = [] # buy_limit & sell_stop
+                    stepup_linear = []
+                    stepdown_linear = []
                     
                     if not orders_data or not isinstance(orders_data, list):
                         return stepup_linear, stepdown_linear
@@ -11205,38 +11765,22 @@ def martingale(inv_id=None):
                         elif 'buy_limit' in order_type or 'sell_stop' in order_type:
                             stepdown_linear.append(order_info)
                     
-                    # Sort stepup_linear by entry (ascending - closest to current price first)
                     stepup_linear.sort(key=lambda x: x['order'].get('entry', 0))
-                    
-                    # Sort stepdown_linear by entry (descending - highest first)
                     stepdown_linear.sort(key=lambda x: x['order'].get('entry', 0), reverse=True)
                     
                     return stepup_linear, stepdown_linear
                 
                 def apply_linear_step_scaling(orders_linear, linear_name, symbol_info, 
                             total_extra_risk, calculation_details):
-                    """
-                    Apply step scaling to linear orders.
-                    
-                    CORRECT BEHAVIOR:
-                    - First order gets volume based on total_extra_risk (this is the BASE)
-                    - Second order gets volume = first_order_volume + (first_order_risk / risk_per_lot)
-                    - Third order gets volume = second_order_volume + (second_order_risk / risk_per_lot)
-                    - And so on...
-                    
-                    This creates a geometric progression where each order's risk equals the sum of all previous orders' risks.
-                    
-                    Returns: dict mapping order index -> new volume
-                    """
                     linear_updates = {}
                     
                     if not orders_linear:
                         return linear_updates
                     
-                    print(f"\n     📊 {linear_name.upper()} linear SCALING:")
+                    print(f"\n     📊 {linear_name.upper()} LINEAR SCALING:")
                     print(f"        Orders in linear: {len(orders_linear)}")
+                    print(f"        LEADER amount: ${total_extra_risk:.2f}")
                     
-                    # Store the calculated volume and risk for each order as we go
                     calculated_volumes = []
                     calculated_risks = []
                     
@@ -11251,7 +11795,6 @@ def martingale(inv_id=None):
                         if not entry or not stop:
                             continue
                         
-                        # Calculate risk per lot for this order
                         is_buy = 'buy' in order_type.lower()
                         if is_buy:
                             price_diff = entry - stop
@@ -11265,11 +11808,9 @@ def martingale(inv_id=None):
                         
                         if idx == 0:
                             # FIRST ORDER (LEADER): Volume based on total_extra_risk
-                            # Volume = total_extra_risk / risk_per_lot
                             leader_volume = total_extra_risk / risk_per_lot
                             leader_volume = round(leader_volume, 2)
                             
-                            # Apply volume constraints
                             min_volume = symbol_info.volume_min
                             max_volume = symbol_info.volume_max
                             volume_step = symbol_info.volume_step
@@ -11279,35 +11820,29 @@ def martingale(inv_id=None):
                             
                             leader_risk = price_diff * leader_volume * symbol_info.trade_contract_size
                             
-                            print(f"\n        🔹 Order #1 (LEADER - Base Order): {symbol} @ {entry:.5f} ({order_type})")
-                            print(f"          ├─ Total extra risk to allocate: ${total_extra_risk:.2f}")
+                            print(f"\n        🔹 Order #1 (LEADER): {symbol} @ {entry:.5f} ({order_type})")
+                            print(f"          ├─ LEADER amount: ${total_extra_risk:.2f}")
                             print(f"          ├─ Calculated volume: {leader_volume:.2f} lots")
                             print(f"          └─ Base risk: ${leader_risk:.2f}")
                             
                             calculated_volumes.append(leader_volume)
                             calculated_risks.append(leader_risk)
                             
-                            # Update this order if volume changed
                             current_volume = get_volume_field_from_order(order)[1] or 0.01
                             if abs(current_volume - leader_volume) > 0.001:
                                 linear_updates[order_index] = leader_volume
                             
                         else:
                             # SUBSEQUENT ORDERS: Each order's risk = previous order's risk
-                            # Volume = current_volume + (previous_risk / risk_per_lot)
                             previous_risk = calculated_risks[idx - 1]
                             
                             current_volume = get_volume_field_from_order(order)[1] or 0.01
-                            
-                            # Calculate additional volume needed to match previous order's risk
                             additional_volume = previous_risk / risk_per_lot
                             additional_volume = round(additional_volume, 2)
                             
-                            # New total volume
                             new_volume = current_volume + additional_volume
                             new_volume = round(new_volume, 2)
                             
-                            # Apply volume constraints
                             min_volume = symbol_info.volume_min
                             max_volume = symbol_info.volume_max
                             volume_step = symbol_info.volume_step
@@ -11315,31 +11850,28 @@ def martingale(inv_id=None):
                             steps = round(new_volume / volume_step) if volume_step > 0 else 0
                             new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
                             
-                            # Calculate new risk
                             new_risk = price_diff * new_volume * symbol_info.trade_contract_size
                             
                             print(f"\n        Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
                             print(f"          ├─ Current volume: {current_volume:.2f} lots (risk: ${price_diff * current_volume * symbol_info.trade_contract_size:.2f})")
-                            print(f"          ├─ Risk to match (from previous order): ${previous_risk:.2f}")
-                            print(f"          ├─ Additional volume needed: {additional_volume:.2f} lots")
+                            print(f"          ├─ Risk to match: ${previous_risk:.2f}")
+                            print(f"          ├─ Additional volume: {additional_volume:.2f} lots")
                             print(f"          ├─ New volume: {new_volume:.2f} lots")
                             print(f"          └─ New risk: ${new_risk:.2f}")
                             
                             calculated_volumes.append(new_volume)
                             calculated_risks.append(new_risk)
                             
-                            # Update this order
                             if abs(current_volume - new_volume) > 0.001:
                                 linear_updates[order_index] = new_volume
                     
-                    # Print summary of the cascade
                     print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
                     for i, (vol, risk) in enumerate(zip(calculated_volumes, calculated_risks)):
                         print(f"           Order {i+1}: {vol:.2f} lots → ${risk:.2f} risk")
                     
                     return linear_updates
                 
-                # Get all unique symbols from limit_orders.json (after removal)
+                # Get all unique symbols from limit orders
                 all_symbols = set()
                 for order in limit_orders_data:
                     if isinstance(order, dict) and order.get('symbol'):
@@ -11347,99 +11879,25 @@ def martingale(inv_id=None):
                 
                 # Process each symbol
                 for symbol in all_symbols:
-                    print(f"\n  🔹 Processing {symbol}:")
+                    print(f"\n  🔹 PROCESSING {symbol}:")
+                    print(f"  {'─'*50}")
                     
-                    # Get symbol info
                     symbol_info = mt5.symbol_info(symbol)
                     if not symbol_info:
                         print(f"     No symbol info for {symbol}")
                         continue
                     
-                    # Initialize total extra risk with stage drawdown
-                    total_extra_limit = current_stage_drawdown
-                    calculation_details_limit = {
-                        "symbol": symbol,
-                        "file_type": "limit_orders",
-                        "stage_drawdown": current_stage_drawdown,
-                        "expected_loss": 0,
-                        "expected_loss_original": 0,
-                        "expected_loss_reduction": 0,
-                        "highest_risk": 0,
-                        "highest_risk_original": 0,
-                        "highest_risk_reduction": 0,
-                        "total_extra": total_extra_limit,
-                        "linear_scaling_applied": martingale_linear_scaling
-                    }
-                    
-                    print(f"     Stage drawdown base: ${current_stage_drawdown:.2f}")
-                    
-                    # Calculate expected loss from open positions (if any)
-                    expected_loss_total = 0
-                    if positions:
-                        for position in positions:
-                            if position.symbol != symbol:
-                                continue
-                            
-                            position_sl = position.sl
-                            position_type = position.type
-                            position_volume = position.volume
-                            position_entry = position.price_open
-                            
-                            if position_sl is None or position_sl == 0:
-                                print(f"     Position has no stop loss - skipping expected loss for {symbol}")
-                                continue
-                            
-                            contract_size = symbol_info.trade_contract_size
-                            
-                            if position_type == mt5.POSITION_TYPE_BUY:
-                                price_diff = position_entry - position_sl
-                            else:
-                                price_diff = position_sl - position_entry
-                            
-                            if price_diff <= 0:
-                                continue
-                            
-                            expected_loss_original = price_diff * position_volume * contract_size
-                            expected_loss = abs(expected_loss_original)
-                            
-                            reduction_amount = 0
-                            if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0:
-                                reduction_amount = expected_loss * (expected_loss_reduction_percentage / 100)
-                                expected_loss = expected_loss - reduction_amount
-                            
-                            expected_loss_total += expected_loss
-                            
-                            calculation_details_limit["expected_loss"] = expected_loss_total
-                            calculation_details_limit["expected_loss_original"] += abs(expected_loss_original)
-                            calculation_details_limit["expected_loss_reduction"] += reduction_amount
-                            
-                            print(f"     Expected loss from position: ${expected_loss:.2f}")
-                    
-                    # Add expected loss total
-                    if martingale_pre_scale_expected_loss_adder and expected_loss_total > 0:
-                        total_extra_limit += expected_loss_total
-                        print(f"     + Expected loss adder: ${expected_loss_total:.2f}")
-                    
-                    # Add highest risk adder
-                    if martingale_pre_scale_highest_risk_adder and symbol in limit_highest_risk_orders:
-                        highest_risk_info = limit_highest_risk_orders[symbol]
-                        highest_risk_value = highest_risk_info['risk']
-                        calculation_details_limit["highest_risk_original"] = highest_risk_info['original_risk']
-                        calculation_details_limit["highest_risk"] = highest_risk_value
-                        if highest_risk_reduction_percentage > 0:
-                            calculation_details_limit["highest_risk_reduction"] = highest_risk_info.get('reduction_applied', 0)
-                        total_extra_limit += highest_risk_value
-                        print(f"     + Highest risk adder: ${highest_risk_value:.2f}")
-                    
-                    calculation_details_limit["total_extra"] = total_extra_limit
+                    # Use the current drawdown as the total extra risk
+                    total_extra_limit = current_drawdown
                     
                     if total_extra_limit <= 0:
-                        print(f"     No extra risk to cover for {symbol}")
+                        print(f"     No extra risk to cover (current drawdown: ${total_extra_limit:.2f})")
                         continue
                     
-                    print(f"\n     TOTAL EXTRA RISK FOR {symbol}: ${total_extra_limit:.2f}")
+                    print(f"     Current drawdown for {symbol}: ${total_extra_limit:.2f}")
+                    print(f"     This is the LEADER amount for linear scaling")
                     
-                    # Get all orders for this symbol with their indices (after removal)
+                    # Get all orders for this symbol
                     symbol_orders_with_indices = []
                     for idx, order in enumerate(limit_orders_data):
                         if isinstance(order, dict) and order.get('symbol') == symbol:
@@ -11449,12 +11907,13 @@ def martingale(inv_id=None):
                         print(f"     No orders found for {symbol} in limit_orders.json")
                         continue
                     
-                    # Get risk per lot (use a sample order to determine)
+                    # Get risk per lot
                     sample_order = symbol_orders_with_indices[0]['order']
                     sample_entry = sample_order.get('entry')
                     sample_stop = sample_order.get('exit') or sample_order.get('stop_loss')
                     sample_order_type = sample_order.get('order_type', '')
                     
+                    risk_per_lot = 0
                     if sample_entry and sample_stop:
                         is_buy = 'buy' in sample_order_type.lower()
                         if is_buy:
@@ -11467,12 +11926,9 @@ def martingale(inv_id=None):
                             print(f"     Risk per lot: ${risk_per_lot:.2f}")
                     
                     if martingale_linear_scaling:
-                        # Apply linear-based step scaling - FIXED: first order in each group retains original volume
-                        print(f"\n     🎯 APPLYING linear-BASED STEP SCALING:")
-                        print(f"     NOTE: First order in each linear group retains original volume")
-                        print(f"     Scaling starts from second order onward")
+                        print(f"\n     🎯 APPLYING LINEAR SCALING WITH LEADER AMOUNT:")
+                        print(f"     LEADER amount: ${total_extra_limit:.2f}")
                         
-                        # Group orders by linear for this symbol only
                         stepup_linear = []
                         stepdown_linear = []
                         
@@ -11485,46 +11941,45 @@ def martingale(inv_id=None):
                             elif 'buy_limit' in order_type or 'sell_stop' in order_type:
                                 stepdown_linear.append(order_info)
                         
-                        # Sort stepup_linear by entry (ascending)
                         stepup_linear.sort(key=lambda x: x['order'].get('entry', 0))
-                        
-                        # Sort stepdown_linear by entry (descending)
                         stepdown_linear.sort(key=lambda x: x['order'].get('entry', 0), reverse=True)
                         
-                        print(f"\n     📈 STEPUP GROUP (sell_limit & buy_stop) - {len(stepup_linear)} orders:")
+                        print(f"\n     📈 STEPUP GROUP - {len(stepup_linear)} orders:")
                         print(f"        └─ Order 1: RETAINS original volume")
                         if len(stepup_linear) > 1:
-                            print(f"        └─ Orders 2-{len(stepup_linear)}: Progressive scaling")
+                            print(f"        └─ Orders 2-{len(stepup_linear)}: Progressive scaling from LEADER")
                         
-                        print(f"\n     📉 STEPDOWN GROUP (buy_limit & sell_stop) - {len(stepdown_linear)} orders:")
+                        print(f"\n     📉 STEPDOWN GROUP - {len(stepdown_linear)} orders:")
                         print(f"        └─ Order 1: RETAINS original volume")
                         if len(stepdown_linear) > 1:
-                            print(f"        └─ Orders 2-{len(stepdown_linear)}: Progressive scaling")
+                            print(f"        └─ Orders 2-{len(stepdown_linear)}: Progressive scaling from LEADER")
                         
-                        # Process stepup_linear (sell_limit & buy_stop)
+                        calculation_details = {
+                            "symbol": symbol,
+                            "current_drawdown": current_drawdown,
+                            "total_extra": total_extra_limit,
+                            "linear_scaling_applied": True
+                        }
+                        
                         if stepup_linear:
                             stepup_updates = apply_linear_step_scaling(
-                                stepup_linear, "stepup", symbol_info,
-                                total_extra_limit, calculation_details_limit
+                                stepup_linear, "STEPUP", symbol_info,
+                                total_extra_limit, calculation_details
                             )
                             order_updates.update(stepup_updates)
                         
-                        # Process stepdown_linear (buy_limit & sell_stop)
                         if stepdown_linear:
                             stepdown_updates = apply_linear_step_scaling(
-                                stepdown_linear, "stepdown", symbol_info,
-                                total_extra_limit, calculation_details_limit
+                                stepdown_linear, "STEPDOWN", symbol_info,
+                                total_extra_limit, calculation_details
                             )
                             order_updates.update(stepdown_updates)
                         
-                        calculation_details_limit["linear_scaling_applied"] = True
-                        
                     else:
-                        # Original behavior - apply same volume to all orders (including first)
+                        # Standard mode - apply same volume to all orders
                         if risk_per_lot > 0:
                             additional_volume_needed = total_extra_limit / risk_per_lot
                             additional_volume_needed = round(additional_volume_needed, 2)
-                            calculation_details_limit["additional_volume"] = additional_volume_needed
                             
                             current_volume = current_limit_volumes.get(symbol, 0)
                             new_volume = current_volume + additional_volume_needed
@@ -11542,25 +11997,27 @@ def martingale(inv_id=None):
                             print(f"     ├─ Additional needed: {additional_volume_needed:.2f} lots")
                             print(f"     └─ NEW TOTAL VOLUME: {new_volume:.2f} lots")
                             
-                            # Apply same volume to all orders for this symbol
                             for order_info in symbol_orders_with_indices:
                                 if new_volume >= min_volume:
                                     order_updates[order_info['index']] = new_volume
                     
-                    pre_scaling_details[f"{symbol}_limit"] = calculation_details_limit
+                    pre_scaling_details[f"{symbol}_limit"] = {
+                        "symbol": symbol,
+                        "current_drawdown": current_drawdown,
+                        "total_extra": total_extra_limit,
+                        "linear_scaling_applied": martingale_linear_scaling
+                    }
                 
                 print(f"\n{'─'*60}")
-                print(f"  💾 APPLYING PRE-SCALING UPDATES")
+                print(f"  💾 APPLYING SMART SCALING UPDATES")
                 print(f"{'─'*60}")
                 
                 updated = False
                 
-                # Apply the order-specific updates
                 if order_updates and limit_orders_data:
                     print(f"\n  📄 Updating limit_orders.json:")
                     updated_count = 0
                     
-                    # Separate updates by group for better display
                     for order_idx, new_volume in order_updates.items():
                         if order_idx < len(limit_orders_data):
                             order = limit_orders_data[order_idx]
@@ -11573,7 +12030,6 @@ def martingale(inv_id=None):
                                 entry = order.get('entry', 0)
                                 order_type = order.get('order_type', 'Unknown')
                                 
-                                # Determine which group this belongs to for display
                                 order_type_lower = order_type.lower()
                                 if 'sell_limit' in order_type_lower or 'buy_stop' in order_type_lower:
                                     group = "STEPUP"
@@ -11588,7 +12044,7 @@ def martingale(inv_id=None):
                         save_limit_orders(limit_orders_path, limit_orders_data)
                         updated = True
                         print(f"\n     ✓ Updated {updated_count} order(s)")
-                        print(f"     └─ First orders in each group retained original volume")
+                        print(f"     └─ Using LEADER amount: ${current_drawdown:.2f}")
                     else:
                         print(f"     ℹ️ No changes needed")
                 
@@ -11596,8 +12052,15 @@ def martingale(inv_id=None):
                 
                 if updated:
                     print(f"\n  ✅ PRE-SCALING COMPLETE")
+                    print(f"     └─ Current drawdown from last trade: ${current_drawdown:.2f}")
+                    print(f"     └─ Stage max risk: ${stage_max_risk:.2f}")
+                    if current_drawdown <= stage_max_risk:
+                        print(f"     └─ ✓ Within Stage 1 - Risks as expected")
+                    else:
+                        stage_num = int(current_drawdown // stage_max_risk) + 1
+                        print(f"     └─ Falls in Stage {stage_num}")
                     if martingale_linear_scaling:
-                        print(f"     └─ linear scaling mode: ACTIVE - First orders unchanged, progressive scaling from 2nd order onward")
+                        print(f"     └─ Linear scaling: ACTIVE - First orders unchanged, progressive scaling from 2nd order onward")
                     else:
                         print(f"     └─ Standard mode: Updated {len(order_updates)} orders")
                 else:
@@ -21066,7 +21529,7 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -21363,23 +21826,7 @@ def process_single_investor_(inv_folder):
         # =====================================================================
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
-        if not is_restricted:
-            manage_grid_levels_in_json(inv_id=inv_id)
-            martingale(inv_id=inv_id)
-            #place_usd_orders(inv_id=inv_id)
-            
-
-            account_stats["success"] = True
-            print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
-
-        # =====================================================================
-        # CONDITION B: INSIDE RESTRICTED TIME RANGE -> SKIP ENGINE
-        # =====================================================================
-        else:
-            print(f"🚨 [ALERT] Account {inv_id} is operating within an active restricted time range block.")
-            print(f"⏭️ in restricted timerange")
-            
-            delete_all_orders_and_positions(inv_id=inv_id)
+        martingale(inv_id=inv_id)
         
         mt5.shutdown()
         
@@ -21394,7 +21841,7 @@ def process_single_investor_(inv_folder):
     
     return account_stats
 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -21786,7 +22233,7 @@ def process_single_investor(inv_folder):
             close_unauthorized_orders(inv_id=inv_id)
             orders_reward_correction(inv_id=inv_id)
             check_pending_orders_risk(inv_id=inv_id)
-            history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
+            #history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
             apply_dynamic_breakeven(inv_id=inv_id)
             check_and_record_unauthorized_actions(inv_id=inv_id)
             
@@ -21886,8 +22333,7 @@ def place_orders_parallel():
     print(f"📊 Global System Load -> Active MT5 instances in other windows: {active_mt5_count}")
 
     if remaining_slots_left == 0:
-        print("⚠️  SYSTEM AT MAXIMUM SAFE CAPACITY: Deferring execution.")
-        return
+        print("⚠️  SYSTEM AT MAXIMUM SAFE CAPACITY: executing.")
 
     total_detected = len(investor_folders)
     if total_detected > remaining_slots_left:

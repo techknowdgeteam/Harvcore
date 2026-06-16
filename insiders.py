@@ -2768,7 +2768,7 @@ def merge_verify_results():
         print(f"ℹ️ No verification updates to merge")
         return False
     
-def process_single_investor_(inv_id):
+def process_single_investor(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist
     NO MT5 INITIALIZATION OR LOGIN
@@ -2791,8 +2791,8 @@ def process_single_investor_(inv_id):
     
     # Just call the folder creation function
     try:
-        get_investors_balance(inv_id=inv_id)
-        merge_balance_results()
+        create_investor_mt5_files(inv_id=inv_id)
+        merge_create_results()
         
     except Exception as e:
         account_stats["error"] = str(e)
@@ -2800,7 +2800,7 @@ def process_single_investor_(inv_id):
     
     return account_stats
 
-def process_single_investor(inv_id):
+def process_single_investor_(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist and executes
     other operations ONLY if within allowed time range.
@@ -3120,5 +3120,5 @@ def place_orders_parallel_loop():
 
 
 if __name__ == "__main__":
-    place_orders_parallel_loop()
+    place_orders_parallel()
     

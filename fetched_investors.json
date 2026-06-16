@@ -1,80 +1,25 @@
 {
-  "1": {
-    "id": "1",
+  "4": {
+    "id": "4",
     "broker": "Deriv",
-    "email": "knnyking12@gmail.com",
-    "fullname": "Arobieke kehinde",
-    "server": "Deriv-Demo",
-    "login": "5996427",
+    "email": "taiwostandarddemo@gmail.com",
+    "fullname": "Arobieke Taiwo",
+    "server": "Deriv-demo",
+    "login": "201763239",
     "password": "@Techknowdge12#",
     "application_status": "approved",
-    "broker_balance": "9001.56",
-    "balance_verification": "verified",
-    "profitandloss": "0.00",
-    "passkey": "$2y$10$CByUUBWo2q1tlr5YppPH.uGZlgWGNzXTTuKxoMVmKwecC8Y5hjS9W",
+    "broker_balance": "10000.00",
+    "balance_verification": "NULL",
+    "profitandloss": "NULL",
+    "passkey": "NULL",
     "submitted_at": "NULL",
-    "balance_display": "show",
-    "execution_start_date": "2026-06-10",
+    "balance_display": "NULL",
+    "execution_start_date": "2026-06-14",
     "analytics_history": "NULL",
-    "revenue_history": [
-      {
-        "id": 1781077968,
-        "execution_start_date": "2026-06-10",
-        "execution_end_date": "2026-07-10",
-        "starting_balance": 9001.56,
-        "current_balance": 9001.56,
-        "profit": 0,
-        "user_share": 0,
-        "server_share": 0,
-        "loyalties": "active",
-        "invested_with": "techknowdge_revenue"
-      },
-      {
-        "id": 1781077086,
-        "execution_start_date": "2026-06-10",
-        "execution_end_date": "2026-07-10",
-        "starting_balance": 9001.56,
-        "current_balance": 9001.56,
-        "profit": 0,
-        "user_share": 0,
-        "server_share": 0,
-        "loyalties": "contract_cancelled",
-        "invested_with": "techknowdge_revenue",
-        "cancelled_at": "2026-06-10 03:38:33",
-        "cancelled_by": "techknowdge12"
-      },
-      {
-        "id": 1780992845,
-        "execution_start_date": "2026-06-09",
-        "execution_end_date": "2026-07-09",
-        "starting_balance": 9001.56,
-        "current_balance": 10001.56,
-        "profit": 1000,
-        "user_share": 700,
-        "server_share": 300,
-        "loyalties": "payment-confirmed",
-        "payment_details": "Amount: $300.00, Coin: btc, Confirmed_at: 2026-06-09 04:16:44",
-        "payment_date": "2026-06-09 04:16:44",
-        "invested_with": "techknowdge_revenue"
-      },
-      {
-        "id": 1780992634,
-        "execution_start_date": "2026-06-09",
-        "execution_end_date": "2026-07-09",
-        "starting_balance": 9001.56,
-        "current_balance": 9001.56,
-        "profit": 0,
-        "user_share": 0,
-        "server_share": 0,
-        "loyalties": "contract_cancelled",
-        "cancelled_at": "2026-06-09 04:11:20",
-        "cancelled_by": "techknowdge12",
-        "invested_with": "techknowdge_revenue"
-      }
-    ],
+    "revenue_history": "NULL",
     "loyalties": "NULL",
     "contract_days_left": "NULL",
-    "paymentdetails": "Amount: $300.00, Coin: btc, Confirmed_at: 2026-06-09 04:16:44",
+    "paymentdetails": "NULL",
     "message": "NULL",
     "unauthorized_actions": "NULL",
     "notifications": "NULL",
@@ -94,7 +39,7 @@
       "symbols_dictionary": {
         "xxxjpy": [],
         "xxxusd": [
-          "BTCUSD"
+          "GBPUSD"
         ],
         "xxxaud": [],
         "xxxnzd": [],
@@ -111,7 +56,7 @@
         "symbols_grid_strategy": true,
         "enable_single_position_and_pending": false,
         "manage_grid_levels_count": {
-          "count": 6
+          "count": 2
         },
         "skip_orders_close_to_position": true,
         "cancel_orders_close_to_position": true,
@@ -123,10 +68,7 @@
             "from": "08:00 pm",
             "to": "12:00 am"
           },
-          "restricted_days": [
-            "saturday",
-            "sunday"
-          ],
+          "restricted_days": [],
           "timezone": "african"
         },
         "fetch_ohlc_data_and_directional_bias_for_investor": false,
@@ -256,11 +198,12 @@
     },
     "invested_with": "techknowdge_revenue",
     "enable_autotrading": "1",
-    "bypass_restriction": "1",
+    "bypass_restriction": "0",
     "demo_account": "1",
     "account_mode": "demo",
-    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Deriv 1\\terminal64.exe",
-    "account_balance": 9001.56,
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv",
+    "account_balance": 10015.74,
     "account_currency": "USD",
     "account_leverage": 1000
   }
