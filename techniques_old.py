@@ -23,7 +23,7 @@ from functools import partial
 
 
 DEV_PATH = r'C:\xampp\htdocs\chronedge\synarex\usersdata\developers'
-DEV_USERS = r'C:\xampp\htdocs\chronedge\synarex\usersdata\developers\developers.json'
+DEV_USERS = r'C:\xampp\htdocs\chronedge\synarex\usersdata\developers\developers_old.json'
 DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\chronedge\synarex\default_accountmanagement.json"
 INVESTOR_USERS = r"C:\xampp\htdocs\chronedge\synarex\usersdata\investors\investors.json"
 INV_PATH = r"C:\xampp\htdocs\chronedge\synarex\usersdata\investors"
@@ -31,7 +31,7 @@ VERIFIED_INVESTORS = r"C:\xampp\htdocs\chronedge\synarex\verified_investors.json
 
 
 def load_developers_dictionary():
-    """Load developers dictionary with user IDs as keys."""
+    # Corrected os.path.exists logic
     if not os.path.exists(DEV_USERS):
         print(f"Error: File not found at {DEV_USERS}")
         return {}
@@ -45,19 +45,16 @@ def load_developers_dictionary():
         print(f"Error loading developers dictionary: {e}")
         return {}
 
-def get_account_management(user_id):
-    """
-    Get account management configuration from the user's JSON entry.
-    Uses user ID to look up the configuration.
-    """
-    dev_dict = load_developers_dictionary()
-    user_config = dev_dict.get(str(user_id))
-    if not user_config:
-        return None
-    return user_config.get("accountmanagement", {})
+def get_account_management(broker_name):
+    path = os.path.join(r"C:\xampp\htdocs\chronedge\synarex\usersdata\developers", broker_name, "accountmanagement.json")
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
 
 def get_analysis_paths(
-    user_id,
+    base_folder,
+    broker_name,
     sym,
     tf,
     direction,
@@ -66,35 +63,27 @@ def get_analysis_paths(
     receiver_tf=None,
     target=None
 ):
-    """
-    Get analysis paths for a specific user.
-    User ID is the key in developers.json.
-    Path structure: DEV_PATH/{user_id}/ohlc/ for source
-                   DEV_PATH/{user_id}/ for output
-    """
-    # Root paths
-    user_root = os.path.join(DEV_PATH, str(user_id))
-    ohlc_source_root = os.path.join(user_root, "ohlc")
-    output_root = user_root  # Output goes directly to user root
-    
-    # Source paths (from ohlc folder)
-    source_json = os.path.join(ohlc_source_root, sym, tf, "candlesdetails", f"{direction}_{bars}.json")
-    source_chart = os.path.join(ohlc_source_root, sym, tf, f"chart_{bars}.png")
-    full_bars_source = os.path.join(ohlc_source_root, sym, tf, "candlesdetails", "newest_oldest.json")
-    
-    # Source ticks path
-    source_ticks = os.path.join(ohlc_source_root, sym, f"{sym}_ticks.json")
-    
-    # Destination paths (directly in user root)
-    dest_ticks_dir = os.path.join(output_root, sym)
+    # Root of developer outputs
+    dev_output_base = os.path.abspath(os.path.join(base_folder, "..", "developers", broker_name))
+
+    # Existing Source files
+    source_json = os.path.join(base_folder, sym, tf, "candlesdetails", f"{direction}_{bars}.json")
+    source_chart = os.path.join(base_folder, sym, tf, f"chart_{bars}.png")
+    full_bars_source = os.path.join(base_folder, sym, tf, "candlesdetails", "newest_oldest.json")
+
+    # --- NEW: Ticks Paths ---
+    # Source: base_folder\AUDNZD\AUDNZD_ticks.json
+    source_ticks = os.path.join(base_folder, sym, f"{sym}_ticks.json")
+    # Destination: developers\broker\AUDNZD\AUDNZD_ticks.json
+    dest_ticks_dir = os.path.join(dev_output_base, sym)
     dest_ticks = os.path.join(dest_ticks_dir, f"{sym}_ticks.json")
-    
+
     # Output directory (tf specific)
-    output_dir = os.path.join(output_root, sym, tf)
+    output_dir = os.path.join(dev_output_base, sym, tf)
     output_json = os.path.join(output_dir, output_filename_base)
     output_chart = os.path.join(output_dir, output_filename_base.replace(".json", ".png"))
     config_json = os.path.join(output_dir, "config.json")
-    
+
     comm_paths = {}
     if receiver_tf and target:
         base_name = output_filename_base.replace(".json", "")
@@ -104,90 +93,87 @@ def get_analysis_paths(
             "png": os.path.join(output_dir, f"{comm_filename_base}.png"),
             "base_name": comm_filename_base
         }
-    
+
     return {
-        "user_root": user_root,
-        "ohlc_source_root": ohlc_source_root,
-        "output_root": output_root,
+        "dev_output_base": dev_output_base,
         "source_json": source_json,
         "source_chart": source_chart,
-        "source_ticks": source_ticks,
-        "dest_ticks": dest_ticks,
+        "source_ticks": source_ticks,      # Added
+        "dest_ticks": dest_ticks,          # Added
         "full_bars_source": full_bars_source,
         "output_dir": output_dir,
         "output_json": output_json,
         "output_chart": output_chart,
         "config_json": config_json,
         "comm_paths": comm_paths
-    }
+    }  
 
-def copy_full_candle_data(user_id):
+def copy_full_candle_data(broker_name):
     """
     Iterates through all symbols and timeframes, copies newest_oldest.json 
     to the developer output directory, and renames it to full_candles_data.json.
     """
     lagos_tz = pytz.timezone('Africa/Lagos')
-    
+
     def log(msg, level="INFO"):
         ts = datetime.now(lagos_tz).strftime('%Y-%m-%d %H:%M:%S')
         print(f"[{ts}] [{level}] {msg}")
 
-    # 1. Load user config
-    dev_dict = load_developers_dictionary()
-    cfg = dev_dict.get(str(user_id))
+    # 1. Load Configurations
+    dev_dict = load_developers_dictionary() # Assuming this is available in your scope
+    cfg = dev_dict.get(broker_name)
     if not cfg:
-        return f"[User {user_id}] Error: User not in dictionary."
+        return f"[{broker_name}] Error: Broker not in dictionary."
     
-    # 2. Define paths using new structure
-    user_root = os.path.join(DEV_PATH, str(user_id))
-    ohlc_source_root = os.path.join(user_root, "ohlc")
-    output_root = user_root  # Output goes directly to user root
+    base_folder = cfg.get("BASE_FOLDER")
     
-    # 3. Check if source exists
-    if not os.path.exists(ohlc_source_root):
-        return f"Error: OHLC source folder {ohlc_source_root} does not exist."
+    # Define destination base (consistent with get_analysis_paths)
+    dev_output_base = os.path.abspath(os.path.join(base_folder, "..", "developers", broker_name))
     
-    log(f"--- STARTING FULL CANDLE DATA: User {user_id} ---")
+    log(f"--- STARTING FULL CANDLE DATA: {broker_name} ---")
     
     processed_count = 0
     error_count = 0
 
-    # 4. Iterate through Symbols
-    for sym in sorted(os.listdir(ohlc_source_root)):
-        sym_p = os.path.join(ohlc_source_root, sym)
+    # 2. Iterate through Symbols
+    if not os.path.exists(base_folder):
+        return f"Error: Base folder {base_folder} does not exist."
+
+    for sym in sorted(os.listdir(base_folder)):
+        sym_p = os.path.join(base_folder, sym)
         if not os.path.isdir(sym_p):
             continue
             
-        # 5. Iterate through Timeframes
+        # 3. Iterate through Timeframes
         for tf in sorted(os.listdir(sym_p)):
             tf_p = os.path.join(sym_p, tf)
             if not os.path.isdir(tf_p):
                 continue
             
-            # Source: user/{id}/ohlc/SYM/TF/candlesdetails/newest_oldest.json
+            # Source: base_folder/SYM/TF/candlesdetails/newest_oldest.json
             source_path = os.path.join(tf_p, "candlesdetails", "newest_oldest.json")
             
-            # Destination: user/{id}/SYM/TF/full_candles_data.json
-            dest_dir = os.path.join(output_root, sym, tf)
+            # Destination: developers/broker/SYM/TF/full_candles_data.json
+            dest_dir = os.path.join(dev_output_base, sym, tf)
             dest_path = os.path.join(dest_dir, "full_candles_data.json")
 
             try:
                 if os.path.exists(source_path):
+                    # Ensure destination directory exists (where config.json lives)
                     os.makedirs(dest_dir, exist_ok=True)
+                    
+                    # Copy and rename
                     shutil.copy2(source_path, dest_path)
                     processed_count += 1
                 else:
-                    # Check if new_old_500.json exists as fallback
-                    alt_source_path = os.path.join(tf_p, "candlesdetails", "new_old_500.json")
-                    if os.path.exists(alt_source_path):
-                        os.makedirs(dest_dir, exist_ok=True)
-                        shutil.copy2(alt_source_path, dest_path)
-                        processed_count += 1
+                    # Log missing source files as info/debug
+                    pass 
+
             except Exception as e:
                 log(f"Error copying {sym}/{tf}: {e}", "ERROR")
                 error_count += 1
 
-    return f"Copy Done. Files: {processed_count}, Errors: {error_count}"
+    return f"Copy Done. Files: {processed_count}"
 
 def label_objects_and_text(
     img,
@@ -495,40 +481,27 @@ def label_objects(
         cv2.putText(img, str(fvg_swing_type), (cx - 8, int(fvg_swing_type_y)), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 
-def swing_points(user_id, max_symbols_parallel=5):
+def swing_points(broker_name, max_symbols_parallel=5):
     lagos_tz = pytz.timezone('Africa/Lagos')
-    
+    def log(msg, level="INFO"):
+        ts = datetime.now(lagos_tz).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{ts}] [{level}] {msg}")
+
     dev_dict = load_developers_dictionary()
-    cfg = dev_dict.get(str(user_id))
+    cfg = dev_dict.get(broker_name)
     if not cfg:
-        return f"[User {user_id}] Error: User not in dictionary."
+        return f"[{broker_name}] Error: Broker not in dictionary."
     
-    # Use global DEV_PATH with user_id
-    user_root = os.path.join(DEV_PATH, str(user_id))
-    ohlc_source_root = os.path.join(user_root, "ohlc")
+    base_folder = cfg.get("BASE_FOLDER")
+    am_data = get_account_management(broker_name)
+    if not am_data:
+        return f"[{broker_name}] Error: accountmanagement.json missing."
     
-    # Get account management from user config
-    account_management = cfg.get("accountmanagement", {})
-    if not account_management:
-        return f"[User {user_id}] Error: accountmanagement not found in config."
-    
-    define_candles = account_management.get("chart", {}).get("define_candles", {})
+    define_candles = am_data.get("chart", {}).get("define_candles", {})
     keyword = "swing_points"
     matching_configs = [(k, v) for k, v in define_candles.items() if keyword in k.lower()]
     if not matching_configs:
-        return f"[User {user_id}] Error: No configuration found for '{keyword}'."
-    
-    # Get symbols from user's symbols_dictionary
-    symbols_dict = account_management.get("symbols_dictionary", {})
-    user_symbols = []
-    for category, symbol_list in symbols_dict.items():
-        if isinstance(symbol_list, list):
-            for sym in symbol_list:
-                if sym and sym not in user_symbols:
-                    user_symbols.append(sym)
-    
-    if not user_symbols:
-        return f"[User {user_id}] Error: No symbols found in symbols_dictionary."
+        return f"[{broker_name}] Error: No configuration found for '{keyword}'."
     
     total_marked_all, processed_charts_all = 0, 0
 
@@ -546,8 +519,9 @@ def swing_points(user_id, max_symbols_parallel=5):
 
     # Aesthetic print header
     print("\n" + "="*80)
-    print(f"🚀 SWING POINTS ANALYSIS - User {user_id}".center(80))
+    print(f"🚀 SWING POINTS ANALYSIS - {broker_name}".center(80))
     print("="*80)
+    log(f"Starting HH/LL analysis for {broker_name} with {max_symbols_parallel} symbols parallel processing")
 
     # Process each config
     for config_key, hlll_cfg in matching_configs:
@@ -574,24 +548,29 @@ def swing_points(user_id, max_symbols_parallel=5):
         hh_cm_obj, hh_cm_dbl = resolve_marker(label_at.get("swing_highs_contourmaker_marker", ""))
         ll_cm_obj, ll_cm_dbl = resolve_marker(label_at.get("swing_lows_contourmaker_marker", ""))
 
-        # Prepare arguments for parallel processing using user symbols only
-        symbol_args = []
-        for sym in user_symbols:
-            # Check if symbol folder exists in ohlc source
-            sym_folder = os.path.join(ohlc_source_root, sym.replace(" ", "_"))
-            if os.path.isdir(sym_folder):
-                symbol_args.append((
-                    sym, ohlc_source_root, user_id, config_key, hlll_cfg,
-                    neighbor_left, neighbor_right, hh_text, ll_text, cm_text,
-                    hh_pos, ll_pos, hh_col, ll_col, hh_obj, ll_obj, hh_dbl, ll_dbl,
-                    hh_cm_obj, ll_cm_obj, hh_cm_dbl, ll_cm_dbl,
-                    bars, direction, output_filename_base
-                ))
+        # Get all symbols to process
+        symbols = []
+        for sym in sorted(os.listdir(base_folder)):
+            sym_p = os.path.join(base_folder, sym)
+            if os.path.isdir(sym_p):
+                symbols.append(sym)
         
-        if not symbol_args:
+        if not symbols:
+            log(f"No symbols found in {base_folder}", "WARNING")
             continue
+
+        # Prepare arguments for parallel processing
+        symbol_args = []
+        for sym in symbols:
+            symbol_args.append((
+                sym, base_folder, broker_name, config_key, hlll_cfg,
+                neighbor_left, neighbor_right, hh_text, ll_text, cm_text,
+                hh_pos, ll_pos, hh_col, ll_col, hh_obj, ll_obj, hh_dbl, ll_dbl,
+                hh_cm_obj, ll_cm_obj, hh_cm_dbl, ll_cm_dbl,
+                bars, direction, output_filename_base
+            ))
         
-        # Use ThreadPool to avoid nested daemon processes
+        # Use ThreadPool instead of Pool to avoid nested daemon processes
         with ThreadPool(processes=max_symbols_parallel) as symbol_pool:
             symbol_results = symbol_pool.map(process_single_symbol, symbol_args)
             
@@ -617,43 +596,33 @@ def swing_points(user_id, max_symbols_parallel=5):
     print(f"📊 Total Swings: {total_marked_all} | Charts Processed: {processed_charts_all}".center(80))
     print("="*80)
     
-    return f"[User {user_id}] Swing points analysis completed. Total swings: {total_marked_all}"
+    return f"[{broker_name}] Swing points analysis completed. Total swings: {total_marked_all}"
 
-def process_single_symbol(args):
+def process_single_symbol_old(args):
     """Process a single symbol across all its timeframes"""
-    (sym, base_folder, user_id, config_key, hlll_cfg,
+    (sym, base_folder, broker_name, config_key, hlll_cfg,
      neighbor_left, neighbor_right, hh_text, ll_text, cm_text,
      hh_pos, ll_pos, hh_col, ll_col, hh_obj, ll_obj, hh_dbl, ll_dbl,
      hh_cm_obj, ll_cm_obj, hh_cm_dbl, ll_cm_dbl,
      bars, direction, output_filename_base) = args
     
+    lagos_tz = pytz.timezone('Africa/Lagos')
+    def log(msg, level="INFO"):
+        ts = datetime.now(lagos_tz).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{ts}] [{level}] {msg}")
+    
     symbol_swings_high = 0
     symbol_swings_low = 0
     symbol_timeframes = []
     
-    # base_folder is already the OHLC source root: DEV_PATH/{user_id}/ohlc
-    # Check if symbol exists in ohlc source
-    sym_folder_name = sym.replace(" ", "_")
-    sym_p = os.path.join(base_folder, sym_folder_name)
+    sym_p = os.path.join(base_folder, sym)
     if not os.path.isdir(sym_p):
         return (0, 0, [], sym)
     
-    # Get user's timeframes from config (or scan folders)
-    timeframes = []
     for tf in sorted(os.listdir(sym_p)):
-        tf_p = os.path.join(sym_p, tf)
-        if os.path.isdir(tf_p):
-            timeframes.append(tf)
-    
-    if not timeframes:
-        return (0, 0, [], sym)
-    
-    for tf in timeframes:
-        # Get paths using the new function signature
-        paths = get_analysis_paths(user_id, sym, tf, direction, bars, output_filename_base)
+        paths = get_analysis_paths(base_folder, broker_name, sym, tf, direction, bars, output_filename_base)
         config_path = os.path.join(paths["output_dir"], "config.json")
         
-        # Check if source files exist - skip silently if not
         if not os.path.exists(paths["source_json"]) or not os.path.exists(paths["source_chart"]):
             continue
         
@@ -688,6 +657,267 @@ def process_single_symbol(args):
 
             for idx, contour in enumerate(contours):
                 x, y, w, h = cv2.boundingRect(contour)
+                # Store both candle center X and the full bounding box
+                data[idx].update({
+                    "candle_center_x": x + (w // 2),
+                    "candle_center_y": y + (h // 2),
+                    "candle_x": x + (w // 2),
+                    "candle_y": y,
+                    "candle_width": w,
+                    "candle_height": h,
+                    "candle_left": x,
+                    "candle_right": x + w,
+                    "candle_top": y,
+                    "candle_bottom": y + h
+                })
+
+            n = len(data)
+            swing_count_in_chart = 0
+            swing_highs_in_chart = 0
+            swing_lows_in_chart = 0
+            
+            # Handle neighbor boundaries based on zero values
+            if neighbor_left == 0 and neighbor_right == 0:
+                start_idx = 0
+                end_idx = n
+            elif neighbor_left == 0:
+                start_idx = 0
+                end_idx = n - neighbor_right
+            elif neighbor_right == 0:
+                start_idx = neighbor_left
+                end_idx = n
+            else:
+                start_idx = neighbor_left
+                end_idx = n - neighbor_right
+
+            for i in range(start_idx, end_idx):
+                curr_h, curr_l = data[i]['high'], data[i]['low']
+                
+                if neighbor_left > 0:
+                    l_h = [d['high'] for d in data[i - neighbor_left:i]]
+                    l_l = [d['low'] for d in data[i - neighbor_left:i]]
+                else:
+                    l_h = []
+                    l_l = []
+                
+                if neighbor_right > 0:
+                    r_h = [d['high'] for d in data[i + 1:i + 1 + neighbor_right]]
+                    r_l = [d['low'] for d in data[i + 1:i + 1 + neighbor_right]]
+                else:
+                    r_h = []
+                    r_l = []
+                
+                is_hh = True
+                if len(l_h) > 0 and curr_h <= max(l_h):
+                    is_hh = False
+                if len(r_h) > 0 and curr_h <= max(r_h):
+                    is_hh = False
+                
+                is_ll = True
+                if len(l_l) > 0 and curr_l >= min(l_l):
+                    is_ll = False
+                if len(r_l) > 0 and curr_l >= min(r_l):
+                    is_ll = False
+                
+                if neighbor_left == 0 and neighbor_right == 0:
+                    if i + 1 < n:
+                        if curr_h > data[i+1]['high']:
+                            is_hh = True
+                            is_ll = False
+                        elif curr_l < data[i+1]['low']:
+                            is_hh = False
+                            is_ll = True
+                        else:
+                            continue
+                    else:
+                        if i - 1 >= 0:
+                            if curr_h > data[i-1]['high']:
+                                is_hh = True
+                                is_ll = False
+                            elif curr_l < data[i-1]['low']:
+                                is_hh = False
+                                is_ll = True
+                            else:
+                                continue
+                        else:
+                            is_hh = False
+                            is_ll = True
+                
+                if not (is_hh or is_ll):
+                    continue
+                
+                swing_count_in_chart += 1
+                is_bull = is_ll
+                
+                if is_bull:
+                    swing_lows_in_chart += 1
+                    symbol_swings_low += 1
+                else:
+                    swing_highs_in_chart += 1
+                    symbol_swings_high += 1
+                    
+                active_color = ll_col if is_bull else hh_col
+                custom_text = ll_text if is_bull else hh_text
+                obj_type = ll_obj if is_bull else hh_obj
+                dbl_arrow = ll_dbl if is_bull else hh_dbl
+                position = ll_pos if is_bull else hh_pos
+
+                label_objects_and_text(
+                    img, data[i]["candle_center_x"], data[i]["candle_center_y"], data[i]["candle_height"],
+                    fvg_swing_type=data[i]['candle_number'],
+                    custom_text=custom_text,
+                    object_type=obj_type,
+                    is_bullish_arrow=is_bull,
+                    is_marked=True,
+                    double_arrow=dbl_arrow,
+                    arrow_color=active_color,
+                    label_position=position
+                )
+
+                m_idx = i + neighbor_right if neighbor_right > 0 else i + 1
+                contour_maker_entry = None
+                if m_idx < n:
+                    cm_obj = ll_cm_obj if is_bull else hh_cm_obj
+                    cm_dbl = ll_cm_dbl if is_bull else hh_cm_dbl
+                    
+                    if cm_obj:
+                        label_objects_and_text(
+                            img, data[m_idx]["candle_center_x"], data[m_idx]["candle_center_y"], data[m_idx]["candle_height"],
+                            custom_text=cm_text,
+                            object_type=cm_obj,
+                            is_bullish_arrow=is_bull,
+                            is_marked=True,
+                            double_arrow=cm_dbl,
+                            arrow_color=active_color,
+                            label_position=position
+                        )
+
+                    data[m_idx]["is_contour_maker"] = True
+                    contour_maker_entry = data[m_idx].copy()
+                    contour_maker_entry.update({
+                        "draw_x": data[m_idx]["candle_center_x"],
+                        "draw_y": data[m_idx]["candle_center_y"],
+                        "draw_w": data[m_idx]["candle_width"],
+                        "draw_h": data[m_idx]["candle_height"],
+                        "draw_left": data[m_idx]["candle_left"],
+                        "draw_right": data[m_idx]["candle_right"],
+                        "draw_top": data[m_idx]["candle_top"],
+                        "draw_bottom": data[m_idx]["candle_bottom"],
+                        "is_contour_maker": True
+                    })
+
+                data[i].update({
+                    "swing_type": "swing_low" if is_bull else "swing_high",
+                    "is_swing": True,
+                    "active_color": active_color,
+                    "draw_x": data[i]["candle_center_x"],
+                    "draw_y": data[i]["candle_center_y"],
+                    "draw_w": data[i]["candle_width"],
+                    "draw_h": data[i]["candle_height"],
+                    "draw_left": data[i]["candle_left"],
+                    "draw_right": data[i]["candle_right"],
+                    "draw_top": data[i]["candle_top"],
+                    "draw_bottom": data[i]["candle_bottom"],
+                    "contour_maker": contour_maker_entry,
+                    "m_idx": m_idx if m_idx < n else None
+                })
+
+            # Finalize outputs for this specific TF
+            os.makedirs(paths["output_dir"], exist_ok=True)
+            cv2.imwrite(paths["output_chart"], img)
+
+            config_json = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config_json = json.load(f)
+                except:
+                    config_json = {}
+            
+            config_json[config_key] = data
+            config_json[f"{config_key}_candle_list"] = data 
+
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_json, f, indent=4)
+            
+            symbol_timeframes.append(tf)
+            
+            # Print exactly like original but during processing
+            if symbol_timeframes:
+                total_symbol_swings = symbol_swings_high + symbol_swings_low
+                if total_symbol_swings > 0:
+                    print(f"\n {sym} SWING POINTS:")
+                    print(f"   ├─ Timeframes processed: {len(symbol_timeframes)}")
+                    print(f"   ├─ 🔴 SWING HIGHS: {symbol_swings_high}")
+                    print(f"   ├─ 🟢 SWING LOWS: {symbol_swings_low}")
+                    print(f"   └─ 📊 TOTAL SWINGS: {total_symbol_swings}")
+                    print(f"   {'.' * 50}")
+            
+        except Exception as e:
+            log(f"[ERROR] Failed processing {sym}/{tf}: {e}", "ERROR")
+    
+    return (symbol_swings_high, symbol_swings_low, symbol_timeframes, sym)
+
+def process_single_symbol(args):
+    """Process a single symbol across all its timeframes"""
+    (sym, base_folder, broker_name, config_key, hlll_cfg,
+     neighbor_left, neighbor_right, hh_text, ll_text, cm_text,
+     hh_pos, ll_pos, hh_col, ll_col, hh_obj, ll_obj, hh_dbl, ll_dbl,
+     hh_cm_obj, ll_cm_obj, hh_cm_dbl, ll_cm_dbl,
+     bars, direction, output_filename_base) = args
+    
+    lagos_tz = pytz.timezone('Africa/Lagos')
+    def log(msg, level="INFO"):
+        ts = datetime.now(lagos_tz).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{ts}] [{level}] {msg}")
+    
+    symbol_swings_high = 0
+    symbol_swings_low = 0
+    symbol_timeframes = []
+    
+    sym_p = os.path.join(base_folder, sym)
+    if not os.path.isdir(sym_p):
+        return (0, 0, [], sym)
+    
+    for tf in sorted(os.listdir(sym_p)):
+        paths = get_analysis_paths(base_folder, broker_name, sym, tf, direction, bars, output_filename_base)
+        config_path = os.path.join(paths["output_dir"], "config.json")
+        
+        if not os.path.exists(paths["source_json"]) or not os.path.exists(paths["source_chart"]):
+            continue
+        
+        try:
+            with open(paths["source_json"], 'r', encoding='utf-8') as f:
+                data = sorted(json.load(f), key=lambda x: x.get('candle_number', 0))
+            
+            # ADD CENTER_PRICE TO EACH CANDLE
+            for candle in data:
+                if 'high' in candle and 'low' in candle:
+                    candle['center_price'] = (candle['high'] + candle['low']) / 2
+                else:
+                    candle['center_price'] = None
+            
+            img = cv2.imread(paths["source_chart"])
+            if img is None: 
+                continue
+            
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, (35, 50, 50), (85, 255, 255)) | cv2.inRange(hsv, (0, 50, 50), (10, 255, 255))
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if len(contours) == 0: 
+                continue
+
+            contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+            
+            if len(data) != len(contours):
+                min_len = min(len(data), len(contours))
+                data = data[:min_len]
+                contours = contours[:min_len]
+
+            for idx, contour in enumerate(contours):
+                x, y, w, h = cv2.boundingRect(contour)
+                # Store both candle center X and the full bounding box
                 data[idx].update({
                     "candle_center_x": x + (w // 2),
                     "candle_center_y": y + (h // 2),
@@ -710,11 +940,16 @@ def process_single_symbol(args):
             if neighbor_left == 0 and neighbor_right == 0:
                 # Special case: mark every red candle as swing low and every green candle as swing high
                 for i in range(n):
+                    # Determine candle color from close vs open
                     candle_close = data[i].get('close', 0)
                     candle_open = data[i].get('open', 0)
-                    is_bull = candle_close >= candle_open
+                    
+                    # Red candle (bearish) = close < open -> swing low
+                    # Green candle (bullish) = close >= open -> swing high
+                    is_bull = candle_close >= candle_open  # Green candle
                     
                     if is_bull:
+                        # Green candle - Swing High
                         swing_highs_in_chart += 1
                         symbol_swings_high += 1
                         active_color = hh_col
@@ -723,6 +958,7 @@ def process_single_symbol(args):
                         dbl_arrow = hh_dbl
                         position = hh_pos
                     else:
+                        # Red candle - Swing Low
                         swing_lows_in_chart += 1
                         symbol_swings_low += 1
                         active_color = ll_col
@@ -745,6 +981,7 @@ def process_single_symbol(args):
                         label_position=position
                     )
                     
+                    # Handle contour maker for next candle
                     m_idx = i + 1
                     contour_maker_entry = None
                     if m_idx < n:
@@ -795,6 +1032,7 @@ def process_single_symbol(args):
             
             else:
                 # Original logic for when neighbors are not both zero
+                # Handle neighbor boundaries based on zero values
                 if neighbor_left == 0 and neighbor_right == 0:
                     start_idx = 0
                     end_idx = n
@@ -960,13 +1198,23 @@ def process_single_symbol(args):
             
             symbol_timeframes.append(tf)
             
+            # Print exactly like original but during processing
+            if symbol_timeframes:
+                total_symbol_swings = symbol_swings_high + symbol_swings_low
+                if total_symbol_swings > 0:
+                    print(f"\n {sym} SWING POINTS:")
+                    print(f"   ├─ Timeframes processed: {len(symbol_timeframes)}")
+                    print(f"   ├─ 🔴 SWING HIGHS: {symbol_swings_high}")
+                    print(f"   ├─ 🟢 SWING LOWS: {symbol_swings_low}")
+                    print(f"   └─ 📊 TOTAL SWINGS: {total_symbol_swings}")
+                    print(f"   {'.' * 50}")
+            
         except Exception as e:
-            # Silently skip errors
-            pass
+            log(f"[ERROR] Failed processing {sym}/{tf}: {e}", "ERROR")
     
     return (symbol_swings_high, symbol_swings_low, symbol_timeframes, sym)
 
-def fair_value_gaps(user_id):
+def fair_value_gaps(broker_name):
     lagos_tz = pytz.timezone('Africa/Lagos')
     
     def log(msg, level="INFO"):
@@ -974,21 +1222,19 @@ def fair_value_gaps(user_id):
         print(f"[{ts}] [{level}] {msg}")
     
     dev_dict = load_developers_dictionary()
-    cfg = dev_dict.get(str(user_id))  # ← FIXED: use user_id
+    cfg = dev_dict.get(broker_name)
     if not cfg:
-        return f"[User {user_id}] Error: User not in dictionary."  # ← FIXED
+        return f"[{broker_name}] Error: Broker not in dictionary."
     
-    # user_id is already the parameter, no need to reassign
-    user_root = os.path.join(DEV_PATH, str(user_id))
-    ohlc_source_root = os.path.join(user_root, "ohlc")
-    am_data = get_account_management(user_id)
+    base_folder = cfg.get("BASE_FOLDER")
+    am_data = get_account_management(broker_name)
     if not am_data:
-        return f"[User {user_id}] Error: accountmanagement not found in config."  # ← FIXED
+        return f"[{broker_name}] Error: accountmanagement.json missing."
     
     # === DYNAMIC SEARCH BY KEYWORD "fvg" IN SECTION NAME ===
     define_candles = am_data.get("chart", {}).get("define_candles", {})
     if not define_candles:
-        return f"[{user_id}] Error: 'define_candles' section missing in accountmanagement.json."
+        return f"[{broker_name}] Error: 'define_candles' section missing in accountmanagement.json."
 
     keyword = "fvg"
     matching_configs = []
@@ -998,7 +1244,7 @@ def fair_value_gaps(user_id):
             matching_configs.append((key, section))
 
     if not matching_configs:
-        return f"[{user_id}] Error: No section key containing '{keyword}' found in 'define_candles'."
+        return f"[{broker_name}] Error: No section key containing '{keyword}' found in 'define_candles'."
 
     log(f"Found {len(matching_configs)} FVG configuration(s) matching keyword '{keyword}': {[k for k, _ in matching_configs]}")
 
@@ -1069,15 +1315,15 @@ def fair_value_gaps(user_id):
 
         log(f"Starting FVG Analysis with config '{config_key}' | Mode: Left-to-Right Only")
 
-        for sym in sorted(os.listdir(ohlc_source_root)):
-            sym_p = os.path.join(ohlc_source_root, sym)
+        for sym in sorted(os.listdir(base_folder)):
+            sym_p = os.path.join(base_folder, sym)
             if not os.path.isdir(sym_p): continue
             
             for tf in sorted(os.listdir(sym_p)):
                 tf_path = os.path.join(sym_p, tf)
                 if not os.path.isdir(tf_path): continue
 
-                paths = get_analysis_paths(user_id, sym, tf, direction, bars, output_filename_base)
+                paths = get_analysis_paths(base_folder, broker_name, sym, tf, direction, bars, output_filename_base)
 
                 if not os.path.exists(paths["source_json"]) or not os.path.exists(paths["source_chart"]):
                     continue
@@ -1313,7 +1559,7 @@ def fair_value_gaps(user_id):
 
     return f"Done (all FVG configs). Total FVGs: {total_marked_all} | Total Charts: {processed_charts_all}"
 
-def fvg_swing_points(user_id):
+def fvg_swing_points(broker_name):
     lagos_tz = pytz.timezone('Africa/Lagos')
     
     def log(msg, level="INFO"):
@@ -1321,23 +1567,21 @@ def fvg_swing_points(user_id):
         print(f"[{ts}] [{level}] {msg}")
 
     dev_dict = load_developers_dictionary()
-    cfg = dev_dict.get(str(user_id))  # ← FIXED: use user_id
+    cfg = dev_dict.get(broker_name)
     if not cfg:
-        return f"[User {user_id}] Error: User not in dictionary."  # ← FIXED
+        return f"[{broker_name}] Error: Broker not in dictionary."
 
-    # user_id is already the parameter, no need to reassign
-    user_root = os.path.join(DEV_PATH, str(user_id))
-    ohlc_source_root = os.path.join(user_root, "ohlc")
-    am_data = get_account_management(user_id)
+    base_folder = cfg.get("BASE_FOLDER")
+    am_data = get_account_management(broker_name)
     if not am_data:
-        return f"[User {user_id}] Error: accountmanagement not found in config."  # ← FIXED
+        return f"[{broker_name}] Error: accountmanagement.json missing."
 
     # Find FVG configuration section(s)
     define_candles = am_data.get("chart", {}).get("define_candles", {})
     fvg_configs = [(k, v) for k, v in define_candles.items() if "fvg" in k.lower()]
     
     if not fvg_configs:
-        return f"[{user_id}] Warning: No FVG config found → cannot determine parameters."
+        return f"[{broker_name}] Warning: No FVG config found → cannot determine parameters."
 
     config_key, fvg_cfg = fvg_configs[0]
     log(f"Using FVG config section: {config_key} for swing detection parameters")
@@ -1359,15 +1603,15 @@ def fvg_swing_points(user_id):
     total_swings_added = 0
     processed_charts = 0
 
-    for sym in sorted(os.listdir(ohlc_source_root)):
-        sym_p = os.path.join(ohlc_source_root, sym)
+    for sym in sorted(os.listdir(base_folder)):
+        sym_p = os.path.join(base_folder, sym)
         if not os.path.isdir(sym_p): continue
 
         for tf in sorted(os.listdir(sym_p)):
             tf_path = os.path.join(sym_p, tf)
             if not os.path.isdir(tf_path): continue
 
-            paths = get_analysis_paths(user_id, sym, tf, direction, bars, output_filename_base)
+            paths = get_analysis_paths(base_folder, broker_name, sym, tf, direction, bars, output_filename_base)
             config_path = os.path.join(paths["output_dir"], "config.json")
             chart_path = paths["output_chart"]
 
@@ -1551,7 +1795,7 @@ def fvg_swing_points(user_id):
 
     return f"Finished. Total Swings: {total_swings_added}, Charts: {processed_charts}"
 
-def liquidity_candles(user_id):
+def liquidity_candles(broker_name):
     lagos_tz = pytz.timezone('Africa/Lagos')
     
     def log(msg, level="INFO"):
@@ -1569,16 +1813,15 @@ def liquidity_candles(user_id):
         if "dot" in raw: return "dot", False
         return raw, False
 
-    log(f"--- STARTING SPACE-BASED LIQUIDITY ANALYSIS: User {user_id} ---")
+    log(f"--- STARTING SPACE-BASED LIQUIDITY ANALYSIS: {broker_name} ---")
 
     dev_dict = load_developers_dictionary() 
-    cfg = dev_dict.get(str(user_id))
+    cfg = dev_dict.get(broker_name)
     if not cfg:
-        return f"Error: User {user_id} not in dictionary."
+        return f"Error: Broker {broker_name} not in dictionary."
     
-    user_root = os.path.join(DEV_PATH, str(user_id))
-    ohlc_source_root = os.path.join(user_root, "ohlc")
-    am_data = get_account_management(user_id)
+    base_folder = cfg.get("BASE_FOLDER")
+    am_data = get_account_management(broker_name)
     if not am_data:
         return "Error: accountmanagement.json missing."
 
@@ -1618,8 +1861,8 @@ def liquidity_candles(user_id):
             "app_ll": resolve_marker(apprentice_cfg.get("label_at", {}).get(f"swing_type_{swing_prefix}_low_marker"))
         }
 
-        for sym in sorted(os.listdir(ohlc_source_root)):
-            sym_p = os.path.join(ohlc_source_root, sym)
+        for sym in sorted(os.listdir(base_folder)):
+            sym_p = os.path.join(base_folder, sym)
             if not os.path.isdir(sym_p): 
                 continue
 
@@ -1628,7 +1871,11 @@ def liquidity_candles(user_id):
                 if not os.path.isdir(tf_p): 
                     continue
                 
-                dev_output_dir = os.path.join(user_root, sym, tf)
+                dev_output_dir = os.path.join(
+                    os.path.abspath(os.path.join(base_folder, "..", "developers", broker_name)), 
+                    sym, 
+                    tf
+                )
                 config_path = os.path.join(dev_output_dir, "config.json")
 
                 if not os.path.exists(config_path): 
@@ -1807,7 +2054,7 @@ def liquidity_candles(user_id):
     log(f"--- LIQUIDITY COMPLETE --- Total Space Sweeps: {total_liq_found}")
     return f"Completed: {total_liq_found} sweeps."
 
-def entry_point_of_interest(user_id):
+def entry_point_of_interest(broker_name):
     lagos_tz = pytz.timezone('Africa/Lagos') 
     
     
@@ -7350,24 +7597,23 @@ def entry_point_of_interest(user_id):
 
     def main_logic():
         """Main logic for processing entry points of interest."""
-        log(f"Starting: {user_id}")
+        log(f"Starting: {broker_name}")
 
         dev_dict = load_developers_dictionary() 
-        cfg = dev_dict.get(str(user_id))  # ← CHANGED: use user_id as string
+        cfg = dev_dict.get(broker_name)
         if not cfg:
-            log(f"User {user_id} not found")
-            return f"Error: User {user_id} not in dictionary."
+            log(f"Broker {broker_name} not found")
+            return f"Error: Broker {broker_name} not in dictionary."
         
-        # ← CHANGED: Use DEV_PATH directly instead of BASE_FOLDER from config
-        dev_base_path = os.path.join(DEV_PATH, str(user_id))
-        base_folder = os.path.join(dev_base_path, "ohlc")  # ← ADDED: base_folder is the ohlc directory
+        base_folder = cfg.get("BASE_FOLDER")
+        dev_base_path = os.path.abspath(os.path.join(base_folder, "..", "developers", broker_name))
         
-        am_data = get_account_management(str(user_id))  # ← CHANGED: use user_id
+        am_data = get_account_management(broker_name)
         if not am_data:
             log("accountmanagement.json missing")
             return "Error: accountmanagement.json missing."
 
-        # Get symbols_dictionary from root level
+        # --- FIXED: Get symbols_dictionary from root level ---
         symbols_dictionary = am_data.get("symbols_dictionary", {})
 
         define_candles = am_data.get("chart", {}).get("define_candles", {})
@@ -7403,13 +7649,14 @@ def entry_point_of_interest(user_id):
                     
                     entry_count += 1
                     
+                    # --- FIXED: Pass symbols_dictionary to the function ---
                     syncs = process_entry_newfilename(
                         entry_settings, 
                         source_def_name, 
                         raw_filename_base, 
-                        base_folder,  # ← Now points to dev_path/{user_id}/ohlc
-                        dev_base_path,  # ← Now points to dev_path/{user_id}
-                        symbols_dictionary
+                        base_folder, 
+                        dev_base_path,
+                        symbols_dictionary  # Pass the symbols dictionary here
                     )
                     
                     total_syncs += syncs
@@ -7418,10 +7665,11 @@ def entry_point_of_interest(user_id):
             return f"Completed: {entry_count} entry points processed, {total_syncs} total syncs"
         else:
             return f"No entry points found for processing."
+    
     # ---- Execute Main Logic ---- 3
     return main_logic()
 
-def entries_confirmation(user_id):
+def entries_confirmation(broker_name):
     lagos_tz = pytz.timezone('Africa/Lagos') 
     
     
@@ -11976,24 +12224,23 @@ def entries_confirmation(user_id):
 
     def main_logic():
         """Main logic for processing entry points of interest."""
-        log(f"Starting: {user_id}")
+        log(f"Starting: {broker_name}")
 
         dev_dict = load_developers_dictionary() 
-        cfg = dev_dict.get(str(user_id))  # ← CHANGED: use user_id as string
+        cfg = dev_dict.get(broker_name)
         if not cfg:
-            log(f"User {user_id} not found")
-            return f"Error: User {user_id} not in dictionary."
+            log(f"Broker {broker_name} not found")
+            return f"Error: Broker {broker_name} not in dictionary."
         
-        # ← CHANGED: Use DEV_PATH directly instead of BASE_FOLDER from config
-        dev_base_path = os.path.join(DEV_PATH, str(user_id))
-        base_folder = os.path.join(dev_base_path, "ohlc")  # ← ADDED: base_folder is the ohlc directory
+        base_folder = cfg.get("BASE_FOLDER")
+        dev_base_path = os.path.abspath(os.path.join(base_folder, "..", "developers", broker_name))
         
-        am_data = get_account_management(str(user_id))  # ← CHANGED: use user_id
+        am_data = get_account_management(broker_name)
         if not am_data:
             log("accountmanagement.json missing")
             return "Error: accountmanagement.json missing."
 
-        # Get symbols_dictionary from root level
+        # --- FIXED: Get symbols_dictionary from root level ---
         symbols_dictionary = am_data.get("symbols_dictionary", {})
 
         define_candles = am_data.get("chart", {}).get("define_candles", {})
@@ -12029,13 +12276,14 @@ def entries_confirmation(user_id):
                     
                     entry_count += 1
                     
+                    # --- FIXED: Pass symbols_dictionary to the function ---
                     syncs = process_entry_confirmation_newfilename(
                         entry_settings, 
                         source_def_name, 
                         raw_filename_base, 
-                        base_folder,  # ← Now points to dev_path/{user_id}/ohlc
-                        dev_base_path,  # ← Now points to dev_path/{user_id}
-                        symbols_dictionary
+                        base_folder, 
+                        dev_base_path,
+                        symbols_dictionary  # Pass the symbols dictionary here
                     )
                     
                     total_syncs += syncs
@@ -12044,6 +12292,7 @@ def entries_confirmation(user_id):
             return f"COMPLETED: {entry_count} ENTRIES CONFIRMATION PROCESSED"
         else:
             return f"No entry points found for processing."
+    
     
     return main_logic()
 
@@ -12673,53 +12922,54 @@ def single():
         #sync_results = pool.map(sync_dev_investors, broker_names)
         #for r in sync_results: print(r)
 
-def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
+def process_single_developer_pipeline(broker_name, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
     This allows multiprocessing to happen at the 'Account Level'.
     """
+    results = []
     try:  
-        res_poi = entry_point_of_interest(user_id)
+        # Step 1: Data Sync
+        res_candles = copy_full_candle_data(broker_name)
         
-        return f"[User {user_id}] Pipeline completed successfully"
+        # Step 2: HH/LL Analysis with symbol-level multiprocessing
+        res_hhll = swing_points(broker_name, max_symbols_parallel)
+        
+        
+        return f"[{broker_name}] Pipeline completed successfully"
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
+        return f"--- [{broker_name}] PIPELINE FAILED: {e} ---"
 
-def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
+def process_single_developer_pipeline_(broker_name, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
     This allows multiprocessing to happen at the 'Account Level'.
     """
+    results = []
     try:  
-        # Step 1: Data Sync - pass user_id
-        res_candles = copy_full_candle_data(user_id)
-        print(res_candles)
+        # Step 1: Data Sync
+        res_candles = copy_full_candle_data(broker_name)
         
-        # Step 2: HH/LL Analysis with symbol-level multiprocessing - pass user_id
-        res_hhll = swing_points(user_id, max_symbols_parallel)
-        print(res_hhll)
+        # Step 2: HH/LL Analysis with symbol-level multiprocessing
+        res_hhll = swing_points(broker_name, max_symbols_parallel)
         
-        # Step 3: POI - pass user_id
-        res_poi = entry_point_of_interest(user_id)
+        # Step 3: POI
+        res_poi = entry_point_of_interest(broker_name)
         
-        # Step 4: Entries Confirmation - pass user_id
-        res_entries = entries_confirmation(user_id)
+        # Step 4: Entries Confirmation
+        res_entries = entries_confirmation(broker_name)
         
-        # Step 5: Cleanup - pass user_id
-        res_clean = clear_unathorized_entries_folders(user_id)
+        # Step 5: Cleanup
+        res_clean = clear_unathorized_entries_folders(broker_name)
         
         # Step 6: Investor Sync
-        res_sync = sync_dev_investors(user_id)
+        #res_sync = sync_dev_investors(broker_name)
         
-        return f"[User {user_id}] Pipeline completed successfully"
+        return f"[{broker_name}] Pipeline completed successfully"
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
+        return f"--- [{broker_name}] PIPELINE FAILED: {e} ---"
 
 def main():
     dev_dict = load_developers_dictionary()
@@ -12727,14 +12977,14 @@ def main():
         print("No developers to process.")
         return
 
-    user_ids = sorted(dev_dict.keys())
+    broker_names = sorted(dev_dict.keys())
     cores = cpu_count()
     
     # You can adjust this value - number of symbols to process in parallel per broker
     MAX_SYMBOLS_PARALLEL = 5  # Change this to control concurrency per broker
     
     print(f"--- STARTING ACCOUNT-LEVEL MULTIPROCESSING ---")
-    print(f"Cores: {cores} | Total Developers: {len(user_ids)}")
+    print(f"Cores: {cores} | Total Developers: {len(broker_names)}")
     print(f"Symbols per broker processed in parallel: {MAX_SYMBOLS_PARALLEL}")
 
     # Use multiprocessing Pool for broker-level parallelism
@@ -12742,7 +12992,7 @@ def main():
         # Pass max_symbols_parallel to each broker process
         from functools import partial
         process_func = partial(process_single_developer_pipeline, max_symbols_parallel=MAX_SYMBOLS_PARALLEL)
-        final_results = pool.map(process_func, user_ids)
+        final_results = pool.map(process_func, broker_names)
         
         # Print summaries as they finish
         for report in final_results:

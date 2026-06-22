@@ -1,30 +1,12 @@
 {
-    "deriv6": {
-        "ACCOUNT_EMAIL": "iamkennyking60@gmail.com",
-        "ACCOUNT_PASSWORD": "@Techknowdge12#",
-        "LOGIN_ID": "101347351",
-        "PASSWORD": "@Techknowdge12#",
-        "SERVER": "DerivSVG-Server-02",
-        "POSITION": "developer",
-        "EXECUTION_START_DATE": "2025-11-29",
-        "BROKER_BALANCE": 12.09,
-        "PROFITANDLOSS": -35.07,
-        "ACCOUNT": "real",
-        "STRATEGY": "hightolow",
-        "SCALE": "consistency",
-        "RISKREWARD": 3,
-        "SYMBOLS": "all",
-        "MARTINGALE_MARKETS": "neth25, usdjpy",
-        "ACCOUNT_VERIFICATION": "verified",
-        "DB_APPLICATION_STATUS": "approved",
-        "LOYALTIES": "justjoined",
-        "PROFITANDLOSS_HISTORY": "",
-        "BROKER_BALANCE_HISTORY": "",
-        "EXECUTION_DATES_HISTORY": "",
-        "RESET_EXECUTION_DATE_AND_BROKER_BALANCE": "none",
-        "CONTRACT_DAYS_LEFT": 25,
-        "TRADES": "14:Trades, 1:Won, 13:Lost, symbolsthatlost:(GBPUSD:-7.97, BNBUSD:-4.06, TONUSD:-4.06, DOTUSD:-4.01, NERUSD:-4.00, DEX 1500 DOWN Index:-4.00, LTCUSD:-3.99, USDCHF:-3.96, ETCUSD:-3.83, ADAUSD:-3.77, BATUSD:-2.91, Volatility 75 (1s) Index:-0.01), symbolsthatwon:(DEX 1500 DOWN Index:11.50)",
-        "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
-        "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\mt5\\MetaTrader 5 Deriv 6\\terminal64.exe"
-    }
+  "deriv6": {
+    "POSITION": "developer",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\synarex\\mt5\\MetaTrader 5 Deriv 6\\terminal64.exe"
+  },
+  "bybit1": {
+    "POSITION": "developer",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\synarex\\mt5\\MetaTrader 5 Bybit 1\\terminal64.exe"
+  }
 }

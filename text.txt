@@ -1,20 +1,356 @@
+    def process_entry_confirmation_newfilename(entry_settings, source_def_name, raw_filename_base, base_folder, dev_base_path, symbols_dictionary=None):
+        new_folder_name = entry_settings.get("new_filename")
+        if not new_folder_name:
+            return 0
+        
+        # Add timeframe hierarchy for ordering (from highest to lowest)
+        tf_hierarchy = ['1M', '1W', '3D', '1D', '12h', '8h', '6h', '4h', '3h', '2h', '1h', '45m', '30m', '15m', '5m', '3m', '1m']
+        
+        # --- Symbol Filtering Logic (CASE INSENSITIVE) ---
+        if symbols_dictionary is None:
+            symbols_dictionary = entry_settings.get("symbols_dictionary", {})
+        
+        target_symbols = None
+        new_folder_name_lower = new_folder_name.lower()
+        
+        matching_key = None
+        for key in symbols_dictionary.keys():
+            if key.lower() == new_folder_name_lower:
+                matching_key = key
+                break
+        
+        if matching_key:
+            symbol_groups = symbols_dictionary[matching_key]
+            log(f"{new_folder_name} targets specific symbols")
+            
+            all_symbols = []
+            if isinstance(symbol_groups, dict):
+                for group_name, symbol_list in symbol_groups.items():
+                    if isinstance(symbol_list, list):
+                        all_symbols.extend(symbol_list)
+            elif isinstance(symbol_groups, list):
+                all_symbols = symbol_groups
+                log(f"  Direct symbol list: {symbol_groups}")
+            
+            if all_symbols:
+                target_symbols = set(all_symbols)
+            else:
+                log(f"{matching_key} activates processing all symbols")
+        else:
+            log(f"{new_folder_name} accepts all symbols")
+        
+        mark_paused_symbols_in_full_candles(dev_base_path, new_folder_name)
+        identify_paused_symbols_poi(dev_base_path, new_folder_name)
+        limit_orders_old_record_cleanup(dev_base_path, new_folder_name)
 
-            "lowerhighsandhigherlows": {
-                "filename":"childswing.json",
-                "read_candles_from":"new_old",
-                "number_candles":"define_candle",
-                "NEIGHBOR_LEFT": 6,
-                "NEIGHBOR_RIGHT": 6,
-                "label":{
-                    "lowerhighs_text": "LH",
-                    "higherlows_text": "HL",
-                    "label_at": {
-                        "higherlows":"low",
-                        "higherlows_color":"green",
-                        "higherlows_marker": "arrow",
-                        "lower_highs":"high",
-                        "lower_highs_color":"red",
-                        "lower_highs_marker": "arrow"
-                    }
-                }
-            },
+        # Load paused symbols
+        paused_symbols_file = os.path.join(dev_base_path, new_folder_name, "paused_symbols_folder", "paused_symbols.json")
+        paused_names = set()
+        
+        if os.path.exists(paused_symbols_file):
+            try:
+                with open(paused_symbols_file, 'r', encoding='utf-8') as f:
+                    paused_list = json.load(f)
+                    paused_names = {item.get("symbol") for item in paused_list if "symbol" in item}
+            except Exception as e:
+                log(f"Error loading paused symbols: {e}")
+
+        process_receiver = str(entry_settings.get("process_receiver_files", "no")).lower()
+        identify_config = entry_settings.get("identify_definitions", {})
+        sync_count = 0
+
+        if target_symbols:
+            log(f"🚀 PROCESSING ONLY these symbols for {new_folder_name}: {sorted(target_symbols)}")
+        else:
+            log(f"📁 Processing ALL symbols for {new_folder_name} (no filtering)")
+
+        for sym in sorted(os.listdir(base_folder)):
+            sym_p = os.path.join(base_folder, sym)
+            
+            if not os.path.isdir(sym_p):
+                continue
+                
+            if target_symbols is not None and sym not in target_symbols:
+                continue
+                
+            if sym in paused_names:
+                log(f"  ⏸️ Skipping {sym} - paused")
+                continue
+
+            target_sym_dir = os.path.join(dev_base_path, new_folder_name, sym)
+            os.makedirs(target_sym_dir, exist_ok=True)
+            
+            target_config_path = os.path.join(target_sym_dir, "config.json")
+            target_data = {}
+            if os.path.exists(target_config_path):
+                try:
+                    with open(target_config_path, 'r', encoding='utf-8') as f:
+                        target_data = json.load(f)
+                except Exception:
+                    target_data = {}
+
+            modified = False
+            pending_images = {}
+            pending_full_candle_data = {}
+
+            # Get all timeframes for this symbol
+            timeframes = sorted([tf for tf in os.listdir(sym_p) if os.path.isdir(os.path.join(sym_p, tf))], 
+                               key=lambda x: tf_hierarchy.index(x) if x in tf_hierarchy else len(tf_hierarchy))
+            
+            for tf in timeframes:
+                tf_p = os.path.join(sym_p, tf)
+                if not os.path.isdir(tf_p): 
+                    continue
+                
+                source_dev_dir = os.path.join(dev_base_path, sym, tf)
+                
+                # Handle full_candles_data.json
+                source_full_candle_path = os.path.join(source_dev_dir, "full_candles_data.json")
+                if os.path.exists(source_full_candle_path):
+                    try:
+                        with open(source_full_candle_path, 'r', encoding='utf-8') as f:
+                            full_data_content = json.load(f)
+                            pending_full_candle_data[f"{tf}_full_candles_data.json"] = (tf, full_data_content)
+                    except Exception as e:
+                        log(f"Error reading full_candles_data for {sym} {tf}: {e}")
+
+                source_config_path = os.path.join(source_dev_dir, "config.json")
+                if not os.path.exists(source_config_path): 
+                    continue
+
+                with open(source_config_path, 'r', encoding='utf-8') as f:
+                    src_data = json.load(f)
+
+                if tf not in target_data:
+                    target_data[tf] = {}
+
+                # Get all higher timeframes (for confirmation sources)
+                higher_tfs = []
+                if tf in tf_hierarchy:
+                    tf_index = tf_hierarchy.index(tf)
+                    higher_tfs = tf_hierarchy[:tf_index]  # All timeframes higher than current
+
+                for file_key, candles in src_data.items():
+                    clean_key = file_key.lower()
+                    if "candle_list" in clean_key or "candlelist" in clean_key: 
+                        continue
+
+                    is_primary = (clean_key == source_def_name.lower() or clean_key == raw_filename_base)
+                    is_receiver = (not is_primary and raw_filename_base in clean_key)
+
+                    if (is_receiver and process_receiver != "yes") or (not is_primary and not is_receiver):
+                        continue
+
+                    # Always preserve original data
+                    target_data[tf][file_key] = candles
+                    modified = True
+
+                    # Find existing confirmation keys for this timeframe and file_key
+                    # Pattern: {current_tf}_confirmation_from_{higher_tf}_poi_{file_key}
+                    matching_keys = []
+                    
+                    # Look for keys that match the pattern
+                    for existing_key in target_data[tf].keys():
+                        if existing_key.startswith(f"{tf}_confirmation_from_") and existing_key.endswith(f"_poi_{file_key}"):
+                            # Extract the source timeframe
+                            source_tf_part = existing_key.replace(f"{tf}_confirmation_from_", "").split("_poi_")[0]
+                            if source_tf_part in higher_tfs:
+                                matching_keys.append(existing_key)
+                    
+                    # Process each matching key
+                    for new_key in matching_keys:
+                        # Extract source timeframe from the key for chart naming
+                        source_tf = new_key.replace(f"{tf}_confirmation_from_", "").split("_poi_")[0]
+                        chart_base_name = f"{tf}_confirmation_from_{source_tf}_poi"
+                        
+                        if identify_config:
+                            processed_candles = identify_definitions({file_key: candles}, identify_config, source_def_name, raw_filename_base)
+                            
+                            if file_key in processed_candles:
+                                updated_candles, extracted_patterns = apply_definitions_condition(
+                                    processed_candles[file_key], identify_config, new_folder_name, file_key
+                                )
+                                
+                                # Update existing key with new data
+                                target_data[tf][new_key] = updated_candles
+                                
+                                if extracted_patterns:
+                                    target_data[tf][f"{new_key}_patterns"] = extracted_patterns
+                                
+                                modified = True
+                                
+                                processed_candles = intruder_and_outlaw_check(processed_candles)
+                                
+                                poi_config = entry_settings.get("point_of_interest")
+                                if poi_config:
+                                    identify_poi(target_data[tf], new_key, updated_candles, poi_config)
+                                    identify_poi_mitigation(target_data[tf], new_key, poi_config)
+                                    identify_swing_mitigation_between_definitions(target_data[tf], new_key, updated_candles, poi_config)
+                                    identify_selected(target_data[tf], new_key, poi_config)
+
+                        # Handle chart images - use the current timeframe (tf) for the image mapping
+                        existing_img_path = os.path.join(target_sym_dir, f"{chart_base_name}.png")
+                        
+                        if os.path.exists(existing_img_path):
+                            img = cv2.imread(existing_img_path)
+                            if img is not None:
+                                log(f"  📊 [{sym}] {new_key}")
+                                
+                                if poi_config:
+                                    img = draw_poi_tools(img, target_data[tf], new_key, poi_config)
+                                    record_config = entry_settings.get("record_prices")
+                                    if record_config:
+                                        identify_prices(target_data[tf], new_key, record_config, dev_base_path, new_folder_name)
+                                
+                                # Queue the image to be saved (overwrites the existing one)
+                                pending_images[f"{chart_base_name}.png"] = (tf, img, new_key)
+
+            # Process Ticks JSON
+            source_ticks_path = os.path.join(dev_base_path, sym, f"{sym}_ticks.json")
+            if os.path.exists(source_ticks_path):
+                target_ticks_path = os.path.join(target_sym_dir, f"{sym}_ticks.json")
+                try:
+                    with open(source_ticks_path, 'r', encoding='utf-8') as f:
+                        ticks_data = json.load(f)
+                    with open(target_ticks_path, 'w', encoding='utf-8') as f:
+                        json.dump(ticks_data, f, indent=4)
+                except Exception as e:
+                    log(f"Error processing ticks for {sym}: {e}")
+            
+            enrich_limit_orders(dev_base_path, new_folder_name)
+
+            # Sanitize and identify orders - this only determines which timeframes have patterns
+            # It does NOT delete any data
+            should_delete_folder, tfs_to_keep = sanitize_symbols_or_files(target_sym_dir, target_data)
+
+            if should_delete_folder:
+                if os.path.exists(target_sym_dir):
+                    shutil.rmtree(target_sym_dir)
+                continue 
+
+            identify_paused_symbols(target_data, dev_base_path, new_folder_name)
+            populate_limit_orders_with_paused_orders(dev_base_path, new_folder_name)
+
+            # Add liquidity sweepers to patterns
+            for tf in tfs_to_keep:
+                if tf in target_data:
+                    for file_key in list(target_data[tf].keys()):
+                        if file_key.endswith("_patterns"):
+                            base_key = file_key.replace("_patterns", "")
+                            
+                            # Extract original candles key from pattern key
+                            if "_confirmation_from_" in base_key:
+                                parts = base_key.split("_poi_")
+                                if len(parts) > 1:
+                                    original_candles_key = parts[1]
+                                else:
+                                    original_candles_key = base_key.split("_poi_")[0].split("_confirmation_from_")[1]
+                            else:
+                                original_candles_key = base_key.replace(f"{new_folder_name}_", "")
+                            
+                            original_candles = target_data[tf].get(original_candles_key, [])
+                            
+                            if original_candles:
+                                add_liquidity_sweepers_to_patterns(target_data[tf], base_key, original_candles)
+
+            # --- STEP 5: Final Write (Images and Full Candle Data) ---
+            # FIXED: NO DELETION - Only save images, never delete
+            # This preserves all charts regardless of whether timeframes have patterns
+            
+            # Save all pending images (overwrites existing ones with updated drawings)
+            for img_name, (tf, img_data, new_key) in pending_images.items():
+                img_path = os.path.join(target_sym_dir, img_name)
+                cv2.imwrite(img_path, img_data)
+                log(f"  💾 [{sym}] {img_name} updated")
+
+            # Write tf_full_candles_data.json files
+            for json_name, (tf, content) in pending_full_candle_data.items():
+                # Only save full candle data for timeframes we want to keep
+                # (this is data, not images, so it's okay to filter)
+                if tf in tfs_to_keep:
+                    with open(os.path.join(target_sym_dir, json_name), 'w', encoding='utf-8') as f:
+                        json.dump(content, f, indent=4)
+
+            if modified:
+                with open(target_config_path, 'w', encoding='utf-8') as f:
+                    json.dump(target_data, f, indent=4)
+                sync_count += 1
+
+        if target_symbols:
+            log(f"✅ Completed: Processed {sync_count} symbols for {new_folder_name} (filtered to: {sorted(target_symbols)})")
+        else:
+            log(f"✅ Completed: Processed {sync_count} symbols for {new_folder_name} (no filtering)")
+            
+        return sync_count
+    
+    def main_logic():
+        """Main logic for processing entry points of interest."""
+        log(f"Starting: {broker_name}")
+
+        dev_dict = load_developers_dictionary() 
+        cfg = dev_dict.get(broker_name)
+        if not cfg:
+            log(f"Broker {broker_name} not found")
+            return f"Error: Broker {broker_name} not in dictionary."
+        
+        base_folder = cfg.get("BASE_FOLDER")
+        dev_base_path = os.path.abspath(os.path.join(base_folder, "..", "developers", broker_name))
+        
+        am_data = get_account_management(broker_name)
+        if not am_data:
+            log("accountmanagement.json missing")
+            return "Error: accountmanagement.json missing."
+
+        # --- FIXED: Get symbols_dictionary from root level ---
+        symbols_dictionary = am_data.get("symbols_dictionary", {})
+
+        define_candles = am_data.get("chart", {}).get("define_candles", {})
+        entries_root = define_candles.get("entries_poi_confirmation_condition", {})
+        
+        total_syncs = 0
+        entry_count = 0
+
+        for apprehend_key, source_configs in entries_root.items():
+            if not apprehend_key.startswith("apprehend_"):
+                continue
+                
+            source_def_name = apprehend_key.replace("apprehend_", "")
+            source_def = define_candles.get(source_def_name, {})
+            if not source_def:
+                continue
+
+            raw_filename_base = source_def.get("filename", "").replace(".json", "").lower()
+
+            for entry_key, entry_settings in source_configs.items():
+                if not entry_key.startswith("entry_"):
+                    continue
+
+                new_folder_name = entry_settings.get('new_filename')
+                if new_folder_name:
+                    print()
+                    log(f"\n📊 Processing {new_folder_name} Poi confirmation")
+                    
+                    # Check if identify_definitions exist
+                    identify_config = entry_settings.get("identify_definitions")
+                    if identify_config:
+                        log(f"  With identify_definitions: {list(identify_config.keys())}")
+                    
+                    entry_count += 1
+                    
+                    # --- FIXED: Pass symbols_dictionary to the function ---
+                    syncs = process_entry_confirmation_newfilename(
+                        entry_settings, 
+                        source_def_name, 
+                        raw_filename_base, 
+                        base_folder, 
+                        dev_base_path,
+                        symbols_dictionary  # Pass the symbols dictionary here
+                    )
+                    
+                    total_syncs += syncs
+        
+        if entry_count > 0:
+            return f"Completed: {entry_count} entry points processed, {total_syncs} total syncs"
+        else:
+            return f"No entry points found for processing."
+    

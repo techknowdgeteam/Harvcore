@@ -1,0 +1,212 @@
+{
+  "deriv_terminal_1": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\mt5\\MetaTrader 5 Deriv ohlc 1\\terminal64.exe"
+  },
+  "deriv_terminal_2": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 2\\terminal64.exe"
+  },
+  "deriv_terminal_3": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 3\\terminal64.exe"
+  },
+  "deriv_terminal_4": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 4\\terminal64.exe"
+  },
+  "deriv_terminal_5": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 5\\terminal64.exe"
+  },
+  "deriv_terminal_6": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 6\\terminal64.exe"
+  },
+  "deriv_terminal_7": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 7\\terminal64.exe"
+  },
+  "deriv_terminal_8": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 8\\terminal64.exe"
+  },
+  "deriv_terminal_9": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 9\\terminal64.exe"
+  },
+  "deriv_terminal_10": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 10\\terminal64.exe"
+  },
+  "deriv_terminal_11": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 11\\terminal64.exe"
+  },
+  "deriv_terminal_12": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 12\\terminal64.exe"
+  },
+  "deriv_terminal_13": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 13\\terminal64.exe"
+  },
+  "deriv_terminal_14": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 14\\terminal64.exe"
+  },
+  "deriv_terminal_15": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 15\\terminal64.exe"
+  },
+  "deriv_terminal_16": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 16\\terminal64.exe"
+  },
+  "deriv_terminal_17": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 17\\terminal64.exe"
+  },
+  "deriv_terminal_18": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 18\\terminal64.exe"
+  },
+  "deriv_terminal_19": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 19\\terminal64.exe"
+  },
+  "deriv_terminal_20": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 20\\terminal64.exe"
+  },
+  "deriv_terminal_21": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 21\\terminal64.exe"
+  },
+  "deriv_terminal_22": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 22\\terminal64.exe"
+  },
+  "deriv_terminal_23": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 23\\terminal64.exe"
+  },
+  "deriv_terminal_24": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 24\\terminal64.exe"
+  },
+  "deriv_terminal_25": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 25\\terminal64.exe"
+  },
+  "deriv_terminal_26": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 26\\terminal64.exe"
+  },
+  "deriv_terminal_27": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 27\\terminal64.exe"
+  },
+  "deriv_terminal_28": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 28\\terminal64.exe"
+  },
+  "deriv_terminal_29": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 29\\terminal64.exe"
+  },
+  "deriv_terminal_30": {
+    "LOGIN_ID": "101347351",
+    "PASSWORD": "@Techknowdge12#",
+    "SERVER": "DerivSVG-Server-02",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedgeusersdata\\ohlc",
+    "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\MetaTrader 5 Deriv ohlc 30\\terminal64.exe"
+  }
+}

@@ -1,0 +1,4 @@
+[20:33:49] Screen is ON | CPU is Active
+[20:33:54] Screen is ON | CPU is Active
+[20:34:57] Screen is ON | CPU is Active
+[20:35:02] Screen is ON | CPU is Active

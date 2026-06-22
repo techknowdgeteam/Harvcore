@@ -3,28 +3,28 @@
     "LOGIN_ID": "101347351",
     "PASSWORD": "@Techknowdge12#",
     "SERVER": "DerivSVG-Server-02",
-    "BASE_FOLDER": "C:\\xampp\\htdocs\\harvcore\\harvox\\usersdata\\ohlc",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
     "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\mt5\\MetaTrader 5 Deriv ohlc 1\\terminal64.exe"
   },
   "deriv_terminal_2": {
     "LOGIN_ID": "101347351",
     "PASSWORD": "@Techknowdge12#",
     "SERVER": "DerivSVG-Server-02",
-    "BASE_FOLDER": "C:\\xampp\\htdocs\\harvcore\\harvox\\usersdata\\ohlc",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
     "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\mt5\\MetaTrader 5 Deriv ohlc 2\\terminal64.exe"
   },
   "deriv_terminal_3": {
     "LOGIN_ID": "101347351",
     "PASSWORD": "@Techknowdge12#",
     "SERVER": "DerivSVG-Server-02",
-    "BASE_FOLDER": "C:\\xampp\\htdocs\\harvcore\\harvox\\usersdata\\ohlc",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
     "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\mt5\\MetaTrader 5 Deriv ohlc 3\\terminal64.exe"
   },
   "deriv_terminal_4": {
     "LOGIN_ID": "101347351",
     "PASSWORD": "@Techknowdge12#",
     "SERVER": "DerivSVG-Server-02",
-    "BASE_FOLDER": "C:\\xampp\\htdocs\\harvcore\\harvox\\usersdata\\ohlc",
+    "BASE_FOLDER": "C:\\xampp\\htdocs\\chronedge\\synarex\\usersdata\\ohlc",
     "TERMINAL_PATH": "C:\\xampp\\htdocs\\chronedge\\mt5\\MetaTrader 5 Deriv ohlc 4\\terminal64.exe"
   }
 }

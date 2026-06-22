@@ -1,1 +1,18 @@
-{}
+{
+    "deriv_f": {
+        "LOGIN_ID": "32092095",
+        "PASSWORD": "@Techknowdge12#",
+        "SERVER": "deriv-demo",
+        "INVESTED_WITH": "deriv6_structural-liquidity",
+        "TERMINAL_PATH": "C:\\xampp\\htdocs\\synapse\\mt5\\MetaTrader 5 Deriv f\\terminal64.exe",
+        "MESSAGE": "invalid broker login please check your login details"
+    },
+    "deriv_k": {
+        "LOGIN_ID": "5996427",
+        "PASSWORD": "@Techknowdge12#",
+        "SERVER": "deriv-demo",
+        "INVESTED_WITH": "deriv6_structural-liquidity",
+        "TERMINAL_PATH": "C:\\xampp\\htdocs\\synapse\\mt5\\MetaTrader 5 Deriv d\\terminal64.exe",
+        "MESSAGE": "invalid broker login please check your login details"
+    }
+}
