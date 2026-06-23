@@ -2,7 +2,7 @@
     "NORMALIZATION": {
         "XAUUSD": ["GOLD", "XAUUSD", "XAU/USD", "GOLDUSD", "GOLD/USD"],
         "USDJPY": ["USDJPY", "USD/JPY"],
-        "GBPUSD": ["GBPUSD", "GBP/USD", "CABLE"],
+        "GBPUSD": ["GBPUSD", "GBP/USD", "CABLE","GBPUSD+"],
         "EURUSD": ["EURUSD", "EUR/USD", "FIBER"],
         "AUDUSD": ["AUDUSD", "AUD/USD", "AUDUSDM", "AUSSIE"],
         "NZDUSD": ["NZDUSD", "NZD/USD", "KIWI"],

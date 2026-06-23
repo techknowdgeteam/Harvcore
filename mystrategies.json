@@ -22,6 +22,15 @@
         "energies": ["USOIL", "UKOIL", "XNGUSD"],
         "synthetics": []
     },
+    "settings":{
+        "minimum_balance": 50,
+        "restrict_order_from_timeframe":"",
+        "custom_selection":{
+            "orders_per_symbol": "all",
+            "if_not_all_filter_buy_by": "lowest",
+            "if_not_all_filter_sells_by": "highest"
+        }
+    },
     "chart":{
         "maximum_holding_days": 0,
         "define_candles": {
@@ -838,117 +847,5 @@
                 }
             }
         }
-    },
-    "settings": {
-    "switch_invalid_to_instant_order": false,
-    "enable_order_type_conversion": false,
-    "restrictions_duration": {
-        "restrict_orders_in_time_range_of": {
-        "from": "08:50 pm",
-        "to": "12:00 am"
-        },
-        "restricted_days": [],
-        "timezone": "african"
-    },
-    "martingale_config": {
-        "enable_martingale": false,
-        "martingale_for_position_order_scale": true,
-        "martingale_loss_recovery_adder_percentage": "10%",
-        "pre_scaling": {
-        "martingale_pre_scaling": true,
-        "martingale_linear_scaling": true,
-        "martingale_pre_scale_highest_risk_adder": true,
-        "highest_risk_reduction_percentage": "100%",
-        "martingale_pre_scale_expected_loss_adder": true,
-        "expected_loss_reduction_percentage": "0%"
-        }
-    },
-    "enable_breakeven": true,
-    "breakeven_dictionary": [
-        {
-        "reward": 1,
-        "breakeven_at_reward": 0.1
-        },
-        {
-        "reward": 1.8,
-        "breakeven_at_reward": 0.5
-        },
-        {
-        "reward": 2,
-        "breakeven_at_reward": 0.5
-        },
-        {
-        "reward": 2.8,
-        "breakeven_at_reward": 1
-        },
-        {
-        "reward": 3,
-        "breakeven_at_reward": 1.5
-        },
-        {
-        "reward": 3.8,
-        "breakeven_at_reward": 1.7
-        },
-        {
-        "reward": 1,
-        "breakeven_at_reward": 2
-        },
-        {
-        "reward": 1.8,
-        "breakeven_at_reward": 2.2
-        },
-        {
-        "reward": 5,
-        "breakeven_at_reward": 2.5
-        },
-        {
-        "reward": 5.8,
-        "breakeven_at_reward": 2.8
-        },
-        {
-        "reward": 6,
-        "breakeven_at_reward": 3
-        },
-        {
-        "reward": 7,
-        "breakeven_at_reward": 3.5
-        },
-        {
-        "reward": 7.8,
-        "breakeven_at_reward": 3.8
-        },
-        {
-        "reward": 8,
-        "breakeven_at_reward": 1
-        },
-        {
-        "reward": 8.8,
-        "breakeven_at_reward": 1.2
-        },
-        {
-        "reward": 9,
-        "breakeven_at_reward": 1.5
-        },
-        {
-        "reward": 10,
-        "breakeven_at_reward": 5
-        }
-    ],
-    "restrict_order_from_timeframe": "none",
-    "default_price": false,
-    "risk_reward_correction": true,
-    "enable_martingale": true
-    },
-    "minimum_balance_risk_distance": {
-    "1-10000000.99_risk": 0.5
-    },
-    "maximum_balance_risk_distance": {
-    "1-10000000.99_risk": 6
-    },
-    "account_balance_default_risk_management": {
-    "1-10000000.99_risk": 50
-    },
-    "account_balance_maximum_risk_management": {
-    "1-10000000.99_risk": 60
     }
 }
