@@ -21,6 +21,7 @@ import os
 import json
 import time
 import re
+import sys
 
 
 BASE_ERROR_FOLDER = r"C:\xampp\htdocs\harvcore\harvox\usersdata\debugs"
@@ -1546,25 +1547,87 @@ def process_account_worker(account_key, account_cfg, symbol_chunk, TIMEFRAME_MAP
     log_and_print(f"  {'='*60}\n", "INFO")
 
 def main():
+    """Main execution function with loop support."""
+    
+    # Parse command line arguments
+    run_as_loop = False
+    loop_interval = 0  # Default 5 minutes between loops
+    max_loops = None  # None means infinite
+    
+    # Check for command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('--loop='):
+            loop_value = arg.split('=')[1].lower()
+            run_as_loop = loop_value in ['true', 'yes', '1', 'on']
+        elif arg.startswith('--interval='):
+            try:
+                loop_interval = int(arg.split('=')[1])
+            except ValueError:
+                log_and_print(f"Invalid interval value: {arg.split('=')[1]}. Using default 300 seconds.", "WARNING")
+        elif arg.startswith('--max-loops='):
+            try:
+                max_loops = int(arg.split('=')[1])
+            except ValueError:
+                log_and_print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.", "WARNING")
+    
     log_and_print("\n" + "┌" + "─"*58 + "┐", "INFO")
     log_and_print("│                 🔄 SYNAREX DATA PIPELINE                   │", "INFO")
+    log_and_print("│" + " " * 58 + "│", "INFO")
+    log_and_print(f"│  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}" + " " * (58 - len(f"│  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")) + "│", "INFO")
+    if run_as_loop:
+        log_and_print(f"│  Interval: {loop_interval}s" + " " * (58 - len(f"│  Interval: {loop_interval}s")) + "│", "INFO")
+        if max_loops:
+            log_and_print(f"│  Max Loops: {max_loops}" + " " * (58 - len(f"│  Max Loops: {max_loops}")) + "│", "INFO")
+        else:
+            log_and_print("│  Max Loops: Infinite" + " " * (58 - len("│  Max Loops: Infinite")) + "│", "INFO")
     log_and_print("└" + "─"*58 + "┘\n", "INFO")
     
-    success = fetch_charts_all_brokers()  # This value is now overridden by user config
-
-    if success:
-        log_and_print("\n" + "┌" + "─"*58 + "┐", "SUCCESS")
-        log_and_print("│                   ✅ PIPELINE COMPLETED                     │", "SUCCESS")
-        log_and_print("├" + "─"*58 + "┤", "SUCCESS")
-        log_and_print("│ • Charts generated                • Candle data saved        │", "SUCCESS")
-        log_and_print("│ • PH/PL analysis completed        • Arrow detection done     │", "SUCCESS")
-        log_and_print("└" + "─"*58 + "┘\n", "SUCCESS")
-    else:
-        log_and_print("\n" + "┌" + "─"*58 + "┐", "ERROR")
-        log_and_print("│                   PIPELINE FAILED                        │", "ERROR")
-        log_and_print("├" + "─"*58 + "┤", "ERROR")
-        log_and_print("│ Check error log for details                                  │", "ERROR")
-        log_and_print("└" + "─"*58 + "┘\n", "ERROR")
+    loop_count = 0
+    
+    while True:
+        loop_count += 1
+        
+        if run_as_loop:
+            log_and_print("\n" + "="*60, "INFO")
+            log_and_print(f"🔄 LOOP #{loop_count} STARTED", "INFO")
+            log_and_print("="*60, "INFO")
+        
+        # Execute the main pipeline
+        success = fetch_charts_all_brokers()
+        
+        if success:
+            log_and_print("\n" + "┌" + "─"*58 + "┐", "SUCCESS")
+            log_and_print("│                   ✅ PIPELINE COMPLETED                     │", "SUCCESS")
+            log_and_print("├" + "─"*58 + "┤", "SUCCESS")
+            log_and_print("│ • Charts generated                • Candle data saved        │", "SUCCESS")
+            log_and_print("│ • PH/PL analysis completed        • Arrow detection done     │", "SUCCESS")
+            log_and_print("└" + "─"*58 + "┘\n", "SUCCESS")
+        else:
+            log_and_print("\n" + "┌" + "─"*58 + "┐", "ERROR")
+            log_and_print("│                   PIPELINE FAILED                        │", "ERROR")
+            log_and_print("├" + "─"*58 + "┤", "ERROR")
+            log_and_print("│ Check error log for details                                  │", "ERROR")
+            log_and_print("└" + "─"*58 + "┘\n", "ERROR")
+        
+        # Check loop conditions
+        if not run_as_loop:
+            # Single execution - exit
+            log_and_print("🏁 Single execution completed. Exiting...", "INFO")
+            break
+        
+        # Check max loops
+        if max_loops and loop_count >= max_loops:
+            log_and_print(f"🏁 Maximum loops ({max_loops}) reached. Exiting...", "INFO")
+            break
+        
+        # Wait before next iteration
+        log_and_print(f"⏳ Waiting {loop_interval} seconds before next loop...", "INFO")
+        time.sleep(loop_interval)
+        
+        # Optional: Reload configuration for next loop
+        global ohlcdictionary
+        log_and_print("🔄 Reloading configuration...", "INFO")
+        ohlcdictionary = load_ohlc_dictionary()
 
 if __name__ == "__main__":
     main()

@@ -8,13 +8,13 @@
     "login": "5996427",
     "password": "@Techknowdge12#",
     "application_status": "approved",
-    "broker_balance": "9000.00",
+    "broker_balance": "10000.00",
     "balance_verification": "NULL",
     "profitandloss": "NULL",
     "passkey": "NULL",
     "submitted_at": "NULL",
     "balance_display": "NULL",
-    "execution_start_date": "June 18, 2026",
+    "execution_start_date": "June 24, 2026",
     "analytics_history": "NULL",
     "revenue_history": "NULL",
     "loyalties": "NULL",
@@ -84,7 +84,7 @@
         "breakeven_dictionary": [
           {
             "reward": 1,
-            "breakeven_at_reward": 0.10
+            "breakeven_at_reward": 0.1
           },
           {
             "reward": 1.8,
@@ -163,10 +163,10 @@
         "1-10000000.99_risk": 3
       },
       "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 2.5
+        "1-10000000.99_risk": 50
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 3
+        "1-10000000.99_risk": 60
       },
       "requirements": {
         "contract_duration": "30",
@@ -185,7 +185,7 @@
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv\\terminal64.exe",
     "mt5_folder_name": "MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv",
-    "account_balance": 8897.16,
+    "account_balance": 8768.78,
     "account_currency": "USD",
     "account_leverage": 1000,
     "last_updated": "2026-06-18 11:12:18",
@@ -209,13 +209,13 @@
     "login": "6170134",
     "password": "@Ayomide12#",
     "application_status": "approved",
-    "broker_balance": "9000.00",
+    "broker_balance": "10000.00",
     "balance_verification": "NULL",
     "profitandloss": "NULL",
     "passkey": "NULL",
     "submitted_at": "NULL",
     "balance_display": "NULL",
-    "execution_start_date": "June 18, 2026",
+    "execution_start_date": "June 24, 2026",
     "analytics_history": "NULL",
     "revenue_history": "NULL",
     "loyalties": "NULL",
@@ -364,7 +364,7 @@
         "1-10000000.99_risk": 0.5
       },
       "maximum_balance_risk_distance": {
-        "1-10000000.99_risk": 2
+        "1-10000000.99_risk": 5
       },
       "martingale_per_stage_drawdown_amount": {
         "1-10000000.99_risk": 50
@@ -399,7 +399,7 @@
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Tolulopestandarddemo_at_gmail_dot_com 2 Deriv\\terminal64.exe",
     "mt5_folder_name": "MetaTrader 5 Tolulopestandarddemo_at_gmail_dot_com 2 Deriv",
-    "account_balance": 9692.38,
+    "account_balance": 10457.58,
     "account_currency": "USD",
     "account_leverage": 1000,
     "last_updated": "2026-06-18 22:22:28",
@@ -407,6 +407,197 @@
     "processed": true,
     "folder_created": true,
     "contract_expiry_date_calculated": "July 27, 2026",
+    "meets_balance_requirement": true,
+    "min_broker_balance": 50.0,
+    "error_messages": [],
+    "strategies": [
+      "techknowdge_revenue"
+    ]
+  },
+  "3": {
+    "id": "3",
+    "broker": "Deriv",
+    "email": "Davidolastandarddemo@gmail.com",
+    "fullname": "T.O",
+    "server": "Deriv-demo",
+    "login": "32264928",
+    "password": "@Ayomide12#",
+    "application_status": "approved",
+    "invested_with": "6_key-level-bias",
+    "broker_balance": "10000.00",
+    "balance_verification": "NULL",
+    "profitandloss": "NULL",
+    "passkey": "NULL",
+    "submitted_at": "NULL",
+    "balance_display": "NULL",
+    "execution_start_date": "June 24, 2026",
+    "analytics_history": "NULL",
+    "revenue_history": "NULL",
+    "loyalties": "NULL",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "0",
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        3
+      ],
+      "hedge_orders_risk_reward": [
+        3
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 3,
+      "symbols_dictionary": {
+        "xxxjpy": [],
+        "xxxusd": [
+          "BTCUSD"
+        ],
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "skip_orders_close_to_position": false,
+        "cancel_orders_close_to_position": false,
+        "also_restrict_opposite_order_too_close_to_position": false,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {
+            "from": "08:55 pm",
+            "to": "12:00 am"
+          },
+          "restricted_days": [
+            "saturday",
+            "sunday"
+          ],
+          "timezone": "african"
+        },
+        "enable_latest_fallback_to_older_order": false,
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.1
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 3,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 3.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 3
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 3.3
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 3.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 3.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 3
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 3.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 3.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.3
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": false
+      },
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 0.5
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 20
+      },
+      "martingale_per_stage_drawdown_amount": {
+        "1-10000000.99_risk": 50
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 50
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 60
+      },
+      "requirements": {
+        "contract_duration": "30",
+        "min_broker_balance": "50.00"
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9034.15,
+      "account_mode": "demo",
+      "demo_account": "1",
+      "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
+    },
+    "enable_autotrading": "1",
+    "bypass_restriction": "1",
+    "demo_account": "1",
+    "account_mode": "real",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Davidolastandarddemo_at_gmail_dot_com 3 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 Davidolastandarddemo_at_gmail_dot_com 3 Deriv",
+    "account_balance": 0.0,
+    "account_currency": "USD",
+    "account_leverage": 500,
+    "has_error": false,
+    "processed": true,
+    "folder_created": true,
     "meets_balance_requirement": true,
     "min_broker_balance": 50.0,
     "error_messages": [],
@@ -423,7 +614,7 @@
     "login": "201763239",
     "password": "@Techknowdge12#",
     "application_status": "approved",
-    "invested_with": "6_key-level-bias, 6_key-level-breakout",
+    "invested_with": "techknowdge_revenue",
     "broker_balance": "9000.00",
     "balance_verification": "NULL",
     "profitandloss": "NULL",
@@ -581,7 +772,7 @@
         "1-10000000.99_risk": 0.5
       },
       "maximum_balance_risk_distance": {
-        "1-10000000.99_risk": 2
+        "1-10000000.99_risk": 5
       },
       "martingale_per_stage_drawdown_amount": {
         "1-10000000.99_risk": 50
@@ -615,8 +806,200 @@
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv\\terminal64.exe",
     "mt5_folder_name": "MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv",
-    "account_balance": 8995.63,
+    "account_balance": 8988.72,
     "account_currency": "USD",
     "account_leverage": 1000
+  },
+  "5": {
+    "id": "5",
+    "broker": "Deriv",
+    "email": "mumstandarddemo@gmail.com",
+    "fullname": "T.O",
+    "server": "Deriv-demo",
+    "login": "201849087",
+    "password": "@Techknowdge12#",
+    "application_status": "approved",
+    "invested_with": "6_key-level-breakout",
+    "broker_balance": "10000.00",
+    "balance_verification": "NULL",
+    "profitandloss": "NULL",
+    "passkey": "NULL",
+    "submitted_at": "NULL",
+    "balance_display": "NULL",
+    "execution_start_date": "June 24, 2026",
+    "analytics_history": "NULL",
+    "revenue_history": "NULL",
+    "loyalties": "NULL",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "0",
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        5
+      ],
+      "hedge_orders_risk_reward": [
+        5
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 5,
+      "symbols_dictionary": {
+        "xxxjpy": [],
+        "xxxusd": [
+          "BTCUSD"
+        ],
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "skip_orders_close_to_position": false,
+        "cancel_orders_close_to_position": false,
+        "also_restrict_opposite_order_too_close_to_position": false,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {
+            "from": "08:55 pm",
+            "to": "12:00 am"
+          },
+          "restricted_days": [
+            "saturday",
+            "sunday"
+          ],
+          "timezone": "african"
+        },
+        "enable_latest_fallback_to_older_order": false,
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 0.5,
+            "breakeven_at_reward": 0.05
+          },
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.1
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": false
+      },
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 0.5
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 50
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 50
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 60
+      },
+      "requirements": {
+        "contract_duration": "50",
+        "min_broker_balance": "50.00"
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9054.15,
+      "account_mode": "demo",
+      "demo_account": "1",
+      "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
+    },
+    "enable_autotrading": "1",
+    "bypass_restriction": "1",
+    "demo_account": "1",
+    "account_mode": "demo",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 mumstandarddemo_at_gmail_dot_com 5 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 mumstandarddemo_at_gmail_dot_com 5 Deriv",
+    "account_balance": 10000.0,
+    "account_currency": "USD",
+    "account_leverage": 1000,
+    "has_error": false,
+    "processed": true,
+    "folder_created": true,
+    "meets_balance_requirement": true,
+    "min_broker_balance": 50.0,
+    "error_messages": [],
+    "strategies": [
+      "techknowdge_revenue"
+    ]
   }
 }

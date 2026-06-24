@@ -20,6 +20,8 @@ from collections import defaultdict
 from pathlib import Path
 from multiprocessing.pool import ThreadPool
 from functools import partial
+import sys
+import time
 
 
 DEV_PATH = r'C:\xampp\htdocs\harvcore\harvox\usersdata\developers'
@@ -12804,22 +12806,7 @@ def sync_dev_investors(dev_user_id):
         import traceback
         traceback.print_exc()
         return error_msg
-           
-def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
-    """
-    Orchestrator: Runs the full suite of tasks for one developer sequentially.
-    This allows multiprocessing to happen at the 'Account Level'.
-    """
-    try:  
-        res_poi = sync_dev_investors(user_id)
-        
-        return f"[User {user_id}] Pipeline completed successfully"
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
-   
+            
 def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
@@ -12854,33 +12841,98 @@ def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
         return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
 
 def main():
-    dev_dict = load_developers_dictionary()
-    if not dev_dict:
-        print("No developers to process.")
-        return
-
-    user_ids = sorted(dev_dict.keys())
-    cores = cpu_count()
     
-    # You can adjust this value - number of symbols to process in parallel per broker
-    MAX_SYMBOLS_PARALLEL = 5  # Change this to control concurrency per broker
+    # Parse command line arguments
+    run_as_loop = True
+    loop_interval = 0  # Default 5 minutes between loops
+    max_loops = None  # None means infinite
     
-    print(f"--- STARTING ACCOUNT-LEVEL MULTIPROCESSING ---")
-    print(f"Cores: {cores} | Total Developers: {len(user_ids)}")
-    print(f"Symbols per broker processed in parallel: {MAX_SYMBOLS_PARALLEL}")
-
-    # Use multiprocessing Pool for broker-level parallelism
-    with Pool(processes=cores) as pool:
-        # Pass max_symbols_parallel to each broker process
-        from functools import partial
-        process_func = partial(process_single_developer_pipeline, max_symbols_parallel=MAX_SYMBOLS_PARALLEL)
-        final_results = pool.map(process_func, user_ids)
+    # Check for command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('--loop='):
+            loop_value = arg.split('=')[1].lower()
+            run_as_loop = loop_value in ['true', 'yes', '1', 'on']
+        elif arg.startswith('--interval='):
+            try:
+                loop_interval = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid interval value: {arg.split('=')[1]}. Using default 300 seconds.")
+        elif arg.startswith('--max-loops='):
+            try:
+                max_loops = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
+    
+    print("\n" + "="*60)
+    print("                 SYNAPSE DATA PIPELINE")
+    print("="*60)
+    print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
+    if run_as_loop:
+        print(f"  Interval: {loop_interval}s")
+        if max_loops:
+            print(f"  Max Loops: {max_loops}")
+        else:
+            print("  Max Loops: Infinite")
+    print("="*60 + "\n")
+    
+    loop_count = 0
+    
+    while True:
+        loop_count += 1
         
-        # Print summaries as they finish
-        for report in final_results:
-            print(report)
+        if run_as_loop:
+            print("\n" + "="*60)
+            print(f"LOOP #{loop_count} STARTED")
+            print("="*60)
+        
+        # Load developers dictionary
+        dev_dict = load_developers_dictionary()
+        if not dev_dict:
+            print("No developers to process.")
+            if not run_as_loop:
+                return
+            else:
+                print(f"Waiting {loop_interval} seconds before retrying...")
+                time.sleep(loop_interval)
+                continue
+        
+        user_ids = sorted(dev_dict.keys())
+        cores = cpu_count()
+        
+        # You can adjust this value - number of symbols to process in parallel per broker
+        MAX_SYMBOLS_PARALLEL = 5  # Change this to control concurrency per broker
+        
+        print(f"--- STARTING ACCOUNT-LEVEL MULTIPROCESSING ---")
+        print(f"Cores: {cores} | Total Developers: {len(user_ids)}")
+        print(f"Symbols per broker processed in parallel: {MAX_SYMBOLS_PARALLEL}")
 
-    print("\n[SUCCESS] All developer pipelines completed.")
+        # Use multiprocessing Pool for broker-level parallelism
+        with Pool(processes=cores) as pool:
+            # Pass max_symbols_parallel to each broker process
+            from functools import partial
+            process_func = partial(process_single_developer_pipeline, max_symbols_parallel=MAX_SYMBOLS_PARALLEL)
+            final_results = pool.map(process_func, user_ids)
+            
+            # Print summaries as they finish
+            for report in final_results:
+                print(report)
+
+        print("\n[SUCCESS] All developer pipelines completed.")
+        
+        # Check loop conditions
+        if not run_as_loop:
+            # Single execution - exit
+            print("Single execution completed. Exiting...")
+            break
+        
+        # Check max loops
+        if max_loops and loop_count >= max_loops:
+            print(f"Maximum loops ({max_loops}) reached. Exiting...")
+            break
+        
+        # Wait before next iteration
+        print(f"Waiting {loop_interval} seconds before next loop...")
+        time.sleep(loop_interval)
 
 if __name__ == "__main__":
     main()
