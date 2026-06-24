@@ -25,7 +25,7 @@
     "server_decision": "NULL",
     "accountmanagement": {
       "selected_risk_reward": [
-        2
+        3
       ],
       "hedge_orders_risk_reward": [
         2
@@ -80,11 +80,11 @@
             "expected_loss_reduction_percentage": "0%"
           }
         },
-        "enable_breakeven": true,
+        "enable_breakeven": false,
         "breakeven_dictionary": [
           {
             "reward": 1,
-            "breakeven_at_reward": 0.1
+            "breakeven_at_reward": 0.10
           },
           {
             "reward": 1.8,
@@ -107,11 +107,11 @@
             "breakeven_at_reward": 1.7
           },
           {
-            "reward": 1,
+            "reward": 4,
             "breakeven_at_reward": 2
           },
           {
-            "reward": 1.8,
+            "reward": 4.8,
             "breakeven_at_reward": 2.2
           },
           {
@@ -136,15 +136,15 @@
           },
           {
             "reward": 8,
-            "breakeven_at_reward": 1
+            "breakeven_at_reward": 4
           },
           {
             "reward": 8.8,
-            "breakeven_at_reward": 1.2
+            "breakeven_at_reward": 4.2
           },
           {
             "reward": 9,
-            "breakeven_at_reward": 1.5
+            "breakeven_at_reward": 4.5
           },
           {
             "reward": 10,
@@ -157,16 +157,16 @@
         "enable_martingale": true
       },
       "minimum_balance_risk_distance": {
-        "1-10000000.99_risk": 0.5
+        "1-10000000.99_risk": 0.9
       },
       "maximum_balance_risk_distance": {
-        "1-10000000.99_risk": 6
+        "1-10000000.99_risk": 3
       },
       "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 50
+        "1-10000000.99_risk": 2.5
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 60
+        "1-10000000.99_risk": 3
       },
       "requirements": {
         "contract_duration": "30",
@@ -174,7 +174,7 @@
       },
       "bypass_restriction": true,
       "activate_autotrading": true,
-      "broker_balance": 9021.15,
+      "broker_balance": 9024.15,
       "account_mode": "demo",
       "demo_account": "1"
     },
@@ -185,7 +185,7 @@
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv\\terminal64.exe",
     "mt5_folder_name": "MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv",
-    "account_balance": 8832.64,
+    "account_balance": 8897.16,
     "account_currency": "USD",
     "account_leverage": 1000,
     "last_updated": "2026-06-18 11:12:18",
@@ -226,213 +226,10 @@
     "server_decision": "NULL",
     "accountmanagement": {
       "selected_risk_reward": [
-        1
-      ],
-      "hedge_orders_risk_reward": [
-        1
-      ],
-      "timeframe": [
-        "15m"
-      ],
-      "bars": 3,
-      "symbols_dictionary": {
-        "xxxjpy": [],
-        "xxxusd": [
-          "BTCUSD"
-        ],
-        "xxxaud": [],
-        "xxxnzd": [],
-        "usdxxx": [],
-        "xxxchf": [],
-        "xxxcad": [],
-        "xxxbasket": [],
-        "indices": [],
-        "metals": [],
-        "energies": [],
-        "synthetics": []
-      },
-      "settings": {
-        "fetch_ohlc_data_and_directional_bias_for_investor": true,
-        "create_hedge_order": true,
-        "enable_latest_fallback_to_older_order": true,
-        "remove_orders_if_additonal_candles_is_more_than": 2,
-        "skip_orders_close_to_position": false,
-        "also_restrict_opposite_order_too_close_to_position": false,
-        "switch_invalid_to_instant_order": false,
-        "enable_order_type_conversion": false,
-        "restrictions_duration": {
-          "restrict_orders_in_time_range_of": {
-            "from": "08:50 pm",
-            "to": "12:00 am"
-          },
-          "restricted_days": [],
-          "timezone": "african"
-        },
-        "martingale_config": {
-          "enable_martingale": false,
-          "martingale_for_position_order_scale": true,
-          "martingale_loss_recovery_adder_percentage": "20%",
-          "pre_scaling": {
-            "martingale_pre_scaling": true,
-            "martingale_linear_scaling": true,
-            "martingale_pre_scale_highest_risk_adder": true,
-            "highest_risk_reduction_percentage": "200%",
-            "martingale_pre_scale_expected_loss_adder": true,
-            "expected_loss_reduction_percentage": "0%"
-          }
-        },
-        "enable_breakeven": true,
-        "breakeven_dictionary": [
-          {
-            "reward": 1,
-            "breakeven_at_reward": 0.1
-          },
-          {
-            "reward": 1.8,
-            "breakeven_at_reward": 0.5
-          },
-          {
-            "reward": 2,
-            "breakeven_at_reward": 0.5
-          },
-          {
-            "reward": 2.8,
-            "breakeven_at_reward": 2
-          },
-          {
-            "reward": 3,
-            "breakeven_at_reward": 2.5
-          },
-          {
-            "reward": 3.8,
-            "breakeven_at_reward": 2.7
-          },
-          {
-            "reward": 2,
-            "breakeven_at_reward": 2
-          },
-          {
-            "reward": 2.8,
-            "breakeven_at_reward": 2.2
-          },
-          {
-            "reward": 5,
-            "breakeven_at_reward": 2.5
-          },
-          {
-            "reward": 5.8,
-            "breakeven_at_reward": 2.8
-          },
-          {
-            "reward": 6,
-            "breakeven_at_reward": 3
-          },
-          {
-            "reward": 7,
-            "breakeven_at_reward": 3.5
-          },
-          {
-            "reward": 7.8,
-            "breakeven_at_reward": 3.8
-          },
-          {
-            "reward": 8,
-            "breakeven_at_reward": 2
-          },
-          {
-            "reward": 8.8,
-            "breakeven_at_reward": 2.2
-          },
-          {
-            "reward": 9,
-            "breakeven_at_reward": 2.5
-          },
-          {
-            "reward": 20,
-            "breakeven_at_reward": 5
-          }
-        ],
-        "restrict_order_from_timeframe": "none",
-        "default_price": false,
-        "risk_reward_correction": true,
-        "enable_martingale": true
-      },
-      "minimum_balance_risk_distance": {
-        "1-10000000.99_risk": 0.5
-      },
-      "maximum_balance_risk_distance": {
-        "1-10000000.99_risk": 6
-      },
-      "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 50
-      },
-      "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 60
-      },
-      "requirements": {
-        "contract_duration": "30",
-        "min_broker_balance": "50.00"
-      },
-      "bypass_restriction": true,
-      "activate_autotrading": true,
-      "broker_balance": 9022.25,
-      "account_mode": "demo",
-      "demo_account": "1"
-    },
-    "invested_with": "techknowdge_revenue",
-    "enable_autotrading": "1",
-    "bypass_restriction": "1",
-    "demo_account": "1",
-    "account_mode": "demo",
-    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Tolulopestandarddemo_at_gmail_dot_com 2 Deriv\\terminal64.exe",
-    "mt5_folder_name": "MetaTrader 5 Tolulopestandarddemo_at_gmail_dot_com 2 Deriv",
-    "account_balance": 9743.39,
-    "account_currency": "USD",
-    "account_leverage": 1000,
-    "last_updated": "2026-06-18 22:22:28",
-    "has_error": false,
-    "processed": true,
-    "folder_created": true,
-    "contract_expiry_date_calculated": "July 27, 2026",
-    "meets_balance_requirement": true,
-    "min_broker_balance": 50.0,
-    "error_messages": [],
-    "strategies": [
-      "techknowdge_revenue"
-    ]
-  },
-  "4": {
-    "id": "4",
-    "broker": "Deriv",
-    "email": "taiwostandarddemo@gmail.com",
-    "fullname": "Arobieke Taiwo",
-    "server": "Deriv-demo",
-    "login": "201763239",
-    "password": "@Techknowdge12#",
-    "application_status": "approved",
-    "broker_balance": "9000.00",
-    "balance_verification": "NULL",
-    "profitandloss": "NULL",
-    "passkey": "NULL",
-    "submitted_at": "NULL",
-    "balance_display": "NULL",
-    "execution_start_date": "2026-06-18",
-    "analytics_history": "NULL",
-    "revenue_history": "NULL",
-    "loyalties": "NULL",
-    "contract_days_left": "NULL",
-    "paymentdetails": "NULL",
-    "message": "NULL",
-    "unauthorized_actions": "NULL",
-    "notifications": "NULL",
-    "executions_notification": "NULL",
-    "server_decision": "NULL",
-    "accountmanagement": {
-      "selected_risk_reward": [
         3
       ],
       "hedge_orders_risk_reward": [
-        2
+        3
       ],
       "timeframe": [
         "15m"
@@ -455,22 +252,25 @@
         "synthetics": []
       },
       "settings": {
-        "fetch_ohlc_data_and_directional_bias_for_investor": true,
-        "create_hedge_order": true,
-        "enable_latest_fallback_to_older_order": true,
-        "remove_orders_if_additonal_candles_is_more_than": 1,
-        "skip_orders_close_to_position": false,
-        "also_restrict_opposite_order_too_close_to_position": false,
+        "symbols_grid_strategy": true,
+        "enable_single_position_and_pending": false,
+        "manage_grid_levels_count": {
+          "count": 2
+        },
+        "skip_orders_close_to_position": true,
+        "cancel_orders_close_to_position": true,
+        "also_restrict_opposite_order_too_close_to_position": true,
         "switch_invalid_to_instant_order": false,
         "enable_order_type_conversion": false,
         "restrictions_duration": {
-          "restrict_orders_in_time_range_of": {
-            "from": "08:50 pm",
-            "to": "12:00 am"
-          },
+          "restrict_orders_in_time_range_of": {},
           "restricted_days": [],
           "timezone": "african"
         },
+        "fetch_ohlc_data_and_directional_bias_for_investor": false,
+        "create_hedge_order": false,
+        "enable_latest_fallback_to_older_order": false,
+        "remove_orders_if_additonal_candles_is_more_than": 1,
         "martingale_config": {
           "enable_martingale": false,
           "martingale_for_position_order_scale": true,
@@ -558,19 +358,28 @@
         "restrict_order_from_timeframe": "none",
         "default_price": false,
         "risk_reward_correction": true,
-        "enable_martingale": true
+        "enable_martingale": false
       },
       "minimum_balance_risk_distance": {
         "1-10000000.99_risk": 0.5
       },
       "maximum_balance_risk_distance": {
-        "1-10000000.99_risk": 6
+        "1-10000000.99_risk": 2
+      },
+      "martingale_per_stage_drawdown_amount": {
+        "1-10000000.99_risk": 50
       },
       "account_balance_default_risk_management": {
         "1-10000000.99_risk": 50
       },
       "account_balance_maximum_risk_management": {
         "1-10000000.99_risk": 60
+      },
+      "grid_prices_setup": {
+        "grid_levels": 4,
+        "grid_multiplier": 200,
+        "bid_prices_order_type": "buy_stop",
+        "ask_prices_order_type": "sell_stop"
       },
       "requirements": {
         "contract_duration": "30",
@@ -580,16 +389,233 @@
       "activate_autotrading": true,
       "broker_balance": 9024.15,
       "account_mode": "demo",
-      "demo_account": "1"
+      "demo_account": "1",
+      "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
     },
     "invested_with": "techknowdge_revenue",
     "enable_autotrading": "1",
     "bypass_restriction": "1",
     "demo_account": "1",
     "account_mode": "demo",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Tolulopestandarddemo_at_gmail_dot_com 2 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 Tolulopestandarddemo_at_gmail_dot_com 2 Deriv",
+    "account_balance": 9692.38,
+    "account_currency": "USD",
+    "account_leverage": 1000,
+    "last_updated": "2026-06-18 22:22:28",
+    "has_error": false,
+    "processed": true,
+    "folder_created": true,
+    "contract_expiry_date_calculated": "July 27, 2026",
+    "meets_balance_requirement": true,
+    "min_broker_balance": 50.0,
+    "error_messages": [],
+    "strategies": [
+      "techknowdge_revenue"
+    ]
+  },
+  "4": {
+    "id": "4",
+    "broker": "Deriv",
+    "email": "taiwostandarddemo@gmail.com",
+    "fullname": "Arobieke Taiwo",
+    "server": "Deriv-demo",
+    "login": "201763239",
+    "password": "@Techknowdge12#",
+    "application_status": "approved",
+    "invested_with": "6_key-level-bias, 6_key-level-breakout",
+    "broker_balance": "9000.00",
+    "balance_verification": "NULL",
+    "profitandloss": "NULL",
+    "passkey": "NULL",
+    "submitted_at": "NULL",
+    "balance_display": "NULL",
+    "execution_start_date": "2026-06-18",
+    "analytics_history": "NULL",
+    "revenue_history": "NULL",
+    "loyalties": "NULL",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "NULL",
+    "notifications": "NULL",
+    "executions_notification": "NULL",
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        2
+      ],
+      "hedge_orders_risk_reward": [
+        2
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 3,
+      "symbols_dictionary": {
+        "xxxjpy": [],
+        "xxxusd": [
+          "BTCUSD"
+        ],
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "symbols_grid_strategy": true,
+        "enable_single_position_and_pending": false,
+        "manage_grid_levels_count": {
+          "count": 2
+        },
+        "skip_orders_close_to_position": true,
+        "cancel_orders_close_to_position": true,
+        "also_restrict_opposite_order_too_close_to_position": true,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {},
+          "restricted_days": [],
+          "timezone": "african"
+        },
+        "fetch_ohlc_data_and_directional_bias_for_investor": false,
+        "create_hedge_order": false,
+        "enable_latest_fallback_to_older_order": false,
+        "remove_orders_if_additonal_candles_is_more_than": 1,
+        "martingale_config": {
+          "enable_martingale": false,
+          "martingale_for_position_order_scale": true,
+          "martingale_loss_recovery_adder_percentage": "10%",
+          "pre_scaling": {
+            "martingale_pre_scaling": true,
+            "martingale_linear_scaling": true,
+            "martingale_pre_scale_highest_risk_adder": true,
+            "highest_risk_reduction_percentage": "100%",
+            "martingale_pre_scale_expected_loss_adder": true,
+            "expected_loss_reduction_percentage": "0%"
+          }
+        },
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.1
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 3,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 3.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 2
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 2.2
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 2.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 2.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 3
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 3.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 3.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.2
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": false
+      },
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 0.5
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 2
+      },
+      "martingale_per_stage_drawdown_amount": {
+        "1-10000000.99_risk": 50
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 50
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 60
+      },
+      "grid_prices_setup": {
+        "grid_levels": 4,
+        "grid_multiplier": 200,
+        "bid_prices_order_type": "buy_stop",
+        "ask_prices_order_type": "sell_stop"
+      },
+      "requirements": {
+        "contract_duration": "30",
+        "min_broker_balance": "50.00"
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9024.15,
+      "account_mode": "demo",
+      "demo_account": "1",
+      "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
+    },
+    "enable_autotrading": "1",
+    "bypass_restriction": "1",
+    "demo_account": "1",
+    "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv\\terminal64.exe",
     "mt5_folder_name": "MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv",
-    "account_balance": 8665.74,
+    "account_balance": 8995.63,
     "account_currency": "USD",
     "account_leverage": 1000
   }

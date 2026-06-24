@@ -21,14 +21,22 @@
         "contract_days_left": "NULL",
         "paymentdetails": "NULL",
         "message": "NULL",
-        "unauthorized_actions": "1",
+        "unauthorized_actions": {
+            "detected": false,
+            "bypass_active": true,
+            "autotrading_active": true,
+            "type": [],
+            "unauthorized_withdrawals": [],
+            "unauthorized_orders": [],
+            "unauthorized_positions": []
+        },
         "server_decision": "NULL",
         "accountmanagement": {
             "selected_risk_reward": [
-                2
+                3
             ],
             "hedge_orders_risk_reward": [
-                2
+                3
             ],
             "timeframe": [
                 "15m"
@@ -51,22 +59,25 @@
                 "synthetics": []
             },
             "settings": {
-                "fetch_ohlc_data_and_directional_bias_for_investor": true,
-                "create_hedge_order": true,
-                "enable_latest_fallback_to_older_order": true,
-                "remove_orders_if_additonal_candles_is_more_than": 1,
-                "skip_orders_close_to_position": false,
-                "also_restrict_opposite_order_too_close_to_position": false,
+                "symbols_grid_strategy": true,
+                "enable_single_position_and_pending": false,
+                "manage_grid_levels_count": {
+                    "count": 2
+                },
+                "skip_orders_close_to_position": true,
+                "cancel_orders_close_to_position": true,
+                "also_restrict_opposite_order_too_close_to_position": true,
                 "switch_invalid_to_instant_order": false,
                 "enable_order_type_conversion": false,
                 "restrictions_duration": {
-                    "restrict_orders_in_time_range_of": {
-                        "from": "08:50 pm",
-                        "to": "12:00 am"
-                    },
+                    "restrict_orders_in_time_range_of": {},
                     "restricted_days": [],
                     "timezone": "african"
                 },
+                "fetch_ohlc_data_and_directional_bias_for_investor": false,
+                "create_hedge_order": false,
+                "enable_latest_fallback_to_older_order": false,
+                "remove_orders_if_additonal_candles_is_more_than": 1,
                 "martingale_config": {
                     "enable_martingale": false,
                     "martingale_for_position_order_scale": true,
@@ -107,11 +118,11 @@
                         "breakeven_at_reward": 1.7
                     },
                     {
-                        "reward": 1,
+                        "reward": 4,
                         "breakeven_at_reward": 2
                     },
                     {
-                        "reward": 1.8,
+                        "reward": 4.8,
                         "breakeven_at_reward": 2.2
                     },
                     {
@@ -136,15 +147,15 @@
                     },
                     {
                         "reward": 8,
-                        "breakeven_at_reward": 1
+                        "breakeven_at_reward": 4
                     },
                     {
                         "reward": 8.8,
-                        "breakeven_at_reward": 1.2
+                        "breakeven_at_reward": 4.2
                     },
                     {
                         "reward": 9,
-                        "breakeven_at_reward": 1.5
+                        "breakeven_at_reward": 4.5
                     },
                     {
                         "reward": 10,
@@ -154,13 +165,16 @@
                 "restrict_order_from_timeframe": "none",
                 "default_price": false,
                 "risk_reward_correction": true,
-                "enable_martingale": true
+                "enable_martingale": false
             },
             "minimum_balance_risk_distance": {
                 "1-10000000.99_risk": 0.5
             },
             "maximum_balance_risk_distance": {
-                "1-10000000.99_risk": 6
+                "1-10000000.99_risk": 2
+            },
+            "martingale_per_stage_drawdown_amount": {
+                "1-10000000.99_risk": 50
             },
             "account_balance_default_risk_management": {
                 "1-10000000.99_risk": 50
@@ -168,15 +182,22 @@
             "account_balance_maximum_risk_management": {
                 "1-10000000.99_risk": 60
             },
+            "grid_prices_setup": {
+                "grid_levels": 4,
+                "grid_multiplier": 100,
+                "bid_prices_order_type": "buy_stop",
+                "ask_prices_order_type": "sell_stop"
+            },
             "requirements": {
                 "contract_duration": "30",
                 "min_broker_balance": "50.00"
             },
             "bypass_restriction": true,
             "activate_autotrading": true,
-            "broker_balance": 9021.15,
+            "broker_balance": 9024.15,
             "account_mode": "demo",
-            "demo_account": "1"
+            "demo_account": "1",
+            "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
         },
         "invested_with": "techknowdge_revenue",
         "enable_autotrading": "1",
@@ -185,10 +206,10 @@
         "account_mode": "demo",
         "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv\\terminal64.exe",
         "mt5_folder_name": "MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv",
-        "account_balance": 8832.64,
+        "account_balance": 9090.64,
         "account_currency": "USD",
         "account_leverage": 1000,
-        "last_updated": "2026-06-20 11:55:59",
+        "last_updated": "2026-06-23 20:13:09",
         "has_error": false,
         "processed": true,
         "folder_created": true,
@@ -330,70 +351,70 @@
             }
         },
         "demo_account_restricted": false,
-        "unauthorized_action_detected": true,
+        "unauthorized_action_detected": false,
         "analytics": {
             "from_execution_start_date": {
                 "start_date": "June 18, 2026",
                 "end_date": "2026-07-18",
-                "last_updated": "2026-06-20T11:56:03.509295",
+                "last_updated": "2026-06-23T20:13:11.010488",
                 "trades_within_risks_config": {
                     "summaries": {
                         "summaries_of_profits_only": {
-                            "inherited_and_claimed_trades_by_risk_reward_1": 7,
-                            "inherited_and_claimed_trades_by_risk_reward_1.8": 4,
-                            "inherited_and_claimed_trades_by_risk_reward_2": 2,
-                            "total_lost_trades": 15,
-                            "total_won_trades": 7,
-                            "total_lost_trades_amount": 680.9,
-                            "total_won_trades_amount": 512.68,
-                            "lowest_trades_per_day": 5,
-                            "highest_trades_per_day": 10,
-                            "average_trades_per_day": 7,
+                            "inherited_and_claimed_trades_by_risk_reward_1": 32,
+                            "inherited_and_claimed_trades_by_risk_reward_1.8": 18,
+                            "inherited_and_claimed_trades_by_risk_reward_2": 4,
+                            "total_lost_trades": 39,
+                            "total_won_trades": 32,
+                            "total_lost_trades_amount": 1901.11,
+                            "total_won_trades_amount": 1990.89,
+                            "lowest_trades_per_day": 7,
+                            "highest_trades_per_day": 17,
+                            "average_trades_per_day": 10,
                             "lowest_trade_dates": [
-                                "2026-06-20"
+                                "2026-06-18"
                             ],
                             "highest_trade_dates": [
-                                "2026-06-19"
+                                "2026-06-22"
                             ],
                             "average_trade_dates": [
-                                "2026-06-18"
+                                "2026-06-19"
                             ]
                         }
                     },
                     "regular_data": {
                         "authorized": {
-                            "total_trades": 22,
-                            "total_pnl": -168.22,
-                            "profit_trades": 7,
-                            "loss_trades": 15,
-                            "profit_amount": 512.68,
-                            "loss_amount": 680.9,
-                            "win_rate_by_count_percentage": 31.82,
-                            "loss_rate_by_count_percentage": 68.18,
-                            "win_rate_by_revenue_percentage": 42.95,
-                            "loss_rate_by_revenue_percentage": 57.05,
-                            "lowest_trades_per_day": 5,
-                            "highest_trades_per_day": 10,
-                            "average_trades_per_day": 7,
+                            "total_trades": 71,
+                            "total_pnl": 89.78,
+                            "profit_trades": 32,
+                            "loss_trades": 39,
+                            "profit_amount": 1990.89,
+                            "loss_amount": 1901.11,
+                            "win_rate_by_count_percentage": 45.07,
+                            "loss_rate_by_count_percentage": 54.93,
+                            "win_rate_by_revenue_percentage": 51.15,
+                            "loss_rate_by_revenue_percentage": 48.85,
+                            "lowest_trades_per_day": 7,
+                            "highest_trades_per_day": 17,
+                            "average_trades_per_day": 10,
                             "lowest_trade_dates": [
-                                "2026-06-20"
+                                "2026-06-18"
                             ],
                             "highest_trade_dates": [
-                                "2026-06-19"
+                                "2026-06-22"
                             ],
                             "average_trade_dates": [
-                                "2026-06-18"
+                                "2026-06-19"
                             ],
                             "all_traded_symbols": {
                                 "BTCUSD": {
                                     "symbol": "BTCUSD",
-                                    "total_trades": 22,
-                                    "total_profit": 512.68,
-                                    "total_loss": 680.9
+                                    "total_trades": 71,
+                                    "total_profit": 1990.89,
+                                    "total_loss": 1901.11
                                 }
                             },
                             "symbols_traded": 1,
-                            "closed_deals_with_sl_tp": 22,
+                            "closed_deals_with_sl_tp": 71,
                             "closed_deals_without_sl_tp": 0,
                             "highest_sequential_losses": {
                                 "consecutive_losses_count": 7,
@@ -1766,40 +1787,814 @@
                             }
                         }
                     }
+                },
+                "may_26_2026_to_june_23_2026": {
+                    "start_date": "May 26, 2026",
+                    "end_date": "2026-06-23",
+                    "last_updated": "2026-06-23T20:13:11.010488",
+                    "trades_within_risks_config": {
+                        "summaries": {
+                            "summaries_of_profits_only": {
+                                "inherited_and_claimed_trades_by_risk_reward_0.96": 38,
+                                "inherited_and_claimed_trades_by_risk_reward_0.98": 37,
+                                "inherited_and_claimed_trades_by_risk_reward_1": 36,
+                                "inherited_and_claimed_trades_by_risk_reward_1.8": 18,
+                                "inherited_and_claimed_trades_by_risk_reward_2": 4,
+                                "total_lost_trades": 52,
+                                "total_won_trades": 38,
+                                "total_lost_trades_amount": 2027.78,
+                                "total_won_trades_amount": 2083.57,
+                                "lowest_trades_per_day": 1,
+                                "highest_trades_per_day": 17,
+                                "average_trades_per_day": 9,
+                                "lowest_trade_dates": [
+                                    "2026-06-14"
+                                ],
+                                "highest_trade_dates": [
+                                    "2026-06-22"
+                                ],
+                                "average_trade_dates": [
+                                    "2026-06-20"
+                                ]
+                            }
+                        },
+                        "regular_data": {
+                            "authorized": {
+                                "total_trades": 88,
+                                "total_pnl": 57.67,
+                                "profit_trades": 38,
+                                "loss_trades": 50,
+                                "profit_amount": 2083.57,
+                                "loss_amount": 2025.9,
+                                "win_rate_by_count_percentage": 43.18,
+                                "loss_rate_by_count_percentage": 56.82,
+                                "win_rate_by_revenue_percentage": 50.7,
+                                "loss_rate_by_revenue_percentage": 49.3,
+                                "lowest_trades_per_day": 1,
+                                "highest_trades_per_day": 17,
+                                "average_trades_per_day": 7,
+                                "lowest_trade_dates": [
+                                    "2026-06-14"
+                                ],
+                                "highest_trade_dates": [
+                                    "2026-06-22"
+                                ],
+                                "average_trade_dates": [
+                                    "2026-06-18"
+                                ],
+                                "all_traded_symbols": {
+                                    "GBPUSD": {
+                                        "symbol": "GBPUSD",
+                                        "total_trades": 14,
+                                        "total_profit": 86.42,
+                                        "total_loss": 124.1
+                                    },
+                                    "BTCUSD": {
+                                        "symbol": "BTCUSD",
+                                        "total_trades": 74,
+                                        "total_profit": 1997.15,
+                                        "total_loss": 1901.8
+                                    }
+                                },
+                                "symbols_traded": 2,
+                                "closed_deals_with_sl_tp": 88,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {
+                                    "consecutive_losses_count": 7,
+                                    "total_loss_pnl": -285.02,
+                                    "trades": [
+                                        {
+                                            "ticket": 5690682025,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 64298.377,
+                                            "stoploss": 64412.9,
+                                            "take_profit": 64072.304,
+                                            "trade_risk": 51.54,
+                                            "risk_reward": 1.97,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.08,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.45,
+                                            "time_open": "2026-06-18 14:20:00",
+                                            "time_close": "2026-06-18 14:26:34",
+                                            "magic": 59964271,
+                                            "total_pnl": -55.63,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5690937417,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 62697.607,
+                                            "stoploss": 62377.489,
+                                            "take_profit": 63334.15,
+                                            "trade_risk": 51.22,
+                                            "risk_reward": 1.99,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -0.11,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.16,
+                                            "time_open": "2026-06-18 18:32:46",
+                                            "time_close": "2026-06-18 20:00:27",
+                                            "magic": 59964271,
+                                            "total_pnl": -5.62,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691003811,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 62630.439,
+                                            "stoploss": 62931.566,
+                                            "take_profit": 62035.052,
+                                            "trade_risk": 51.19,
+                                            "risk_reward": 1.98,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -0.17,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.17,
+                                            "time_open": "2026-06-18 19:54:45",
+                                            "time_close": "2026-06-18 20:00:27",
+                                            "magic": 59964271,
+                                            "total_pnl": -8.76,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691210299,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 62892.522,
+                                            "stoploss": 63042.4,
+                                            "take_profit": 62593.0,
+                                            "trade_risk": 50.96,
+                                            "risk_reward": 2.0,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.02,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.34,
+                                            "time_open": "2026-06-19 02:11:20",
+                                            "time_close": "2026-06-19 02:16:26",
+                                            "magic": 59964271,
+                                            "total_pnl": -51.87,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691226940,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 63005.145,
+                                            "stoploss": 62862.632,
+                                            "take_profit": 63286.379,
+                                            "trade_risk": 51.3,
+                                            "risk_reward": 1.97,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.12,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.36,
+                                            "time_open": "2026-06-19 02:16:07",
+                                            "time_close": "2026-06-19 02:32:53",
+                                            "magic": 59964271,
+                                            "total_pnl": -57.42,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691275258,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 62985.206,
+                                            "stoploss": 62882.25,
+                                            "take_profit": 63173.73,
+                                            "trade_risk": 53.54,
+                                            "risk_reward": 1.83,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.01,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.52,
+                                            "time_open": "2026-06-19 03:57:21",
+                                            "time_close": "2026-06-19 04:07:38",
+                                            "magic": 59964271,
+                                            "total_pnl": -53.83,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691242703,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 62983.245,
+                                            "stoploss": 62812.38,
+                                            "take_profit": 63317.1,
+                                            "trade_risk": 51.26,
+                                            "risk_reward": 1.95,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.01,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.3,
+                                            "time_open": "2026-06-19 02:54:51",
+                                            "time_close": "2026-06-19 04:12:18",
+                                            "magic": 59964271,
+                                            "total_pnl": -51.89,
+                                            "state": "CLOSED"
+                                        }
+                                    ]
+                                },
+                                "highest_sequential_days_in_loss": {
+                                    "consecutive_days_count": 4,
+                                    "total_loss_pnl": -246.21,
+                                    "days": {
+                                        "2026-06-14": [
+                                            {
+                                                "ticket": 5686865114,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 64030.109,
+                                                "stoploss": 63970.152,
+                                                "take_profit": 64209.344,
+                                                "trade_risk": 0.6,
+                                                "risk_reward": 2.99,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.15,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.01,
+                                                "time_open": "2026-06-14 17:00:56",
+                                                "time_close": "2026-06-14 17:04:30",
+                                                "magic": 59964271,
+                                                "total_pnl": -0.69,
+                                                "state": "CLOSED"
+                                            }
+                                        ],
+                                        "2026-06-15": [
+                                            {
+                                                "ticket": 5687609492,
+                                                "symbol": "GBPUSD",
+                                                "type": "SELL",
+                                                "entry_price": 1.34198,
+                                                "stoploss": 1.343,
+                                                "take_profit": 1.341,
+                                                "trade_risk": 2.04,
+                                                "risk_reward": 0.96,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.02,
+                                                "time_open": "2026-06-15 12:43:36",
+                                                "time_close": "2026-06-15 13:55:12",
+                                                "magic": 59964271,
+                                                "total_pnl": -2.06,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5687646928,
+                                                "symbol": "GBPUSD",
+                                                "type": "BUY",
+                                                "entry_price": 1.34301,
+                                                "stoploss": 1.342,
+                                                "take_profit": 1.344,
+                                                "trade_risk": 5.05,
+                                                "risk_reward": 0.98,
+                                                "trade_owned_by_risk_reward": "primary target:0.98",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 1.0,
+                                                "claimed_reason": "claimed by the actual trade risk reward potential of 0.98",
+                                                "volume": 0.05,
+                                                "time_open": "2026-06-15 13:55:12",
+                                                "time_close": "2026-06-15 15:07:11",
+                                                "magic": 59964271,
+                                                "total_pnl": 5.05,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5687755028,
+                                                "symbol": "GBPUSD",
+                                                "type": "SELL",
+                                                "entry_price": 1.343,
+                                                "stoploss": 1.344,
+                                                "take_profit": 1.342,
+                                                "trade_risk": 2.0,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.0,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.02,
+                                                "time_open": "2026-06-15 15:31:09",
+                                                "time_close": "2026-06-15 15:48:40",
+                                                "magic": 59964271,
+                                                "total_pnl": -2.0,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5687868376,
+                                                "symbol": "GBPUSD",
+                                                "type": "BUY",
+                                                "entry_price": 1.343,
+                                                "stoploss": 1.342,
+                                                "take_profit": 1.344,
+                                                "trade_risk": 1.0,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.0,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.01,
+                                                "time_open": "2026-06-15 17:05:20",
+                                                "time_close": "2026-06-15 19:32:31",
+                                                "magic": 59964271,
+                                                "total_pnl": -1.0,
+                                                "state": "CLOSED"
+                                            }
+                                        ],
+                                        "2026-06-18": [
+                                            {
+                                                "ticket": 5690450015,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 64424.54,
+                                                "stoploss": 64281.277,
+                                                "take_profit": 64707.115,
+                                                "trade_risk": 51.57,
+                                                "risk_reward": 1.97,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.36,
+                                                "time_open": "2026-06-18 10:15:21",
+                                                "time_close": "2026-06-18 10:26:10",
+                                                "magic": 59964271,
+                                                "total_pnl": -52.3,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690513755,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 64068.933,
+                                                "stoploss": 63880.251,
+                                                "take_profit": 64439.271,
+                                                "trade_risk": 50.94,
+                                                "risk_reward": 1.96,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.27,
+                                                "time_open": "2026-06-18 11:52:37",
+                                                "time_close": "2026-06-18 12:23:30",
+                                                "magic": 59964271,
+                                                "total_pnl": -51.4,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690539680,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 63978.813,
+                                                "stoploss": 64197.4,
+                                                "take_profit": 63555.514,
+                                                "trade_risk": 52.46,
+                                                "risk_reward": 1.94,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.02,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.24,
+                                                "time_open": "2026-06-18 12:10:23",
+                                                "time_close": "2026-06-18 13:30:00",
+                                                "magic": 59964271,
+                                                "total_pnl": -53.39,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690390283,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 64324.249,
+                                                "stoploss": 64624.646,
+                                                "take_profit": 63723.524,
+                                                "trade_risk": 51.07,
+                                                "risk_reward": 2.0,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 0.09,
+                                                "claimed_reason": "claimed because trade qualified as a breakeven exit (structural exit within 50% risk boundary) consolidated into lowest tier 1.0",
+                                                "volume": 0.17,
+                                                "time_open": "2026-06-18 10:00:34",
+                                                "time_close": "2026-06-18 13:46:01",
+                                                "magic": 59964271,
+                                                "total_pnl": 4.47,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690682025,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 64298.377,
+                                                "stoploss": 64412.9,
+                                                "take_profit": 64072.304,
+                                                "trade_risk": 51.54,
+                                                "risk_reward": 1.97,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.08,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.45,
+                                                "time_open": "2026-06-18 14:20:00",
+                                                "time_close": "2026-06-18 14:26:34",
+                                                "magic": 59964271,
+                                                "total_pnl": -55.63,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690937417,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62697.607,
+                                                "stoploss": 62377.489,
+                                                "take_profit": 63334.15,
+                                                "trade_risk": 51.22,
+                                                "risk_reward": 1.99,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -0.11,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.16,
+                                                "time_open": "2026-06-18 18:32:46",
+                                                "time_close": "2026-06-18 20:00:27",
+                                                "magic": 59964271,
+                                                "total_pnl": -5.62,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691003811,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62630.439,
+                                                "stoploss": 62931.566,
+                                                "take_profit": 62035.052,
+                                                "trade_risk": 51.19,
+                                                "risk_reward": 1.98,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -0.17,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.17,
+                                                "time_open": "2026-06-18 19:54:45",
+                                                "time_close": "2026-06-18 20:00:27",
+                                                "magic": 59964271,
+                                                "total_pnl": -8.76,
+                                                "state": "CLOSED"
+                                            }
+                                        ],
+                                        "2026-06-19": [
+                                            {
+                                                "ticket": 5691210299,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62892.522,
+                                                "stoploss": 63042.4,
+                                                "take_profit": 62593.0,
+                                                "trade_risk": 50.96,
+                                                "risk_reward": 2.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.02,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.34,
+                                                "time_open": "2026-06-19 02:11:20",
+                                                "time_close": "2026-06-19 02:16:26",
+                                                "magic": 59964271,
+                                                "total_pnl": -51.87,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691226940,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 63005.145,
+                                                "stoploss": 62862.632,
+                                                "take_profit": 63286.379,
+                                                "trade_risk": 51.3,
+                                                "risk_reward": 1.97,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.12,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.36,
+                                                "time_open": "2026-06-19 02:16:07",
+                                                "time_close": "2026-06-19 02:32:53",
+                                                "magic": 59964271,
+                                                "total_pnl": -57.42,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691275258,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62985.206,
+                                                "stoploss": 62882.25,
+                                                "take_profit": 63173.73,
+                                                "trade_risk": 53.54,
+                                                "risk_reward": 1.83,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.52,
+                                                "time_open": "2026-06-19 03:57:21",
+                                                "time_close": "2026-06-19 04:07:38",
+                                                "magic": 59964271,
+                                                "total_pnl": -53.83,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691242703,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62983.245,
+                                                "stoploss": 62812.38,
+                                                "take_profit": 63317.1,
+                                                "trade_risk": 51.26,
+                                                "risk_reward": 1.95,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.3,
+                                                "time_open": "2026-06-19 02:54:51",
+                                                "time_close": "2026-06-19 04:12:18",
+                                                "magic": 59964271,
+                                                "total_pnl": -51.89,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691259779,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62943.996,
+                                                "stoploss": 63086.875,
+                                                "take_profit": 62660.608,
+                                                "trade_risk": 51.44,
+                                                "risk_reward": 1.98,
+                                                "trade_owned_by_risk_reward": "primary target:1.8",
+                                                "beneficiaries": "1",
+                                                "closed_at_reward": 3.04,
+                                                "claimed_reason": "claimed because reward at 1.8 requested to breakeven at 0.5",
+                                                "volume": 0.36,
+                                                "time_open": "2026-06-19 03:19:49",
+                                                "time_close": "2026-06-19 04:15:12",
+                                                "magic": 59964271,
+                                                "total_pnl": 156.5,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691357795,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62597.778,
+                                                "stoploss": 62374.875,
+                                                "take_profit": 63043.263,
+                                                "trade_risk": 51.27,
+                                                "risk_reward": 2.0,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 0.08,
+                                                "claimed_reason": "claimed because trade qualified as a breakeven exit (structural exit within 50% risk boundary) consolidated into lowest tier 1.0",
+                                                "volume": 0.23,
+                                                "time_open": "2026-06-19 06:05:41",
+                                                "time_close": "2026-06-19 08:35:15",
+                                                "magic": 59964271,
+                                                "total_pnl": 4.11,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691408368,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62660.09,
+                                                "stoploss": 62824.53,
+                                                "take_profit": 62348.118,
+                                                "trade_risk": 52.62,
+                                                "risk_reward": 1.9,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 0.09,
+                                                "claimed_reason": "claimed because trade qualified as a breakeven exit (structural exit within 50% risk boundary) consolidated into lowest tier 1.0",
+                                                "volume": 0.32,
+                                                "time_open": "2026-06-19 08:33:46",
+                                                "time_close": "2026-06-19 08:52:00",
+                                                "magic": 59964271,
+                                                "total_pnl": 4.8,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691472930,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62745.911,
+                                                "stoploss": 62463.832,
+                                                "take_profit": 63310.063,
+                                                "trade_risk": 50.77,
+                                                "risk_reward": 2.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.18,
+                                                "time_open": "2026-06-19 09:38:55",
+                                                "time_close": "2026-06-19 10:09:50",
+                                                "magic": 59964271,
+                                                "total_pnl": -51.28,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691506115,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62575.061,
+                                                "stoploss": 62687.9,
+                                                "take_profit": 62349.8,
+                                                "trade_risk": 50.78,
+                                                "risk_reward": 2.0,
+                                                "trade_owned_by_risk_reward": "primary target:2",
+                                                "beneficiaries": "1,1.8",
+                                                "closed_at_reward": 2.05,
+                                                "claimed_reason": "claimed because reward at 2.0 requested to breakeven at 0.5",
+                                                "volume": 0.45,
+                                                "time_open": "2026-06-19 09:41:51",
+                                                "time_close": "2026-06-19 10:11:31",
+                                                "magic": 59964271,
+                                                "total_pnl": 104.1,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691963243,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62973.761,
+                                                "stoploss": 63203.094,
+                                                "take_profit": 62546.4,
+                                                "trade_risk": 52.75,
+                                                "risk_reward": 1.86,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -0.49,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.23,
+                                                "time_open": "2026-06-19 19:39:11",
+                                                "time_close": "2026-06-19 20:00:07",
+                                                "magic": 59964271,
+                                                "total_pnl": -26.1,
+                                                "state": "CLOSED"
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                            "unauthorized": {
+                                "total_trades": 2,
+                                "total_pnl": -1.88,
+                                "profit_trades": 0,
+                                "loss_trades": 2,
+                                "profit_amount": 0,
+                                "loss_amount": 1.88,
+                                "win_rate_by_count_percentage": 0.0,
+                                "loss_rate_by_count_percentage": 100.0,
+                                "win_rate_by_revenue_percentage": 0.0,
+                                "loss_rate_by_revenue_percentage": 100.0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 2,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": [
+                                    "2026-06-06"
+                                ],
+                                "all_traded_symbols": {
+                                    "TRUUSD": {
+                                        "symbol": "TRUUSD",
+                                        "total_trades": 2,
+                                        "total_profit": 0.0,
+                                        "total_loss": 1.88
+                                    }
+                                },
+                                "symbols_traded": 1,
+                                "closed_deals_with_sl_tp": 0,
+                                "closed_deals_without_sl_tp": 2,
+                                "highest_sequential_losses": {},
+                                "highest_sequential_days_in_loss": {}
+                            }
+                        }
+                    },
+                    "trades_outside_risks_config": {
+                        "summaries": {
+                            "summaries_of_profits_only": {
+                                "total_lost_trades": 0,
+                                "total_won_trades": 0,
+                                "total_lost_trades_amount": 0,
+                                "total_won_trades_amount": 0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": []
+                            }
+                        },
+                        "regular_data": {
+                            "authorized": {
+                                "total_trades": 0,
+                                "total_pnl": 0,
+                                "profit_trades": 0,
+                                "loss_trades": 0,
+                                "profit_amount": 0,
+                                "loss_amount": 0,
+                                "win_rate_by_count_percentage": 0.0,
+                                "loss_rate_by_count_percentage": 0.0,
+                                "win_rate_by_revenue_percentage": 0.0,
+                                "loss_rate_by_revenue_percentage": 0.0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": [],
+                                "all_traded_symbols": {},
+                                "symbols_traded": 0,
+                                "closed_deals_with_sl_tp": 0,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {},
+                                "highest_sequential_days_in_loss": {}
+                            },
+                            "unauthorized": {
+                                "total_trades": 0,
+                                "total_pnl": 0,
+                                "profit_trades": 0,
+                                "loss_trades": 0,
+                                "profit_amount": 0,
+                                "loss_amount": 0,
+                                "win_rate_by_count_percentage": 0.0,
+                                "loss_rate_by_count_percentage": 0.0,
+                                "win_rate_by_revenue_percentage": 0.0,
+                                "loss_rate_by_revenue_percentage": 0.0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": [],
+                                "all_traded_symbols": {},
+                                "symbols_traded": 0,
+                                "closed_deals_with_sl_tp": 0,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {},
+                                "highest_sequential_days_in_loss": {}
+                            }
+                        }
+                    }
                 }
             }
         },
         "audit_history": [
             {
-                "audit_timestamp": "2026-06-20T11:56:03.740626",
+                "audit_timestamp": "2026-06-23T20:13:11.291186",
                 "application_status": "approved",
                 "unauthorized_detected": false,
                 "unauthorized_orders_count": 0,
                 "unauthorized_positions_count": 0,
                 "balance_discrepancy": 0.86,
-                "calculated_balance": 8831.78,
-                "mt5_actual_balance": 8832.64,
-                "profit_and_loss": -168.22,
-                "authorized_trades_count": 46
+                "calculated_balance": 9089.78,
+                "mt5_actual_balance": 9090.64,
+                "profit_and_loss": 89.78,
+                "authorized_trades_count": 143
             },
             {
-                "audit_timestamp": "2026-06-20T11:56:08.165014",
+                "audit_timestamp": "2026-06-23T20:13:16.573158",
                 "application_status": "approved",
                 "unauthorized_detected": false,
                 "unauthorized_orders_count": 0,
                 "unauthorized_positions_count": 0,
                 "balance_discrepancy": 0.86,
-                "calculated_balance": 8831.78,
-                "mt5_actual_balance": 8832.64,
-                "profit_and_loss": -168.22,
-                "authorized_trades_count": 46
+                "calculated_balance": 9089.78,
+                "mt5_actual_balance": 9090.64,
+                "profit_and_loss": 89.78,
+                "authorized_trades_count": 143
             }
         ],
         "last_audit_status": "approved",
-        "last_audit_timestamp": "2026-06-20T11:56:08.166538",
+        "last_audit_timestamp": "2026-06-23T20:13:16.573158",
         "current_unauthorized_detected": false,
-        "current_balance": 8831.78,
-        "current_pnl": -168.22
+        "current_balance": 9089.78,
+        "current_pnl": 89.78
     },
     "2": {
         "id": "2",
@@ -1823,15 +2618,7 @@
         "contract_days_left": "NULL",
         "paymentdetails": "NULL",
         "message": "NULL",
-        "unauthorized_actions": {
-            "detected": false,
-            "bypass_active": true,
-            "autotrading_active": true,
-            "type": [],
-            "unauthorized_withdrawals": [],
-            "unauthorized_orders": [],
-            "unauthorized_positions": []
-        },
+        "unauthorized_actions": "0",
         "server_decision": "NULL",
         "accountmanagement": {
             "selected_risk_reward": [
@@ -1998,7 +2785,7 @@
         "account_balance": 9743.39,
         "account_currency": "USD",
         "account_leverage": 1000,
-        "last_updated": "2026-06-20 11:56:00",
+        "last_updated": "2026-06-23 20:11:49",
         "has_error": false,
         "processed": true,
         "folder_created": true,
@@ -2140,71 +2927,81 @@
             }
         },
         "demo_account_restricted": false,
+        "unauthorized_action_detected": false,
         "analytics": {
             "from_execution_start_date": {
                 "start_date": "June 18, 2026",
                 "end_date": "2026-07-18",
-                "last_updated": "2026-06-20T11:56:02.977802",
+                "last_updated": "2026-06-23T20:11:52.664219",
                 "trades_within_risks_config": {
                     "summaries": {
                         "summaries_of_profits_only": {
-                            "inherited_and_claimed_trades_by_risk_reward_0.88": 8,
-                            "inherited_and_claimed_trades_by_risk_reward_0.93": 7,
-                            "inherited_and_claimed_trades_by_risk_reward_0.97": 6,
-                            "inherited_and_claimed_trades_by_risk_reward_0.99": 5,
-                            "inherited_and_claimed_trades_by_risk_reward_1": 4,
-                            "total_lost_trades": 15,
-                            "total_won_trades": 8,
-                            "total_lost_trades_amount": 680.35,
-                            "total_won_trades_amount": 426.64,
-                            "lowest_trades_per_day": 6,
-                            "highest_trades_per_day": 10,
-                            "average_trades_per_day": 7,
+                            "inherited_and_claimed_trades_by_risk_reward_0.71": 35,
+                            "inherited_and_claimed_trades_by_risk_reward_0.88": 34,
+                            "inherited_and_claimed_trades_by_risk_reward_0.89": 33,
+                            "inherited_and_claimed_trades_by_risk_reward_0.9": 32,
+                            "inherited_and_claimed_trades_by_risk_reward_0.92": 31,
+                            "inherited_and_claimed_trades_by_risk_reward_0.93": 30,
+                            "inherited_and_claimed_trades_by_risk_reward_0.94": 27,
+                            "inherited_and_claimed_trades_by_risk_reward_0.96": 26,
+                            "inherited_and_claimed_trades_by_risk_reward_0.97": 23,
+                            "inherited_and_claimed_trades_by_risk_reward_0.98": 17,
+                            "inherited_and_claimed_trades_by_risk_reward_0.99": 14,
+                            "inherited_and_claimed_trades_by_risk_reward_1": 8,
+                            "total_lost_trades": 37,
+                            "total_won_trades": 35,
+                            "total_lost_trades_amount": 1842.6,
+                            "total_won_trades_amount": 1791.72,
+                            "lowest_trades_per_day": 7,
+                            "highest_trades_per_day": 17,
+                            "average_trades_per_day": 14,
                             "lowest_trade_dates": [
-                                "2026-06-20"
+                                "2026-06-18"
                             ],
                             "highest_trade_dates": [
-                                "2026-06-19"
+                                "2026-06-22"
                             ],
                             "average_trade_dates": [
-                                "2026-06-18"
+                                "2026-06-21",
+                                "2026-06-23"
                             ]
                         }
                     },
                     "regular_data": {
                         "authorized": {
-                            "total_trades": 23,
-                            "total_pnl": -253.71,
-                            "profit_trades": 8,
-                            "loss_trades": 15,
-                            "profit_amount": 426.64,
-                            "loss_amount": 680.35,
-                            "win_rate_by_count_percentage": 34.78,
-                            "loss_rate_by_count_percentage": 65.22,
-                            "win_rate_by_revenue_percentage": 38.54,
-                            "loss_rate_by_revenue_percentage": 61.46,
-                            "lowest_trades_per_day": 6,
-                            "highest_trades_per_day": 10,
-                            "average_trades_per_day": 7,
+                            "total_trades": 72,
+                            "total_pnl": -50.88,
+                            "profit_trades": 35,
+                            "loss_trades": 37,
+                            "profit_amount": 1791.72,
+                            "loss_amount": 1842.6,
+                            "win_rate_by_count_percentage": 48.61,
+                            "loss_rate_by_count_percentage": 51.39,
+                            "win_rate_by_revenue_percentage": 49.3,
+                            "loss_rate_by_revenue_percentage": 50.7,
+                            "lowest_trades_per_day": 7,
+                            "highest_trades_per_day": 17,
+                            "average_trades_per_day": 14,
                             "lowest_trade_dates": [
-                                "2026-06-20"
+                                "2026-06-18"
                             ],
                             "highest_trade_dates": [
-                                "2026-06-19"
+                                "2026-06-22"
                             ],
                             "average_trade_dates": [
-                                "2026-06-18"
+                                "2026-06-21",
+                                "2026-06-23"
                             ],
                             "all_traded_symbols": {
                                 "BTCUSD": {
                                     "symbol": "BTCUSD",
-                                    "total_trades": 23,
-                                    "total_profit": 426.64,
-                                    "total_loss": 680.35
+                                    "total_trades": 72,
+                                    "total_profit": 1791.72,
+                                    "total_loss": 1842.6
                                 }
                             },
                             "symbols_traded": 1,
-                            "closed_deals_with_sl_tp": 23,
+                            "closed_deals_with_sl_tp": 72,
                             "closed_deals_without_sl_tp": 0,
                             "highest_sequential_losses": {
                                 "consecutive_losses_count": 9,
@@ -3938,41 +4735,834 @@
                             }
                         }
                     }
+                },
+                "may_26_2026_to_june_23_2026": {
+                    "start_date": "May 26, 2026",
+                    "end_date": "2026-06-23",
+                    "last_updated": "2026-06-23T20:11:52.664219",
+                    "trades_within_risks_config": {
+                        "summaries": {
+                            "summaries_of_profits_only": {
+                                "inherited_and_claimed_trades_by_risk_reward_0.71": 36,
+                                "inherited_and_claimed_trades_by_risk_reward_0.88": 35,
+                                "inherited_and_claimed_trades_by_risk_reward_0.89": 34,
+                                "inherited_and_claimed_trades_by_risk_reward_0.9": 33,
+                                "inherited_and_claimed_trades_by_risk_reward_0.92": 32,
+                                "inherited_and_claimed_trades_by_risk_reward_0.93": 31,
+                                "inherited_and_claimed_trades_by_risk_reward_0.94": 28,
+                                "inherited_and_claimed_trades_by_risk_reward_0.96": 27,
+                                "inherited_and_claimed_trades_by_risk_reward_0.97": 24,
+                                "inherited_and_claimed_trades_by_risk_reward_0.98": 18,
+                                "inherited_and_claimed_trades_by_risk_reward_0.99": 15,
+                                "inherited_and_claimed_trades_by_risk_reward_1": 9,
+                                "total_lost_trades": 40,
+                                "total_won_trades": 36,
+                                "total_lost_trades_amount": 1847.85,
+                                "total_won_trades_amount": 1794.07,
+                                "lowest_trades_per_day": 1,
+                                "highest_trades_per_day": 17,
+                                "average_trades_per_day": 10,
+                                "lowest_trade_dates": [
+                                    "2026-06-14"
+                                ],
+                                "highest_trade_dates": [
+                                    "2026-06-22"
+                                ],
+                                "average_trade_dates": [
+                                    "2026-06-19",
+                                    "2026-06-20"
+                                ]
+                            }
+                        },
+                        "regular_data": {
+                            "authorized": {
+                                "total_trades": 76,
+                                "total_pnl": -53.78,
+                                "profit_trades": 36,
+                                "loss_trades": 40,
+                                "profit_amount": 1794.07,
+                                "loss_amount": 1847.85,
+                                "win_rate_by_count_percentage": 47.37,
+                                "loss_rate_by_count_percentage": 52.63,
+                                "win_rate_by_revenue_percentage": 49.26,
+                                "loss_rate_by_revenue_percentage": 50.74,
+                                "lowest_trades_per_day": 1,
+                                "highest_trades_per_day": 17,
+                                "average_trades_per_day": 10,
+                                "lowest_trade_dates": [
+                                    "2026-06-14"
+                                ],
+                                "highest_trade_dates": [
+                                    "2026-06-22"
+                                ],
+                                "average_trade_dates": [
+                                    "2026-06-19",
+                                    "2026-06-20"
+                                ],
+                                "all_traded_symbols": {
+                                    "BTCUSD": {
+                                        "symbol": "BTCUSD",
+                                        "total_trades": 73,
+                                        "total_profit": 1791.72,
+                                        "total_loss": 1843.29
+                                    },
+                                    "GBPUSD": {
+                                        "symbol": "GBPUSD",
+                                        "total_trades": 3,
+                                        "total_profit": 2.35,
+                                        "total_loss": 4.56
+                                    }
+                                },
+                                "symbols_traded": 2,
+                                "closed_deals_with_sl_tp": 76,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {
+                                    "consecutive_losses_count": 9,
+                                    "total_loss_pnl": -389.7,
+                                    "trades": [
+                                        {
+                                            "ticket": 5690513753,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 64068.933,
+                                            "stoploss": 63880.251,
+                                            "take_profit": 64252.931,
+                                            "trade_risk": 50.94,
+                                            "risk_reward": 0.98,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.01,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.27,
+                                            "time_open": "2026-06-18 11:52:37",
+                                            "time_close": "2026-06-18 12:23:30",
+                                            "magic": 61701342,
+                                            "total_pnl": -51.4,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5690539673,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 63978.813,
+                                            "stoploss": 64197.4,
+                                            "take_profit": 63769.476,
+                                            "trade_risk": 52.46,
+                                            "risk_reward": 0.96,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.02,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.24,
+                                            "time_open": "2026-06-18 12:10:23",
+                                            "time_close": "2026-06-18 13:30:00",
+                                            "magic": 61701342,
+                                            "total_pnl": -53.39,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5690681975,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 64298.377,
+                                            "stoploss": 64412.9,
+                                            "take_profit": 64185.836,
+                                            "trade_risk": 51.54,
+                                            "risk_reward": 0.98,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.08,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.45,
+                                            "time_open": "2026-06-18 14:20:00",
+                                            "time_close": "2026-06-18 14:26:34",
+                                            "magic": 61701342,
+                                            "total_pnl": -55.63,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5690937448,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 62697.607,
+                                            "stoploss": 62377.489,
+                                            "take_profit": 63015.263,
+                                            "trade_risk": 51.22,
+                                            "risk_reward": 0.99,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -0.11,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.16,
+                                            "time_open": "2026-06-18 18:32:46",
+                                            "time_close": "2026-06-18 20:00:27",
+                                            "magic": 61701342,
+                                            "total_pnl": -5.52,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691003789,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 62630.439,
+                                            "stoploss": 62931.566,
+                                            "take_profit": 62333.89,
+                                            "trade_risk": 51.19,
+                                            "risk_reward": 0.98,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -0.17,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.17,
+                                            "time_open": "2026-06-18 19:54:45",
+                                            "time_close": "2026-06-18 20:00:27",
+                                            "magic": 61701342,
+                                            "total_pnl": -8.75,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691210294,
+                                            "symbol": "BTCUSD",
+                                            "type": "SELL",
+                                            "entry_price": 62892.522,
+                                            "stoploss": 63042.4,
+                                            "take_profit": 62742.8,
+                                            "trade_risk": 50.96,
+                                            "risk_reward": 1.0,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.02,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.34,
+                                            "time_open": "2026-06-19 02:11:20",
+                                            "time_close": "2026-06-19 02:16:26",
+                                            "magic": 61701342,
+                                            "total_pnl": -51.87,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691226948,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 63005.145,
+                                            "stoploss": 62862.632,
+                                            "take_profit": 63145.13,
+                                            "trade_risk": 51.3,
+                                            "risk_reward": 0.98,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.12,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.36,
+                                            "time_open": "2026-06-19 02:16:07",
+                                            "time_close": "2026-06-19 02:32:53",
+                                            "magic": 61701342,
+                                            "total_pnl": -57.42,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691275250,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 62985.206,
+                                            "stoploss": 62882.25,
+                                            "take_profit": 63076.57,
+                                            "trade_risk": 53.54,
+                                            "risk_reward": 0.89,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.01,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.52,
+                                            "time_open": "2026-06-19 03:57:21",
+                                            "time_close": "2026-06-19 04:07:38",
+                                            "magic": 61701342,
+                                            "total_pnl": -53.83,
+                                            "state": "CLOSED"
+                                        },
+                                        {
+                                            "ticket": 5691242709,
+                                            "symbol": "BTCUSD",
+                                            "type": "BUY",
+                                            "entry_price": 62983.245,
+                                            "stoploss": 62812.38,
+                                            "take_profit": 63148.86,
+                                            "trade_risk": 51.26,
+                                            "risk_reward": 0.97,
+                                            "trade_owned_by_risk_reward": "N/A",
+                                            "beneficiaries": "none",
+                                            "closed_at_reward": -1.01,
+                                            "claimed_reason": "unclaimed because trade closed out at a loss",
+                                            "volume": 0.3,
+                                            "time_open": "2026-06-19 02:54:51",
+                                            "time_close": "2026-06-19 04:12:18",
+                                            "magic": 61701342,
+                                            "total_pnl": -51.89,
+                                            "state": "CLOSED"
+                                        }
+                                    ]
+                                },
+                                "highest_sequential_days_in_loss": {
+                                    "consecutive_days_count": 4,
+                                    "total_loss_pnl": -258.6,
+                                    "days": {
+                                        "2026-06-14": [
+                                            {
+                                                "ticket": 5686865113,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 64030.109,
+                                                "stoploss": 63970.152,
+                                                "take_profit": 64089.748,
+                                                "trade_risk": 0.6,
+                                                "risk_reward": 0.99,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.15,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.01,
+                                                "time_open": "2026-06-14 17:00:56",
+                                                "time_close": "2026-06-14 17:04:30",
+                                                "magic": 61701342,
+                                                "total_pnl": -0.69,
+                                                "state": "CLOSED"
+                                            }
+                                        ],
+                                        "2026-06-15": [
+                                            {
+                                                "ticket": 5687550683,
+                                                "symbol": "GBPUSD",
+                                                "type": "SELL",
+                                                "entry_price": 1.3425,
+                                                "stoploss": 1.344,
+                                                "take_profit": 1.341,
+                                                "trade_risk": 1.5,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.0,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.01,
+                                                "time_open": "2026-06-15 11:57:45",
+                                                "time_close": "2026-06-15 15:06:24",
+                                                "magic": 61701342,
+                                                "total_pnl": -1.5,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5687600109,
+                                                "symbol": "GBPUSD",
+                                                "type": "BUY",
+                                                "entry_price": 1.344,
+                                                "stoploss": 1.3425,
+                                                "take_profit": 1.3455,
+                                                "trade_risk": 3.0,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.02,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.02,
+                                                "time_open": "2026-06-15 15:06:24",
+                                                "time_close": "2026-06-15 16:50:11",
+                                                "magic": 61701342,
+                                                "total_pnl": -3.06,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5687798020,
+                                                "symbol": "GBPUSD",
+                                                "type": "SELL",
+                                                "entry_price": 1.34247,
+                                                "stoploss": 1.344,
+                                                "take_profit": 1.341,
+                                                "trade_risk": 7.65,
+                                                "risk_reward": 0.96,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 0.31,
+                                                "claimed_reason": "claimed because trade qualified as a breakeven exit (structural exit within 50% risk boundary) consolidated into lowest tier 1.0",
+                                                "volume": 0.05,
+                                                "time_open": "2026-06-15 16:50:11",
+                                                "time_close": "2026-06-15 20:00:26",
+                                                "magic": 61701342,
+                                                "total_pnl": 2.35,
+                                                "state": "CLOSED"
+                                            }
+                                        ],
+                                        "2026-06-18": [
+                                            {
+                                                "ticket": 5690450025,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 64424.54,
+                                                "stoploss": 64281.277,
+                                                "take_profit": 64565.169,
+                                                "trade_risk": 51.57,
+                                                "risk_reward": 0.98,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.36,
+                                                "time_open": "2026-06-18 10:15:21",
+                                                "time_close": "2026-06-18 10:26:10",
+                                                "magic": 61701342,
+                                                "total_pnl": -52.3,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690390291,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 64324.249,
+                                                "stoploss": 64624.646,
+                                                "take_profit": 64023.898,
+                                                "trade_risk": 51.07,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 1.01,
+                                                "claimed_reason": "claimed because reward at 1.0 requested to breakeven at 0.1",
+                                                "volume": 0.17,
+                                                "time_open": "2026-06-18 10:00:34",
+                                                "time_close": "2026-06-18 11:09:03",
+                                                "magic": 61701342,
+                                                "total_pnl": 51.36,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690513753,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 64068.933,
+                                                "stoploss": 63880.251,
+                                                "take_profit": 64252.931,
+                                                "trade_risk": 50.94,
+                                                "risk_reward": 0.98,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.27,
+                                                "time_open": "2026-06-18 11:52:37",
+                                                "time_close": "2026-06-18 12:23:30",
+                                                "magic": 61701342,
+                                                "total_pnl": -51.4,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690539673,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 63978.813,
+                                                "stoploss": 64197.4,
+                                                "take_profit": 63769.476,
+                                                "trade_risk": 52.46,
+                                                "risk_reward": 0.96,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.02,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.24,
+                                                "time_open": "2026-06-18 12:10:23",
+                                                "time_close": "2026-06-18 13:30:00",
+                                                "magic": 61701342,
+                                                "total_pnl": -53.39,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690681975,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 64298.377,
+                                                "stoploss": 64412.9,
+                                                "take_profit": 64185.836,
+                                                "trade_risk": 51.54,
+                                                "risk_reward": 0.98,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.08,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.45,
+                                                "time_open": "2026-06-18 14:20:00",
+                                                "time_close": "2026-06-18 14:26:34",
+                                                "magic": 61701342,
+                                                "total_pnl": -55.63,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5690937448,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62697.607,
+                                                "stoploss": 62377.489,
+                                                "take_profit": 63015.263,
+                                                "trade_risk": 51.22,
+                                                "risk_reward": 0.99,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -0.11,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.16,
+                                                "time_open": "2026-06-18 18:32:46",
+                                                "time_close": "2026-06-18 20:00:27",
+                                                "magic": 61701342,
+                                                "total_pnl": -5.52,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691003789,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62630.439,
+                                                "stoploss": 62931.566,
+                                                "take_profit": 62333.89,
+                                                "trade_risk": 51.19,
+                                                "risk_reward": 0.98,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -0.17,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.17,
+                                                "time_open": "2026-06-18 19:54:45",
+                                                "time_close": "2026-06-18 20:00:27",
+                                                "magic": 61701342,
+                                                "total_pnl": -8.75,
+                                                "state": "CLOSED"
+                                            }
+                                        ],
+                                        "2026-06-19": [
+                                            {
+                                                "ticket": 5691210294,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62892.522,
+                                                "stoploss": 63042.4,
+                                                "take_profit": 62742.8,
+                                                "trade_risk": 50.96,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.02,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.34,
+                                                "time_open": "2026-06-19 02:11:20",
+                                                "time_close": "2026-06-19 02:16:26",
+                                                "magic": 61701342,
+                                                "total_pnl": -51.87,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691226948,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 63005.145,
+                                                "stoploss": 62862.632,
+                                                "take_profit": 63145.13,
+                                                "trade_risk": 51.3,
+                                                "risk_reward": 0.98,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.12,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.36,
+                                                "time_open": "2026-06-19 02:16:07",
+                                                "time_close": "2026-06-19 02:32:53",
+                                                "magic": 61701342,
+                                                "total_pnl": -57.42,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691275250,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62985.206,
+                                                "stoploss": 62882.25,
+                                                "take_profit": 63076.57,
+                                                "trade_risk": 53.54,
+                                                "risk_reward": 0.89,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.52,
+                                                "time_open": "2026-06-19 03:57:21",
+                                                "time_close": "2026-06-19 04:07:38",
+                                                "magic": 61701342,
+                                                "total_pnl": -53.83,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691242709,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62983.245,
+                                                "stoploss": 62812.38,
+                                                "take_profit": 63148.86,
+                                                "trade_risk": 51.26,
+                                                "risk_reward": 0.97,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.3,
+                                                "time_open": "2026-06-19 02:54:51",
+                                                "time_close": "2026-06-19 04:12:18",
+                                                "magic": 61701342,
+                                                "total_pnl": -51.89,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691259780,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62943.996,
+                                                "stoploss": 63086.875,
+                                                "take_profit": 62802.697,
+                                                "trade_risk": 51.44,
+                                                "risk_reward": 0.99,
+                                                "trade_owned_by_risk_reward": "primary target:0.99",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 1.02,
+                                                "claimed_reason": "claimed by the actual trade risk reward potential of 0.99",
+                                                "volume": 0.36,
+                                                "time_open": "2026-06-19 03:19:49",
+                                                "time_close": "2026-06-19 04:12:51",
+                                                "magic": 61701342,
+                                                "total_pnl": 52.56,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691357819,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62597.778,
+                                                "stoploss": 62374.875,
+                                                "take_profit": 62820.467,
+                                                "trade_risk": 51.27,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 1.01,
+                                                "claimed_reason": "claimed because reward at 1.0 requested to breakeven at 0.1",
+                                                "volume": 0.23,
+                                                "time_open": "2026-06-19 06:05:41",
+                                                "time_close": "2026-06-19 07:15:32",
+                                                "magic": 61701342,
+                                                "total_pnl": 51.73,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691408369,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62660.09,
+                                                "stoploss": 62824.53,
+                                                "take_profit": 62506.922,
+                                                "trade_risk": 52.62,
+                                                "risk_reward": 0.93,
+                                                "trade_owned_by_risk_reward": "primary target:0.93",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 1.02,
+                                                "claimed_reason": "claimed by the actual trade risk reward potential of 0.93",
+                                                "volume": 0.32,
+                                                "time_open": "2026-06-19 08:33:46",
+                                                "time_close": "2026-06-19 08:38:03",
+                                                "magic": 61701342,
+                                                "total_pnl": 53.92,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691472916,
+                                                "symbol": "BTCUSD",
+                                                "type": "BUY",
+                                                "entry_price": 62745.911,
+                                                "stoploss": 62463.832,
+                                                "take_profit": 63027.986,
+                                                "trade_risk": 50.77,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -1.01,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.18,
+                                                "time_open": "2026-06-19 09:38:55",
+                                                "time_close": "2026-06-19 10:09:50",
+                                                "magic": 61701342,
+                                                "total_pnl": -51.28,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691506118,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62575.061,
+                                                "stoploss": 62687.9,
+                                                "take_profit": 62462.5,
+                                                "trade_risk": 50.78,
+                                                "risk_reward": 1.0,
+                                                "trade_owned_by_risk_reward": "primary target:1",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": 1.06,
+                                                "claimed_reason": "claimed because reward at 1.0 requested to breakeven at 0.1",
+                                                "volume": 0.45,
+                                                "time_open": "2026-06-19 09:41:51",
+                                                "time_close": "2026-06-19 10:09:57",
+                                                "magic": 61701342,
+                                                "total_pnl": 53.67,
+                                                "state": "CLOSED"
+                                            },
+                                            {
+                                                "ticket": 5691963245,
+                                                "symbol": "BTCUSD",
+                                                "type": "SELL",
+                                                "entry_price": 62973.761,
+                                                "stoploss": 63203.094,
+                                                "take_profit": 62765.298,
+                                                "trade_risk": 52.75,
+                                                "risk_reward": 0.91,
+                                                "trade_owned_by_risk_reward": "N/A",
+                                                "beneficiaries": "none",
+                                                "closed_at_reward": -0.49,
+                                                "claimed_reason": "unclaimed because trade closed out at a loss",
+                                                "volume": 0.23,
+                                                "time_open": "2026-06-19 19:39:11",
+                                                "time_close": "2026-06-19 20:00:07",
+                                                "magic": 61701342,
+                                                "total_pnl": -25.66,
+                                                "state": "CLOSED"
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                            "unauthorized": {
+                                "total_trades": 0,
+                                "total_pnl": 0,
+                                "profit_trades": 0,
+                                "loss_trades": 0,
+                                "profit_amount": 0,
+                                "loss_amount": 0,
+                                "win_rate_by_count_percentage": 0.0,
+                                "loss_rate_by_count_percentage": 0.0,
+                                "win_rate_by_revenue_percentage": 0.0,
+                                "loss_rate_by_revenue_percentage": 0.0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": [],
+                                "all_traded_symbols": {},
+                                "symbols_traded": 0,
+                                "closed_deals_with_sl_tp": 0,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {},
+                                "highest_sequential_days_in_loss": {}
+                            }
+                        }
+                    },
+                    "trades_outside_risks_config": {
+                        "summaries": {
+                            "summaries_of_profits_only": {
+                                "total_lost_trades": 0,
+                                "total_won_trades": 0,
+                                "total_lost_trades_amount": 0,
+                                "total_won_trades_amount": 0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": []
+                            }
+                        },
+                        "regular_data": {
+                            "authorized": {
+                                "total_trades": 0,
+                                "total_pnl": 0,
+                                "profit_trades": 0,
+                                "loss_trades": 0,
+                                "profit_amount": 0,
+                                "loss_amount": 0,
+                                "win_rate_by_count_percentage": 0.0,
+                                "loss_rate_by_count_percentage": 0.0,
+                                "win_rate_by_revenue_percentage": 0.0,
+                                "loss_rate_by_revenue_percentage": 0.0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": [],
+                                "all_traded_symbols": {},
+                                "symbols_traded": 0,
+                                "closed_deals_with_sl_tp": 0,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {},
+                                "highest_sequential_days_in_loss": {}
+                            },
+                            "unauthorized": {
+                                "total_trades": 0,
+                                "total_pnl": 0,
+                                "profit_trades": 0,
+                                "loss_trades": 0,
+                                "profit_amount": 0,
+                                "loss_amount": 0,
+                                "win_rate_by_count_percentage": 0.0,
+                                "loss_rate_by_count_percentage": 0.0,
+                                "win_rate_by_revenue_percentage": 0.0,
+                                "loss_rate_by_revenue_percentage": 0.0,
+                                "lowest_trades_per_day": 0,
+                                "highest_trades_per_day": 0,
+                                "average_trades_per_day": 0,
+                                "lowest_trade_dates": [],
+                                "highest_trade_dates": [],
+                                "average_trade_dates": [],
+                                "all_traded_symbols": {},
+                                "symbols_traded": 0,
+                                "closed_deals_with_sl_tp": 0,
+                                "closed_deals_without_sl_tp": 0,
+                                "highest_sequential_losses": {},
+                                "highest_sequential_days_in_loss": {}
+                            }
+                        }
+                    }
                 }
             }
         },
-        "unauthorized_action_detected": false,
         "audit_history": [
             {
-                "audit_timestamp": "2026-06-20T11:56:03.168418",
+                "audit_timestamp": "2026-06-23T20:11:53.174452",
                 "application_status": "approved",
                 "unauthorized_detected": false,
                 "unauthorized_orders_count": 0,
                 "unauthorized_positions_count": 0,
                 "balance_discrepancy": 997.1,
-                "calculated_balance": 8746.29,
-                "mt5_actual_balance": 9743.39,
-                "profit_and_loss": -253.71,
-                "authorized_trades_count": 47
+                "calculated_balance": 8949.12,
+                "mt5_actual_balance": 9946.22,
+                "profit_and_loss": -50.88,
+                "authorized_trades_count": 145
             },
             {
-                "audit_timestamp": "2026-06-20T11:56:07.235502",
+                "audit_timestamp": "2026-06-23T20:11:58.625909",
                 "application_status": "approved",
                 "unauthorized_detected": false,
                 "unauthorized_orders_count": 0,
                 "unauthorized_positions_count": 0,
                 "balance_discrepancy": 997.1,
-                "calculated_balance": 8746.29,
-                "mt5_actual_balance": 9743.39,
-                "profit_and_loss": -253.71,
-                "authorized_trades_count": 47
+                "calculated_balance": 8949.12,
+                "mt5_actual_balance": 9946.22,
+                "profit_and_loss": -50.88,
+                "authorized_trades_count": 145
             }
         ],
         "last_audit_status": "approved",
-        "last_audit_timestamp": "2026-06-20T11:56:07.235502",
+        "last_audit_timestamp": "2026-06-23T20:11:58.625909",
         "current_unauthorized_detected": false,
-        "current_balance": 8746.29,
-        "current_pnl": -253.71
+        "current_balance": 8949.12,
+        "current_pnl": -50.88
     },
     "4": {
         "id": "4",
@@ -3997,10 +5587,12 @@
         "paymentdetails": "NULL",
         "message": "NULL",
         "unauthorized_actions": {
-            "detected": false,
+            "detected": true,
             "bypass_active": true,
             "autotrading_active": true,
-            "type": [],
+            "type": [
+                "trades"
+            ],
             "unauthorized_withdrawals": [],
             "unauthorized_orders": [],
             "unauthorized_positions": []
@@ -4103,6 +5695,13 @@
                 "time": "2026-06-18 08:31:36",
                 "type": "success",
                 "update": "new"
+            },
+            "15": {
+                "section": "ApplicationStatus",
+                "message": "\u26a0\ufe0f APPLICATION STATUS CHANGE: Your account status has changed from 'approved' to 'APPROVED WITH BYPASS'. Unauthorized actions are being automatically bypassed but are still being flagged for monitoring.",
+                "time": "2026-06-23 20:11:49",
+                "type": "error",
+                "update": "new"
             }
         },
         "executions_notification": {
@@ -4202,6 +5801,13 @@
                 "message": "SERVER NOTIFICATION: Investor 4 status restored to approved. No unauthorized actions detected.",
                 "time": "2026-06-18 08:31:36",
                 "type": "success",
+                "update": "new"
+            },
+            "15": {
+                "section": "ApplicationStatus",
+                "message": "SERVER NOTIFICATION: Investor 4 status changed to approved_with_bypass. Bypass mode active.",
+                "time": "2026-06-23 20:11:49",
+                "type": "error",
                 "update": "new"
             }
         },
@@ -4371,7 +5977,7 @@
         "account_balance": 8665.74,
         "account_currency": "USD",
         "account_leverage": 1000,
-        "last_updated": "2026-06-20 11:56:01",
+        "last_updated": "2026-06-23 20:11:49",
         "has_error": false,
         "processed": true,
         "folder_created": true,
@@ -4383,25 +5989,25 @@
             "techknowdge_revenue"
         ],
         "demo_account_restricted": false,
-        "unauthorized_action_detected": false,
+        "unauthorized_action_detected": true,
         "audit_history": [
             {
-                "audit_timestamp": "2026-06-20T11:56:06.144450",
-                "application_status": "approved",
-                "unauthorized_detected": false,
+                "audit_timestamp": "2026-06-23T20:11:57.376097",
+                "application_status": "approved_with_bypass",
+                "unauthorized_detected": true,
                 "unauthorized_orders_count": 0,
                 "unauthorized_positions_count": 0,
-                "balance_discrepancy": 99.33,
-                "calculated_balance": 8566.41,
-                "mt5_actual_balance": 8665.74,
-                "profit_and_loss": -433.59,
-                "authorized_trades_count": 46
+                "balance_discrepancy": 58.95,
+                "calculated_balance": 8699.95,
+                "mt5_actual_balance": 8758.9,
+                "profit_and_loss": -300.05,
+                "authorized_trades_count": 161
             }
         ],
-        "last_audit_status": "approved",
-        "last_audit_timestamp": "2026-06-20T11:56:06.144450",
-        "current_unauthorized_detected": false,
-        "current_balance": 8566.41,
-        "current_pnl": -433.59
+        "last_audit_status": "approved_with_bypass",
+        "last_audit_timestamp": "2026-06-23T20:11:57.376097",
+        "current_unauthorized_detected": true,
+        "current_balance": 8699.95,
+        "current_pnl": -300.05
     }
 }

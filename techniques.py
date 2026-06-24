@@ -22,12 +22,13 @@ from multiprocessing.pool import ThreadPool
 from functools import partial
 
 
-DEV_PATH = r'C:\xampp\htdocs\chronedge\synarex\usersdata\developers'
-DEV_USERS = r'C:\xampp\htdocs\chronedge\synarex\usersdata\developers\developers.json'
-DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\chronedge\synarex\default_accountmanagement.json"
-INVESTOR_USERS = r"C:\xampp\htdocs\chronedge\synarex\usersdata\investors\investors.json"
-INV_PATH = r"C:\xampp\htdocs\chronedge\synarex\usersdata\investors"
-VERIFIED_INVESTORS = r"C:\xampp\htdocs\chronedge\synarex\verified_investors.json"
+DEV_PATH = r'C:\xampp\htdocs\harvcore\harvox\usersdata\developers'
+DEV_USERS = r'C:\xampp\htdocs\harvcore\harvox\usersdata\developers\developers.json'
+DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\harvcore\harvox\default_accountmanagement.json"
+INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors\investors.json"
+INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors"
+VERIFIED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\verified_investors.json"
+FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
 
 
 def load_developers_dictionary():
@@ -3856,6 +3857,127 @@ def entry_point_of_interest(user_id):
                 if p_name in patterns:
                     del patterns[p_name]
 
+    def remove_outlawed_swings_in_between_definitions(target_data_tf, new_key, original_candles, poi_config):
+        """
+        Removes patterns that have ANY swing type between the specific define_1 and define_2
+        candles found in the pattern family.
+        
+        This function finds the define_1 candle (with 'from': True) and define_2 candle 
+        (with 'after': True) in the pattern, then checks the FULL original candle data
+        for any swings between their candle numbers.
+        
+        Config format:
+            "remove_outlawed_swings_in_between_definitions": "define_1_define_2, define_2_define_3"
+        
+        Args:
+            target_data_tf: The timeframe data containing patterns
+            new_key: The key for the current pattern
+            original_candles: The full original candle data
+            poi_config: The POI configuration containing the setting
+        
+        Returns:
+            target_data_tf: The modified timeframe data with outlaw patterns removed
+        """
+        if not poi_config or not isinstance(target_data_tf, dict) or not original_candles:
+            return target_data_tf
+
+        # Get the configuration
+        remove_config = poi_config.get("remove_outlawed_swings_in_between_definitions", "")
+        if not remove_config:
+            return target_data_tf
+
+        pattern_key = f"{new_key}_patterns"
+        patterns = target_data_tf.get(pattern_key, {})
+        if not patterns:
+            return target_data_tf
+
+        # Parse the configuration
+        pairs = [p.strip() for p in remove_config.split(",") if p.strip()]
+        if not pairs:
+            return target_data_tf
+
+        # Build a lookup dictionary of original candles by candle_number
+        original_candle_lookup = {}
+        for candle in original_candles:
+            if isinstance(candle, dict) and candle.get("candle_number") is not None:
+                original_candle_lookup[candle["candle_number"]] = candle
+
+        # Track patterns to remove
+        patterns_to_remove = []
+
+        # Process each pattern family
+        for p_name, family in patterns.items():
+            if not isinstance(family, list):
+                continue
+
+            # Check each pair configuration
+            for pair in pairs:
+                parts = pair.split("_")
+                if len(parts) < 4:
+                    continue
+                    
+                def1_key = f"{parts[0]}_{parts[1]}"  # e.g., "define_1"
+                def2_key = f"{parts[2]}_{parts[3]}"  # e.g., "define_2"
+
+                # Find the define_1 candle (with 'from': True) and define_2 candle (with 'after': True)
+                from_candle = None  # This is the define_1 candle
+                after_candle = None  # This is the define_2 candle
+                
+                for candle in family:
+                    if isinstance(candle, dict):
+                        # The define_1 candle has 'from': True
+                        if candle.get("from") is True and candle.get(def1_key) is True:
+                            from_candle = candle
+                        # The define_2 candle has 'after': True
+                        if candle.get("after") is True and candle.get(def2_key) is True:
+                            after_candle = candle
+
+                # If we can't find both, skip this pattern
+                if not from_candle or not after_candle:
+                    continue
+
+                # Get candle numbers
+                from_num = from_candle.get("candle_number")
+                after_num = after_candle.get("candle_number")
+                
+                if from_num is None or after_num is None:
+                    continue
+
+                # Determine the range between the two definitions
+                start = min(from_num, after_num) + 1
+                end = max(from_num, after_num) - 1
+
+                # If there are no candles between them, skip
+                if start > end:
+                    continue
+
+                # Check if there are ANY swing candles between them in the FULL original data
+                has_swing_between = False
+                
+                for candle_num in range(start, end + 1):
+                    original_candle = original_candle_lookup.get(candle_num)
+                    if not original_candle:
+                        continue
+                    
+                    # Check if this candle has a swing_type (meaning it's a swing candle)
+                    swing_type = original_candle.get("swing_type", "").lower()
+                    if swing_type and swing_type in ["swing_high", "swing_low"]:
+                        has_swing_between = True
+                        break
+
+                # If ANY swing exists between the definitions, mark this pattern for removal
+                if has_swing_between:
+                    patterns_to_remove.append(p_name)
+                    break  # No need to check other pairs for this pattern
+
+        # Remove all marked patterns
+        for p_name in patterns_to_remove:
+            if p_name in patterns:
+                del patterns[p_name]
+                
+
+        return target_data_tf
+
     def draw_poi_tools(img, target_data_tf, new_key, poi_config):
         """
         Draws visual markers on the image. 
@@ -4079,107 +4201,6 @@ def entry_point_of_interest(user_id):
 
         return img
 
-    def identify_swing_mitigation_between_definitions(target_data_tf, new_key, original_candles, poi_config):
-        """
-        Checks for swing violations between multiple pairs of definitions (sender and receiver).
-        The config expects a comma-separated string: "define_1_define_3, define_4_define_10"
-        If any candle between a pair matches the receiver's swing_type and violates the price, 
-        the pattern is removed.
-        """
-        if not poi_config or not isinstance(target_data_tf, dict):
-            return
-
-        pattern_key = f"{new_key}_patterns"
-        patterns = target_data_tf.get(pattern_key, {})
-        from_sub = poi_config.get("from_subject")
-        
-        # Get the raw string, e.g., "define_1_define_3, define_2_define_4"
-        restrict_raw = poi_config.get("restrict_swing_mitigation_between_definitions")
-        if not restrict_raw:
-            return
-
-        # Split by comma to handle multiple pairs
-        restrict_pairs = [p.strip() for p in restrict_raw.split(",") if p.strip()]
-        patterns_to_remove = []
-
-        for p_name, family in patterns.items():
-            from_candle = next((c for c in family if c.get(from_sub) is True), None)
-            if not from_candle:
-                continue
-
-            # Determine target price level once per pattern based on from_subject
-            target_swingtype = from_candle.get("swing_type", "").lower()
-            if "high" in target_swingtype:
-                price_key = poi_config.get("subject_is_swinghigh_or_lowerhigh", "low")
-            else:
-                price_key = poi_config.get("subject_is_swinglow_or_higherlow", "high")
-
-            clean_key = price_key.replace("_price", "")
-            target_price = from_candle.get(clean_key)
-            
-            if target_price is None:
-                continue
-
-            is_mitigated = False
-
-            # Evaluate each pair defined in the config
-            for pair_str in restrict_pairs:
-                parts = pair_str.split("_")
-                # Expecting format: define, N, define, M -> 4 parts
-                if len(parts) < 4:
-                    continue
-                
-                sender_key = f"{parts[0]}_{parts[1]}"
-                receiver_key = f"{parts[2]}_{parts[3]}"
-
-                sender_candle = next((c for c in family if c.get(sender_key) is True), None)
-                receiver_candle = next((c for c in family if c.get(receiver_key) is True), None)
-
-                if not sender_candle or not receiver_candle:
-                    continue
-
-                s_num = sender_candle.get("candle_number")
-                r_num = receiver_candle.get("candle_number")
-                receiver_swing_type = receiver_candle.get("swing_type", "").lower()
-                
-                # Define search range (exclusive)
-                start_range = min(s_num, r_num) + 1
-                end_range = max(s_num, r_num) - 1
-
-                # Scan range for violations
-                for oc in original_candles:
-                    if not isinstance(oc, dict):
-                        continue
-                    
-                    c_num = oc.get("candle_number")
-                    if start_range <= c_num <= end_range:
-                        current_swing = oc.get("swing_type", "").lower()
-                        
-                        # Match the swing type of the receiver
-                        if current_swing == receiver_swing_type:
-                            if receiver_swing_type == "swing_low":
-                                v_low = oc.get("low")
-                                if v_low is not None and v_low < target_price:
-                                    is_mitigated = True
-                                    break
-                            elif receiver_swing_type == "swing_high":
-                                v_high = oc.get("high")
-                                if v_high is not None and v_high > target_price:
-                                    is_mitigated = True
-                                    break
-                
-                if is_mitigated:
-                    break # No need to check other pairs for this pattern if one triggered
-
-            if is_mitigated:
-                patterns_to_remove.append(p_name)
-
-        # Clean up patterns
-        for p_name in patterns_to_remove:
-            del patterns[p_name]
-
-        return target_data_tf
-
     def identify_selected(target_data_tf, new_key, poi_config):
         """
         Filters pattern records based on extreme or non-extreme values of a specific define_n.
@@ -4341,6 +4362,107 @@ def entry_point_of_interest(user_id):
 
         return target_data_tf
     
+    def identify_swing_mitigation_between_definitions(target_data_tf, new_key, original_candles, poi_config):
+        """
+        Checks for swing violations between multiple pairs of definitions (sender and receiver).
+        The config expects a comma-separated string: "define_1_define_3, define_4_define_10"
+        If any candle between a pair matches the receiver's swing_type and violates the price, 
+        the pattern is removed.
+        """
+        if not poi_config or not isinstance(target_data_tf, dict):
+            return
+
+        pattern_key = f"{new_key}_patterns"
+        patterns = target_data_tf.get(pattern_key, {})
+        from_sub = poi_config.get("from_subject")
+        
+        # Get the raw string, e.g., "define_1_define_3, define_2_define_4"
+        restrict_raw = poi_config.get("restrict_swing_mitigation_between_definitions")
+        if not restrict_raw:
+            return
+
+        # Split by comma to handle multiple pairs
+        restrict_pairs = [p.strip() for p in restrict_raw.split(",") if p.strip()]
+        patterns_to_remove = []
+
+        for p_name, family in patterns.items():
+            from_candle = next((c for c in family if c.get(from_sub) is True), None)
+            if not from_candle:
+                continue
+
+            # Determine target price level once per pattern based on from_subject
+            target_swingtype = from_candle.get("swing_type", "").lower()
+            if "high" in target_swingtype:
+                price_key = poi_config.get("subject_is_swinghigh_or_lowerhigh", "low")
+            else:
+                price_key = poi_config.get("subject_is_swinglow_or_higherlow", "high")
+
+            clean_key = price_key.replace("_price", "")
+            target_price = from_candle.get(clean_key)
+            
+            if target_price is None:
+                continue
+
+            is_mitigated = False
+
+            # Evaluate each pair defined in the config
+            for pair_str in restrict_pairs:
+                parts = pair_str.split("_")
+                # Expecting format: define, N, define, M -> 4 parts
+                if len(parts) < 4:
+                    continue
+                
+                sender_key = f"{parts[0]}_{parts[1]}"
+                receiver_key = f"{parts[2]}_{parts[3]}"
+
+                sender_candle = next((c for c in family if c.get(sender_key) is True), None)
+                receiver_candle = next((c for c in family if c.get(receiver_key) is True), None)
+
+                if not sender_candle or not receiver_candle:
+                    continue
+
+                s_num = sender_candle.get("candle_number")
+                r_num = receiver_candle.get("candle_number")
+                receiver_swing_type = receiver_candle.get("swing_type", "").lower()
+                
+                # Define search range (exclusive)
+                start_range = min(s_num, r_num) + 1
+                end_range = max(s_num, r_num) - 1
+
+                # Scan range for violations
+                for oc in original_candles:
+                    if not isinstance(oc, dict):
+                        continue
+                    
+                    c_num = oc.get("candle_number")
+                    if start_range <= c_num <= end_range:
+                        current_swing = oc.get("swing_type", "").lower()
+                        
+                        # Match the swing type of the receiver
+                        if current_swing == receiver_swing_type:
+                            if receiver_swing_type == "swing_low":
+                                v_low = oc.get("low")
+                                if v_low is not None and v_low < target_price:
+                                    is_mitigated = True
+                                    break
+                            elif receiver_swing_type == "swing_high":
+                                v_high = oc.get("high")
+                                if v_high is not None and v_high > target_price:
+                                    is_mitigated = True
+                                    break
+                
+                if is_mitigated:
+                    break # No need to check other pairs for this pattern if one triggered
+
+            if is_mitigated:
+                patterns_to_remove.append(p_name)
+
+        # Clean up patterns
+        for p_name in patterns_to_remove:
+            del patterns[p_name]
+
+        return target_data_tf
+
     def draw_definition_tools(img, target_data_tf, pattern_key, identify_config):
         """
         Draws visual markers for definitions as HORIZONTAL LINES with optional text labels.
@@ -4491,7 +4613,7 @@ def entry_point_of_interest(user_id):
                     start_x = int(candle.get("draw_right", candle.get("candle_right", 0)))
                     text_position = "below"  # Text should be below the line for lower low
                 else:
-                    #print(f"       ❌ Skipped: Unknown swing type '{swing_type}'")
+                    #print(f"        Skipped: Unknown swing type '{swing_type}'")
                     skipped_count += 1
                     continue
                 
@@ -6621,7 +6743,7 @@ def entry_point_of_interest(user_id):
                         shutil.rmtree(item_path)
                         deleted_count += 1
                     except Exception as e:
-                        log(f"  ❌ Error deleting empty folder {item_name}: {e}")
+                        log(f"   Error deleting empty folder {item_name}: {e}")
         
         return deleted_count
     
@@ -6785,7 +6907,7 @@ def entry_point_of_interest(user_id):
                         log(f"        ⏭️ No matching source candles found for '{target_key}'")
                         
                 except Exception as e:
-                    log(f"        ❌ Error processing {source_config_path}: {e}")
+                    log(f"         Error processing {source_config_path}: {e}")
         
         # Also check confirmation data that might have been moved to target timeframes
         # The populate_other_timeframes_with_confirmation_entry might have created backup keys
@@ -6848,7 +6970,7 @@ def entry_point_of_interest(user_id):
                                         modified = True
                                         log(f"        ✅ Updated {backup_updated} candles in backup key '{key}'")
                             except Exception as e:
-                                log(f"        ❌ Error processing backup {key}: {e}")
+                                log(f"         Error processing backup {key}: {e}")
         
         if total_candles_updated > 0:
             log(f"\n  ✅ SWING TYPE SWAPPING COMPLETE: Updated {total_candles_updated} candles across all timeframes for {sym}")
@@ -7056,6 +7178,15 @@ def entry_point_of_interest(user_id):
                             
                             identify_swing_mitigation_between_definitions(target_data[tf], new_key, candles, poi_config)
                             identify_selected(target_data[tf], new_key, poi_config)
+                            # --- NEW: Remove outlawed swings between definitions ---
+                            # This must be called AFTER identify_selected and BEFORE POI drawing
+                            # It checks the FULL candle data for any swing between definitions
+                            remove_outlawed_swings_in_between_definitions(
+                                target_data[tf], 
+                                new_key, 
+                                candles,  # Pass the FULL original candles
+                                poi_config
+                            )
 
                     # Always store the original candles
                     target_data[tf][file_key] = candles
@@ -7353,21 +7484,22 @@ def entry_point_of_interest(user_id):
         log(f"Starting: {user_id}")
 
         dev_dict = load_developers_dictionary() 
-        cfg = dev_dict.get(str(user_id))  # ← CHANGED: use user_id as string
+        cfg = dev_dict.get(str(user_id))
         if not cfg:
             log(f"User {user_id} not found")
             return f"Error: User {user_id} not in dictionary."
         
-        # ← CHANGED: Use DEV_PATH directly instead of BASE_FOLDER from config
+        # Use DEV_PATH from your main config
         dev_base_path = os.path.join(DEV_PATH, str(user_id))
-        base_folder = os.path.join(dev_base_path, "ohlc")  # ← ADDED: base_folder is the ohlc directory
+        base_folder = os.path.join(dev_base_path, "ohlc")
         
-        am_data = get_account_management(str(user_id))  # ← CHANGED: use user_id
+        # Get accountmanagement from developers.json (NOT from file system)
+        am_data = get_account_management(str(user_id))
         if not am_data:
-            log("accountmanagement.json missing")
-            return "Error: accountmanagement.json missing."
+            log("accountmanagement configuration missing in developers.json")
+            return "Error: accountmanagement configuration missing in developers.json."
 
-        # Get symbols_dictionary from root level
+        # Get symbols_dictionary from accountmanagement (already loaded from developers.json)
         symbols_dictionary = am_data.get("symbols_dictionary", {})
 
         define_candles = am_data.get("chart", {}).get("define_candles", {})
@@ -7396,7 +7528,6 @@ def entry_point_of_interest(user_id):
                     print()
                     log(f"\n📊 PROCESSING {new_folder_name}")
                     
-                    # Check if identify_definitions exist
                     identify_config = entry_settings.get("identify_definitions")
                     if identify_config:
                         log(f"  With identify_definitions: {list(identify_config.keys())}")
@@ -7407,8 +7538,8 @@ def entry_point_of_interest(user_id):
                         entry_settings, 
                         source_def_name, 
                         raw_filename_base, 
-                        base_folder,  # ← Now points to dev_path/{user_id}/ohlc
-                        dev_base_path,  # ← Now points to dev_path/{user_id}
+                        base_folder,
+                        dev_base_path,
                         symbols_dictionary
                     )
                     
@@ -9178,6 +9309,251 @@ def entries_confirmation(user_id):
                 if p_name in patterns:
                     del patterns[p_name]
 
+    def validate_contour_maker_position(target_data_tf, new_key, original_candles, poi_config):
+        """
+        Validates that the contour maker for the 'after' define candle exists BEFORE the Hitler candle
+        and is NOT the Hitler candle itself.
+        
+        For patterns with 'after' defined, this function checks:
+        1. If the 'after' candle has a contour_maker
+        2. If the contour_maker candle number is BEFORE the Hitler candle number
+        3. If the contour_maker is NOT the Hitler candle itself
+        
+        IMPORTANT: This validation only applies to patterns with a Hitler candle
+        (is_hitler_poi or point_of_interest). Patterns with pending_entry_level: true
+        are skipped entirely from this validation.
+        
+        If any of these conditions fail, the pattern is removed.
+        
+        Args:
+            target_data_tf: The timeframe data containing patterns
+            new_key: The key for the current pattern
+            original_candles: The full original candle data
+            poi_config: The POI configuration containing 'after_subject'
+        
+        Returns:
+            target_data_tf: The modified timeframe data with invalid patterns removed
+        """
+        if not poi_config or not isinstance(target_data_tf, dict):
+            return target_data_tf
+
+        pattern_key = f"{new_key}_patterns"
+        patterns = target_data_tf.get(pattern_key, {})
+        
+        if not patterns:
+            return target_data_tf
+
+        after_sub = poi_config.get("after_subject")
+        if not after_sub:
+            return target_data_tf
+
+        # Only check for the exact after_subject value
+        after_variants = [after_sub] if after_sub else []
+        
+        patterns_to_remove = []
+
+        for p_name, family in patterns.items():
+            if not isinstance(family, list):
+                continue
+
+            # Find the 'after' candle using exact value
+            after_candle = None
+            for variant in after_variants:
+                after_candle = next((c for c in family if c.get(variant) is True), None)
+                if after_candle:
+                    break
+
+            if not after_candle:
+                # If no after candle found, skip this pattern (it might be invalid already)
+                continue
+
+            # Find the Hitler candle in the family
+            hitler_candle = next(
+                (c for c in family if c.get("is_hitler_poi") is True or c.get("point_of_interest") is True),
+                None
+            )
+
+            if not hitler_candle:
+                # If no Hitler candle found, this pattern is invalid - remove it
+                patterns_to_remove.append(p_name)
+                continue
+
+            # CRITICAL CHECK: If this pattern has pending_entry_level, skip validation entirely
+            # Check if any candle in the family has pending_entry_level: true
+            has_pending_entry = any(c.get("pending_entry_level") is True for c in family)
+            
+            if has_pending_entry:
+                # Skip all validation for pending entry patterns
+                continue
+
+            # Get the contour_maker from the after candle
+            contour_maker = after_candle.get("contour_maker")
+            
+            if not contour_maker:
+                # No contour maker found - pattern is invalid by definition
+                patterns_to_remove.append(p_name)
+                continue
+
+            # Get contour maker candle number
+            contour_candle_num = contour_maker.get("candle_number")
+            hitler_candle_num = hitler_candle.get("candle_number")
+            after_candle_num = after_candle.get("candle_number")
+
+            # Validate we have all needed numbers
+            if contour_candle_num is None or hitler_candle_num is None:
+                patterns_to_remove.append(p_name)
+                continue
+
+            # Condition 1: Contour maker MUST NOT be the Hitler candle itself
+            if contour_candle_num == hitler_candle_num:
+                # The contour maker IS the Hitler candle - invalid pattern
+                patterns_to_remove.append(p_name)
+                continue
+
+            # Condition 2: Contour maker MUST be BEFORE the Hitler candle
+            # (candle_number smaller means earlier in time)
+            if contour_candle_num > hitler_candle_num:
+                # Contour maker appears after Hitler candle - invalid pattern
+                patterns_to_remove.append(p_name)
+                continue
+
+            # Condition 3: Also check that the contour maker is not the after candle itself
+            # (contour maker and after candle can be different)
+            if contour_candle_num == after_candle_num:
+                # This would mean the after candle IS the contour maker, which is fine
+                # as long as it's before the Hitler candle (already checked above)
+                pass
+
+            # If we get here, all conditions are met - pattern is valid
+
+        # Remove all invalid patterns
+        for p_name in patterns_to_remove:
+            if p_name in patterns:
+                del patterns[p_name]
+
+        return target_data_tf
+
+    def remove_outlawed_swings_in_between_definitions(target_data_tf, new_key, original_candles, poi_config):
+        """
+        Removes patterns that have ANY swing type between the specific define_1 and define_2
+        candles found in the pattern family.
+        
+        This function finds the define_1 candle (with 'from': True) and define_2 candle 
+        (with 'after': True) in the pattern, then checks the FULL original candle data
+        for any swings between their candle numbers.
+        
+        Config format:
+            "remove_outlawed_swings_in_between_definitions": "define_1_define_2, define_2_define_3"
+        
+        Args:
+            target_data_tf: The timeframe data containing patterns
+            new_key: The key for the current pattern
+            original_candles: The full original candle data
+            poi_config: The POI configuration containing the setting
+        
+        Returns:
+            target_data_tf: The modified timeframe data with outlaw patterns removed
+        """
+        if not poi_config or not isinstance(target_data_tf, dict) or not original_candles:
+            return target_data_tf
+
+        # Get the configuration
+        remove_config = poi_config.get("remove_outlawed_swings_in_between_definitions", "")
+        if not remove_config:
+            return target_data_tf
+
+        pattern_key = f"{new_key}_patterns"
+        patterns = target_data_tf.get(pattern_key, {})
+        if not patterns:
+            return target_data_tf
+
+        # Parse the configuration
+        pairs = [p.strip() for p in remove_config.split(",") if p.strip()]
+        if not pairs:
+            return target_data_tf
+
+        # Build a lookup dictionary of original candles by candle_number
+        original_candle_lookup = {}
+        for candle in original_candles:
+            if isinstance(candle, dict) and candle.get("candle_number") is not None:
+                original_candle_lookup[candle["candle_number"]] = candle
+
+        # Track patterns to remove
+        patterns_to_remove = []
+
+        # Process each pattern family
+        for p_name, family in patterns.items():
+            if not isinstance(family, list):
+                continue
+
+            # Check each pair configuration
+            for pair in pairs:
+                parts = pair.split("_")
+                if len(parts) < 4:
+                    continue
+                    
+                def1_key = f"{parts[0]}_{parts[1]}"  # e.g., "define_1"
+                def2_key = f"{parts[2]}_{parts[3]}"  # e.g., "define_2"
+
+                # Find the define_1 candle (with 'from': True) and define_2 candle (with 'after': True)
+                from_candle = None  # This is the define_1 candle
+                after_candle = None  # This is the define_2 candle
+                
+                for candle in family:
+                    if isinstance(candle, dict):
+                        # The define_1 candle has 'from': True
+                        if candle.get("from") is True and candle.get(def1_key) is True:
+                            from_candle = candle
+                        # The define_2 candle has 'after': True
+                        if candle.get("after") is True and candle.get(def2_key) is True:
+                            after_candle = candle
+
+                # If we can't find both, skip this pattern
+                if not from_candle or not after_candle:
+                    continue
+
+                # Get candle numbers
+                from_num = from_candle.get("candle_number")
+                after_num = after_candle.get("candle_number")
+                
+                if from_num is None or after_num is None:
+                    continue
+
+                # Determine the range between the two definitions
+                start = min(from_num, after_num) + 1
+                end = max(from_num, after_num) - 1
+
+                # If there are no candles between them, skip
+                if start > end:
+                    continue
+
+                # Check if there are ANY swing candles between them in the FULL original data
+                has_swing_between = False
+                
+                for candle_num in range(start, end + 1):
+                    original_candle = original_candle_lookup.get(candle_num)
+                    if not original_candle:
+                        continue
+                    
+                    # Check if this candle has a swing_type (meaning it's a swing candle)
+                    swing_type = original_candle.get("swing_type", "").lower()
+                    if swing_type and swing_type in ["swing_high", "swing_low"]:
+                        has_swing_between = True
+                        break
+
+                # If ANY swing exists between the definitions, mark this pattern for removal
+                if has_swing_between:
+                    patterns_to_remove.append(p_name)
+                    break  # No need to check other pairs for this pattern
+
+        # Remove all marked patterns
+        for p_name in patterns_to_remove:
+            if p_name in patterns:
+                del patterns[p_name]
+                
+
+        return target_data_tf
+
     def draw_poi_tools(img, target_data_tf, new_key, poi_config):
         """
         Draws visual markers on the image. 
@@ -9509,7 +9885,7 @@ def entries_confirmation(user_id):
                     start_x = int(candle.get("draw_right", candle.get("candle_right", 0)))
                     text_position = "below"  # Text should be below the line for lower low
                 else:
-                    #print(f"       ❌ Skipped: Unknown swing type '{swing_type}'")
+                    #print(f"        Skipped: Unknown swing type '{swing_type}'")
                     skipped_count += 1
                     continue
                 
@@ -11271,7 +11647,7 @@ def entries_confirmation(user_id):
                         shutil.rmtree(item_path)
                         deleted_count += 1
                     except Exception as e:
-                        log(f"  ❌ Error deleting empty folder {item_name}: {e}")
+                        log(f"   Error deleting empty folder {item_name}: {e}")
         
         
         return deleted_count
@@ -11436,7 +11812,7 @@ def entries_confirmation(user_id):
                         log(f"        ⏭️ No matching source candles found for '{target_key}'")
                         
                 except Exception as e:
-                    log(f"        ❌ Error processing {source_config_path}: {e}")
+                    log(f"         Error processing {source_config_path}: {e}")
         
         # Also check confirmation data that might have been moved to target timeframes
         # The populate_other_timeframes_with_confirmation_entry might have created backup keys
@@ -11499,7 +11875,7 @@ def entries_confirmation(user_id):
                                         modified = True
                                         log(f"        ✅ Updated {backup_updated} candles in backup key '{key}'")
                             except Exception as e:
-                                log(f"        ❌ Error processing backup {key}: {e}")
+                                log(f"         Error processing backup {key}: {e}")
         
         if total_candles_updated > 0:
             log(f"\n  ✅ SWING TYPE SWAPPING COMPLETE: Updated {total_candles_updated} candles across all timeframes for {sym}")
@@ -11724,6 +12100,15 @@ def entries_confirmation(user_id):
                                     identify_poi_mitigation(target_data[tf], new_key, poi_config)
                                     identify_swing_mitigation_between_definitions(target_data[tf], new_key, updated_candles, poi_config)
                                     identify_selected(target_data[tf], new_key, poi_config)
+                                    # --- NEW: Remove outlawed swings between definitions ---
+                                    # This must be called AFTER identify_selected and BEFORE POI drawing
+                                    # It checks the FULL candle data for any swing between definitions
+                                    remove_outlawed_swings_in_between_definitions(
+                                        target_data[tf], 
+                                        new_key, 
+                                        candles,  # Pass the FULL original candles
+                                        poi_config
+                                    )
 
                     # Process full_candles_data.json from target symbol directory
                     target_full_candle_path = os.path.join(target_sym_dir, f"{tf}_full_candles_data.json")
@@ -11978,30 +12363,34 @@ def entries_confirmation(user_id):
         """Main logic for processing entry points of interest."""
         log(f"Starting: {user_id}")
 
+        # 1. Load developers dictionary
         dev_dict = load_developers_dictionary() 
-        cfg = dev_dict.get(str(user_id))  # ← CHANGED: use user_id as string
+        cfg = dev_dict.get(str(user_id))
         if not cfg:
             log(f"User {user_id} not found")
             return f"Error: User {user_id} not in dictionary."
         
-        # ← CHANGED: Use DEV_PATH directly instead of BASE_FOLDER from config
+        # 2. Set up paths
         dev_base_path = os.path.join(DEV_PATH, str(user_id))
-        base_folder = os.path.join(dev_base_path, "ohlc")  # ← ADDED: base_folder is the ohlc directory
+        base_folder = os.path.join(dev_base_path, "ohlc")
         
-        am_data = get_account_management(str(user_id))  # ← CHANGED: use user_id
+        # 3. Get accountmanagement from developers.json (NOT from file system)
+        am_data = get_account_management(str(user_id))
         if not am_data:
-            log("accountmanagement.json missing")
-            return "Error: accountmanagement.json missing."
+            log("accountmanagement configuration missing in developers.json")
+            return "Error: accountmanagement configuration missing in developers.json."
 
-        # Get symbols_dictionary from root level
+        # 4. Extract configuration from accountmanagement
         symbols_dictionary = am_data.get("symbols_dictionary", {})
-
         define_candles = am_data.get("chart", {}).get("define_candles", {})
+        
+        # 5. Get the confirmation entries (note: different key from POI condition)
         entries_root = define_candles.get("entries_poi_confirmation_condition", {})
         
         total_syncs = 0
         entry_count = 0
 
+        # 6. Process each entry
         for apprehend_key, source_configs in entries_root.items():
             if not apprehend_key.startswith("apprehend_"):
                 continue
@@ -12022,7 +12411,6 @@ def entries_confirmation(user_id):
                     print()
                     log(f"\n📊 PROCESSING {new_folder_name} POI CONFIRMATION")
                     
-                    # Check if identify_definitions exist
                     identify_config = entry_settings.get("identify_definitions")
                     if identify_config:
                         log(f"  With identify_definitions: {list(identify_config.keys())}")
@@ -12033,13 +12421,14 @@ def entries_confirmation(user_id):
                         entry_settings, 
                         source_def_name, 
                         raw_filename_base, 
-                        base_folder,  # ← Now points to dev_path/{user_id}/ohlc
-                        dev_base_path,  # ← Now points to dev_path/{user_id}
+                        base_folder,
+                        dev_base_path,
                         symbols_dictionary
                     )
                     
                     total_syncs += syncs
         
+        # 7. Return summary
         if entry_count > 0:
             return f"COMPLETED: {entry_count} ENTRIES CONFIRMATION PROCESSED"
         else:
@@ -12047,582 +12436,346 @@ def entries_confirmation(user_id):
     
     return main_logic()
 
-def clear_unathorized_entries_folders(broker_name):
+def clear_unathorized_entries_folders(dev_user_id):
     """
-    1. Identifies protected filenames from accountmanagement.json in DEV_PATH.
-    2. Deletes any folder in the developer directory NOT listed in the JSON's protected filenames.
-    """
-    dev_dict = load_developers_dictionary()
-    cfg = dev_dict.get(broker_name)
+    Cleans up unauthorized folders in a developer's directory.
     
-    if not cfg:
-        print(f"[{broker_name}] Error: Broker not in dictionary.")
-        return False
+    1. Identifies valid strategy folders from the developer's directory
+       (folders that contain a 'pending_orders' subfolder).
+    2. Always spares the 'ohlc' folder.
+    3. Deletes any OTHER folder at the ROOT level of the developer directory 
+       that is NOT a strategy folder and NOT 'ohlc'.
+    
+    IMPORTANT: Only deletes folders at the root level. Does NOT go into 
+    subfolders or delete anything inside ohlc or strategy folders.
+    
+    Parameters:
+    - dev_user_id: The developer's user ID (folder name in DEV_PATH)
+    
+    Returns:
+    - True if successful, False if error
+    """
+    try:
+        # Path for Developer Output
+        dev_output_base = os.path.join(DEV_PATH, str(dev_user_id))
+        
+        # Check if developer folder exists
+        if not os.path.exists(dev_output_base):
+            print(f"[{dev_user_id}] ⚠️ Developer folder not found: {dev_output_base}")
+            return True  # Nothing to clean up
 
-    # Path for Developer Output and JSON
-    # Assumes DEV_PATH is defined globally in your script
-    dev_output_base = os.path.join(DEV_PATH, broker_name)
-    json_path = os.path.join(dev_output_base, "accountmanagement.json")
+        print(f"\n{'='*60}")
+        print(f"🧹 CLEANING UP UNAUTHORIZED FOLDERS FOR USER ID: {dev_user_id}")
+        print(f"📂 Path: {dev_output_base}")
+        print(f"{'='*60}")
 
-    # --- PART 1: Identify Protected Filenames from JSON ---
-    protected_filenames = set()
-    if os.path.exists(json_path):
+        # --- PART 1: Identify Protected Folders ---
+        protected_folders = set()
+        
+        # 1. Always protect the 'ohlc' folder
+        protected_folders.add("ohlc")
+        print(f"  🔒 Protected: ohlc (always spared)")
+        
+        # 2. Find all strategy folders (contain 'pending_orders' subfolder)
+        strategy_folders = []
+        if os.path.exists(dev_output_base):
+            for item in os.listdir(dev_output_base):
+                item_path = os.path.join(dev_output_base, item)
+                
+                # Check if it's a directory and contains a pending_orders folder
+                if os.path.isdir(item_path):
+                    pending_orders_path = os.path.join(item_path, "pending_orders")
+                    if os.path.exists(pending_orders_path) and os.path.isdir(pending_orders_path):
+                        strategy_folders.append(item)
+                        protected_folders.add(item)
+                        print(f"  📁 Protected: {item} (strategy folder with pending_orders)")
+        
+        if not strategy_folders:
+            print(f"  ⚠️ No strategy folders found in developer's directory")
+            print(f"  💡 Strategy folders should contain a 'pending_orders' subfolder")
+        
+        print(f"\n  📋 Total protected folders: {len(protected_folders)}")
+        for folder in sorted(protected_folders):
+            print(f"    • {folder}")
+
+        # --- PART 2: Cleanup Unauthorized Folders (ROOT LEVEL ONLY) ---
+        deleted_count = 0
+        unauthorized_folders = []
+        
         try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
+            # Only iterate through items at the ROOT level of dev_output_base
+            for item in os.listdir(dev_output_base):
+                item_path = os.path.join(dev_output_base, item)
+                
+                # Target ONLY directories at the ROOT level
+                if os.path.isdir(item_path):
+                    # Check if this folder is protected
+                    if item not in protected_folders:
+                        unauthorized_folders.append(item)
+                        shutil.rmtree(item_path)  # This deletes the folder and ALL its contents
+                        deleted_count += 1
             
-            # Navigate the specific JSON structure
-            poi_conditions = (data.get("chart", {})
-                                  .get("define_candles", {})
-                                  .get("entries_poi_condition", {}))
-            
-            for key, apprehend_box in poi_conditions.items():
-                if key.startswith("apprehend") and isinstance(apprehend_box, dict):
-                    for entry_key, entry_val in apprehend_box.items():
-                        if entry_key.startswith("entry_") and isinstance(entry_val, dict):
-                            filename = entry_val.get("new_filename")
-                            if filename:
-                                protected_filenames.add(filename)
         except Exception as e:
-            print(f"[{broker_name}] Error reading JSON: {e}")
+            print(f"[{dev_user_id}]  Cleanup Error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-    else:
-        print(f"[{broker_name}] JSON not found at: {json_path}. Aborting cleanup to prevent accidental wipe.")
-        return False
-
-    # --- PART 2: Cleanup ---
-    if not os.path.exists(dev_output_base):
-        return True
-
-    deleted_count = 0
-    try:
-        for item in os.listdir(dev_output_base):
-            item_path = os.path.join(dev_output_base, item)
-            
-            # Target ONLY folders; ignore files like accountmanagement.json
-            if os.path.isdir(item_path):
-                if item not in protected_filenames:
-                    shutil.rmtree(item_path)
-                    deleted_count += 1
-                    #print(f"[{broker_name}] cleaned up unauthorized {item} folder")
-                    
-    except Exception as e:
-        print(f"[{broker_name}] Cleanup Error: {e}")
-        return False
-    return 
-
-# populate verified investors
-def move_verified_investors():
-    """
-    Moves verified investors from verified_investors.json to:
-    Step 1: investors.json (with limited fields: LOGIN_ID, PASSWORD, SERVER, INVESTED_WITH, TERMINAL_PATH)
-    Step 2: Create activities.json directly in investor root folder (NEW PATH STRUCTURE)
-    
-    Verified investors must have:
-    - INVESTED_WITH (not empty)
-    - execution_start_date (not empty)
-    - contract_days_left (not empty)
-    - TERMINAL_PATH (not empty) - MANDATORY FIELD
-    
-    Strategy name is extracted by splitting INVESTED_WITH on first underscore
-    e.g., "deriv6_double-levels" → strategy = "double-levels"
-    
-    SUPPORTS MULTI-STRATEGY: INVESTED_WITH can contain comma-separated values
-    e.g., "deriv6_strat1, deriv6_strat2, deriv6_strat3"
-    
-    For Step 2, activities.json is created directly in INV_PATH/{inv_id}/activities.json
-    This simplifies the structure and removes the need for strategy subfolders.
-    
-    NOTE: Investors are NOT removed from verified_investors.json after processing
-    """
-    
-    print(f"\n{'='*70}")
-    print(f"📦 MOVE VERIFIED INVESTORS TO INVESTOR USERS".center(70))
-    print(f"{'='*70}")
-    
-    # Default activities template for NEW PATH structure
-    DEFAULT_ACTIVITIES = {
-        "activate_autotrading": True,
-        "bypass_restriction": True,
-        "execution_start_date": "",
-        "contract_duration": 30,
-        "contract_expiry_date": "",
-        "unauthorized_trades": {},
-        "unauthorized_withdrawals": {},
-        "unauthorized_action_detected": False,
-        "strategies": []  # Store all strategies in a list for the new structure
-    }
-    
-    # Check if verified investors file exists
-    if not os.path.exists(VERIFIED_INVESTORS):
-        print(f"❌ Verified investors file not found: {VERIFIED_INVESTORS}")
-        return False
-    
-    try:
-        with open(VERIFIED_INVESTORS, 'r', encoding='utf-8') as f:
-            verified_data = json.load(f)
-    except Exception as e:
-        print(f"❌ Error loading verified investors: {e}")
-        return False
-    
-    if not isinstance(verified_data, dict):
-        print(f"❌ Invalid format: expected dictionary")
-        return False
-    
-    print(f"\n📋 Found {len(verified_data)} investors in verified list")
-    
-    # ============================================
-    # STEP 1: Move to investors.json with limited fields
-    # ============================================
-    print(f"\n{'─'*70}")
-    print(f"🔹 STEP 1: ADDING TO INVESTORS.JSON")
-    print(f"{'─'*70}")
-    
-    # Load existing investors.json if it exists
-    investors_data = {}
-    if os.path.exists(INVESTOR_USERS):
-        try:
-            with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
-                investors_data = json.load(f)
-            print(f"📄 Loaded existing investors.json with {len(investors_data)} investors")
-        except Exception as e:
-            print(f"⚠️ Error loading existing investors.json: {e}")
-            investors_data = {}
-    
-    investors_updated = []
-    investors_skipped = []
-    
-    for inv_id, investor_data in verified_data.items():
-        # Case-insensitive lookup
-        investor_data_upper = {k.upper(): v for k, v in investor_data.items()}
         
-        # Check required fields
-        invested_with = investor_data_upper.get('INVESTED_WITH', '').strip()
-        execution_start = investor_data_upper.get('EXECUTION_START_DATE', '').strip()
-        contract_days = investor_data_upper.get('CONTRACT_DAYS_LEFT', '').strip()
-        terminal_path = investor_data_upper.get('TERMINAL_PATH', '').strip()
-        login_id = investor_data_upper.get('LOGIN_ID') or investor_data_upper.get('LOGIN', '')
-        password = investor_data_upper.get('PASSWORD', '').strip()
-        server = investor_data_upper.get('SERVER', '').strip()
-        
-        missing_fields = []
-        if not invested_with: missing_fields.append('INVESTED_WITH')
-        if not execution_start: missing_fields.append('execution_start_date')
-        if not contract_days: missing_fields.append('contract_days_left')
-        if not terminal_path: missing_fields.append('TERMINAL_PATH')
-        if not login_id: missing_fields.append('LOGIN_ID')
-        if not password: missing_fields.append('PASSWORD')
-        if not server: missing_fields.append('SERVER')
-        
-        if missing_fields:
-            investors_skipped.append(f"{inv_id} (missing: {', '.join(missing_fields)})")
-            continue
-        
-        # Create minimal investor record
-        minimal_investor = {
-            "LOGIN_ID": str(login_id).strip(),
-            "PASSWORD": password,
-            "SERVER": server,
-            "INVESTED_WITH": invested_with,
-            "TERMINAL_PATH": terminal_path
-        }
-        
-        investors_data[inv_id] = minimal_investor
-        investors_updated.append(inv_id)
-    
-    # Save updated investors.json
-    if investors_updated:
-        os.makedirs(os.path.dirname(INVESTOR_USERS), exist_ok=True)
-        with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
-            json.dump(investors_data, f, indent=4)
-        
-        print(f"\n  ✅ Added/Updated: {len(investors_updated)} investors")
-        if investors_updated:
-            print(f"     {', '.join(investors_updated[:5])}{'...' if len(investors_updated) > 5 else ''}")
-        if investors_skipped:
-            print(f"  ⏭️  Skipped: {len(investors_skipped)} investors")
-    
-    # ============================================
-    # STEP 2: Create activities.json in INVESTOR ROOT (NEW PATH)
-    # ============================================
-    print(f"\n{'─'*70}")
-    print(f"🔹 STEP 2: CREATING ACTIVITIES.JSON IN INVESTOR ROOT (NEW PATH)")
-    print(f"{'─'*70}")
-    
-    processed_summary = []
-    skipped_summary = []
-    created_summary = []
-    updated_summary = []
-    
-    for inv_id, investor_data in verified_data.items():
-        # Case-insensitive lookup
-        investor_data_upper = {k.upper(): v for k, v in investor_data.items()}
-        
-        invested_with = investor_data_upper.get('INVESTED_WITH', '').strip()
-        execution_start = investor_data_upper.get('EXECUTION_START_DATE', '').strip()
-        contract_days = investor_data_upper.get('CONTRACT_DAYS_LEFT', '').strip()
-        terminal_path = investor_data_upper.get('TERMINAL_PATH', '').strip()
-        
-        # Skip if missing required fields
-        if not all([invested_with, execution_start, contract_days, terminal_path]):
-            skipped_summary.append(inv_id)
-            continue
-        
-        # Split INVESTED_WITH by comma to handle multiple strategies
-        strategies = [s.strip() for s in invested_with.split(",") if s.strip()]
-        
-        # Extract strategy names (without the prefix)
-        strategy_names = []
-        for strat_full in strategies:
-            try:
-                underscore_index = strat_full.find('_')
-                if underscore_index != -1:
-                    strategy_name = strat_full[underscore_index + 1:]
-                    strategy_names.append(strategy_name)
-                else:
-                    strategy_names.append(strat_full)  # Use full name if no underscore
-            except:
-                strategy_names.append(strat_full)
-        
-        # Format execution start date
-        formatted_start_date = execution_start
-        try:
-            date_obj = datetime.strptime(execution_start, "%Y-%m-%d")
-            formatted_start_date = date_obj.strftime("%B %d, %Y")
-        except:
-            try:
-                date_obj = datetime.strptime(execution_start, "%B %d, %Y")
-                formatted_start_date = execution_start
-            except:
-                pass
-        
-        # Calculate contract duration and expiry
-        contract_duration_val = 30
-        expiry_date_str = ""
-        try:
-            contract_duration_val = int(contract_days)
-            try:
-                start_date = datetime.strptime(execution_start, "%Y-%m-%d")
-            except:
-                start_date = datetime.strptime(formatted_start_date, "%B %d, %Y")
-            expiry_date = start_date + timedelta(days=contract_duration_val)
-            expiry_date_str = expiry_date.strftime("%B %d, %Y")
-        except:
-            pass
-        
-        # Create investor root folder if it doesn't exist
-        inv_root = Path(INV_PATH) / inv_id
-        try:
-            inv_root.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            print(f"  ❌ Could not create investor folder: {e}")
-            continue
-        
-        # NEW PATH: activities.json directly in investor root
-        activities_path = inv_root / "activities.json"
-        
-        # Load existing activities.json if it exists
-        existing_activities = {}
-        is_new = False
-        if activities_path.exists():
-            try:
-                with open(activities_path, 'r', encoding='utf-8') as f:
-                    existing_activities = json.load(f)
-                print(f"  📄 Existing activities.json found")
-            except:
-                existing_activities = {}
-                is_new = True
+        # --- Summary ---
+        print(f"\n{'='*60}")
+        if deleted_count > 0:
+            print(f"✅ CLEANUP COMPLETE: {deleted_count} unauthorized root folder(s) deleted")
+            print(f"   Deleted folders: {', '.join(unauthorized_folders)}")
         else:
-            is_new = True
+            print(f"✅ CLEANUP COMPLETE: No unauthorized root folders found to delete")
         
-        # Prepare activities data (merge with existing)
-        activities_data = DEFAULT_ACTIVITIES.copy()
-        activities_data.update(existing_activities)
+        print(f"   Protected folders remaining at root level: {', '.join(sorted(protected_folders))}")
+        print(f"   📂 Contents inside protected folders (ohlc & strategies) remain untouched")
+        print(f"{'='*60}")
         
-        # Update with new values
-        changed = False
+        return True
         
-        # Update strategies list
-        if activities_data.get("strategies") != strategy_names:
-            activities_data["strategies"] = strategy_names
-            changed = True
-            print(f"  📋 Strategies: {', '.join(strategy_names)}")
-        
-        # Update execution_start_date
-        if activities_data.get("execution_start_date") != formatted_start_date:
-            activities_data["execution_start_date"] = formatted_start_date
-            changed = True
-        
-        # Update contract_duration
-        if activities_data.get("contract_duration") != contract_duration_val:
-            activities_data["contract_duration"] = contract_duration_val
-            changed = True
-        
-        # Update contract_expiry_date
-        if activities_data.get("contract_expiry_date") != expiry_date_str:
-            activities_data["contract_expiry_date"] = expiry_date_str
-            changed = True
-        
-        # Update terminal_path if provided
-        if terminal_path and activities_data.get("terminal_path") != terminal_path:
-            activities_data["terminal_path"] = terminal_path
-            changed = True
-        
-        # Ensure default values for other fields
-        for field, default_value in DEFAULT_ACTIVITIES.items():
-            if field not in activities_data or activities_data[field] is None:
-                activities_data[field] = default_value
-                changed = True
-        
-        # Save activities.json
-        try:
-            with open(activities_path, 'w', encoding='utf-8') as f:
-                json.dump(activities_data, f, indent=4)
-            
-            if is_new:
-                created_summary.append(inv_id)
-                print(f"  ✅ Created new activities.json")
-            elif changed:
-                updated_summary.append(inv_id)
-                print(f"  ✅ Updated existing activities.json")
-            else:
-                print(f"  ℹ️  No changes needed")
-            
-            processed_summary.append(inv_id)
-            
-        except Exception as e:
-            print(f"  ❌ Failed to save activities.json: {e}")
+    except Exception as e:
+        print(f"[{dev_user_id}]  Critical Error in cleanup: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
     
-    # ============================================
-    # STEP 3: Summary
-    # ============================================
-    print(f"\n{'─'*70}")
-    print(f"📊 SUMMARY")
-    print(f"{'─'*70}")
-    
-    print(f"\n🔹 STEP 1 - INVESTORS.JSON:")
-    print(f"   ✅ Added/Updated: {len(investors_updated)}")
-    if investors_updated:
-        print(f"      {', '.join(investors_updated[:3])}{'...' if len(investors_updated) > 3 else ''}")
-    if investors_skipped:
-        print(f"   ⏭️  Skipped: {len(investors_skipped)}")
-        for skip in investors_skipped[:2]:
-            print(f"      • {skip}")
-    
-    print(f"\n🔹 STEP 2 - ACTIVITIES.JSON CREATION (NEW PATH):")
-    print(f"   ✅ Created: {len(created_summary)} new activities.json files")
-    if created_summary:
-        for inv in created_summary[:5]:
-            print(f"      • {inv}")
-        if len(created_summary) > 5:
-            print(f"      ... and {len(created_summary)-5} more")
-    
-    print(f"   🔄 Updated: {len(updated_summary)} existing activities.json files")
-    if updated_summary:
-        for inv in updated_summary[:3]:
-            print(f"      • {inv}")
-        if len(updated_summary) > 3:
-            print(f"      ... and {len(updated_summary)-3} more")
-    
-    if skipped_summary:
-        print(f"   ⏭️  Skipped (missing fields): {len(skipped_summary)}")
-        for inv in skipped_summary[:3]:
-            print(f"      • {inv}")
-    
-    print(f"\n🔹 STEP 3 - VERIFIED LIST:")
-    print(f"   📁 All {len(verified_data)} investors remain in verified_investors.json")
-    
-    print(f"\n{'='*70}")
-    print(f"✅ MOVE COMPLETE".center(70))
-    print(f"{'='*70}")
-    
-    return True
-
-def sync_dev_investors(dev_broker_id):
+def sync_dev_investors(dev_user_id):
     """
     Worker: Synchronizes investor strategy folders with developer data.
-    Creates a requirements.json in the INVESTOR ROOT folder (new path) containing the 
-    developer's minimum_balance setting.
-    Supports multi-strategy (comma-separated INVESTED_WITH values).
+    
+    Reads strategy folders directly from the developer's directory.
+    For each investor, checks if invested_with matches any developer strategy folder.
+    Creates investor folder: INV_PATH/{investor_id}/{strategy_name}/
+    Copies ONLY the pending_orders folder and ONLY limit_orders.json inside it.
+    Developer's original files remain untouched.
+    
+    Supports:
+    - Single strategy: "KEY-LEVEL-BREAKOUT"
+    - Multiple strategies: "KEY-LEVEL-BREAKOUT, STRUCTURAL-LIQUIDITY-1"
+    - With developer ID prefix: "6_KEY-LEVEL-BREAKOUT", "6keylevelbreakout", "6-KEY-LEVEL-BREAKOUT"
     """
-    move_verified_investors()
     try:
-        # 1. Load Data - Check required files
-        missing_files = []
-        if not os.path.exists(INVESTOR_USERS):
-            missing_files.append(f"INVESTOR_USERS: {INVESTOR_USERS}")
-        if not os.path.exists(DEV_USERS):
-            missing_files.append(f"DEV_USERS: {DEV_USERS}")
-        
-        if missing_files:
-            return f" [{dev_broker_id}] ❌ Error: Missing config files:\n" + "\n".join([f"  - {f}" for f in missing_files])
+        print(f"\n{'='*60}")
+        print(f"🔄 SYNCING INVESTORS FOR DEVELOPER USER ID: {dev_user_id}")
+        print(f"{'='*60}")
 
-        with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
-            investors_data = json.load(f)
+        # 1. Load required data - Check both possible investor files
+        investors_data = {}
         
+        # Try FETCHED_INVESTORS first (since that's where your data is)
+        if os.path.exists(FETCHED_INVESTORS):
+            try:
+                with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                    investors_data = json.load(f)
+                print(f"  📂 Loaded investors from FETCHED_INVESTORS")
+            except Exception as e:
+                print(f"  ⚠️ Error loading FETCHED_INVESTORS: {e}")
+        
+        # If FETCHED_INVESTORS didn't work or was empty, try INVESTOR_USERS
+        if not investors_data and os.path.exists(INVESTOR_USERS):
+            try:
+                with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
+                    investors_data = json.load(f)
+                print(f"  📂 Loaded investors from INVESTOR_USERS")
+            except Exception as e:
+                print(f"  ⚠️ Error loading INVESTOR_USERS: {e}")
+        
+        # If still no data, try both files with different structures
+        if not investors_data:
+            # Try to load FETCHED_INVESTORS as a list or dict
+            if os.path.exists(FETCHED_INVESTORS):
+                try:
+                    with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                        raw_data = json.load(f)
+                        # If it's a list, convert to dict with id as key
+                        if isinstance(raw_data, list):
+                            for item in raw_data:
+                                if 'id' in item:
+                                    investors_data[item['id']] = item
+                            print(f"  📂 Loaded {len(investors_data)} investors from FETCHED_INVESTORS (list format)")
+                        else:
+                            investors_data = raw_data
+                            print(f"  📂 Loaded investors from FETCHED_INVESTORS (dict format)")
+                except Exception as e:
+                    print(f"  ⚠️ Error loading FETCHED_INVESTORS: {e}")
+        
+        if not investors_data:
+            return f" [{dev_user_id}]  Error: No investor data found in FETCHED_INVESTORS or INVESTOR_USERS"
+        
+        # Load developer data
+        if not os.path.exists(DEV_USERS):
+            return f" [{dev_user_id}]  Error: DEV_USERS file not found"
+
         with open(DEV_USERS, 'r', encoding='utf-8') as f:
             developers_data = json.load(f)
 
-        print(f"\n{'='*60}")
-        print(f"🔄 SYNCING INVESTORS FOR DEVELOPER: {dev_broker_id}")
-        print(f"{'='*60}")
-
-        # 2. Find investors linked to this developer (with multi-strategy support)
-        linked_investors = []
-        for inv_broker_id, inv_info in investors_data.items():
-            invested_string = inv_info.get("INVESTED_WITH", "")
-            if invested_string:  # Only process if there's an INVESTED_WITH value
-                # Split by comma to handle multiple strategies
-                strategies = [s.strip() for s in invested_string.split(",")]
-                for strat in strategies:
-                    if "_" in strat:
-                        parts = strat.split("_", 1)
-                        if parts[0] == dev_broker_id:
-                            # Store investor info along with the specific strategy name
-                            linked_investors.append({
-                                "inv_broker_id": inv_broker_id,
-                                "inv_info": inv_info,
-                                "target_strat_name": parts[1]
-                            })
-
-        if not linked_investors:
-            print(f"  No linked investors found for developer {dev_broker_id}")
-            print(f"{'='*60}")
-            return f" [{dev_broker_id}] 🔘 No linked investors found."
-
-        total_synced = 0
-        synced_summary = []  # Track which investors+strategies were synced
+        # 2. Get developer's folder path
+        dev_user_folder = os.path.join(DEV_PATH, str(dev_user_id))
         
-        # Group by investor for cleaner output
-        investors_grouped = {}
+        if not os.path.exists(dev_user_folder):
+            print(f"   Developer folder not found: {dev_user_folder}")
+            return f" [{dev_user_id}]  Developer folder missing"
+
+        # 3. Get ALL strategy folders from developer's directory
+        developer_strategies = []
+        
+        for item in os.listdir(dev_user_folder):
+            item_path = os.path.join(dev_user_folder, item)
+            
+            if os.path.isdir(item_path):
+                pending_orders_path = os.path.join(item_path, "pending_orders")
+                if os.path.exists(pending_orders_path) and os.path.isdir(pending_orders_path):
+                    developer_strategies.append(item)
+                    print(f"  📁 Found strategy folder: {item}")
+
+        if not developer_strategies:
+            print(f"  ⚠️ No strategy folders found in developer's directory")
+            print(f"  📂 Checked: {dev_user_folder}")
+            return f" [{dev_user_id}] ⚠️ No strategies found"
+
+        print(f"\n📋 User {dev_user_id} Strategies Found ({len(developer_strategies)}):")
+        for strat in developer_strategies:
+            print(f"  • {strat}")
+
+        # 4. Helper function to extract developer ID and strategy name
+        def extract_dev_id_and_strategy(invested_value):
+            """
+            Extracts developer ID and strategy name from invested_with value.
+            Returns: (dev_id, strategy_name) or (None, None) if no ID found
+            """
+            invested_value = invested_value.strip()
+            import re
+            
+            # Pattern: number at start, optionally followed by _ or -, then the rest
+            match = re.match(r'^(\d+)[_\-]?(.*)$', invested_value)
+            
+            if match:
+                dev_id = match.group(1)
+                strategy_part = match.group(2)
+                return dev_id, strategy_part
+            else:
+                return None, invested_value
+
+        # 5. Find investors linked to this developer
+        linked_investors = []
+        
+        print(f"\n🔍 Searching for investors with developer ID: {dev_user_id}")
+        
+        for inv_user_id, inv_info in investors_data.items():
+            # Check both possible field names for invested_with
+            invested_with = inv_info.get("INVESTED_WITH") or inv_info.get("invested_with", "").strip()
+            
+            if not invested_with:
+                continue
+        
+            
+            # Split by comma for multiple strategies
+            investor_strategies_raw = [s.strip() for s in invested_with.split(",") if s.strip()]
+            
+            # Process each strategy to extract developer ID and strategy name
+            matched_strategies = []
+            
+            for raw_strategy in investor_strategies_raw:
+                extracted_dev_id, extracted_strategy = extract_dev_id_and_strategy(raw_strategy)
+                
+                # Check if the developer ID matches our target dev_user_id
+                if extracted_dev_id == str(dev_user_id):
+                    # Now check if the extracted strategy matches any of our developer's strategies
+                    for dev_strategy in developer_strategies:
+                        if extracted_strategy.lower() == dev_strategy.lower():
+                            matched_strategies.append(dev_strategy)
+                            break
+                    else:
+                        print(f"     No matching strategy found for: '{extracted_strategy}'")
+            
+            if matched_strategies:
+                linked_investors.append({
+                    "inv_user_id": inv_user_id,
+                    "inv_info": inv_info,
+                    "matched_strategies": matched_strategies
+                })
+                print(f"  ✅ Investor {inv_user_id} signed with User {dev_user_id} {dev_strategy} {len(matched_strategies)} strategies")
+
+        # 6. If no investors found, return message
+        if not linked_investors:
+            print(f"\n  ℹ️  No investors signed with User {dev_user_id}")
+            print(f"{'='*60}")
+            return f" [{dev_user_id}] 🔘 No investors linked to this developer"
+
+        print(f"\n📊 Found {len(linked_investors)} investor(s) linked to this developer")
+
+        # 7. Process each investor
+        total_synced = 0
+        synced_summary = []
+        
         for link in linked_investors:
-            inv_id = link["inv_broker_id"]
-            if inv_id not in investors_grouped:
-                investors_grouped[inv_id] = []
-            investors_grouped[inv_id].append(link)
-
-        print(f"\n📊 Found {len(linked_investors)} strategy links across {len(investors_grouped)} investors\n")
-
-        # 3. Process each investor and their strategies
-        for inv_broker_id, links in investors_grouped.items():
-            inv_info = links[0]["inv_info"]  # Same investor info for all links
-            inv_name = inv_info.get("NAME", inv_broker_id)
-            invested_string = inv_info.get("INVESTED_WITH", "")
-            inv_server = inv_info.get("SERVER", "")
+            inv_user_id = link["inv_user_id"]
+            inv_info = link["inv_info"]
+            matched_strategies = link["matched_strategies"]
+            
+            inv_name = inv_info.get("fullname") or inv_info.get("FULLNAME") or inv_info.get("NAME") or inv_user_id
+            inv_server = inv_info.get("SERVER") or inv_info.get("server", "")
             
             print(f"\n┌─{'─'*50}─┐")
-            print(f"│  👤 INVESTOR: {inv_name} ({inv_broker_id})")
+            print(f"│  👤 INVESTOR: {inv_name} (ID: {inv_user_id})")
+            print(f"│  📋 Server: {inv_server}")
+            print(f"│  📋 Matched Strategies: {', '.join(matched_strategies)}")
             print(f"├─{'─'*50}─┤")
             
-            # Broker Matching Check
-            dev_broker_name = developers_data[dev_broker_id].get("BROKER", "").lower()
-            if dev_broker_name not in inv_server.lower():
-                print(f"│  ❌ Broker Mismatch: Dev requires {dev_broker_name.upper()}, Investor has {inv_server}")
-                print(f"└─{'─'*50}─┘")
-                continue
-            
-            dev_user_folder = os.path.join(DEV_PATH, dev_broker_id)
-            
-            # Load developer's minimum_balance once for all strategies
-            min_balance = 0
-            dev_acc_mgmt_path = os.path.join(dev_user_folder, "accountmanagement.json")
-            if os.path.exists(dev_acc_mgmt_path):
-                try:
-                    with open(dev_acc_mgmt_path, 'r', encoding='utf-8') as am_file:
-                        am_data = json.load(am_file)
-                        min_balance = am_data.get("settings", {}).get("minimum_balance", 0)
-                except Exception as e:
-                    print(f"│  ⚠️ Could not read Dev accountmanagement.json: {e}")
-            
-            requirements_data = {"minimum_balance": min_balance}
-            
-            # NEW PATH: Create requirements.json directly in investor root folder
-            inv_root_path = os.path.join(INV_PATH, inv_broker_id)
-            req_dest_path = os.path.join(inv_root_path, "requirements.json")
-            
-            # Create investor root folder if it doesn't exist
+            # Create investor root folder
+            inv_root_path = os.path.join(INV_PATH, str(inv_user_id))
             os.makedirs(inv_root_path, exist_ok=True)
-            
-            # Save requirements.json to investor root (new path)
-            try:
-                with open(req_dest_path, 'w', encoding='utf-8') as req_file:
-                    json.dump(requirements_data, req_file, indent=4)
-                print(f"│  📋 Created/Updated requirements.json")
-                print(f"│     Minimum balance requirement: ${min_balance}")
-            except Exception as e:
-                print(f"│  ❌ Failed to save requirements.json: {e}")
             
             # Track synced strategies for this investor
             investor_synced = []
             
-            # Process each strategy for this investor
-            for link in links:
-                target_strat_name = link["target_strat_name"]
+            # Process each matched strategy
+            for strategy_name in matched_strategies:
                 
-                print(f"│  \n│  📁 Strategy: {target_strat_name}")
+                # Source: Developer's strategy folder (READ ONLY - NOT MODIFIED)
+                dev_strat_path = os.path.join(dev_user_folder, strategy_name)
+                dev_pending_path = os.path.join(dev_strat_path, "pending_orders")
                 
-                dev_strat_path = os.path.join(dev_user_folder, target_strat_name)
-                inv_strat_path = os.path.join(INV_PATH, inv_broker_id, target_strat_name)
+                # Destination: Investor's strategy folder
+                inv_strat_path = os.path.join(inv_root_path, strategy_name)
+                inv_pending_path = os.path.join(inv_strat_path, "pending_orders")
                 
-                if not os.path.exists(dev_strat_path):
-                    print(f"│     ❌ Dev strategy folder missing")
+                if not os.path.exists(dev_pending_path):
+                    print(f"│      Developer does not have pending_orders folder for: {strategy_name}")
                     continue
                 
                 try:
-                    # ALWAYS perform clean clone (overwrite existing)
-                    print(f"│     🔄 Performing clean sync (overwriting)...")
                     
-                    # Create a temporary directory for cleaned strategy
-                    import tempfile
-                    temp_dir = tempfile.mkdtemp()
-                    
-                    # Copy the entire strategy to temp directory
-                    temp_strat_path = os.path.join(temp_dir, target_strat_name)
-                    shutil.copytree(dev_strat_path, temp_strat_path)
-                    
-                    # Remove all subfolders except pending_orders
-                    removed_folders = []
-                    for item in os.listdir(temp_strat_path):
-                        item_path = os.path.join(temp_strat_path, item)
-                        if os.path.isdir(item_path) and item != "pending_orders":
-                            shutil.rmtree(item_path)
-                            removed_folders.append(item)
-                    
-                    if removed_folders:
-                        folder_summary = ', '.join(removed_folders[:3])
-                    
-                    # Remove existing investor strategy folder if it exists (for clean overwrite)
                     if os.path.exists(inv_strat_path):
                         shutil.rmtree(inv_strat_path)
                     
-                    # Copy the cleaned strategy to investor folder
-                    shutil.copytree(temp_strat_path, inv_strat_path)
+                    os.makedirs(inv_pending_path, exist_ok=True)
                     
-                    # Clean up temp directory
-                    shutil.rmtree(temp_dir)
+                    dev_limit_orders = os.path.join(dev_pending_path, "limit_orders.json")
+                    inv_limit_orders = os.path.join(inv_pending_path, "limit_orders.json")
                     
-                    # Note: limit_orders files are handled within pending_orders folder
-                    # No need to copy them separately as they're already in pending_orders
+                    if os.path.exists(dev_limit_orders):
+                        shutil.copy2(dev_limit_orders, inv_limit_orders)
+                        
+                        other_json_files = []
+                        for file in os.listdir(dev_pending_path):
+                            if file.endswith('.json') and file != "limit_orders.json":
+                                other_json_files.append(file)
+                        
+                    else:
+                        print(f"│     ⚠️  No limit_orders.json found in developer's pending_orders")
                     
-                    # Check pending_orders files after sync (for reporting)
-                    inv_pending_path = os.path.join(inv_strat_path, "pending_orders")
-                    if os.path.exists(inv_pending_path):
-                        pending_files = [f for f in os.listdir(inv_pending_path) if os.path.isfile(os.path.join(inv_pending_path, f))]
-                        if pending_files:
-                            file_summary = ', '.join(pending_files[:3])
-                            if len(pending_files) > 3:
-                                file_summary += f" and {len(pending_files)-3} more"
-                            print(f"│     📁 Pending orders: {file_summary}")
-                    
-                    # Track successful sync
-                    investor_synced.append(target_strat_name)
+                    investor_synced.append(strategy_name)
                     total_synced += 1
-                    print(f"│     ✅ Synced successfully")
+                    print(f"│     ✅ Strategy synced successfully")
                     
                 except Exception as e:
-                    print(f"│     ❌ Error: {e}")
+                    print(f"│      Sync failed: {e}")
+                    import traceback
+                    traceback.print_exc()
             
-            # Investor summary
             if investor_synced:
                 synced_summary.append(f"{inv_name}({len(investor_synced)} strat)")
                 print(f"│  \n│  ✅ Investor complete: {len(investor_synced)} strategies synced")
@@ -12631,55 +12784,34 @@ def sync_dev_investors(dev_broker_id):
             
             print(f"└─{'─'*50}─┘")
         
-        move_verified_investors()
-        
-        # Final summary
         print(f"\n{'='*60}")
         if total_synced > 0:
-            summary_str = ', '.join(synced_summary)
-            print(f"✅ SYNC COMPLETE: {total_synced} strategies updated for {len(investors_grouped)} investors")
-            print(f"   Investors: {summary_str}")
+            print(f"✅ SYNC COMPLETE: {total_synced} strategies synced for {len(linked_investors)} investor(s)")
+            print(f"   Investors: {', '.join(synced_summary)}")
+            print(f"   📂 Structure: INV_PATH/investor_id/strategy_name/pending_orders/limit_orders.json")
+            print(f"   🔒 Developer files preserved at: {dev_user_folder}")
             print(f"{'='*60}")
-            return f" [{dev_broker_id}] ✅ Sync complete. {total_synced} strategies updated for investors: {summary_str}"
+            return f" [{dev_user_id}] ✅ Sync complete. {total_synced} strategies synced"
         else:
             print(f"⚠️ No strategies were synced")
             print(f"{'='*60}")
-            return f" [{dev_broker_id}] ⚠️ No strategies were synced."
-    
+            return f" [{dev_user_id}] ⚠️ No strategies synced"
+
     except Exception as e:
-        error_msg = f" [{dev_broker_id}] ❌ Sync Error: {e}"
+        error_msg = f" [{dev_user_id}]  Sync Error: {e}"
         print(f"\n{error_msg}")
         print(f"{'='*60}")
+        import traceback
+        traceback.print_exc()
         return error_msg
-                  
-def single():  
-    dev_dict = load_developers_dictionary()
-    if not dev_dict:
-        print("No developers to process.")
-        return
-
-
-    broker_names = sorted(dev_dict.keys()) 
-    cores = cpu_count()
-    print(f"--- STARTING MULTIPROCESSING (Cores: {cores}) ---")
-
-    with Pool(processes=cores) as pool:
-        sync_results = pool.map(swing_points, broker_names)
-        for r in sync_results: print(r)
-        #sync_results = pool.map(entry_point_of_interest, broker_names)
-        #for r in sync_results: print(r)
-        #sync_results = pool.map(entries_confirmation, broker_names)
-        #for r in sync_results: print(r)
-        #sync_results = pool.map(sync_dev_investors, broker_names)
-        #for r in sync_results: print(r)
-
-def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
+           
+def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
     This allows multiprocessing to happen at the 'Account Level'.
     """
     try:  
-        res_poi = entry_point_of_interest(user_id)
+        res_poi = sync_dev_investors(user_id)
         
         return f"[User {user_id}] Pipeline completed successfully"
         
@@ -12687,8 +12819,8 @@ def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
         import traceback
         traceback.print_exc()
         return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
-
-def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
+   
+def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
     This allows multiprocessing to happen at the 'Account Level'.
