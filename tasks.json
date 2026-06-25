@@ -1,0 +1,87 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run Script A (Harvcore Bias)",
+            "type": "shell",
+            "command": "C:/Program Files/Python310/python.exe",
+            "args": [
+                "c:/xampp/htdocs/harvcore/harvox/Harvcore.py"
+            ],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated",
+                "group": "trading-suite",
+                "close": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Script B (Insiders)",
+            "type": "shell",
+            "command": "C:/Program Files/Python310/python.exe",
+            "args": [
+                "c:/xampp/htdocs/harvcore/harvox/insiders.py"
+            ],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "group": "trading-suite",
+                "close": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Script C (OHLC)",
+            "type": "shell",
+            "command": "C:/Program Files/Python310/python.exe",
+            "args": [
+                "c:/xampp/htdocs/harvcore/harvox/ohlc.py"
+            ],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "group": "trading-suite",
+                "close": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Script D (Techniques)",
+            "type": "shell",
+            "command": "C:/Program Files/Python310/python.exe",
+            "args": [
+                "c:/xampp/htdocs/harvcore/harvox/techniques.py"
+            ],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "dedicated",
+                "group": "trading-suite",
+                "close": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Launch Trading Suite (Split)",
+            "dependsOn": [
+                "Run Script A (Harvcore Bias)",
+                "Run Script B (Insiders)",
+                "Run Script C (OHLC)",
+                "Run Script D (Techniques)"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}
