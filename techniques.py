@@ -24,13 +24,13 @@ import sys
 import time
 
 
-DEV_PATH = r'C:\xampp\htdocs\harvcore\harvox\usersdata\developers'
-DEV_USERS = r'C:\xampp\htdocs\harvcore\harvox\usersdata\developers\developers.json'
-DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\harvcore\harvox\default_accountmanagement.json"
-INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors\investors.json"
-INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\usersdata\investors"
-VERIFIED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\verified_investors.json"
-FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
+DEV_PATH = r'C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers'
+DEV_USERS = r'C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers\developers.json'
+DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\harvcore\harvox\invharv\default_accountmanagement.json"
+INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\investors\investors.json"
+INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\investors"
+VERIFIED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\verified_investors.json"
+FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\fetched_investors.json"
 
 
 def load_developers_dictionary():
@@ -12806,7 +12806,22 @@ def sync_dev_investors(dev_user_id):
         import traceback
         traceback.print_exc()
         return error_msg
-            
+
+def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
+    """
+    Orchestrator: Runs the full suite of tasks for one developer sequentially.
+    This allows multiprocessing to happen at the 'Account Level'.
+    """
+    try:  
+        sync_dev_investors(user_id)
+        
+        return f"[User {user_id}] Pipeline completed successfully"
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
+
 def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.

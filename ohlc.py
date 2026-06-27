@@ -24,9 +24,9 @@ import re
 import sys
 
 
-BASE_ERROR_FOLDER = r"C:\xampp\htdocs\harvcore\harvox\usersdata\debugs"
-BROKERS_JSON_PATH = r"C:\xampp\htdocs\harvcore\harvox\usersdata\developers\developers.json"
-OHLC_FOLDER = r"C:\xampp\htdocs\harvcore\harvox\usersdata\developers"
+BASE_ERROR_FOLDER = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\debugs"
+BROKERS_JSON_PATH = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers\developers.json"
+OHLC_FOLDER = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers"
 MAX_TERMINALS_PER_DEVELOPER = 5
 
 # Default timeframe map - will be filtered per user
@@ -793,7 +793,7 @@ def ticks_value(symbol, symbol_folder, user_brokerid, base_folder, all_symbols):
     output_json_filename = f"{safe_symbol}_ticks.json"
     output_json_path = os.path.join(symbol_folder, output_json_filename)
     
-    combined_path = r"C:\xampp\htdocs\harvcore\harvox\usersdata\symbolstick\symbolstick.json"
+    combined_path = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\symbolstick\symbolstick.json"
     
     tick_size = None
     tick_value = None
@@ -949,8 +949,8 @@ def crop_chart(chart_path, symbol, timeframe_str, timeframe_folder):
 
 def backup_ohlc_dictionary():
     """Backup the developers.json file instead of ohlc.json"""
-    main_path = Path(r"C:\xampp\htdocs\harvcore\harvox\usersdata\developers\developers.json")
-    backup_path = Path(r"C:\xampp\htdocs\harvcore\harvox\usersdata\developers\developersbackup.json")
+    main_path = Path(r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers\developers.json")
+    backup_path = Path(r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers\developersbackup.json")
     
     main_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1048,7 +1048,7 @@ def clear_chart_folder(base_folder: str):
 
 def clear_unknown_broker():
     """Clear unknown broker folders based on new JSON structure."""
-    base_path = r"C:\xampp\htdocs\harvcore\harvox\usersdata\developers"
+    base_path = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\developers"
     
     if not os.path.exists(base_path):
         print(f"ERROR: Base directory does not exist:\n    {base_path}")
@@ -1313,7 +1313,7 @@ def fetch_charts_all_brokers():
         traceback.print_exc()
         return False
      
-def process_account_worker(account_key, account_cfg, symbol_chunk, TIMEFRAME_MAP, result_dict):
+def process_account_worker_old(account_key, account_cfg, symbol_chunk, TIMEFRAME_MAP, result_dict):
     """
     This function runs in its own process.
     Uses dynamic bars and timeframes from user config.
@@ -1546,11 +1546,358 @@ def process_account_worker(account_key, account_cfg, symbol_chunk, TIMEFRAME_MAP
         log_and_print(f"  ⚠️  {account_key.upper()} | {len(symbols_to_process) - processed_count} symbols failed", "WARNING")
     log_and_print(f"  {'='*60}\n", "INFO")
 
+def process_account_worker(account_key, account_cfg, symbol_chunk, TIMEFRAME_MAP, result_dict):
+    """
+    This function runs in its own process.
+    Uses dynamic bars and timeframes from user config.
+    Filters symbols to only those available from the broker.
+    Supports per-symbol timeframes: "BTCUSD, specific_timeframes[15m]"
+    """
+    processed_count = 0
+    
+    # Get user-specific configuration
+    user_bars = account_cfg.get("OHLC_BARS", 500)
+    user_timeframes = account_cfg.get("OHLC_TIMEFRAMES", ["15m", "5m", "30m", "1h", "4h"])
+    
+    # Build timeframe map for this user
+    user_timeframe_map = {}
+    for tf_str in user_timeframes:
+        if tf_str in TIMEFRAME_MAP:
+            user_timeframe_map[tf_str] = TIMEFRAME_MAP[tf_str]
+    
+    if not user_timeframe_map:
+        log_and_print(f"⚠️  No valid timeframes for {account_key}. Using defaults.", "WARNING")
+        user_timeframe_map = {tf: TIMEFRAME_MAP[tf] for tf in ["15m", "5m", "30m", "1h", "4h"]}
+        user_bars = 500
+    
+    # If symbol_chunk is provided and not empty, use it
+    if symbol_chunk and len(symbol_chunk) > 0:
+        symbols_to_process = symbol_chunk
+    else:
+        # Fallback: extract from config
+        symbols_dict = account_cfg.get("SYMBOLS_DICTIONARY", {})
+        symbols_to_process = []
+        for category, symbol_list in symbols_dict.items():
+            if isinstance(symbol_list, list):
+                for sym in symbol_list:
+                    if sym:
+                        symbols_to_process.append((sym, category))
+    
+    total_in_chunk = len(symbols_to_process)
+    log_and_print(f"\n  ⚙️  {account_key.upper()} | Starting | {total_in_chunk} symbols", "INFO")
+    log_and_print(f"  ⚙️  {account_key.upper()} | Bars: {user_bars} | Global Timeframes: {list(user_timeframe_map.keys())}", "INFO")
+    
+    # ============================================================
+    # FETCH AND FILTER SYMBOLS OFFERED BY THE BROKER
+    # ============================================================
+    broker_symbols = []
+    available_symbols_set = set()
+    
+    try:
+        # Initialize MT5 once to fetch all symbols
+        ok, _ = initialize_mt5(
+            account_cfg["terminal_path"], 
+            account_cfg["LOGIN_ID"], 
+            account_cfg["PASSWORD"], 
+            account_cfg["SERVER"]
+        )
+        
+        if ok:
+            # Get all symbols from MT5
+            all_symbols = mt5.symbols_get()
+            if all_symbols:
+                broker_symbols = [s.name for s in all_symbols]
+                available_symbols_set = set(broker_symbols)
+                
+                # Group symbols by category (common prefixes)
+                symbol_groups = {}
+                for sym in broker_symbols:
+                    # Try to categorize by common prefixes
+                    prefix = sym.split('.')[0] if '.' in sym else sym[:3]
+                    if prefix not in symbol_groups:
+                        symbol_groups[prefix] = []
+                    symbol_groups[prefix].append(sym)
+                
+                # ============================================================
+                # COMPACT FLEXIBLE DISPLAY WITH BRACKETS
+                # ============================================================
+                log_and_print(f"\n  📊 {account_key.upper()} | Offered Symbols:", "INFO")
+                
+                # Build compact display string
+                offered_parts = []
+                for group, symbols in sorted(symbol_groups.items()):
+                    # Format: 📁 GROUP: N symbols
+                    part = f"📁 {group.upper()}: {len(symbols)}"
+                    offered_parts.append(part)
+                
+                # Join with commas and wrap in brackets
+                offered_display = f"[{', '.join(offered_parts)}]"
+                
+                # Print in a single line with wrapping if too long
+                if len(offered_display) > 200:  # If too long, split into multiple lines
+                    log_and_print(f"  {offered_display[:200]}...", "INFO")
+                    # Print remaining groups in chunks
+                    remaining = offered_display[200:]
+                    while remaining:
+                        chunk = remaining[:200]
+                        log_and_print(f"    {chunk}", "INFO")
+                        remaining = remaining[200:]
+                else:
+                    log_and_print(f"  {offered_display}", "INFO")
+                
+                # Print total count
+                log_and_print(f"  ✅ Total symbols available: {len(broker_symbols)}", "SUCCESS")
+                
+                # ============================================================
+                # FILTER: Only keep symbols that are available from the broker
+                # AND extract per-symbol timeframes using new syntax
+                # ============================================================
+                filtered_symbols = []
+                missing_symbols = []
+                
+                # Dictionary to store per-symbol timeframes
+                symbol_timeframes_map = {}
+                
+                for sym_item, cat in symbols_to_process:
+                    # Initialize variables
+                    symbol_name = sym_item
+                    custom_timeframes = None
+                    
+                    # Check if this is a string with custom timeframes
+                    # Format: "BTCUSD, specific_timeframes[15m, 1h, 4h]"
+                    # or: "BTCUSD, specific_timeframes[15m]"
+                    if isinstance(sym_item, str):
+                        # Look for the pattern: "symbol, specific_timeframes[timeframes]"
+                        if 'specific_timeframes[' in sym_item and ']' in sym_item:
+                            # Split by the specific_timeframes pattern
+                            parts = sym_item.split('specific_timeframes[')
+                            # First part is the symbol name (remove trailing comma and spaces)
+                            symbol_name = parts[0].strip()
+                            # Remove trailing comma if present
+                            if symbol_name.endswith(','):
+                                symbol_name = symbol_name[:-1].strip()
+                            
+                            # Second part contains the timeframes (remove closing bracket)
+                            timeframe_part = parts[1].split(']')[0].strip()
+                            
+                            # Parse timeframe strings like "15m, 1h, 4h" or "15m"
+                            custom_timeframes = []
+                            # Split by comma and clean
+                            for tf in timeframe_part.split(','):
+                                tf_clean = tf.strip()
+                                if tf_clean in TIMEFRAME_MAP:
+                                    custom_timeframes.append(tf_clean)
+                                else:
+                                    # Try to extract timeframe from patterns like "15m" or "1h"
+                                    for word in tf_clean.split():
+                                        if word in TIMEFRAME_MAP:
+                                            custom_timeframes.append(word)
+                            
+                            # If we found valid timeframes, store them
+                            if custom_timeframes:
+                                log_and_print(f"  📌 {symbol_name} has custom timeframes: {custom_timeframes}", "INFO")
+                                symbol_timeframes_map[symbol_name] = custom_timeframes
+                            else:
+                                log_and_print(f"  ⚠️  {symbol_name} specified timeframes but none were valid: {sym_item}", "WARNING")
+                    
+                    # Now check if the symbol exists in the broker
+                    symbol_found = False
+                    matched_symbol = None
+                    
+                    # Strategy 1: Exact match
+                    if symbol_name in available_symbols_set:
+                        symbol_found = True
+                        matched_symbol = symbol_name
+                        log_and_print(f"  ✅ {symbol_name} matched exactly", "INFO")
+                    
+                    # Strategy 2: Case-insensitive match
+                    if not symbol_found:
+                        for avail_sym in available_symbols_set:
+                            if avail_sym.upper() == symbol_name.upper():
+                                symbol_found = True
+                                matched_symbol = avail_sym
+                                log_and_print(f"  ✅ {symbol_name} matched as {avail_sym} (case-insensitive)", "INFO")
+                                break
+                    
+                    # Strategy 3: Partial match (for symbols with suffixes like .M, .pro, .cash)
+                    if not symbol_found:
+                        for avail_sym in available_symbols_set:
+                            # Check if symbol_name is a prefix of the available symbol
+                            if avail_sym.upper().startswith(symbol_name.upper()) or \
+                               symbol_name.upper() in avail_sym.upper():
+                                symbol_found = True
+                                matched_symbol = avail_sym
+                                log_and_print(f"  ✅ {symbol_name} matched as {avail_sym} (partial match)", "INFO")
+                                break
+                    
+                    # Use the matched symbol if found
+                    if symbol_found and matched_symbol:
+                        filtered_symbols.append((matched_symbol, cat))
+                        
+                        # If this symbol had custom timeframes, store them with the matched name
+                        if symbol_name in symbol_timeframes_map:
+                            # Store with the actual MT5 symbol name
+                            symbol_timeframes_map[matched_symbol] = symbol_timeframes_map.pop(symbol_name)
+                    else:
+                        missing_symbols.append(symbol_name)
+                        log_and_print(f"  ❌ {symbol_name} not found in MT5 symbols", "WARNING")
+                
+                # Update symbols_to_process with only available symbols
+                symbols_to_process = filtered_symbols
+                
+                # Compact display for filtered results
+                log_and_print(f"\n  📌 {account_key.upper()} | Filtering Results:", "INFO")
+                
+                # Show available symbols in compact format
+                if filtered_symbols:
+                    available_names = [sym for sym, _ in filtered_symbols]
+                    available_display = f"  ✅ Process: [{', '.join(available_names)}]"
+                    if len(available_display) > 200:
+                        log_and_print(f"  ✅ Process: [{', '.join(available_names[:10])} ... and {len(available_names) - 10} more]", "INFO")
+                    else:
+                        log_and_print(available_display, "INFO")
+                    log_and_print(f"     Total: {len(filtered_symbols)} symbols", "INFO")
+                    
+                    # Show which symbols have custom timeframes
+                    if symbol_timeframes_map:
+                        custom_symbols = list(symbol_timeframes_map.keys())
+                        log_and_print(f"     Custom timeframes: {len(custom_symbols)} symbols", "INFO")
+                        for sym in custom_symbols:
+                            log_and_print(f"       - {sym}: {symbol_timeframes_map[sym]}", "INFO")
+                
+                if missing_symbols:
+                    missing_display = f"   Skipped: [{', '.join(missing_symbols)}]"
+                    if len(missing_display) > 200:
+                        log_and_print(f"   Skipped: [{', '.join(missing_symbols[:10])} ... and {len(missing_symbols) - 10} more]", "WARNING")
+                    else:
+                        log_and_print(missing_display, "WARNING")
+                    log_and_print(f"     Total skipped: {len(missing_symbols)} symbols", "WARNING")
+            else:
+                log_and_print(f"   {account_key.upper()} | No symbols retrieved from MT5", "ERROR")
+                mt5.shutdown()
+                result_dict[account_key] = 0
+                return
+            
+            mt5.shutdown()
+        else:
+            log_and_print(f"   {account_key.upper()} | Failed to initialize MT5 to fetch symbols", "ERROR")
+            result_dict[account_key] = 0
+            return
+            
+    except Exception as e:
+        log_and_print(f"   {account_key.upper()} | Error fetching symbols: {str(e)}", "ERROR")
+        mt5.shutdown()
+        result_dict[account_key] = 0
+        return
+    
+    log_and_print(f"\n  {'='*60}", "INFO")
+    
+    # Check if there are any symbols to process after filtering
+    if not symbols_to_process:
+        log_and_print(f"  ⚠️  {account_key.upper()} | No symbols to process after filtering. Skipping.", "WARNING")
+        result_dict[account_key] = 0
+        return
+    
+    # ============================================================
+    # CONTINUE WITH NORMAL PROCESSING - ONLY FOR FILTERED SYMBOLS
+    # ============================================================
+    
+    for symbol, cat in symbols_to_process:
+        # Initialize MT5
+        ok, _ = initialize_mt5(
+            account_cfg["terminal_path"], 
+            account_cfg["LOGIN_ID"], 
+            account_cfg["PASSWORD"], 
+            account_cfg["SERVER"]
+        )
+        
+        if not ok:
+            log_and_print(f"  ⚠️  {account_key.upper()} | Connection failed | {symbol}", "ERROR")
+            continue
+
+        try:
+            # ============================================================
+            # DETERMINE TIMEFRAMES FOR THIS SYMBOL
+            # ============================================================
+            # Check if this symbol has custom timeframes
+            if symbol in symbol_timeframes_map:
+                # Use custom timeframes for this symbol
+                symbol_timeframes = symbol_timeframes_map[symbol]
+                # Build timeframe map for this specific symbol
+                symbol_tf_map = {}
+                for tf_str in symbol_timeframes:
+                    if tf_str in TIMEFRAME_MAP:
+                        symbol_tf_map[tf_str] = TIMEFRAME_MAP[tf_str]
+                
+                log_and_print(f"  📌 {account_key.upper()} | {symbol} using custom timeframes: {list(symbol_tf_map.keys())}", "INFO")
+            else:
+                # Use global timeframes for this symbol
+                symbol_tf_map = user_timeframe_map
+                log_and_print(f"  📌 {account_key.upper()} | {symbol} using global timeframes: {list(symbol_tf_map.keys())}", "INFO")
+            
+            # Skip if no valid timeframes
+            if not symbol_tf_map:
+                log_and_print(f"  ⚠️  {account_key.upper()} | {symbol} has no valid timeframes. Skipping.", "WARNING")
+                mt5.shutdown()
+                continue
+            
+            log_and_print(f"  📈 {account_key.upper()} | Processing | {symbol} ({cat})", "INFO")
+            
+            base_folder = account_cfg["BASE_FOLDER"]
+            sym_folder = os.path.join(base_folder, symbol.replace(" ", "_"))
+            
+            # ============================================================
+            # DELETE EXISTING SYMBOL FOLDER BEFORE PROCESSING (FRESH START)
+            # ============================================================
+            if os.path.exists(sym_folder):
+                try:
+                    shutil.rmtree(sym_folder)
+                    log_and_print(f"  🗑️  {account_key.upper()} | Deleted existing folder: {sym_folder}", "INFO")
+                except Exception as e:
+                    log_and_print(f"  ⚠️  {account_key.upper()} | Failed to delete folder {sym_folder}: {str(e)}", "WARNING")
+            
+            # Create fresh folder
+            os.makedirs(sym_folder, exist_ok=True)
+
+            # Use symbol-specific timeframes
+            for tf_str, mt5_tf in symbol_tf_map.items():
+                tf_folder = os.path.join(sym_folder, tf_str)
+                os.makedirs(tf_folder, exist_ok=True)
+
+                # Use user-specific bars
+                df, _ = fetch_ohlcv_data(symbol, mt5_tf, user_bars)
+                if df is not None and not df.empty:
+                    df["symbol"] = symbol
+                    save_newest_oldest_df(df, symbol, tf_str, tf_folder)
+                    
+                    chart_path, _ = generate_and_save_chart_df(df, symbol, tf_str, tf_folder)
+                    slice_counts, _ = generate_and_save_chart_slice(symbol, tf_str, tf_folder)
+                    
+                    if slice_counts:
+                        save_sliced_newest_oldest_json(symbol, tf_str, tf_folder, slice_counts)
+            
+            ticks_value(symbol, sym_folder, account_key, account_cfg["BASE_FOLDER"], [symbol])
+            processed_count += 1
+            log_and_print(f"  ✅ {account_key.upper()} | Completed | {symbol}", "SUCCESS")
+            
+        except Exception as e:
+            log_and_print(f"   {account_key.upper()} | Error on {symbol}: {str(e)[:50]}", "ERROR")
+        finally:
+            mt5.shutdown()
+    
+    result_dict[account_key] = processed_count
+    
+    # Final summary for this account
+    log_and_print(f"  🏁 {account_key.upper()} | Finished | {processed_count}/{len(symbols_to_process)} symbols processed", "SUCCESS")
+    if processed_count < len(symbols_to_process):
+        log_and_print(f"  ⚠️  {account_key.upper()} | {len(symbols_to_process) - processed_count} symbols failed", "WARNING")
+    log_and_print(f"  {'='*60}\n", "INFO")
+      
 def main():
     """Main execution function with loop support."""
     
     # Parse command line arguments
-    run_as_loop = False
+    run_as_loop = True
     loop_interval = 0  # Default 5 minutes between loops
     max_loops = None  # None means infinite
     
