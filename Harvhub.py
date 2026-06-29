@@ -20129,6 +20129,444 @@ def close_unauthorized_orders(inv_id=None):
     
     return global_stats
 
+def pending_orders_per_symbol_limitation(inv_id=None):
+    """
+    Apply pending order limitations per symbol based on accountmanagement.json settings.
+    
+    This function:
+    1. Reads pending_orders_limitation_per_symbol from accountmanagement.json
+    2. For each symbol in limit_orders.json, keeps only the closest N orders to current price
+    3. Alternates between BUY and SELL orders when selecting which ones to keep
+    4. Removes excess orders from limit_orders.json files
+    
+    Args:
+        inv_id: Investor ID (optional, if None processes all investors)
+    
+    Returns:
+        dict: Statistics about orders removed per symbol
+    """
+    
+    import json
+    from pathlib import Path
+    import glob
+    
+    # --- SUB-FUNCTION: LOAD PENDING ORDER LIMITATION SETTING ---
+    def get_pending_order_limitation(investor_root):
+        """
+        Load pending_orders_limitation_per_symbol setting from accountmanagement.json.
+        Returns the limit value (int) or None if not set.
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+        
+        if not acc_mgmt_path.exists():
+            print(f"    ℹ️  No accountmanagement.json found - no limitation applied")
+            return None
+        
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            settings = config.get("settings", {})
+            limit = settings.get("pending_orders_limitation_per_symbol")
+            
+            # If limit is None, 0, or empty string, treat as no limitation
+            if limit is None or limit == "" or limit == 0:
+                print(f"    ℹ️  pending_orders_limitation_per_symbol: {limit} - no limitation applied")
+                return None
+            
+            # Ensure it's an integer
+            try:
+                limit = int(limit)
+                print(f"    📊 pending_orders_limitation_per_symbol: {limit}")
+                return limit
+            except (ValueError, TypeError):
+                print(f"    ⚠️ Invalid limit value: {limit} - treating as no limitation")
+                return None
+            
+        except Exception as e:
+            print(f"     Error reading accountmanagement.json: {e}")
+            return None
+    
+    # --- SUB-FUNCTION: GET CURRENT PRICE FOR SYMBOL ---
+    def get_current_price(symbol):
+        """
+        Get current bid/ask price for a symbol.
+        Returns (bid, ask) or (None, None) if not available.
+        """
+        try:
+            import MetaTrader5 as mt5
+            
+            # Ensure symbol is selected
+            if not mt5.symbol_select(symbol, True):
+                print(f"        ⚠️ Cannot select symbol: {symbol}")
+                return None, None
+            
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                print(f"        ⚠️ Cannot get tick for symbol: {symbol}")
+                return None, None
+            
+            return tick.bid, tick.ask
+        except Exception as e:
+            print(f"        ⚠️ Error getting price for {symbol}: {e}")
+            return None, None
+    
+    # --- SUB-FUNCTION: GET ORDER TYPE STRING ---
+    def get_order_type_string(order_type):
+        """Convert order type string to standardized format"""
+        type_map = {
+            'buy_limit': 'buy_limit',
+            'sell_limit': 'sell_limit',
+            'buy_stop': 'buy_stop',
+            'sell_stop': 'sell_stop',
+            'BUY_LIMIT': 'buy_limit',
+            'SELL_LIMIT': 'sell_limit',
+            'BUY_STOP': 'buy_stop',
+            'SELL_STOP': 'sell_stop'
+        }
+        return type_map.get(order_type, order_type).lower()
+    
+    # --- MAIN FUNCTION LOGIC ---
+    print("\n" + "="*80)
+    print("🔄 APPLYING PENDING ORDER LIMITATIONS PER SYMBOL")
+    print("="*80)
+    
+    # Use the globally defined INV_PATH
+    try:
+        investor_base_path = Path(INV_PATH)
+        if not investor_base_path.exists():
+            print(f"❌ ERROR: INV_PATH does not exist: {INV_PATH}")
+            return {"error": "INV_PATH does not exist"}
+        print(f"📂 Using investor path: {investor_base_path}")
+    except NameError:
+        print("❌ ERROR: INV_PATH is not defined globally!")
+        return {"error": "INV_PATH not defined"}
+    
+    # Determine which investors to process
+    if inv_id:
+        # Process specific investor
+        investor_ids = [str(inv_id)]
+    else:
+        # Process ALL investors by scanning directories
+        investor_ids = [d.name for d in investor_base_path.iterdir() if d.is_dir() and d.name.isdigit()]
+        print(f"📂 Found {len(investor_ids)} investor directories")
+    
+    if not investor_ids:
+        print("⚠️ No investors found to process!")
+        return {"error": "No investors found"}
+    
+    print(f"\n🎯 Processing investors: {investor_ids}")
+    print("="*80)
+    
+    global_stats = {
+        'investors_processed': 0,
+        'investors_with_limitation': 0,
+        'limit_files_processed': 0,
+        'symbols_processed': 0,
+        'orders_checked': 0,
+        'orders_kept': 0,
+        'orders_removed': 0,
+        'limit_files_modified': 0
+    }
+    
+    for user_brokerid in investor_ids:
+        print(f"\n{'='*60}")
+        print(f"📋 INVESTOR: {user_brokerid}")
+        print(f"{'='*60}")
+        
+        # Construct investor root path using INV_PATH
+        investor_root = investor_base_path / user_brokerid
+        
+        if not investor_root.exists():
+            print(f"   ⚠️ Investor root not found: {investor_root}")
+            continue
+        
+        # Load limitation setting from accountmanagement.json
+        limit = get_pending_order_limitation(investor_root)
+        
+        # If no limitation or limit is 0, skip
+        if limit is None or limit <= 0:
+            print(f"   ℹ️ No limitation applied for {user_brokerid}")
+            continue
+        
+        global_stats['investors_with_limitation'] += 1
+        
+        # Find ALL limit_orders.json files deep inside investor folder using glob
+        limit_orders_pattern = str(investor_root / "**" / "limit_orders.json")
+        limit_files = glob.glob(limit_orders_pattern, recursive=True)
+        
+        if not limit_files:
+            print(f"   ℹ️ No limit_orders.json files found for {user_brokerid}")
+            continue
+        
+        print(f"   📊 Found {len(limit_files)} limit_orders.json files")
+        global_stats['limit_files_processed'] += len(limit_files)
+        
+        total_removed_for_investor = 0
+        total_files_modified = 0
+        
+        # Process each limit_orders.json file
+        for limit_file_path in limit_files:
+            limit_file = Path(limit_file_path)
+            print(f"\n   📄 Processing: {limit_file.relative_to(investor_root)}")
+            
+            try:
+                # Load the limit orders from the JSON file
+                with open(limit_file, 'r', encoding='utf-8') as f:
+                    orders = json.load(f)
+                
+                if not orders:
+                    print(f"      ℹ️ File is empty - skipping")
+                    continue
+                
+                print(f"      Orders in file: {len(orders)}")
+                
+                # Group orders by symbol
+                orders_by_symbol = {}
+                for order in orders:
+                    symbol = order.get('symbol')
+                    if not symbol:
+                        continue
+                    
+                    # Skip if order doesn't have required fields
+                    if 'order_type' not in order or 'entry' not in order:
+                        continue
+                    
+                    if symbol not in orders_by_symbol:
+                        orders_by_symbol[symbol] = []
+                    orders_by_symbol[symbol].append(order)
+                
+                if not orders_by_symbol:
+                    print(f"      ℹ️ No valid orders found in file")
+                    continue
+                
+                print(f"      Found orders for {len(orders_by_symbol)} symbols")
+                file_removed_count = 0
+                
+                # Process each symbol
+                for symbol, symbol_orders in orders_by_symbol.items():
+                    print(f"\n      📈 Symbol: {symbol}")
+                    print(f"         Orders: {len(symbol_orders)}")
+                    global_stats['symbols_processed'] += 1
+                    
+                    # Check if we need to limit this symbol
+                    if len(symbol_orders) <= limit:
+                        print(f"         ✅ {len(symbol_orders)} orders ≤ limit ({limit}) - no action needed")
+                        global_stats['orders_kept'] += len(symbol_orders)
+                        global_stats['orders_checked'] += len(symbol_orders)
+                        continue
+                    
+                    # Get current price for this symbol
+                    bid, ask = get_current_price(symbol)
+                    if bid is None or ask is None:
+                        print(f"         ⚠️ Cannot get current price for {symbol} - skipping limitation")
+                        global_stats['orders_kept'] += len(symbol_orders)
+                        global_stats['orders_checked'] += len(symbol_orders)
+                        continue
+                    
+                    # Current price is the midpoint for distance calculation
+                    current_price = (bid + ask) / 2
+                    print(f"         Current price: {current_price:.5f} (bid: {bid:.5f}, ask: {ask:.5f})")
+                    
+                    # Separate orders by direction with their distances
+                    buy_orders = []
+                    sell_orders = []
+                    
+                    for order in symbol_orders:
+                        order_type = get_order_type_string(order.get('order_type', ''))
+                        entry_price = float(order.get('entry', 0))
+                        
+                        if order_type in ['buy_limit', 'buy_stop']:
+                            distance = abs(entry_price - current_price)
+                            buy_orders.append((order, distance))
+                        elif order_type in ['sell_limit', 'sell_stop']:
+                            distance = abs(entry_price - current_price)
+                            sell_orders.append((order, distance))
+                        else:
+                            print(f"         ⚠️ Unknown order type: {order_type} - skipping")
+                    
+                    # Sort by distance (closest first)
+                    buy_orders.sort(key=lambda x: x[1])
+                    sell_orders.sort(key=lambda x: x[1])
+                    
+                    print(f"         BUY orders: {len(buy_orders)}, SELL orders: {len(sell_orders)}")
+                    
+                    # Determine which orders to keep
+                    orders_to_keep = []
+                    orders_to_remove = []
+                    
+                    # If only one direction exists, keep the closest N orders from that direction
+                    if len(buy_orders) == 0:
+                        # Only sell orders exist
+                        print(f"         ℹ️ Only SELL orders exist - keeping closest {min(limit, len(sell_orders))}")
+                        orders_to_keep = sell_orders[:limit]
+                        orders_to_remove = sell_orders[limit:]
+                        
+                    elif len(sell_orders) == 0:
+                        # Only buy orders exist
+                        print(f"         ℹ️ Only BUY orders exist - keeping closest {min(limit, len(buy_orders))}")
+                        orders_to_keep = buy_orders[:limit]
+                        orders_to_remove = buy_orders[limit:]
+                        
+                    else:
+                        # Both directions exist - ALTERNATE between BUY and SELL
+                        print(f"         🔄 Both directions exist - ALTERNATING selection (BUY→SELL→BUY→SELL...)")
+                        
+                        # Use two pointers, alternating between directions
+                        buy_idx = 0
+                        sell_idx = 0
+                        use_buy = True  # Start with BUY
+                        
+                        while len(orders_to_keep) < limit:
+                            if use_buy:
+                                # Try to take a BUY order
+                                if buy_idx < len(buy_orders):
+                                    orders_to_keep.append(buy_orders[buy_idx])
+                                    buy_idx += 1
+                                    print(f"            Kept BUY #{buy_idx} (distance: {buy_orders[buy_idx-1][1]:.5f})")
+                                else:
+                                    # No more BUY orders, only take SELL if available
+                                    if sell_idx < len(sell_orders):
+                                        orders_to_keep.append(sell_orders[sell_idx])
+                                        sell_idx += 1
+                                        print(f"            Kept SELL #{sell_idx} (distance: {sell_orders[sell_idx-1][1]:.5f})")
+                                    else:
+                                        break  # No more orders at all
+                            else:
+                                # Try to take a SELL order
+                                if sell_idx < len(sell_orders):
+                                    orders_to_keep.append(sell_orders[sell_idx])
+                                    sell_idx += 1
+                                    print(f"            Kept SELL #{sell_idx} (distance: {sell_orders[sell_idx-1][1]:.5f})")
+                                else:
+                                    # No more SELL orders, only take BUY if available
+                                    if buy_idx < len(buy_orders):
+                                        orders_to_keep.append(buy_orders[buy_idx])
+                                        buy_idx += 1
+                                        print(f"            Kept BUY #{buy_idx} (distance: {buy_orders[buy_idx-1][1]:.5f})")
+                                    else:
+                                        break  # No more orders at all
+                            
+                            # Switch direction for next iteration
+                            use_buy = not use_buy
+                        
+                        # Collect all remaining orders (not kept) for removal
+                        all_orders = buy_orders + sell_orders
+                        kept_identifiers = set()
+                        for order, _ in orders_to_keep:
+                            # Create a unique identifier for the order (using ticket if available, otherwise create one)
+                            ticket = order.get('ticket')
+                            if ticket:
+                                kept_identifiers.add(('ticket', ticket))
+                            else:
+                                # Fallback: use symbol + order_type + entry + volume
+                                kept_identifiers.add(('details', 
+                                    order.get('symbol', ''),
+                                    get_order_type_string(order.get('order_type', '')),
+                                    float(order.get('entry', 0)),
+                                    float(order.get('volume', 0))
+                                ))
+                        
+                        for order, distance in all_orders:
+                            is_kept = False
+                            ticket = order.get('ticket')
+                            if ticket and ('ticket', ticket) in kept_identifiers:
+                                is_kept = True
+                            else:
+                                # Check by details
+                                order_key = ('details',
+                                    order.get('symbol', ''),
+                                    get_order_type_string(order.get('order_type', '')),
+                                    float(order.get('entry', 0)),
+                                    float(order.get('volume', 0))
+                                )
+                                if order_key in kept_identifiers:
+                                    is_kept = True
+                            
+                            if not is_kept:
+                                orders_to_remove.append((order, distance))
+                    
+                    # Now remove the excess orders from the list
+                    if orders_to_remove:
+                        print(f"\n         🗑️ Removing {len(orders_to_remove)} excess orders for {symbol} (keeping {len(orders_to_keep)})")
+                        
+                        # Sort orders to remove by distance (farthest first)
+                        orders_to_remove.sort(key=lambda x: x[1], reverse=True)
+                        
+                        # Remove the orders from the original orders list
+                        for order, distance in orders_to_remove:
+                            # Find and remove this order from the main orders list
+                            for i, orig_order in enumerate(symbol_orders):
+                                if id(orig_order) == id(order):
+                                    symbol_orders.pop(i)
+                                    file_removed_count += 1
+                                    global_stats['orders_removed'] += 1
+                                    global_stats['orders_checked'] += 1
+                                    order_type = get_order_type_string(order.get('order_type', ''))
+                                    entry = order.get('entry', 0)
+                                    print(f"            🗑️ Removed {order_type} @ {entry} (distance: {distance:.5f})")
+                                    break
+                        
+                        # Update orders_kept count
+                        global_stats['orders_kept'] += len(orders_to_keep)
+                    else:
+                        print(f"         ✅ No orders to remove - all within limit")
+                        global_stats['orders_kept'] += len(symbol_orders)
+                        global_stats['orders_checked'] += len(symbol_orders)
+                
+                # If we removed any orders, save the updated file
+                if file_removed_count > 0:
+                    # Rebuild the orders list from all symbols
+                    all_orders = []
+                    for symbol_orders in orders_by_symbol.values():
+                        all_orders.extend(symbol_orders)
+                    
+                    # Save the updated file
+                    with open(limit_file, 'w', encoding='utf-8') as f:
+                        json.dump(all_orders, f, indent=4)
+                    
+                    total_files_modified += 1
+                    global_stats['limit_files_modified'] += 1
+                    print(f"\n      ✅ Updated file: {len(all_orders)} orders remaining ({file_removed_count} removed)")
+                    total_removed_for_investor += file_removed_count
+                else:
+                    print(f"\n      ✅ No changes needed for this file")
+                
+            except Exception as e:
+                print(f"      ⚠️ Error processing {limit_file}: {e}")
+                continue
+        
+        # Investor summary
+        if total_removed_for_investor > 0:
+            print(f"\n   └─ 📈 INVESTOR {user_brokerid} SUMMARY")
+            print(f"       • Orders removed: {total_removed_for_investor}")
+            print(f"       • Files modified: {total_files_modified}")
+        
+        global_stats['investors_processed'] += 1
+    
+    # Final summary
+    print("\n" + "="*80)
+    print("  📊 PENDING ORDER LIMITATION SUMMARY".ljust(79) + "=")
+    print("="*80)
+    print(f"│  Investors processed:        {global_stats['investors_processed']}")
+    print(f"│  Investors with limitation:  {global_stats['investors_with_limitation']}")
+    print(f"│  Limit files found:          {global_stats['limit_files_processed']}")
+    print(f"│  Limit files modified:       {global_stats['limit_files_modified']}")
+    print(f"│  Symbols processed:          {global_stats['symbols_processed']}")
+    print(f"│  Orders checked:             {global_stats['orders_checked']}")
+    print(f"│  Orders kept:                {global_stats['orders_kept']}")
+    print(f"│  Orders removed:             {global_stats['orders_removed']}")
+    print("="*80)
+    
+    if global_stats['orders_removed'] > 0:
+        print(f"✅ Successfully removed {global_stats['orders_removed']} excess orders")
+        print(f"   Updated {global_stats['limit_files_modified']} limit_orders.json files")
+    else:
+        print("ℹ️ No orders needed to be removed")
+    print("="*80 + "\n")
+    
+    return global_stats
+  
 def place_usd_orders(inv_id=None):
     
     # --- SUFFIX DICTIONARY FOR RETRY LOGIC ---
@@ -26256,6 +26694,7 @@ def process_single_investor(inv_folder):
             loss_streak_martingale(inv_id=inv_id)
 
             #clean_trades_history(inv_id=inv_id)
+            pending_orders_per_symbol_limitation(inv_id=inv_id)
             place_usd_orders(inv_id=inv_id)
 
             if grid_strategy_enabled:
