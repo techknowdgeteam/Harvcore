@@ -26,10 +26,10 @@ import psutil
 
 
 INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\harvhub\usersdata\investors"
-UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
-INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\usersdata\investors\harvhub_investors.json"
-FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_harvhub_investors.json"
-ISSUES_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\issues_harvhub_investors.json"
+UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_investors.json"
+INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\usersdata\investors\investors.json"
+FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_investors.json"
+ISSUES_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\issues_investors.json"
 DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\harvcore\harvox\harvhub\harvcore_accountmanagement.json"
 TECHNICAL_UPDATES = r"C:\xampp\htdocs\harvcore\harvox\harvhub\server_updates.json"
 DEFAULT_PATH = r"C:\xampp\htdocs\harvcore\harvox"
@@ -69,10 +69,10 @@ def load_investors_dictionary():
         return data
 
     except json.JSONDecodeError as e:
-        print(f"Invalid JSON in harvhub_investors.json: {e}", "CRITICAL")
+        print(f"Invalid JSON in investors.json: {e}", "CRITICAL")
         return {}
     except Exception as e:
-        print(f"Failed to load harvhub_investors.json: {e}", "CRITICAL")
+        print(f"Failed to load investors.json: {e}", "CRITICAL")
         return {}
 usersdictionary = load_investors_dictionary()
 
@@ -80,14 +80,14 @@ usersdictionary = load_investors_dictionary()
 #--VERIFICATIONS AND AUTHORIZATIONS--
 def move_fetched_investors_():
     """
-    Moves verified investors from fetched_harvhub_investors.json to:
-    - harvhub_investors.json (limited fields)
+    Moves verified investors from fetched_investors.json to:
+    - investors.json (limited fields)
     - activities.json (with notifications)
     - tradeshistory.json (empty array)
     - accountmanagement.json (using defaults from fetched data or no defaults)
     
-    Removes investors from harvhub_investors.json if:
-    - Not in fetched_harvhub_investors.json
+    Removes investors from investors.json if:
+    - Not in fetched_investors.json
     - Missing required fields
     - activate_autotrading is False
     - broker_balance < min_broker_balance (insufficient funds)
@@ -304,14 +304,14 @@ def move_fetched_investors_():
         "_last_balance_notification_time": None
     }
     
-    # Load or initialize updated_harvhub_investors.json
+    # Load or initialize updated_investors.json
     updated_investors_data = {}
     if os.path.exists(UPDATED_INVESTORS):
         try:
             with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                 updated_investors_data = json.load(f)
         except Exception as e:
-            print(f"Error loading updated_harvhub_investors.json: {e}")
+            print(f"Error loading updated_investors.json: {e}")
     
     # Check if verified investors file exists
     if not os.path.exists(FETCHED_INVESTORS):
@@ -328,9 +328,9 @@ def move_fetched_investors_():
     print(f"📋 Found {len(verified_data)} investors")
     
     # ============================================
-    # STEP 1: UPDATE harvhub_investors.json
+    # STEP 1: UPDATE investors.json
     # ============================================
-    print(f"\n[1/4] Updating harvhub_investors.json...")
+    print(f"\n[1/4] Updating investors.json...")
     
     investors_data = {}
     if os.path.exists(INVESTOR_USERS):
@@ -481,7 +481,7 @@ def move_fetched_investors_():
                 with open(accountmanagement_path, 'w', encoding='utf-8') as f:
                     json.dump(accountmanagement_data, f, indent=4)
             
-            # Update harvhub_investors.json if credentials are present
+            # Update investors.json if credentials are present
             investor_entry = {
                 "LOGIN_ID": str(login).strip() if login else "",
                 "PASSWORD": password if password else "",
@@ -1048,7 +1048,7 @@ def move_fetched_investors_():
         print(f"\n🚫 Handling demo restricted investors...")
         removed_count = 0
         for inv_id in demo_restricted_investors:
-            # Remove from harvhub_investors.json
+            # Remove from investors.json
             if inv_id in investors_data:
                 del investors_data[inv_id]
                 removed_count += 1
@@ -1076,7 +1076,7 @@ def move_fetched_investors_():
     # MOVE INSUFFICIENT BALANCE INVESTORS
     # ============================================
     if balance_insufficient_investors:
-        print(f"\n💰 Moving insufficient balance investors to issues_harvhub_investors.json...")
+        print(f"\n💰 Moving insufficient balance investors to issues_investors.json...")
         moved_to_issues = []
         
         for inv_id in balance_insufficient_investors:
@@ -1111,16 +1111,16 @@ def move_fetched_investors_():
         if moved_to_issues:
             with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
                 json.dump(investors_data, f, indent=4)
-            print(f"   ✅ Moved {len(moved_to_issues)} investors to issues_harvhub_investors.json")
+            print(f"   ✅ Moved {len(moved_to_issues)} investors to issues_investors.json")
     
     # ============================================
-    # SAVE UPDATED_harvhub_investors.json
+    # SAVE UPDATED_INVESTORS.JSON
     # ============================================
     if updated_investors_data:
         os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
         with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(updated_investors_data, f, indent=4)
-        print(f"\n📝 Updated updated_harvhub_investors.json with {len(updated_investors_data)} investor records")
+        print(f"\n📝 Updated updated_investors.json with {len(updated_investors_data)} investor records")
     
     # ============================================
     # CLEANUP ORPHANED FOLDERS
@@ -1161,10 +1161,10 @@ def move_fetched_investors_():
     print(f"Auto-trading disabled (removed): {len(autotrading_disabled_investors)}")
     print(f"Demo restricted (removed): {len(demo_restricted_investors)}")
     print(f"Insufficient balance (moved to issues): {len(balance_insufficient_investors)}")
-    print(f"📁 harvhub_investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
+    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
     print(f"📝 activities.json: {len(processed_summary) + len(incomplete_investors)} updated (including incomplete investors)")
     print(f"💰 accountmanagement.json: {len(processed_summary)} updated")
-    print(f"📋 updated_harvhub_investors.json: {len(updated_investors_data)} investor records")
+    print(f"📋 updated_investors.json: {len(updated_investors_data)} investor records")
     print(f"🗑️ Folders cleaned: {len(deleted_folders)}")
     print(f"{'='*60}")
     print(f"✅ MOVE COMPLETE".center(60))
@@ -1174,14 +1174,14 @@ def move_fetched_investors_():
 
 def move_fetched_investors():
     """
-    Moves verified investors from fetched_harvhub_investors.json to:
-    - harvhub_investors.json (limited fields)
+    Moves verified investors from fetched_investors.json to:
+    - investors.json (limited fields)
     - activities.json (with notifications)
     - tradeshistory.json (empty array)
     - accountmanagement.json (using defaults from fetched data or no defaults)
     
-    Removes investors from harvhub_investors.json if:
-    - Not in fetched_harvhub_investors.json
+    Removes investors from investors.json if:
+    - Not in fetched_investors.json
     - Missing required fields
     - activate_autotrading is False
     - broker_balance < min_broker_balance (insufficient funds)
@@ -1473,11 +1473,11 @@ def move_fetched_investors():
         "_last_balance_notification_time": None
     }
     
-    # Load or initialize updated_harvhub_investors.json
+    # Load or initialize updated_investors.json
     updated_investors_data = {}
     if os.path.exists(UPDATED_INVESTORS):
         updated_investors_data = safe_json_load(UPDATED_INVESTORS, {})
-        print(f"   📋 Loaded existing updated_harvhub_investors.json with {len(updated_investors_data)} records")
+        print(f"   📋 Loaded existing updated_investors.json with {len(updated_investors_data)} records")
     
     # Check if verified investors file exists
     if not os.path.exists(FETCHED_INVESTORS):
@@ -1490,7 +1490,7 @@ def move_fetched_investors():
             print(f" No data found in {FETCHED_INVESTORS}")
             return False
     except Exception as e:
-        print(f" Error loading fetched_harvhub_investors.json: {e}")
+        print(f" Error loading fetched_investors.json: {e}")
         traceback.print_exc()
         return False
     
@@ -1516,14 +1516,14 @@ def move_fetched_investors():
         print(f"   processed: {inv1_data.get('processed', 'MISSING')}")
     
     # ============================================
-    # STEP 1: UPDATE harvhub_investors.json
+    # STEP 1: UPDATE investors.json
     # ============================================
-    print(f"\n[1/4] Updating harvhub_investors.json...")
+    print(f"\n[1/4] Updating investors.json...")
     
     investors_data = {}
     if os.path.exists(INVESTOR_USERS):
         investors_data = safe_json_load(INVESTOR_USERS, {})
-        print(f"   📋 Loaded existing harvhub_investors.json with {len(investors_data)} records")
+        print(f"   📋 Loaded existing investors.json with {len(investors_data)} records")
     
     valid_investors = set()
     investors_updated = []
@@ -1536,7 +1536,7 @@ def move_fetched_investors():
     demo_restricted_investors = []
     
     for inv_id, investor_data in verified_data.items():
-        print(f"\n   📋 Processing investor {inv_id} for harvhub_investors.json...")
+        print(f"\n   📋 Processing investor {inv_id} for investors.json...")
         
         # Extract required fields (case-insensitive)
         invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
@@ -1668,7 +1668,7 @@ def move_fetched_investors():
                     if server: accountmanagement_data['server'] = server
                 safe_json_write(str(accountmanagement_path), accountmanagement_data)
             
-            # Update harvhub_investors.json if credentials are present
+            # Update investors.json if credentials are present
             investor_entry = {
                 "LOGIN_ID": str(login).strip() if login else "",
                 "PASSWORD": password if password else "",
@@ -2276,7 +2276,7 @@ def move_fetched_investors():
         removed_count = 0
         for inv_id in demo_restricted_investors:
             print(f"   🚫 Removing demo restricted investor: {inv_id}")
-            # Remove from harvhub_investors.json
+            # Remove from investors.json
             if inv_id in investors_data:
                 del investors_data[inv_id]
                 removed_count += 1
@@ -2304,7 +2304,7 @@ def move_fetched_investors():
     # MOVE INSUFFICIENT BALANCE INVESTORS
     # ============================================
     if balance_insufficient_investors:
-        print(f"\n💰 Moving insufficient balance investors to issues_harvhub_investors.json...")
+        print(f"\n💰 Moving insufficient balance investors to issues_investors.json...")
         moved_to_issues = []
         
         for inv_id in balance_insufficient_investors:
@@ -2334,14 +2334,14 @@ def move_fetched_investors():
         
         if moved_to_issues:
             safe_json_write(INVESTOR_USERS, investors_data)
-            print(f"   ✅ Moved {len(moved_to_issues)} investors to issues_harvhub_investors.json")
+            print(f"   ✅ Moved {len(moved_to_issues)} investors to issues_investors.json")
     
     # ============================================
-    # SAVE UPDATED_harvhub_investors.json
+    # SAVE UPDATED_INVESTORS.JSON
     # ============================================
     if updated_investors_data:
         safe_json_write(UPDATED_INVESTORS, updated_investors_data)
-        print(f"\n📝 Updated updated_harvhub_investors.json with {len(updated_investors_data)} investor records")
+        print(f"\n📝 Updated updated_investors.json with {len(updated_investors_data)} investor records")
     
     # ============================================
     # CLEANUP ORPHANED FOLDERS
@@ -2384,10 +2384,10 @@ def move_fetched_investors():
     print(f"Auto-trading disabled (removed): {len(autotrading_disabled_investors)}")
     print(f"Demo restricted (removed): {len(demo_restricted_investors)}")
     print(f"Insufficient balance (moved to issues): {len(balance_insufficient_investors)}")
-    print(f"📁 harvhub_investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
+    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
     print(f"📝 activities.json: {len(processed_summary) + len(incomplete_investors)} updated (including incomplete investors)")
     print(f"💰 accountmanagement.json: {len(processed_summary)} updated")
-    print(f"📋 updated_harvhub_investors.json: {len(updated_investors_data)} investor records")
+    print(f"📋 updated_investors.json: {len(updated_investors_data)} investor records")
     print(f"🗑️ Folders cleaned: {len(deleted_folders)}")
     print(f"{'='*60}")
     print(f"✅ MOVE COMPLETE".center(60))
@@ -2561,14 +2561,14 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print("="*80)
         return stats
     
-    # Load or initialize updated_harvhub_investors.json for tracking audit history
+    # Load or initialize updated_investors.json for tracking audit history
     updated_investors_data = {}
     if os.path.exists(UPDATED_INVESTORS):
         try:
             with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                 updated_investors_data = json.load(f)
         except Exception as e:
-            print(f"Error loading updated_harvhub_investors.json: {e}")
+            print(f"Error loading updated_investors.json: {e}")
     
     for user_brokerid in investor_ids:
         # ============================================================
@@ -3116,7 +3116,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
             print(f"│   Error saving activities.json: {e}")
         
         # ============================================================
-        # UPDATE UPDATED_harvhub_investors.json WITH AUDIT DATA
+        # UPDATE UPDATED_INVESTORS.JSON WITH AUDIT DATA
         # ============================================================
         if user_brokerid in updated_investors_data:
             updated_record = updated_investors_data[user_brokerid].copy()
@@ -3180,13 +3180,13 @@ def check_and_record_unauthorized_actions(inv_id=None):
         # Shutdown MT5 connection for this investor
     
     # ============================================================
-    # SAVE UPDATED_harvhub_investors.json
+    # SAVE UPDATED_INVESTORS.JSON
     # ============================================================
     if updated_investors_data:
         os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
         with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(updated_investors_data, f, indent=4)
-        print(f"\n📝 Updated updated_harvhub_investors.json with audit data for {len(updated_investors_data)} investors")
+        print(f"\n📝 Updated updated_investors.json with audit data for {len(updated_investors_data)} investors")
     
     # ============================================================
     # FINAL SUMMARY
@@ -3440,14 +3440,14 @@ def restricted_timerange(inv_id=None):
         'time_windows': {}
     }
     
-    # Load updated_harvhub_investors.json
+    # Load updated_investors.json
     updated_investors_data = {}
     if os.path.exists(UPDATED_INVESTORS):
         try:
             with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                 updated_investors_data = json.load(f)
         except Exception as e:
-            print(f"  Error loading updated_harvhub_investors.json: {e}")
+            print(f"  Error loading updated_investors.json: {e}")
     
     investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
     total_investors = len(investors_to_process) if not inv_id else 1
@@ -3624,7 +3624,7 @@ def restricted_timerange(inv_id=None):
             except Exception as e:
                 print(f"  Error saving activities.json: {e}")
             
-            # Update updated_harvhub_investors.json
+            # Update updated_investors.json
             if user_brokerid in updated_investors_data:
                 updated_record = updated_investors_data[user_brokerid].copy()
             else:
@@ -3802,7 +3802,7 @@ def restricted_timerange(inv_id=None):
             print(f"  Error saving activities.json: {e}")
         
         # ============================================================
-        # UPDATE UPDATED_harvhub_investors.json
+        # UPDATE UPDATED_INVESTORS.JSON
         # ============================================================
         if user_brokerid in updated_investors_data:
             updated_record = updated_investors_data[user_brokerid].copy()
@@ -3828,15 +3828,15 @@ def restricted_timerange(inv_id=None):
         updated_investors_data[user_brokerid] = updated_record
         stats["processing_success"] = True
 
-    # Save updated_harvhub_investors.json
+    # Save updated_investors.json
     if updated_investors_data:
         os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
         try:
             with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(updated_investors_data, f, indent=4)
-            print(f"\n📝 Updated updated_harvhub_investors.json")
+            print(f"\n📝 Updated updated_investors.json")
         except Exception as e:
-            print(f"\nError saving updated_harvhub_investors.json: {e}")
+            print(f"\nError saving updated_investors.json: {e}")
 
     restricted_timerange_alert = {
         'is_triggered': any_in_window,
@@ -3999,7 +3999,7 @@ def investor_broker_symbols(inv_id=None):
     """
     Display and compare broker symbols with investor's configured symbols.
     Helps identify symbol naming mismatches.
-    Records broker symbols to activities.json and updated_harvhub_investors.json for each investor.
+    Records broker symbols to activities.json and updated_investors.json for each investor.
     
     Parameters:
     - inv_id: Optional investor ID to compare against their config
@@ -4040,7 +4040,7 @@ def investor_broker_symbols(inv_id=None):
     
     
     # ============================================================
-    # RECORD BROKER SYMBOLS TO ACTIVITIES.JSON AND UPDATED_harvhub_investors.json
+    # RECORD BROKER SYMBOLS TO ACTIVITIES.JSON AND UPDATED_INVESTORS.JSON
     # ============================================================
     print(f"📝 RECORDING BROKER SYMBOLS TO JSON FILES:\n")
     
@@ -4052,14 +4052,14 @@ def investor_broker_symbols(inv_id=None):
     else:
         updated_count = 0
         
-        # Load updated_harvhub_investors.json
+        # Load updated_investors.json
         updated_investors_data = {}
         if os.path.exists(UPDATED_INVESTORS):
             try:
                 with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                     updated_investors_data = json.load(f)
             except Exception as e:
-                print(f"   Error loading updated_harvhub_investors.json: {e}")
+                print(f"   Error loading updated_investors.json: {e}")
         
         for user_brokerid in investors_to_process:
             inv_root = Path(INV_PATH) / user_brokerid
@@ -4095,7 +4095,7 @@ def investor_broker_symbols(inv_id=None):
                 print(f"   Investor {user_brokerid}: Error saving activities.json - {e}")
             
             # ============================================================
-            # UPDATE UPDATED_harvhub_investors.json
+            # UPDATE UPDATED_INVESTORS.JSON
             # ============================================================
             if user_brokerid in updated_investors_data:
                 updated_record = updated_investors_data[user_brokerid].copy()
@@ -4117,14 +4117,14 @@ def investor_broker_symbols(inv_id=None):
             updated_investors_data[user_brokerid] = updated_record
             updated_count += 1
         
-        # Save updated_harvhub_investors.json
+        # Save updated_investors.json
         if updated_investors_data:
             os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
             try:
                 with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                     json.dump(updated_investors_data, f, indent=4)
             except Exception as e:
-                print(f"\n   Error saving updated_harvhub_investors.json: {e}")
+                print(f"\n   Error saving updated_investors.json: {e}")
         
         print(f"\n   📊 Updated {updated_count} investor(s) with broker symbols")
     
@@ -4234,9 +4234,9 @@ def investor_broker_symbols(inv_id=None):
                 else:
                     print(f"   accountmanagement.json not found for investor '{inv_id}'")
             else:
-                print(f"   Investor '{inv_id}' not found in harvhub_investors.json")
+                print(f"   Investor '{inv_id}' not found in investors.json")
         else:
-            print(f"   harvhub_investors.json not found")
+            print(f"   investors.json not found")
     
     print(f"{'='*80}\n")
     
@@ -4483,10 +4483,10 @@ def fetch_ohlc_data_for_investor(inv_id):
             return data
 
         except json.JSONDecodeError as e:
-            print(f"Invalid JSON in harvhub_investors.json: {e}")
+            print(f"Invalid JSON in investors.json: {e}")
             return {}
         except Exception as e:
-            print(f"Failed to load harvhub_investors.json: {e}")
+            print(f"Failed to load investors.json: {e}")
             return {}
     
     def load_accountmanagement(investor_id):
@@ -4878,7 +4878,7 @@ def fetch_ohlc_data_for_investor(inv_id):
         # Step 2: Get investor config
         investor_cfg = investor_users.get(inv_id)
         if not investor_cfg:
-            print(f"    Investor {inv_id} | Config not found in harvhub_investors.json")
+            print(f"    Investor {inv_id} | Config not found in investors.json")
             result['errors'].append("Investor config not found")
             return result
         
@@ -7000,15 +7000,15 @@ def create_position_hedge(inv_id=None):
         
         # Check if already connected to correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"  Not logged into correct account. Expected: {login_id}")
-            if not mt5.initialize(path=mt5_path, login=login_id, 
-                                   password=broker_cfg["PASSWORD"], 
-                                   server=broker_cfg["SERVER"]):
-                print(f"   Failed to initialize MT5 for {user_brokerid}")
-                continue
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
-            print(f"  ✅ Connected to account: {acc.login}")
+            print(f"  └─ ✅ Already connected to account {login_id}")
         
         # Step 2: Load tradeshistory.json
         history_path = investor_root / "tradeshistory.json"
@@ -9686,15 +9686,15 @@ def manage_position_and_pending_orders(inv_id=None):
 
         # Check login status
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─  Login failed: {error}")
-                stats["errors"] += 1
-                continue
-            print(f"      ✅ Successfully logged into account")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
+            print(f"  └─ ✅ Already connected to account {login_id}")
             print(f"      ✅ Already logged into account")
 
         # --- GET ALL POSITIONS AND PENDING ORDERS ---
@@ -9840,8 +9840,13 @@ def manage_position_and_pending_orders(inv_id=None):
                     buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
                     sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
                     
-                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
-                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    if current_price is not None:
+                        closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                        closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    else:
+                        closest_buy = None
+                        closest_sell = None
+                        print(f"        Cannot find closest orders for {symbol} - no current price")
                     
                     if closest_buy and closest_sell:
                         valid_match = False
@@ -9925,8 +9930,14 @@ def manage_position_and_pending_orders(inv_id=None):
                     buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
                     sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
                     
-                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
-                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    
+                    if current_price is not None:
+                        closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                        closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    else:
+                        closest_buy = None
+                        closest_sell = None
+                        print(f"        Cannot find closest orders for {symbol} - no current price")
                     
                     if closest_buy and closest_sell:
                         valid_match = False
@@ -9974,8 +9985,14 @@ def manage_position_and_pending_orders(inv_id=None):
                         buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
                         sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
                         
+                    
+                    if current_price is not None:
                         closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
                         closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    else:
+                        closest_buy = None
+                        closest_sell = None
+                        print(f"        Cannot find closest orders for {symbol} - no current price")
                         
                         if closest_buy and closest_sell:
                             valid_match = False
@@ -9991,8 +10008,14 @@ def manage_position_and_pending_orders(inv_id=None):
                     buy_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]]
                     sell_orders = [o for o in symbol_orders if o.type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]]
                     
-                    closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
-                    closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    
+                    if current_price is not None:
+                        closest_buy = min(buy_orders, key=lambda o: abs(o.price_open - current_price)) if buy_orders else None
+                        closest_sell = min(sell_orders, key=lambda o: abs(o.price_open - current_price)) if sell_orders else None
+                    else:
+                        closest_buy = None
+                        closest_sell = None
+                        print(f"        Cannot find closest orders for {symbol} - no current price")
                     
                     if closest_buy and closest_sell:
                         valid_match = False
@@ -10287,16 +10310,15 @@ def manage_single_position_and_pending(inv_id=None):
 
         # Check login status
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─  Login failed: {error}")
-                stats["errors"] += 1
-                continue
-            print(f"      ✅ Successfully logged into account")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
-            print(f"      ✅ Already logged into account")
+            print(f"  └─ ✅ Already connected to account {login_id}")
 
         # --- GET ALL POSITIONS AND PENDING ORDERS ---
         positions = mt5.positions_get()
@@ -22744,10 +22766,7 @@ def place_usd_orders(inv_id=None):
                 symbol = order_data.get('symbol', '')
                 order_type = order_data.get('order_type', '').lower()
                 
-                # Only process stop orders for regular signals
-                if order_type not in ['buy_stop', 'sell_stop']:
-                    print(f"  ℹ️  Skipping non-stop regular order: {order_type} for {symbol}")
-                    continue
+                
                 
                 key = f"{symbol}_{order_type}"
                 
@@ -23059,11 +23078,15 @@ def check_pending_orders_risk(inv_id=None):
 
         # Check if already logged into correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"  └─  Not logged into the correct account. Expected: {login_id}, Found: {acc.login if acc else 'None'}")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
             continue
         else:
-            print(f"      ✅ Connected to account: {acc.login}")
+            print(f"  └─ ✅ Already connected to account {login_id}")
 
         acc_info = mt5.account_info()
         if not acc_info:
@@ -23413,16 +23436,15 @@ def orders_reward_correction(inv_id=None):
 
         # Check login status
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─   login failed: {error}")
-                stats["orders_error"] += 1
-                continue
-            print(f"      ✅ Successfully logged into account")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
-            print(f"      ✅ Already logged into account")
+            print(f"  └─ ✅ Already connected to account {login_id}")
 
         acc_info = mt5.account_info()
         if not acc_info:
@@ -24171,11 +24193,15 @@ def apply_dynamic_breakeven(inv_id=None):
         
         # Check if already logged in with correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                print(f"  └─  Login failed: {mt5.last_error()}")
-                stats["positions_error"] += 1
-                continue
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
+        else:
+            print(f"  └─ ✅ Already connected to account {login_id}")
         
         acc_info = mt5.account_info()
         if not acc_info:
@@ -26408,7 +26434,7 @@ def place_orders_parallel_loop():
 
 
 if __name__ == "__main__":
-   place_orders_parallel_loop()
+   place_orders_parallel()
 
 
  

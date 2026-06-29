@@ -7000,15 +7000,15 @@ def create_position_hedge(inv_id=None):
         
         # Check if already connected to correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"  Not logged into correct account. Expected: {login_id}")
-            if not mt5.initialize(path=mt5_path, login=login_id, 
-                                   password=broker_cfg["PASSWORD"], 
-                                   server=broker_cfg["SERVER"]):
-                print(f"   Failed to initialize MT5 for {user_brokerid}")
-                continue
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
-            print(f"  ✅ Connected to account: {acc.login}")
+            print(f"  └─ ✅ Already connected to account {login_id}")
         
         # Step 2: Load tradeshistory.json
         history_path = investor_root / "tradeshistory.json"
@@ -9686,15 +9686,15 @@ def manage_position_and_pending_orders(inv_id=None):
 
         # Check login status
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─  Login failed: {error}")
-                stats["errors"] += 1
-                continue
-            print(f"      ✅ Successfully logged into account")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
+            print(f"  └─ ✅ Already connected to account {login_id}")
             print(f"      ✅ Already logged into account")
 
         # --- GET ALL POSITIONS AND PENDING ORDERS ---
@@ -10287,16 +10287,15 @@ def manage_single_position_and_pending(inv_id=None):
 
         # Check login status
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─  Login failed: {error}")
-                stats["errors"] += 1
-                continue
-            print(f"      ✅ Successfully logged into account")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
-            print(f"      ✅ Already logged into account")
+            print(f"  └─ ✅ Already connected to account {login_id}")
 
         # --- GET ALL POSITIONS AND PENDING ORDERS ---
         positions = mt5.positions_get()
@@ -22744,10 +22743,7 @@ def place_usd_orders(inv_id=None):
                 symbol = order_data.get('symbol', '')
                 order_type = order_data.get('order_type', '').lower()
                 
-                # Only process stop orders for regular signals
-                if order_type not in ['buy_stop', 'sell_stop']:
-                    print(f"  ℹ️  Skipping non-stop regular order: {order_type} for {symbol}")
-                    continue
+                
                 
                 key = f"{symbol}_{order_type}"
                 
@@ -23059,11 +23055,15 @@ def check_pending_orders_risk(inv_id=None):
 
         # Check if already logged into correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"  └─  Not logged into the correct account. Expected: {login_id}, Found: {acc.login if acc else 'None'}")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
             continue
         else:
-            print(f"      ✅ Connected to account: {acc.login}")
+            print(f"  └─ ✅ Already connected to account {login_id}")
 
         acc_info = mt5.account_info()
         if not acc_info:
@@ -23413,16 +23413,15 @@ def orders_reward_correction(inv_id=None):
 
         # Check login status
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            print(f"      🔑 Logging into account...")
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                error = mt5.last_error()
-                print(f"  └─   login failed: {error}")
-                stats["orders_error"] += 1
-                continue
-            print(f"      ✅ Successfully logged into account")
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
         else:
-            print(f"      ✅ Already logged into account")
+            print(f"  └─ ✅ Already connected to account {login_id}")
 
         acc_info = mt5.account_info()
         if not acc_info:
@@ -24171,11 +24170,15 @@ def apply_dynamic_breakeven(inv_id=None):
         
         # Check if already logged in with correct account
         acc = mt5.account_info()
-        if acc is None or acc.login != login_id:
-            if not mt5.login(login_id, password=broker_cfg["PASSWORD"], server=broker_cfg["SERVER"]):
-                print(f"  └─  Login failed: {mt5.last_error()}")
-                stats["positions_error"] += 1
-                continue
+        if acc is None:
+            print(f"  └─ ❌ MT5 not connected. Please ensure MT5 is initialized before calling this function.")
+            continue
+        elif acc.login != login_id:
+            print(f"  └─ ⚠️ Connected to different account (login: {acc.login}, expected: {login_id})")
+            print(f"     └─ Please ensure correct account is connected before calling this function.")
+            continue
+        else:
+            print(f"  └─ ✅ Already connected to account {login_id}")
         
         acc_info = mt5.account_info()
         if not acc_info:
