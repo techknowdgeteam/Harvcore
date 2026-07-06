@@ -100,6 +100,65 @@ def is_browser_alive():
     except Exception:
         return False
 
+def kill_chrome_processes_and_clean_locks():
+    """Force kill all Chrome processes and remove webdriver locks"""
+    
+    print("  🔧 Cleaning Chrome processes and locks...")
+    
+    # 1. Kill all Chrome processes using taskkill (more aggressive)
+    killed_count = 0
+    try:
+        import subprocess
+        # Kill all Chrome processes
+        result = subprocess.run(["taskkill", "/f", "/im", "chrome.exe", "/t"], 
+                               capture_output=True, text=True)
+        if "SUCCESS" in result.stdout or result.returncode == 0:
+            killed_count += 1
+            print("    Killed Chrome processes via taskkill")
+        
+        # Kill all ChromeDriver processes
+        result = subprocess.run(["taskkill", "/f", "/im", "chromedriver.exe", "/t"], 
+                               capture_output=True, text=True)
+        if "SUCCESS" in result.stdout or result.returncode == 0:
+            killed_count += 1
+            print("    Killed ChromeDriver processes via taskkill")
+        
+        if killed_count > 0:
+            print(f"  ✅ Killed processes")
+            time.sleep(2)  # Wait for processes to fully terminate
+    except Exception as e:
+        print(f"  ⚠️ Error killing processes: {e}")
+    
+    # 2. Remove the entire .wdm directory
+    wdm_dir = os.path.expanduser(r"~\.wdm")
+    removed_count = 0
+    
+    if os.path.exists(wdm_dir):
+        try:
+            import shutil
+            # Try to remove the entire directory
+            shutil.rmtree(wdm_dir, ignore_errors=True)
+            print(f"  ✅ Removed entire .wdm directory")
+            removed_count += 1
+        except Exception as e:
+            print(f"  ⚠️ Could not remove entire .wdm directory: {e}")
+            # Fallback: remove individual lock files
+            for root, dirs, files in os.walk(wdm_dir):
+                for file in files:
+                    if ".wdm-lock" in file and file.endswith(".lock"):
+                        lock_path = os.path.join(root, file)
+                        try:
+                            os.remove(lock_path)
+                            removed_count += 1
+                            print(f"  ✅ Removed lock: {file}")
+                        except Exception as e:
+                            print(f"  ⚠️ Could not remove {file}: {e}")
+    
+    if removed_count > 0:
+        print(f"  ✅ Removed {removed_count} lock file(s)")
+    
+    return killed_count > 0 or removed_count > 0
+
 def initialize_browser(force_new=False):
     """
     Initialize Chrome browser - REUSES existing instance if available.
@@ -111,6 +170,7 @@ def initialize_browser(force_new=False):
         bool: True if browser is ready, False otherwise
     """
     global driver, session, current_servers, _is_shutdown
+    
     
     with _browser_lock:
         # If shutdown was explicitly called, don't reuse
@@ -175,15 +235,74 @@ def initialize_browser(force_new=False):
         chrome_options.add_argument("--log-level=3")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
-        # Step 2: Initialize ChromeDriver
+        # Step 2: Initialize ChromeDriver with retry
         print_step(2, 3, "Initializing ChromeDriver")
-        try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            print_success("ChromeDriver initialized successfully")
-        except Exception as e:
-            print_error("Failed to initialize ChromeDriver", str(e))
-            return False
+        
+        # Try multiple times with increasing delays
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Clean locks again before each attempt (especially important after failures)
+                if attempt > 1:
+                    print_info(f"Retry attempt {attempt}/{max_attempts}...")
+                    # Force kill any remaining Chrome processes
+                    for proc in psutil.process_iter(['pid', 'name']):
+                        try:
+                            if 'chrome' in proc.info['name'].lower() or 'chromedriver' in proc.info['name'].lower():
+                                proc.kill()
+                        except:
+                            pass
+                    time.sleep(2)
+                    # Remove lock files again
+                    wdm_dir = os.path.expanduser(r"~\.wdm")
+                    if os.path.exists(wdm_dir):
+                        for root, dirs, files in os.walk(wdm_dir):
+                            for file in files:
+                                if ".wdm-lock" in file:
+                                    try:
+                                        os.remove(os.path.join(root, file))
+                                    except:
+                                        pass
+                
+                # Use a different approach - install ChromeDriver to a specific location
+                from webdriver_manager.chrome import ChromeDriverManager
+                import shutil
+                
+                # Try to use cached ChromeDriver first
+                chromedriver_cache = os.path.expanduser(r"~\.chromedriver_cache")
+                chromedriver_exe = os.path.join(chromedriver_cache, "chromedriver.exe")
+                
+                if os.path.exists(chromedriver_exe):
+                    print_info("Using cached ChromeDriver...")
+                    service = Service(chromedriver_exe)
+                else:
+                    print_info("Downloading ChromeDriver (this may take a moment)...")
+                    # Install ChromeDriver
+                    driver_path = ChromeDriverManager().install()
+                    
+                    # Cache it for future use
+                    try:
+                        os.makedirs(chromedriver_cache, exist_ok=True)
+                        shutil.copy2(driver_path, chromedriver_exe)
+                        print_info(f"Cached ChromeDriver at: {chromedriver_exe}")
+                    except:
+                        pass
+                    
+                    service = Service(driver_path)
+                
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+                print_success("ChromeDriver initialized successfully")
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                error_msg = str(e)
+                if attempt < max_attempts:
+                    print_warning(f"Attempt {attempt} failed: {error_msg[:100]}")
+                    print_info("Waiting 3 seconds before retry...")
+                    time.sleep(3)
+                else:
+                    print_error("Failed to initialize ChromeDriver after multiple attempts", error_msg)
+                    return False
 
         # Step 3: Authenticate
         print_step(3, 3, "Authenticating and Accessing Query Page")
@@ -231,7 +350,7 @@ def initialize_browser(force_new=False):
 
         print_error("All servers failed authentication")
         return False
-    
+        
 def append_to_json_log(server_type, server_url):
     """Append the server used to the JSON log file."""
     log_entry = {

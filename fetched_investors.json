@@ -158,10 +158,10 @@
         "1-10000000.99_risk": 18
       },
       "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 50
+        "1-10000000.99_risk": 250
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 60
+        "1-10000000.99_risk": 260
       },
       "requirements": {
         "contract_duration": "30",
@@ -179,7 +179,7 @@
     "account_mode": "demo",
     "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv\\terminal64.exe",
     "mt5_folder_name": "MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv",
-    "account_balance": 7652.73,
+    "account_balance": 7626.56,
     "account_currency": "USD",
     "account_leverage": 1000,
     "last_updated": "2026-06-18 11:12:18",
@@ -197,39 +197,40 @@
   "3": {
     "id": "3",
     "broker": "Deriv",
-    "email": "Davidolastandarddemo@gmail.com",
-    "fullname": "T.O",
+    "email": "davidolastandarddemo@gmail.com",
+    "fullname": "D.Ola",
     "server": "Deriv-demo",
     "login": "32264928",
     "password": "@Ayomide12#",
     "application_status": "approved",
-    "invested_with": "6_key-level-bias",
-    "broker_balance": "10000.00",
-    "balance_verification": "NULL",
+    "broker_balance": "9544.54",
+    "balance_verification": "verified",
     "profitandloss": "NULL",
-    "passkey": "NULL",
+    "passkey": "$2y$10$OSFt5RMQjU9HMhFxj3Ecze/LTCewf0HqUYT0D0psNC4xyn1Cc3pe.",
     "submitted_at": "NULL",
     "balance_display": "NULL",
-    "execution_start_date": "June 24, 2026",
+    "execution_start_date": "NULL",
     "analytics_history": "NULL",
     "revenue_history": "NULL",
     "loyalties": "NULL",
     "contract_days_left": "NULL",
     "paymentdetails": "NULL",
     "message": "NULL",
-    "unauthorized_actions": "0",
+    "unauthorized_actions": "NULL",
+    "notifications": "NULL",
+    "executions_notification": "NULL",
     "server_decision": "NULL",
     "accountmanagement": {
       "selected_risk_reward": [
-        5
+        3
       ],
       "hedge_orders_risk_reward": [
-        5
+        3
       ],
       "timeframe": [
         "15m"
       ],
-      "bars": 3,
+      "bars": 5,
       "symbols_dictionary": {
         "xxxjpy": [],
         "xxxusd": [
@@ -250,11 +251,12 @@
         "skip_orders_close_to_position": false,
         "cancel_orders_close_to_position": false,
         "also_restrict_opposite_order_too_close_to_position": false,
+        "pending_orders_limitation_per_symbol": 2,
         "switch_invalid_to_instant_order": false,
         "enable_order_type_conversion": false,
         "restrictions_duration": {
           "restrict_orders_in_time_range_of": {
-            "from": "08:55 pm",
+            "from": "11:55 pm",
             "to": "12:00 am"
           },
           "restricted_days": [
@@ -283,40 +285,40 @@
             "breakeven_at_reward": 1
           },
           {
-            "reward": 3,
+            "reward": 5,
             "breakeven_at_reward": 1.5
           },
           {
-            "reward": 3.8,
+            "reward": 5.8,
             "breakeven_at_reward": 1.7
           },
           {
             "reward": 4,
-            "breakeven_at_reward": 3
+            "breakeven_at_reward": 5
           },
           {
             "reward": 4.8,
-            "breakeven_at_reward": 3.3
+            "breakeven_at_reward": 5.5
           },
           {
             "reward": 5,
-            "breakeven_at_reward": 3.5
+            "breakeven_at_reward": 5.5
           },
           {
             "reward": 5.8,
-            "breakeven_at_reward": 3.8
+            "breakeven_at_reward": 5.8
           },
           {
             "reward": 6,
-            "breakeven_at_reward": 3
+            "breakeven_at_reward": 5
           },
           {
             "reward": 7,
-            "breakeven_at_reward": 3.5
+            "breakeven_at_reward": 5.5
           },
           {
             "reward": 7.8,
-            "breakeven_at_reward": 3.8
+            "breakeven_at_reward": 5.8
           },
           {
             "reward": 8,
@@ -324,7 +326,7 @@
           },
           {
             "reward": 8.8,
-            "breakeven_at_reward": 4.3
+            "breakeven_at_reward": 4.5
           },
           {
             "reward": 9,
@@ -341,46 +343,35 @@
         "enable_martingale": false
       },
       "minimum_balance_risk_distance": {
-        "1-10000000.99_risk": 0.5
+        "1-10000000.99_risk": 1
       },
       "maximum_balance_risk_distance": {
-        "1-10000000.99_risk": 5
+        "1-10000000.99_risk": 10
       },
       "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 50
+        "1-10000000.99_risk": 250
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 60
+        "1-10000000.99_risk": 260
       },
       "requirements": {
-        "contract_duration": "30",
+        "contract_duration": "50",
         "min_broker_balance": "50.00"
       },
       "bypass_restriction": true,
       "activate_autotrading": true,
-      "broker_balance": 9034.15,
+      "broker_balance": 9054.15,
       "account_mode": "demo",
       "demo_account": "1",
       "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
     },
+    "invested_with": "6_key-level-bias",
     "enable_autotrading": "1",
-    "bypass_restriction": "1",
+    "bypass_restriction": "0",
     "demo_account": "1",
     "account_mode": "demo",
-    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 Davidolastandarddemo_at_gmail_dot_com 3 Deriv\\terminal64.exe",
-    "mt5_folder_name": "MetaTrader 5 Davidolastandarddemo_at_gmail_dot_com 3 Deriv",
-    "account_balance": 11487.13,
-    "account_currency": "USD",
-    "account_leverage": 1000,
-    "has_error": false,
-    "processed": true,
-    "folder_created": true,
-    "meets_balance_requirement": true,
-    "min_broker_balance": 50.0,
-    "error_messages": [],
-    "strategies": [
-      "techknowdge_revenue"
-    ]
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 davidolastandarddemo_at_gmail_dot_com 3 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 davidolastandarddemo_at_gmail_dot_com 3 Deriv"
   },
   "5": {
     "id": "5",
@@ -438,6 +429,7 @@
         "skip_orders_close_to_position": false,
         "cancel_orders_close_to_position": false,
         "also_restrict_opposite_order_too_close_to_position": false,
+        "pending_orders_limitation_per_symbol": 2,
         "switch_invalid_to_instant_order": false,
         "enable_order_type_conversion": false,
         "restrictions_duration": {
@@ -539,10 +531,10 @@
         "1-10000000.99_risk": 20
       },
       "account_balance_default_risk_management": {
-        "1-10000000.99_risk": 50
+        "1-10000000.99_risk": 250
       },
       "account_balance_maximum_risk_management": {
-        "1-10000000.99_risk": 60
+        "1-10000000.99_risk": 260
       },
       "requirements": {
         "contract_duration": "50",
