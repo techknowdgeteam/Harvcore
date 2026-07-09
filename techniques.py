@@ -12807,7 +12807,7 @@ def sync_dev_investors(dev_user_id):
         traceback.print_exc()
         return error_msg
 
-def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
+def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
     This allows multiprocessing to happen at the 'Account Level'.
@@ -12822,7 +12822,7 @@ def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
         traceback.print_exc()
         return f"--- [User {user_id}] PIPELINE FAILED: {e} ---"
 
-def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
+def process_single_developer_pipeline(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.
     This allows multiprocessing to happen at the 'Account Level'.
@@ -12858,7 +12858,7 @@ def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
 def main():
     
     # Parse command line arguments
-    run_as_loop = False
+    run_as_loop = True
     loop_interval = 0  # Default 5 minutes between loops
     max_loops = None  # None means infinite
     

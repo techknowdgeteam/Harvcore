@@ -1897,7 +1897,7 @@ def main():
     """Main execution function with loop support."""
     
     # Parse command line arguments
-    run_as_loop = False
+    run_as_loop = True
     loop_interval = 0  # Default 5 minutes between loops
     max_loops = None  # None means infinite
     

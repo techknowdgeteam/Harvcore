@@ -26,10 +26,16 @@ import psutil
 
 
 INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\harvhub\usersdata\investors"
-UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_investors.json"
-INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\usersdata\investors\investors.json"
-FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_investors.json"
-ISSUES_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\issues_investors.json"
+UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
+INVESTOR_USERS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\usersdata\investors\harvhub_investors.json"
+FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_harvhub_investors.json"
+INVHARV_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\fetched_investors.json"
+INVHARV_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\updated_investors.json"
+HARVHUB_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_harvhub_investors.json"
+HARVHUB_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
+ALL_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
+ALL_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\updated_investors.json"
+ISSUES_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\issues_harvhub_investors.json"
 DEFAULT_ACCOUNTMANAGEMENT = r"C:\xampp\htdocs\harvcore\harvox\harvhub\harvcore_accountmanagement.json"
 TECHNICAL_UPDATES = r"C:\xampp\htdocs\harvcore\harvox\harvhub\server_updates.json"
 DEFAULT_PATH = r"C:\xampp\htdocs\harvcore\harvox"
@@ -69,1103 +75,144 @@ def load_investors_dictionary():
         return data
 
     except json.JSONDecodeError as e:
-        print(f"Invalid JSON in investors.json: {e}", "CRITICAL")
+        print(f"Invalid JSON in harvhub_investors.json: {e}", "CRITICAL")
         return {}
     except Exception as e:
-        print(f"Failed to load investors.json: {e}", "CRITICAL")
+        print(f"Failed to load harvhub_investors.json: {e}", "CRITICAL")
         return {}
 usersdictionary = load_investors_dictionary()
 
 
 #--VERIFICATIONS AND AUTHORIZATIONS--
-def move_fetched_investors_():
+def move_grid_traders_to_harvhub():
     """
-    Moves verified investors from fetched_investors.json to:
-    - investors.json (limited fields)
-    - activities.json (with notifications)
-    - tradeshistory.json (empty array)
-    - accountmanagement.json (using defaults from fetched data or no defaults)
+    Moves investors with 'grid_trade' or 'grid_trades' in invested_with field
+    from invharv fetched_investors.json to harvhub fetched_harvhub_investors.json
     
-    Removes investors from investors.json if:
-    - Not in fetched_investors.json
-    - Missing required fields
-    - activate_autotrading is False
-    - broker_balance < min_broker_balance (insufficient funds)
-    - demo_account is "0" when account_mode is "demo"
-    
-    Uses DEFAULT_ACCOUNTMANAGEMENT as fallback for contract_duration and min_broker_balance
-    
-    Handles database values: "1"/1 = True, "0"/0 = False
+    MOVES THE ENTIRE DATA WITHOUT MODIFICATION
     """
     
     print(f"\n{'='*60}")
-    print(f"MOVE VERIFIED INVESTORS".center(60))
+    print(f"MOVE GRID TRADERS TO HARVHUB".center(60))
     print(f"{'='*60}")
     
-    # Helper function to convert database values to boolean
-    def db_to_bool(value):
-        """Convert database values (1, '1', 0, '0') to boolean"""
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return value == 1
-        if isinstance(value, str):
-            return value.strip().lower() in ['1', 'true', 'yes', 'on']
+    # ============================================
+    # HELPER FUNCTIONS
+    # ============================================
+    def safe_json_load(filepath):
+        """Safely load JSON"""
+        if not os.path.exists(filepath):
+            return {}
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"   ⚠️ Error loading {filepath}: {e}")
+            return {}
+    
+    def safe_json_write(filepath, data):
+        """Safely write JSON"""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            temp_file = filepath + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            os.rename(temp_file, filepath)
+            return True
+        except Exception as e:
+            print(f"   ⚠️ Write error: {e}")
+            return False
+    
+    # ============================================
+    # LOAD FILES
+    # ============================================
+    
+    # Load invharv fetched data
+    if not os.path.exists(INVHARV_FETCHED_INVESTORS):
+        print(f"❌ Source file not found: {INVHARV_FETCHED_INVESTORS}")
         return False
     
-    # Helper function to convert boolean to database string format '1' or '0'
-    def bool_to_db_string(value):
-        """Convert boolean to database string format '1' or '0'"""
-        return '1' if value else '0'
+    invharv_data = safe_json_load(INVHARV_FETCHED_INVESTORS)
+    if not invharv_data:
+        print(f"⚠️ No data found in {INVHARV_FETCHED_INVESTORS}")
+        return False
     
-    def normalize_date(date_value):
-        """Convert invalid date values (0000-00-00, NULL, None, etc.) to empty string"""
-        if date_value is None:
-            return ""
-        if not isinstance(date_value, str):
-            date_value = str(date_value)
-        date_value = date_value.strip()
-        
-        # Check for literal NULL/None strings
-        if date_value.upper() in ['NULL', 'NONE', '']:
-            return ""
-        
-        # Check for patterns like 0000-00-00, 0000-00-00 00:00:00, 0000-00-00T00:00:00
-        if date_value.replace('-', '').replace(':', '').replace(' ', '').replace('T', '').strip('0') == '':
-            return ""
-        
-        # Also check if it starts with 0000-00-00
-        if date_value.startswith('0000-00-00'):
-            return ""
-        
-        return date_value
-    # Helper function to get the last message for a specific section
-    def get_last_message(notifications_dict, section_key):
-        """Get the most recent message for a specific section"""
-        if not notifications_dict:
-            return None
-        
-        latest_message = None
-        latest_time = None
-        latest_id = None
-        
-        for msg_id, msg_data in notifications_dict.items():
-            if isinstance(msg_data, dict) and msg_data.get('section') == section_key:
-                try:
-                    msg_time = datetime.strptime(msg_data['time'], "%Y-%m-%d %H:%M:%S")
-                    if latest_time is None or msg_time > latest_time:
-                        latest_time = msg_time
-                        latest_message = msg_data
-                        latest_id = msg_id
-                except:
-                    pass
-        
-        if latest_message:
-            return {
-                'type': latest_message.get('type'),
-                'time': latest_time,
-                'id': latest_id,
-                'data': latest_message
-            }
-        return None
+    print(f"\n📋 Found {len(invharv_data)} investors in invharv fetched_investors.json")
+    print(f"   Investor IDs: {list(invharv_data.keys())}")
     
-    # Helper function to add notification with individual section tracking
-    def add_notification(notifications_dict, section_key, message, message_type, timestamp=None):
-        """
-        Add notification with individual section tracking.
-        Only adds if the message type is different from the last message type for that section.
-        """
-        if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Load harvhub fetched data
+    harvhub_data = safe_json_load(HARVHUB_FETCHED_INVESTORS)
+    print(f"📋 Found {len(harvhub_data)} investors in harvhub fetched_harvhub_investors.json")
+    
+    # ============================================
+    # IDENTIFY GRID TRADERS
+    # ============================================
+    
+    grid_traders = {}
+    non_grid_traders = {}
+    grid_keywords = ['grid_trade', 'grid_trades']
+    
+    print(f"\n🔍 Scanning for grid traders...")
+    
+    for inv_id, investor_data in invharv_data.items():
+        invested_with = investor_data.get('invested_with', '').strip().lower()
         
-        last_msg = get_last_message(notifications_dict, section_key)
+        is_grid_trader = False
+        for keyword in grid_keywords:
+            if keyword in invested_with:
+                is_grid_trader = True
+                break
         
-        # Check if we should add this notification
-        should_add = False
-        if last_msg is None:
-            # No message exists for this section, add it
-            should_add = True
+        if is_grid_trader:
+            grid_traders[inv_id] = investor_data
+            print(f"   ✅ Investor {inv_id} is a grid trader (invested_with: '{invested_with}')")
         else:
-            # Only add if the type is different from the last message type
-            if last_msg['type'] != message_type:
-                should_add = True
-        
-        if not should_add:
-            return False
-        
-        # Find next available ID
-        next_id = 1
-        if notifications_dict:
-            try:
-                existing_ids = [int(k) for k in notifications_dict.keys() if k.isdigit()]
-                next_id = max(existing_ids) + 1 if existing_ids else 1
-            except:
-                next_id = len(notifications_dict) + 1
-        
-        notifications_dict[str(next_id)] = {
-            "section": section_key,
-            "message": message,
-            "time": timestamp,
-            "type": message_type,
-            "update": "new"
-        }
+            non_grid_traders[inv_id] = investor_data
+    
+    if not grid_traders:
+        print(f"\n⚠️ No grid traders found in invharv fetched_investors.json")
         return True
     
-    # Helper function to add execution notification with individual section tracking
-    def add_execution_notification(executions_dict, section_key, message, message_type, timestamp=None):
-        """
-        Add execution notification with individual section tracking.
-        Only adds if the message type is different from the last message type for that section.
-        """
-        if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        last_msg = get_last_message(executions_dict, section_key)
-        
-        # Check if we should add this notification
-        should_add = False
-        if last_msg is None:
-            # No message exists for this section, add it
-            should_add = True
-        else:
-            # Only add if the type is different from the last message type
-            if last_msg['type'] != message_type:
-                should_add = True
-        
-        if not should_add:
-            return False
-        
-        # Find next available ID
-        next_id = 1
-        if executions_dict:
-            try:
-                existing_ids = [int(k) for k in executions_dict.keys() if k.isdigit()]
-                next_id = max(existing_ids) + 1 if existing_ids else 1
-            except:
-                next_id = len(executions_dict) + 1
-        
-        executions_dict[str(next_id)] = {
-            "section": section_key,
-            "message": message,
-            "time": timestamp,
-            "type": message_type,
-            "update": "new"
-        }
-        return True
+    # ============================================
+    # MOVE GRID TRADERS TO HARVHUB
+    # ============================================
     
-    # Load default accountmanagement.json for fallbacks
-    default_contract_duration = None
-    default_min_broker_balance = None
+    print(f"\n📦 Moving {len(grid_traders)} grid traders to harvhub...")
     
-    if os.path.exists(DEFAULT_ACCOUNTMANAGEMENT):
-        try:
-            with open(DEFAULT_ACCOUNTMANAGEMENT, 'r', encoding='utf-8') as f:
-                default_acct_mgmt = json.load(f)
-            default_requirements = default_acct_mgmt.get('requirements', {})
-            default_contract_duration = default_requirements.get('contract_duration')
-            default_min_broker_balance = default_requirements.get('min_broker_balance')
-            
-            if default_contract_duration is not None:
-                try:
-                    default_contract_duration = int(default_contract_duration)
-                except:
-                    default_contract_duration = None
-            if default_min_broker_balance is not None:
-                try:
-                    default_min_broker_balance = float(default_min_broker_balance)
-                except:
-                    default_min_broker_balance = None
-                    
-            print(f"   📋 Loaded defaults: contract_duration={default_contract_duration}, min_broker_balance={default_min_broker_balance}")
-        except Exception as e:
-            print(f"Error loading default_accountmanagement.json: {e}")
+    # Add grid traders to harvhub data
+    for inv_id, investor_data in grid_traders.items():
+        harvhub_data[inv_id] = investor_data
+        print(f"   ➡️ Moved investor {inv_id} to harvhub")
+    
+    # Save harvhub data
+    if safe_json_write(HARVHUB_FETCHED_INVESTORS, harvhub_data):
+        print(f"\n✅ Saved {len(harvhub_data)} investors to {HARVHUB_FETCHED_INVESTORS}")
     else:
-        print(f"Default accountmanagement file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
-    
-    # Default activities template
-    DEFAULT_ACTIVITIES = {
-        "activate_autotrading": None,
-        "bypass_restriction": None,
-        "execution_start_date": "",
-        "contract_duration": None,
-        "contract_expiry_date": "",
-        "min_broker_balance": None,
-        "broker_balance": None,
-        "unauthorized_trades": {},
-        "unauthorized_withdrawals": {},
-        "unauthorized_action_detected": False,
-        "strategies": [],
-        "notifications": {},
-        "executions_notification": {},
-        "_initial_notifications_sent": False,
-        "_meets_balance_requirement": False,
-        "_last_balance_notification_time": None
-    }
-    
-    # Load or initialize updated_investors.json
-    updated_investors_data = {}
-    if os.path.exists(UPDATED_INVESTORS):
-        try:
-            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                updated_investors_data = json.load(f)
-        except Exception as e:
-            print(f"Error loading updated_investors.json: {e}")
-    
-    # Check if verified investors file exists
-    if not os.path.exists(FETCHED_INVESTORS):
-        print(f"File not found: {FETCHED_INVESTORS}")
+        print(f"\n❌ Failed to save {HARVHUB_FETCHED_INVESTORS}")
         return False
     
-    try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-            verified_data = json.load(f)
-    except Exception as e:
-        print(f"Error loading: {e}")
+    # Update invharv fetched (remove grid traders)
+    if safe_json_write(INVHARV_FETCHED_INVESTORS, non_grid_traders):
+        print(f"✅ Updated {INVHARV_FETCHED_INVESTORS} (removed {len(grid_traders)} grid traders)")
+        print(f"   Remaining investors: {len(non_grid_traders)}")
+    else:
+        print(f"❌ Failed to update {INVHARV_FETCHED_INVESTORS}")
         return False
     
-    print(f"📋 Found {len(verified_data)} investors")
-    
     # ============================================
-    # STEP 1: UPDATE investors.json
+    # SUMMARY
     # ============================================
-    print(f"\n[1/4] Updating investors.json...")
     
-    investors_data = {}
-    if os.path.exists(INVESTOR_USERS):
-        try:
-            with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
-                investors_data = json.load(f)
-        except:
-            pass
-    
-    valid_investors = set()
-    investors_updated = []
-    investors_skipped = []
-    investors_removed = []
-    
-    # Track incomplete investors
-    incomplete_investors = []
-    # Track demo account restricted investors
-    demo_restricted_investors = []
-    
-    for inv_id, investor_data in verified_data.items():
-        # Extract required fields (case-insensitive)
-        invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
-        execution_start_raw = investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', ''))
-        if isinstance(execution_start_raw, str) and execution_start_raw.upper() in ['NULL', 'NONE', '']:
-            execution_start = ""
-        else:
-            execution_start = normalize_date(execution_start_raw)
-        Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
-        login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
-        password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
-        server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
-        
-        # Extract account mode and demo account fields
-        account_mode = investor_data.get('account_mode', investor_data.get('ACCOUNT_MODE', '')).strip().lower()
-        demo_account_raw = investor_data.get('demo_account', investor_data.get('DEMO_ACCOUNT', '0'))
-        demo_account = db_to_bool(demo_account_raw)
-        
-        # Required fields check
-        missing_required = []
-        if not invested_with: missing_required.append('invested_with')
-        if not execution_start: missing_required.append('execution_start_date')
-        if not Terminal_path: missing_required.append('Terminal_path')
-        
-        missing_investor_fields = []
-        if not login: missing_investor_fields.append('login')
-        if not password: missing_investor_fields.append('password')
-        if not server: missing_investor_fields.append('server')
-        
-        is_complete = len(missing_required) == 0 and len(missing_investor_fields) == 0
-        
-        if not is_complete:
-            investors_skipped.append(inv_id)
-            incomplete_investors.append({
-                'inv_id': inv_id,
-                'missing_required': missing_required,
-                'missing_investor_fields': missing_investor_fields,
-                'investor_data': investor_data
-            })
-            
-            # FIX: Create folder and add notifications for incomplete investors
-            inv_root = Path(INV_PATH) / inv_id
-            inv_root.mkdir(parents=True, exist_ok=True)
-            
-            # Create activities.json with notifications for missing fields
-            activities_path = inv_root / "activities.json"
-            existing_activities = {}
-            if activities_path.exists():
-                try:
-                    with open(activities_path, 'r') as f:
-                        existing_activities = json.load(f)
-                except:
-                    pass
-            
-            activities_data = DEFAULT_ACTIVITIES.copy()
-            activities_data.update(existing_activities)
-            
-            if 'notifications' not in activities_data:
-                activities_data['notifications'] = {}
-            if 'executions_notification' not in activities_data:
-                activities_data['executions_notification'] = {}
-            
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Add AccountMode notification for incomplete investors
-            if not account_mode:
-                account_mode_msg = "Account mode is not specified. The system cannot determine if this is a demo or live account. Trading will proceed once account mode is confirmed."
-                add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} has unknown account mode.", 'error', timestamp)
-            elif account_mode == 'demo':
-                if demo_account is False:
-                    account_mode_msg = "This is a demo account but demo trading is disabled. Demo accounts must have demo trading enabled to proceed."
-                    add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
-                    add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} has demo account mode but demo_account is disabled.", 'error', timestamp)
-                elif demo_account is True:
-                    account_mode_msg = "This is a demo account with demo trading enabled. Trading will proceed in demo mode."
-                    add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
-                    add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode confirmed and enabled.", 'success', timestamp)
-                else:
-                    account_mode_msg = "This is a demo account but demo trading status is unknown. Please verify your demo account settings."
-                    add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
-                    add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode but demo_account status unknown.", 'error', timestamp)
-            else:
-                account_mode_msg = f"Account mode is {account_mode}. Trading will be paused until the account mode is identified with this configuration."
-                add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} account mode: {account_mode}.", 'success', timestamp)
-            
-            # Add notifications for missing required fields
-            if missing_required:
-                missing_fields_str = ', '.join(missing_required)
-                missing_message = f" You have not yet enrolled or your configuration is incomplete. Please contact support if you experience any issues."
-                add_notification(activities_data['notifications'], 'RegistrationRequired', missing_message, 'error', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'RegistrationRequired', f"SERVER NOTIFICATION: Investor {inv_id} has missing required fields: {missing_fields_str}", 'error', timestamp)
-            
-            # Add notifications for missing investor credentials
-            if missing_investor_fields:
-                missing_creds_str = ', '.join(missing_investor_fields)
-                creds_message = f" ACCOUNT CREDENTIALS MISSING: The following account information is incomplete: {missing_creds_str}. Trading cannot be activated until this information is provided."
-                add_notification(activities_data['notifications'], 'CredentialsMissing', creds_message, 'error', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'CredentialsMissing', f"SERVER NOTIFICATION: Investor {inv_id} has missing credentials: {missing_creds_str}", 'error', timestamp)
-            
-            # Add overall incomplete registration message if both types missing
-            if missing_required and missing_investor_fields:
-                overall_message = "Your investor registration is incomplete. Please provide all required information to begin automated trading."
-                add_notification(activities_data['notifications'], 'RegistrationStatus', overall_message, 'error', timestamp)
-            
-            # Set initial notifications flag
-            if activities_data['notifications']:
-                activities_data['_initial_notifications_sent'] = True
-            
-            # Save activities.json
-            with open(activities_path, 'w', encoding='utf-8') as f:
-                json.dump(activities_data, f, indent=4)
-            
-            # Create empty tradeshistory.json
-            tradeshistory_path = inv_root / "tradeshistory.json"
-            if not tradeshistory_path.exists():
-                with open(tradeshistory_path, 'w', encoding='utf-8') as f:
-                    json.dump([], f, indent=4)
-            
-            # Create empty accountmanagement.json
-            accountmanagement_path = inv_root / "accountmanagement.json"
-            if not accountmanagement_path.exists():
-                accountmanagement_data = {}
-                if login and password and server:
-                    if login: accountmanagement_data['login'] = str(login).strip()
-                    if password: accountmanagement_data['password'] = password
-                    if server: accountmanagement_data['server'] = server
-                with open(accountmanagement_path, 'w', encoding='utf-8') as f:
-                    json.dump(accountmanagement_data, f, indent=4)
-            
-            # Update investors.json if credentials are present
-            investor_entry = {
-                "LOGIN_ID": str(login).strip() if login else "",
-                "PASSWORD": password if password else "",
-                "SERVER": server if server else "",
-                "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
-                "invested_with": invested_with if invested_with else "",
-                "Terminal_path": Terminal_path if Terminal_path else ""
-            }
-            
-            if login and password and server:
-                investors_data[inv_id] = investor_entry
-                investors_updated.append(inv_id)
-            else:
-                # Still add to investors_data but mark as incomplete
-                investor_entry["_incomplete"] = True
-                investor_entry["_missing_fields"] = missing_required + missing_investor_fields
-                investors_data[inv_id] = investor_entry
-                investors_updated.append(inv_id)
-            
-            continue
-        
-        valid_investors.add(inv_id)
-        
-        investor_entry = {
-            "LOGIN_ID": str(login).strip(),
-            "PASSWORD": password,
-            "SERVER": server,
-            "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
-            "invested_with": invested_with,
-            "Terminal_path": Terminal_path
-        }
-        investors_data[inv_id] = investor_entry
-        investors_updated.append(inv_id)
-    
-    # Remove invalid investors
-    investors_to_remove = []
-    for inv_id in list(investors_data.keys()):
-        if inv_id not in verified_data:
-            investors_to_remove.append(inv_id)
-            continue
-        
-        investor_data = verified_data.get(inv_id, {})
-        login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
-        password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
-        server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
-        
-        if not login or not password or not server:
-            investors_to_remove.append(inv_id)
-            continue
-        
-        # Check auto-trading status
-        fetched_activate = None
-        if 'enable_autotrading' in investor_data:
-            fetched_activate = investor_data['enable_autotrading']
-        elif 'activate_autotrading' in investor_data:
-            fetched_activate = investor_data['activate_autotrading']
-        
-        if fetched_activate is not None:
-            final_activate = db_to_bool(fetched_activate)
-            if final_activate is False:
-                investors_to_remove.append(inv_id)
-                continue
-    
-    for inv_id in investors_to_remove:
-        if inv_id in investors_data:
-            del investors_data[inv_id]
-            investors_removed.append(inv_id)
-            if inv_id in valid_investors:
-                valid_investors.discard(inv_id)
-    
-    if investors_updated or investors_removed:
-        os.makedirs(os.path.dirname(INVESTOR_USERS), exist_ok=True)
-        with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
-            json.dump(investors_data, f, indent=4)
-    
-    print(f"   ✅ Added/Updated: {len(investors_updated)} | 🗑️ Removed: {len(investors_removed)} | ⏭️ Skipped: {len(investors_skipped)}")
-    
-    # ============================================
-    # STEP 2: RECORD INCOMPLETE INVESTORS
-    # ============================================
-    print(f"\n[2/4] Recording incomplete investors...")
-    
-    for incomplete in incomplete_investors:
-        inv_id = incomplete['inv_id']
-        missing_required = incomplete['missing_required']
-        missing_investor_fields = incomplete['missing_investor_fields']
-        investor_data = incomplete['investor_data'].copy()
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        missing_fields_readable = ', '.join(missing_required + missing_investor_fields)
-        
-        # Copy all existing fields
-        updated_record = investor_data.copy()
-        
-        # Add/update required fields
-        updated_record["id"] = inv_id
-        updated_record["last_updated"] = timestamp
-        updated_record["has_error"] = True
-        updated_record["error_messages"] = [f"Missing required fields: {missing_fields_readable}"]
-        updated_record["status"] = "incomplete_registration"
-        updated_record["processed"] = False
-        
-        # FIX: Add notification data to the record
-        inv_root = Path(INV_PATH) / inv_id
-        activities_path = inv_root / "activities.json"
-        if activities_path.exists():
-            try:
-                with open(activities_path, 'r') as f:
-                    activities_data = json.load(f)
-                updated_record["notifications"] = activities_data.get('notifications', {})
-                updated_record["executions_notification"] = activities_data.get('executions_notification', {})
-            except:
-                pass
-        
-        updated_investors_data[inv_id] = updated_record
-        print(f"   📝 Recorded incomplete investor: {inv_id} (notifications added)")
-    
-    # ============================================
-    # STEP 3: PROCESS COMPLETE INVESTORS
-    # ============================================
-    print(f"\n[3/4] Processing complete investors...")
-    
-    processed_summary = []
-    autotrading_disabled_investors = []
-    error_investors_to_delete = []
-    balance_insufficient_investors = []
-    demo_restricted_investors = []
-    
-    for inv_id, investor_data in verified_data.items():
-        # Skip incomplete investors
-        if inv_id in [inv['inv_id'] for inv in incomplete_investors]:
-            continue
-        
-        print(f"\n   🔄 Processing investor: {inv_id}")
-        
-        # Extract fields
-        invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
-        execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
-        contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
-        Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
-        accountmanagement_data = investor_data.get('accountmanagement', {})
-        
-        # Extract account mode and demo account fields
-        account_mode = investor_data.get('account_mode', investor_data.get('ACCOUNT_MODE', '')).strip().lower()
-        demo_account_raw = investor_data.get('demo_account', investor_data.get('DEMO_ACCOUNT', '0'))
-        demo_account = db_to_bool(demo_account_raw)
-        
-        # Get broker_balance (keep as string)
-        broker_balance_str = investor_data.get('broker_balance', investor_data.get('BROKER_BALANCE', '0'))
-        broker_balance_val = None
-        if broker_balance_str and str(broker_balance_str).upper() not in ['NULL', 'NONE', '']:
-            try:
-                broker_balance_val = float(broker_balance_str)
-            except:
-                pass
-        
-        has_error = False
-        error_messages = []
-        
-        # Handle activate_autotrading
-        fetched_activate = None
-        if 'enable_autotrading' in investor_data:
-            fetched_activate = investor_data['enable_autotrading']
-        elif 'activate_autotrading' in investor_data:
-            fetched_activate = investor_data['activate_autotrading']
-        
-        final_activate = None
-        if fetched_activate is not None:
-            final_activate = db_to_bool(fetched_activate)
-            if final_activate is None:
-                final_activate = True
-        
-        # Handle bypass_restriction
-        fetched_bypass = None
-        if 'bypass_restriction' in investor_data:
-            fetched_bypass = investor_data['bypass_restriction']
-        
-        final_bypass = None
-        if fetched_bypass is not None:
-            final_bypass = db_to_bool(fetched_bypass)
-            if final_bypass is None:
-                final_bypass = False
-        
-        # Handle contract_duration
-        contract_duration_val = None
-        if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
-            try:
-                contract_days = int(contract_days_raw)
-                if contract_days > 0:
-                    contract_duration_val = contract_days
-            except:
-                pass
-        
-        if contract_duration_val is None and default_contract_duration is not None:
-            contract_duration_val = default_contract_duration
-        
-        # Handle min_broker_balance
-        min_broker_balance = None
-        if 'min_broker_balance' in investor_data:
-            try:
-                min_broker_balance = float(investor_data['min_broker_balance'])
-            except:
-                pass
-        
-        if min_broker_balance is None and default_min_broker_balance is not None:
-            min_broker_balance = default_min_broker_balance
-        
-        # Check balance requirement
-        meets_balance_requirement = True
-        balance_check_message = None
-        balance_message_type = None
-        
-        if broker_balance_val is not None and min_broker_balance is not None:
-            if broker_balance_val < min_broker_balance:
-                meets_balance_requirement = False
-                has_error = True
-                error_messages.append(f"Insufficient balance: ${broker_balance_val:.2f} < ${min_broker_balance:.2f}")
-                balance_check_message = f"💰 BALANCE VERIFICATION: Broker balance of ${broker_balance_val:.2f} is below the minimum requirement of ${min_broker_balance:.2f}. Trading operations are paused until minimum balance is met."
-                balance_message_type = 'error'
-                balance_insufficient_investors.append(inv_id)
-            else:
-                balance_check_message = f"💰 BALANCE VERIFICATION: Investor's broker balance of ${broker_balance_val:.2f} meets the minimum requirement of ${min_broker_balance:.2f}. Trading operations can proceed normally."
-                balance_message_type = 'success'
-        
-        # Check demo account restriction
-        demo_account_restricted = False
-        demo_account_message = None
-        demo_account_message_type = None
-        
-        if account_mode == 'demo':
-            if demo_account is False:
-                demo_account_restricted = True
-                has_error = True
-                error_messages.append("Demo account mode but demo_account is disabled")
-                demo_account_message = f"🚫 DEMO ACCOUNT RESTRICTION: Demo accounts are not allowed"
-                demo_account_message_type = 'error'
-                demo_restricted_investors.append(inv_id)
-            elif demo_account is True:
-                demo_account_message = f"✅ ACCOUNT VERIFICATION: Trading will proceed in this account. "
-                demo_account_message_type = 'success'
-            elif demo_account is None:
-                demo_account_message = f"⚠️ DEMO ACCOUNT UNKNOWN: Account mode is 'demo' but demo_account status is unknown. Please verify your account configuration."
-                demo_account_message_type = 'error'
-                has_error = True
-                error_messages.append("Demo account mode but demo_account status unknown")
-                demo_restricted_investors.append(inv_id)
-        elif not account_mode:
-            demo_account_message = f"⚠️ ACCOUNT MODE UNKNOWN: Account mode is not specified. Trading will proceed but account type cannot be verified."
-            demo_account_message_type = 'error'
-            # Not adding to demo_restricted since mode is unknown, just warning
-        else:
-            demo_account_message = f"ℹ️ ACCOUNT MODE: This is a '{account_mode}' account. Standard trading rules apply."
-            demo_account_message_type = 'success'
-        
-        # Extract strategies
-        strategy_names = [s.strip() for s in invested_with.split(",") if s.strip()]
-        
-        # Format date and calculate expiry
-        formatted_start_date = execution_start
-        expiry_date_str = ""
-        
-        if execution_start:
-            try:
-                date_obj = datetime.strptime(execution_start, "%Y-%m-%d")
-                formatted_start_date = date_obj.strftime("%B %d, %Y")
-                
-                if contract_duration_val is not None and contract_duration_val > 0:
-                    expiry_date = date_obj + timedelta(days=contract_duration_val)
-                    expiry_date_str = expiry_date.strftime("%B %d, %Y")
-            except:
-                try:
-                    date_obj = datetime.strptime(execution_start, "%B %d, %Y")
-                    formatted_start_date = execution_start
-                    if contract_duration_val is not None and contract_duration_val > 0:
-                        expiry_date = date_obj + timedelta(days=contract_duration_val)
-                        expiry_date_str = expiry_date.strftime("%B %d, %Y")
-                except:
-                    pass
-        
-        # Create investor folder
-        inv_root = Path(INV_PATH) / inv_id
-        inv_root.mkdir(parents=True, exist_ok=True)
-        
-        # Create/Update activities.json
-        activities_path = inv_root / "activities.json"
-        existing_activities = {}
-        if activities_path.exists():
-            try:
-                with open(activities_path, 'r') as f:
-                    existing_activities = json.load(f)
-            except:
-                pass
-        
-        activities_data = DEFAULT_ACTIVITIES.copy()
-        activities_data.update(existing_activities)
-        
-        if final_activate is not None:
-            activities_data["activate_autotrading"] = final_activate
-        if final_bypass is not None:
-            activities_data["bypass_restriction"] = final_bypass
-        if contract_duration_val is not None:
-            activities_data["contract_duration"] = contract_duration_val
-        if min_broker_balance is not None:
-            activities_data["min_broker_balance"] = min_broker_balance
-        if broker_balance_val is not None:
-            activities_data["broker_balance"] = broker_balance_val
-        if execution_start:
-            activities_data["execution_start_date"] = formatted_start_date
-        if expiry_date_str:
-            activities_data["contract_expiry_date"] = expiry_date_str
-        
-        if 'notifications' not in activities_data:
-            activities_data['notifications'] = {}
-        if 'executions_notification' not in activities_data:
-            activities_data['executions_notification'] = {}
-        if '_initial_notifications_sent' not in activities_data:
-            activities_data['_initial_notifications_sent'] = False
-        if '_meets_balance_requirement' not in activities_data:
-            activities_data['_meets_balance_requirement'] = meets_balance_requirement
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # ============================================
-        # ADD ACCOUNT MODE NOTIFICATION (NEW SECTION)
-        # ============================================
-        if demo_account_message:
-            add_notification(activities_data['notifications'], 'AccountMode', demo_account_message, demo_account_message_type, timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'AccountMode', demo_account_message, demo_account_message_type, timestamp)
-        
-        # Add notifications with individual section tracking
-        
-        # 1. STRATEGIES section
-        if not strategy_names:
-            strategy_message = "You are currently not enrolled in any trading strategy partnership. Please contact your account manager to enroll in a strategy to begin automated trading."
-            add_notification(activities_data['notifications'], 'Strategies', strategy_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'Strategies', f"SERVER NOTIFICATION: Investor {inv_id} has no strategy partnership.", 'error', timestamp)
-            has_error = True
-            error_messages.append("No strategy partnership")
-        else:
-            strategy_message = f"Your account has been configured with the following trading strategy(s): {', '.join(strategy_names)}. The system will execute trades according to this strategy configuration."
-            add_notification(activities_data['notifications'], 'Strategies', strategy_message, 'success', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'Strategies', f"SERVER NOTIFICATION: Investor {inv_id} successfully configured with strategies: {', '.join(strategy_names)}", 'success', timestamp)
-            activities_data["strategies"] = strategy_names
-        
-        # 2. START DATE section
-        if not execution_start:
-            start_message = "Your program start date is not set. You haven't officially enrolled in the trading program. Please complete your enrollment to activate trading."
-            add_notification(activities_data['notifications'], 'StartDate', start_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'StartDate', f"SERVER NOTIFICATION: Investor {inv_id} has no execution start date.", 'error', timestamp)
-            has_error = True
-            error_messages.append("No execution start date")
-        else:
-            start_message = f"Your trading program is active as of {formatted_start_date}. Welcome aboard!"
-            add_notification(activities_data['notifications'], 'StartDate', start_message, 'success', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'StartDate', f"SERVER NOTIFICATION: Investor {inv_id} enrollment confirmed. Start date: {formatted_start_date}", 'success', timestamp)
-        
-        # 3. AUTOTRADING section
-        if final_activate is False:
-            autotrading_message = "Auto-trading has been disabled on your account. No automated trades will be executed. Please contact support."
-            add_notification(activities_data['notifications'], 'Autotrading', autotrading_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'Autotrading', f"SERVER NOTIFICATION: Investor {inv_id} has auto-trading disabled.", 'error', timestamp)
-            autotrading_disabled_investors.append(inv_id)
-            has_error = True
-            error_messages.append("Auto-trading disabled by user")
-        elif final_activate is True:
-            autotrading_message = "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration."
-            add_notification(activities_data['notifications'], 'Autotrading', autotrading_message, 'success', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'Autotrading', f"SERVER NOTIFICATION: Investor {inv_id} auto-trading is active and ready for automated execution.", 'success', timestamp)
-        
-        # 4. BYPASS RESTRICTION section
-        if final_bypass is True:
-            bypass_message = "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity."
-            add_notification(activities_data['notifications'], 'BypassRestriction', bypass_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'BypassRestriction', f"SERVER NOTIFICATION: Investor {inv_id} has bypass_restriction ENABLED.", 'error', timestamp)
-        elif final_bypass is False:
-            bypass_message = "Standard trading restrictions are in place. Ensure to avoid unauthorized actions such as manual trades, withdrawals and deposits during this contract duration."
-            add_notification(activities_data['notifications'], 'BypassRestriction', bypass_message, 'success', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'BypassRestriction', f"SERVER NOTIFICATION: Investor {inv_id} has bypass_restriction disabled.", 'success', timestamp)
-        
-        # 5. CONTRACT DURATION section
-        if contract_duration_val is None or contract_duration_val == 0:
-            duration_message = "Your contract duration is not set. Trading will continue without a contract end date."
-            add_notification(activities_data['notifications'], 'ContractDuration', duration_message, 'success', timestamp)
-        else:
-            if expiry_date_str:
-                duration_message = f"Your trading contract duration is set to {contract_duration_val} days. Your contract will expire on {expiry_date_str}. You are currently within your active trading period."
-            else:
-                duration_message = f"Your trading contract duration is set to {contract_duration_val} days. You are currently within your active trading period."
-            add_notification(activities_data['notifications'], 'ContractDuration', duration_message, 'success', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'ContractDuration', f"SERVER NOTIFICATION: Investor {inv_id} contract duration configured: {contract_duration_val} days.", 'success', timestamp)
-        
-        # 6. TERMINAL PATH section
-        if not Terminal_path or Terminal_path.strip() == '':
-            terminal_message = "Your terminal path is missing. Please contact support to resolve your account status."
-            add_notification(activities_data['notifications'], 'TerminalPath', terminal_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'TerminalPath', f"SERVER NOTIFICATION: Investor {inv_id} has NO TERMINAL PATH.", 'error', timestamp)
-            has_error = True
-            error_messages.append("Terminal path missing")
-        else:
-            terminal_message = "Your trading terminal has been configured and is ready for automated trading."
-            add_notification(activities_data['notifications'], 'TerminalPath', terminal_message, 'success', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'TerminalPath', f"SERVER NOTIFICATION: Investor {inv_id} terminal path configured successfully.", 'success', timestamp)
-        
-        # 7. BALANCE CHECK section
-        if balance_check_message:
-            old_meets_requirement = activities_data.get('_meets_balance_requirement', True)
-            add_notification(activities_data['notifications'], 'BalanceCheck', balance_check_message, balance_message_type, timestamp)
-            
-            # Check if we need to add execution notification (when type changes or first time)
-            last_exec_msg = get_last_message(activities_data['executions_notification'], 'BalanceCheck')
-            if not meets_balance_requirement or (meets_balance_requirement and not old_meets_requirement):
-                if last_exec_msg is None or last_exec_msg['type'] != balance_message_type:
-                    add_execution_notification(activities_data['executions_notification'], 'BalanceCheck', balance_check_message, balance_message_type, timestamp)
-            
-            activities_data['_meets_balance_requirement'] = meets_balance_requirement
-            activities_data['_last_balance_notification_time'] = timestamp
-        
-        # Set initial notifications flag if any notifications were added
-        if activities_data['notifications'] and not activities_data['_initial_notifications_sent']:
-            activities_data['_initial_notifications_sent'] = True
-        
-        # Save activities.json
-        with open(activities_path, 'w', encoding='utf-8') as f:
-            json.dump(activities_data, f, indent=4)
-        
-        # Create tradeshistory.json
-        tradeshistory_path = inv_root / "tradeshistory.json"
-        if not tradeshistory_path.exists():
-            with open(tradeshistory_path, 'w', encoding='utf-8') as f:
-                json.dump([], f, indent=4)
-        
-        # Create/Update accountmanagement.json
-        accountmanagement_path = inv_root / "accountmanagement.json"
-        final_accountmanagement = {}
-        
-        # Handle accountmanagement_data - could be dict, string, or None
-        if accountmanagement_data:
-            if isinstance(accountmanagement_data, dict):
-                final_accountmanagement.update(accountmanagement_data)
-            else:
-                # Not a dictionary - log the issue and treat as missing data
-                print(f"   ⚠️ Accountmanagement data for {inv_id} is invalid format: {type(accountmanagement_data)}")
-                error_messages.append(f"Invalid accountmanagement format - expected JSON object, got {type(accountmanagement_data).__name__}")
-                has_error = True
-                # Don't update, leave as empty dict
-        
-        if contract_duration_val is not None:
-            if 'requirements' not in final_accountmanagement:
-                final_accountmanagement['requirements'] = {}
-            final_accountmanagement['requirements']['contract_duration'] = str(contract_duration_val)
-        
-        if min_broker_balance is not None:
-            if 'requirements' not in final_accountmanagement:
-                final_accountmanagement['requirements'] = {}
-            final_accountmanagement['requirements']['min_broker_balance'] = f"{min_broker_balance:.2f}"
-        
-        if final_bypass is not None:
-            final_accountmanagement['bypass_restriction'] = final_bypass
-        if final_activate is not None:
-            final_accountmanagement['activate_autotrading'] = final_activate
-        if broker_balance_val is not None:
-            final_accountmanagement['broker_balance'] = broker_balance_val
-        
-        # Add account mode info to accountmanagement
-        if account_mode:
-            final_accountmanagement['account_mode'] = account_mode
-        if demo_account_raw is not None:
-            final_accountmanagement['demo_account'] = str(demo_account_raw)
-        
-        with open(accountmanagement_path, 'w', encoding='utf-8') as f:
-            json.dump(final_accountmanagement, f, indent=4)
-        
-        # Build updated record - copy ALL existing fields first
-        updated_record = investor_data.copy()
-        
-        # Add/update with our processed fields
-        updated_record["id"] = inv_id
-        updated_record["last_updated"] = timestamp
-        updated_record["has_error"] = has_error
-        updated_record["processed"] = True
-        updated_record["folder_created"] = True
-        updated_record["contract_expiry_date_calculated"] = expiry_date_str if expiry_date_str else None
-        updated_record["meets_balance_requirement"] = meets_balance_requirement
-        updated_record["min_broker_balance"] = min_broker_balance
-        updated_record["error_messages"] = error_messages if has_error else []
-        updated_record["notifications"] = activities_data.get('notifications', {})
-        updated_record["executions_notification"] = activities_data.get('executions_notification', {})
-        updated_record["strategies"] = strategy_names
-        updated_record["execution_start_date"] = formatted_start_date if execution_start and execution_start != '0' else None
-        updated_record["account_mode"] = account_mode if account_mode else "unknown"
-        updated_record["demo_account"] = str(demo_account_raw) if demo_account_raw is not None else "0"
-        updated_record["demo_account_restricted"] = demo_account_restricted
-        
-        # Convert booleans to database format '1'/'0' for these specific fields
-        updated_record["enable_autotrading"] = bool_to_db_string(final_activate) if final_activate is not None else investor_data.get('enable_autotrading', '0')
-        updated_record["bypass_restriction"] = bool_to_db_string(final_bypass) if final_bypass is not None else investor_data.get('bypass_restriction', '0')
-        
-        # Ensure broker_balance is string
-        if 'broker_balance' in updated_record:
-            updated_record['broker_balance'] = str(updated_record['broker_balance'])
-        
-        updated_investors_data[inv_id] = updated_record
-        
-        if has_error:
-            if demo_account_restricted:
-                # Demo restricted investors are handled separately
-                pass
-            else:
-                error_investors_to_delete.append(inv_id)
-        else:
-            processed_summary.append(inv_id)
-    
-    # ============================================
-    # DELETE ERROR INVESTORS
-    # ============================================
-    if error_investors_to_delete:
-        print(f"\n[4/4] Removing error investors...")
-        for inv_id in error_investors_to_delete:
-            if inv_id in investors_data:
-                del investors_data[inv_id]
-                if inv_id in valid_investors:
-                    valid_investors.discard(inv_id)
-            
-            inv_folder = Path(INV_PATH) / inv_id
-            if inv_folder.exists():
-                import shutil
-                shutil.rmtree(inv_folder)
-            
-            if inv_id in updated_investors_data:
-                updated_investors_data[inv_id]["folder_deleted"] = True
-                updated_investors_data[inv_id]["removed_from_investors"] = True
-        
-        if error_investors_to_delete:
-            with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
-                json.dump(investors_data, f, indent=4)
-        
-        print(f"   ✅ Removed {len(error_investors_to_delete)} error investors")
-    
-    # ============================================
-    # REMOVE AUTOTRADING DISABLED INVESTORS
-    # ============================================
-    if autotrading_disabled_investors:
-        removed_count = 0
-        for inv_id in autotrading_disabled_investors:
-            if inv_id in investors_data:
-                del investors_data[inv_id]
-                removed_count += 1
-                if inv_id in valid_investors:
-                    valid_investors.discard(inv_id)
-            
-            if inv_id in updated_investors_data:
-                updated_investors_data[inv_id]["auto_trading_disabled"] = True
-                updated_investors_data[inv_id]["removed_from_investors"] = True
-        
-        if removed_count > 0:
-            with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
-                json.dump(investors_data, f, indent=4)
-        print(f"   🚫 Removed {removed_count} investors (auto-trading disabled)")
-    
-    # ============================================
-    # HANDLE DEMO RESTRICTED INVESTORS (NEW SECTION)
-    # ============================================
-    if demo_restricted_investors:
-        print(f"\n🚫 Handling demo restricted investors...")
-        removed_count = 0
-        for inv_id in demo_restricted_investors:
-            # Remove from investors.json
-            if inv_id in investors_data:
-                del investors_data[inv_id]
-                removed_count += 1
-                if inv_id in valid_investors:
-                    valid_investors.discard(inv_id)
-            
-            # Delete investor folder
-            inv_folder = Path(INV_PATH) / inv_id
-            if inv_folder.exists():
-                import shutil
-                shutil.rmtree(inv_folder)
-            
-            # Update record
-            if inv_id in updated_investors_data:
-                updated_investors_data[inv_id]["demo_account_restricted"] = True
-                updated_investors_data[inv_id]["removed_from_investors"] = True
-                updated_investors_data[inv_id]["folder_deleted"] = True
-        
-        if removed_count > 0:
-            with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
-                json.dump(investors_data, f, indent=4)
-        print(f"   🚫 Removed {removed_count} investors (demo account restricted)")
-    
-    # ============================================
-    # MOVE INSUFFICIENT BALANCE INVESTORS
-    # ============================================
-    if balance_insufficient_investors:
-        print(f"\n💰 Moving insufficient balance investors to issues_investors.json...")
-        moved_to_issues = []
-        
-        for inv_id in balance_insufficient_investors:
-            if inv_id in investors_data:
-                investor_data = investors_data[inv_id]
-                balance_info = updated_investors_data.get(inv_id, {})
-                
-                investor_data['MESSAGE'] = f"Insufficient balance: ${balance_info.get('broker_balance', 'Unknown')} is below minimum requirement ${balance_info.get('min_broker_balance', 'Unknown')}"
-                investor_data['insufficient_balance'] = True
-                investor_data['moved_to_issues_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                del investors_data[inv_id]
-                
-                issues_data = {}
-                if os.path.exists(ISSUES_INVESTORS):
-                    try:
-                        with open(ISSUES_INVESTORS, 'r', encoding='utf-8') as f:
-                            issues_data = json.load(f)
-                    except: 
-                        issues_data = {}
-                
-                issues_data[inv_id] = investor_data
-                with open(ISSUES_INVESTORS, 'w', encoding='utf-8') as f:
-                    json.dump(issues_data, f, indent=4)
-                
-                moved_to_issues.append(inv_id)
-                
-                if inv_id in updated_investors_data:
-                    updated_investors_data[inv_id]['moved_to_issues'] = True
-                    updated_investors_data[inv_id]['moved_to_issues_reason'] = 'insufficient_balance'
-        
-        if moved_to_issues:
-            with open(INVESTOR_USERS, 'w', encoding='utf-8') as f:
-                json.dump(investors_data, f, indent=4)
-            print(f"   ✅ Moved {len(moved_to_issues)} investors to issues_investors.json")
-    
-    # ============================================
-    # SAVE UPDATED_INVESTORS.JSON
-    # ============================================
-    if updated_investors_data:
-        os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
-        with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-            json.dump(updated_investors_data, f, indent=4)
-        print(f"\n📝 Updated updated_investors.json with {len(updated_investors_data)} investor records")
-    
-    # ============================================
-    # CLEANUP ORPHANED FOLDERS
-    # ============================================
-    print(f"\n🧹 Cleaning up orphaned folders...")
-    deleted_folders = []
-    
-    try:
-        inv_path_obj = Path(INV_PATH)
-        if inv_path_obj.exists():
-            for folder_path in inv_path_obj.iterdir():
-                if folder_path.is_dir():
-                    should_have_folder = (
-                        folder_path.name in valid_investors and 
-                        folder_path.name not in error_investors_to_delete and
-                        folder_path.name not in balance_insufficient_investors and
-                        folder_path.name not in demo_restricted_investors and
-                        folder_path.name not in [inv['inv_id'] for inv in incomplete_investors]
-                    )
-                    
-                    if not should_have_folder and folder_path.name not in processed_summary:
-                        import shutil
-                        shutil.rmtree(folder_path)
-                        deleted_folders.append(folder_path.name)
-        print(f"   🗑️ Deleted {len(deleted_folders)} orphaned folders")
-    except Exception as e:
-        print(f"   Cleanup error: {e}")
-    
-    # ============================================
-    # FINAL SUMMARY
-    # ============================================
     print(f"\n{'='*60}")
     print(f"SUMMARY".center(60))
     print(f"{'='*60}")
-    print(f"✅ Processed (complete): {len(processed_summary)} investors")
-    print(f"Incomplete (recorded only): {len(incomplete_investors)} investors")
-    print(f"Error investors (removed): {len(error_investors_to_delete)}")
-    print(f"Auto-trading disabled (removed): {len(autotrading_disabled_investors)}")
-    print(f"Demo restricted (removed): {len(demo_restricted_investors)}")
-    print(f"Insufficient balance (moved to issues): {len(balance_insufficient_investors)}")
-    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
-    print(f"📝 activities.json: {len(processed_summary) + len(incomplete_investors)} updated (including incomplete investors)")
-    print(f"💰 accountmanagement.json: {len(processed_summary)} updated")
-    print(f"📋 updated_investors.json: {len(updated_investors_data)} investor records")
-    print(f"🗑️ Folders cleaned: {len(deleted_folders)}")
+    print(f"✅ Grid traders found and moved: {len(grid_traders)}")
+    print(f"   Grid trader IDs: {list(grid_traders.keys())}")
+    print(f"📝 {INVHARV_FETCHED_INVESTORS}: {len(non_grid_traders)} investors remain")
+    print(f"📝 {HARVHUB_FETCHED_INVESTORS}: {len(harvhub_data)} investors total")
     print(f"{'='*60}")
     print(f"✅ MOVE COMPLETE".center(60))
     print(f"{'='*60}")
@@ -1191,6 +238,7 @@ def move_fetched_investors():
     
     Handles database values: "1"/1 = True, "0"/0 = False
     """
+    move_grid_traders_to_harvhub()
     
     import traceback
     import sys
@@ -2413,6 +1461,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
     7. Calculates profit and loss (sum of all closed trade profits)
     8. Calculates current balance = starting_balance + total_profit_from_closed_trades
     9. Updates notifications for unauthorized actions, balance discrepancies, and status changes
+    10. Updates FETCHED_INVESTORS and UPDATED_INVESTORS with split authorized/unauthorized P&L
     
     Args:
         inv_id: Optional specific investor ID to process. If None, processes all investors.
@@ -2569,6 +1618,15 @@ def check_and_record_unauthorized_actions(inv_id=None):
                 updated_investors_data = json.load(f)
         except Exception as e:
             print(f"Error loading updated_investors.json: {e}")
+    
+    # Load or initialize fetched_investors.json for tracking audit history
+    fetched_investors_data = {}
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_investors_data = json.load(f)
+        except Exception as e:
+            print(f"Error loading fetched_investors.json: {e}")
     
     for user_brokerid in investor_ids:
         # ============================================================
@@ -2871,6 +1929,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print(f"│\n├─ 💰 BALANCE CALCULATION")
         print(f"│  • Starting Balance: ${starting_balance:.2f}")
         print(f"│  • Authorized Trades P&L: ${total_authorized_profit:.2f}")
+        print(f"│  • Unauthorized Trades P&L: ${total_unauthorized_profit:.2f}")
         print(f"│  • Calculated Current Balance: ${calculated_balance:.2f}")
         print(f"│  • MT5 Actual Balance: ${mt5_balance:.2f}")
         
@@ -3065,6 +2124,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
             'execution_start_date': execution_start_date,
             'broker_balance': round(starting_balance, 2),
             'profitandloss': round(profit_and_loss, 2),
+            'authorized_profitandloss': round(total_authorized_profit, 2),
+            'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
             'current_balance': round(calculated_balance, 2),
             'mt5_actual_balance': round(mt5_balance, 2),
             'authorized_magic_number': authorized_magic_number,
@@ -3106,7 +2167,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
             print(f"│  ✅ activities.json saved with notifications")
             print(f"│     • Starting Balance: ${starting_balance:.2f}")
             print(f"│     • Current Balance: ${calculated_balance:.2f}")
-            print(f"│     • P&L: ${profit_and_loss:.2f}")
+            print(f"│     • Authorized P&L: ${total_authorized_profit:.2f}")
+            print(f"│     • Unauthorized P&L: ${total_unauthorized_profit:.2f}")
             print(f"│     • Status: {application_status}")
             print(f"│     • Authorized Magic Number: {authorized_magic_number}")
             print(f"│     • Authorized trades: {trades_structure['summary']['total_trades']}")
@@ -3116,49 +2178,46 @@ def check_and_record_unauthorized_actions(inv_id=None):
             print(f"│   Error saving activities.json: {e}")
         
         # ============================================================
-        # UPDATE UPDATED_INVESTORS.JSON WITH AUDIT DATA
+        # UPDATE UPDATED_INVESTORS.JSON - ONLY SPECIFIC FIELDS
         # ============================================================
         if user_brokerid in updated_investors_data:
-            updated_record = updated_investors_data[user_brokerid].copy()
+            # Update only specific fields, preserve everything else
+            updated_investors_data[user_brokerid]['authorized_profitandloss'] = round(total_authorized_profit, 2)
+            updated_investors_data[user_brokerid]['unauthorized_profitandloss'] = round(total_unauthorized_profit, 2)
+            updated_investors_data[user_brokerid]['unauthorized_action_detected'] = unauthorized_detected
+            updated_investors_data[user_brokerid]['application_status'] = application_status
+            updated_investors_data[user_brokerid]['last_audit_timestamp'] = datetime.now().isoformat()
         else:
-            updated_record = {}
+            # Record doesn't exist, create minimal entry with only the fields we need
+            updated_investors_data[user_brokerid] = {
+                'id': str(user_brokerid),
+                'authorized_profitandloss': round(total_authorized_profit, 2),
+                'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
+                'unauthorized_action_detected': unauthorized_detected,
+                'application_status': application_status,
+                'last_audit_timestamp': datetime.now().isoformat()
+            }
         
-        # Add audit-specific fields without overwriting existing data
-        if 'audit_history' not in updated_record:
-            updated_record['audit_history'] = []
-        
-        # Add this audit entry
-        audit_entry = {
-            'audit_timestamp': datetime.now().isoformat(),
-            'application_status': application_status,
-            'unauthorized_detected': unauthorized_detected,
-            'unauthorized_orders_count': len(unauthorized_orders),
-            'unauthorized_positions_count': len(unauthorized_positions),
-            'balance_discrepancy': round(balance_discrepancy, 2) if abs(balance_discrepancy) > 0.01 else 0,
-            'calculated_balance': round(calculated_balance, 2),
-            'mt5_actual_balance': round(mt5_balance, 2),
-            'profit_and_loss': round(profit_and_loss, 2),
-            'authorized_trades_count': len(authorized_closed_trades)
-        }
-        
-        updated_record['audit_history'].append(audit_entry)
-        
-        # Keep only last 10 audit entries
-        if len(updated_record['audit_history']) > 10:
-            updated_record['audit_history'] = updated_record['audit_history'][-10:]
-        
-        # Update current status fields
-        updated_record['last_audit_status'] = application_status
-        updated_record['last_audit_timestamp'] = datetime.now().isoformat()
-        updated_record['current_unauthorized_detected'] = unauthorized_detected
-        updated_record['current_balance'] = round(calculated_balance, 2)
-        updated_record['current_pnl'] = round(profit_and_loss, 2)
-        
-        # Preserve notification data
-        updated_record['notifications'] = activities_data.get('notifications', {})
-        updated_record['executions_notification'] = activities_data.get('executions_notification', {})
-        
-        updated_investors_data[user_brokerid] = updated_record
+        # ============================================================
+        # UPDATE FETCHED_INVESTORS.JSON - ONLY SPECIFIC FIELDS
+        # ============================================================
+        if user_brokerid in fetched_investors_data:
+            # Update only specific fields, preserve everything else
+            fetched_investors_data[user_brokerid]['authorized_profitandloss'] = round(total_authorized_profit, 2)
+            fetched_investors_data[user_brokerid]['unauthorized_profitandloss'] = round(total_unauthorized_profit, 2)
+            fetched_investors_data[user_brokerid]['unauthorized_action_detected'] = unauthorized_detected
+            fetched_investors_data[user_brokerid]['application_status'] = application_status
+            fetched_investors_data[user_brokerid]['last_audit_timestamp'] = datetime.now().isoformat()
+        else:
+            # Record doesn't exist, create minimal entry with only the fields we need
+            fetched_investors_data[user_brokerid] = {
+                'id': str(user_brokerid),
+                'authorized_profitandloss': round(total_authorized_profit, 2),
+                'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
+                'unauthorized_action_detected': unauthorized_detected,
+                'application_status': application_status,
+                'last_audit_timestamp': datetime.now().isoformat()
+            }
         
         # Update stats
         stats["bypass_active_investors"] += 1 if bypass_active else 0
@@ -3171,13 +2230,12 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print(f"│  • Authorized Magic Number: {authorized_magic_number}")
         print(f"│  • Starting Balance: ${starting_balance:.2f}")
         print(f"│  • Current Balance: ${calculated_balance:.2f}")
-        print(f"│  • P&L: ${profit_and_loss:.2f}")
+        print(f"│  • Authorized P&L: ${total_authorized_profit:.2f}")
+        print(f"│  • Unauthorized P&L: ${total_unauthorized_profit:.2f}")
         print(f"│  • Authorized trades: {len(authorized_closed_trades)} ({won_trades}W/{lost_trades}L)")
         print(f"│  • Unauthorized trades: {len(unauthorized_trades_list)}")
         print(f"│  • Unauthorized items: {len(unauthorized_orders)} orders, {len(unauthorized_positions)} positions")
         print(f"│  • Contract Days Left: {contract_days_left}")
-        
-        # Shutdown MT5 connection for this investor
     
     # ============================================================
     # SAVE UPDATED_INVESTORS.JSON
@@ -3187,6 +2245,15 @@ def check_and_record_unauthorized_actions(inv_id=None):
         with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(updated_investors_data, f, indent=4)
         print(f"\n📝 Updated updated_investors.json with audit data for {len(updated_investors_data)} investors")
+    
+    # ============================================================
+    # SAVE FETCHED_INVESTORS.JSON
+    # ============================================================
+    if fetched_investors_data:
+        os.makedirs(os.path.dirname(FETCHED_INVESTORS), exist_ok=True)
+        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+            json.dump(fetched_investors_data, f, indent=4)
+        print(f"📝 Updated fetched_investors.json with audit data for {len(fetched_investors_data)} investors")
     
     # ============================================================
     # FINAL SUMMARY
@@ -3221,9 +2288,13 @@ def restricted_timerange(inv_id=None):
     from accountmanagement.json.
     
     Supports:
-    - Time range restrictions with optional day restrictions
+    - Per-day time range restrictions (each day can have different times)
+    - Full day restrictions (empty from/to means whole day restricted)
     - Timezone conversion (African, American, Australian)
-    - No restriction if values are 0/0.00/00:00 or not configured
+    - No restriction if day not listed in restrictions_duration
+    
+    Fallback: If accountmanagement.json doesn't exist, checks FETCHED_INVESTORS
+    and UPDATED_INVESTORS for accountmanagement data.
     
     Args:
         inv_id: Optional specific investor ID to process. If None, processes all investors.
@@ -3278,24 +2349,80 @@ def restricted_timerange(inv_id=None):
             print(f"  ⚠️ Error getting timezone time: {e}, using local time")
             return datetime.now()
     
-    # Helper function to check if current day is restricted
-    def is_day_restricted(restricted_days_list, current_datetime):
+    # Helper function to get day's restriction configuration
+    def get_day_restriction(restrictions_duration, day_name):
         """
-        Check if current day is in restricted days list.
-        Returns True if day is restricted, False otherwise.
+        Get restriction configuration for a specific day.
+        Returns: (has_restriction, from_time, to_time, is_full_day)
         """
-        if not restricted_days_list:
-            return False
+        if not restrictions_duration or day_name not in restrictions_duration:
+            return False, None, None, False
         
-        # Get current day name (lowercase)
-        current_day = current_datetime.strftime("%A").lower()
+        day_config = restrictions_duration[day_name]
         
-        # Check if current day matches any restricted day
-        for day in restricted_days_list:
-            if day and day.lower().strip() == current_day:
-                return True
+        # Check if it's a full day restriction (empty dict or no from/to)
+        if not day_config or not isinstance(day_config, dict):
+            return True, None, None, True
         
-        return False
+        from_time = day_config.get("from", "")
+        to_time = day_config.get("to", "")
+        
+        # If both from and to are empty or missing, it's a full day restriction
+        if not from_time and not to_time:
+            return True, None, None, True
+        
+        # If from is empty but to has value, treat as full day restriction
+        if not from_time:
+            return True, None, None, True
+        
+        return True, from_time, to_time, False
+    
+    # Helper function to parse time string
+    def parse_time_string(time_str):
+        """Parse time string to 24-hour format (hour, minute)"""
+        if not time_str:
+            return None, None
+        
+        time_str = time_str.lower().strip().replace(" ", "")
+        is_pm = "pm" in time_str
+        is_am = "am" in time_str
+        clean_time = time_str.replace("pm", "").replace("am", "")
+        
+        if ":" in clean_time:
+            parts = clean_time.split(":")
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+        else:
+            hour = int(clean_time)
+            minute = 0
+        
+        if is_pm and hour != 12:
+            hour += 12
+        elif is_am and hour == 12:
+            hour = 0
+        
+        return hour, minute
+    
+    # Helper function to check if current time is within a time window
+    def is_time_in_window(current_hour, current_minute, start_hour, start_minute, end_hour, end_minute):
+        """Check if current time is within the specified time window"""
+        current_minutes = current_hour * 60 + current_minute
+        start_minutes = start_hour * 60 + start_minute
+        end_minutes = end_hour * 60 + end_minute
+        
+        # Handle cross-midnight windows
+        if end_minutes < start_minutes:
+            return current_minutes >= start_minutes or current_minutes <= end_minutes
+        else:
+            return start_minutes <= current_minutes <= end_minutes
+    
+    # Helper function to format time to 12-hour format
+    def to_12hr(hour, minute):
+        period = "AM" if hour < 12 else "PM"
+        hour_12 = hour % 12
+        if hour_12 == 0:
+            hour_12 = 12
+        return f"{hour_12}:{minute:02d} {period}"
     
     # Helper function to get the last message for a specific section
     def get_last_message(notifications_dict, section_key):
@@ -3449,6 +2576,15 @@ def restricted_timerange(inv_id=None):
         except Exception as e:
             print(f"  Error loading updated_investors.json: {e}")
     
+    # Load fetched_investors.json
+    fetched_investors_data = {}
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_investors_data = json.load(f)
+        except Exception as e:
+            print(f"  Error loading fetched_investors.json: {e}")
+    
     investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
     total_investors = len(investors_to_process) if not inv_id else 1
     processed = 0
@@ -3470,132 +2606,153 @@ def restricted_timerange(inv_id=None):
             except Exception as e:
                 print(f"  Error reading activities.json: {e}")
         
-        # Initialize with NO RESTRICTION (None means no restriction configured)
+        # Initialize variables
+        has_restriction = False
+        is_restricted = False
+        timezone_config = None
+        current_datetime = None
+        restrictions_duration = {}
+        
+        # Variables for current day's restriction
+        day_has_restriction = False
+        day_from_time = None
+        day_to_time = None
+        day_is_full_day = False
+        current_day_name = None
         window_start_hour = None
         window_start_minute = None
         window_end_hour = None
         window_end_minute = None
-        time_range_config = None
-        has_restriction = False
-        restricted_days = []
-        timezone_config = None
-        current_datetime = None
-        is_day_restricted_flag = False
+        start_12hr = "N/A"
+        end_12hr = "N/A"
         crosses_midnight = False
         
-        # Load time range from accountmanagement.json ONLY if values exist and are valid (> 0)
+        # ============================================================
+        # LOAD ACCOUNT MANAGEMENT CONFIG (WITH FALLBACK)
+        # ============================================================
+        config = None
+        config_source = None
+        
+        # PRIMARY: Try to load from accountmanagement.json
         if acc_mgmt_path.exists():
             try:
                 with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+                    config_source = "accountmanagement.json"
+                    print(f"  📁 Using config from: accountmanagement.json")
+            except Exception as e:
+                print(f"  Error reading accountmanagement.json: {e}")
+        
+        # FALLBACK 1: Try to get from UPDATED_INVESTORS
+        if config is None and user_brokerid in updated_investors_data:
+            updated_record = updated_investors_data[user_brokerid]
+            if 'accountmanagement' in updated_record and updated_record['accountmanagement']:
+                config = updated_record['accountmanagement']
+                config_source = "UPDATED_INVESTORS"
+                print(f"  📁 Using config from: UPDATED_INVESTORS")
+        
+        # FALLBACK 2: Try to get from FETCHED_INVESTORS
+        if config is None and user_brokerid in fetched_investors_data:
+            fetched_record = fetched_investors_data[user_brokerid]
+            if 'accountmanagement' in fetched_record and fetched_record['accountmanagement']:
+                config = fetched_record['accountmanagement']
+                config_source = "FETCHED_INVESTORS"
+                print(f"  📁 Using config from: FETCHED_INVESTORS")
+        
+        # Process config if found
+        if config:
+            # Get settings from config
+            settings = config.get("settings", {})
+            
+            # Get restrictions duration
+            restrictions_duration = settings.get("restrictions_duration", {})
+            
+            # Get timezone (if any)
+            timezone_config = restrictions_duration.get("timezone", "")
+            if timezone_config:
+                print(f"  🌍 Timezone configured: {timezone_config}")
+            
+            # Get current time in specified timezone
+            current_datetime = get_current_time_in_timezone(timezone_config)
+            current_day_name = current_datetime.strftime("%A")  # Full day name (Monday, Tuesday, etc.)
+            print(f"  🕐 Current time ({timezone_config if timezone_config else 'local'}): {current_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}")
+            print(f"  📅 Current day: {current_day_name}")
+            
+            # Check if current day has restriction
+            day_has_restriction, day_from_time, day_to_time, day_is_full_day = get_day_restriction(
+                restrictions_duration, current_day_name
+            )
+            
+            if day_has_restriction:
+                has_restriction = True
                 
-                settings = config.get("settings", {})
-                
-                # Get restrictions duration
-                restrictions = settings.get("restrictions_duration", {})
-                time_range = restrictions.get("restrict_orders_in_time_range_of", {})
-                
-                # Get restricted days (if any)
-                restricted_days = restrictions.get("restricted_days", [])
-                if restricted_days:
-                    print(f"  📅 Restricted days: {', '.join(restricted_days)}")
-                else:
-                    print(f"  📅 No day restrictions - all days allowed")
-                
-                # Get timezone (if any)
-                timezone_config = restrictions.get("timezone", "")
-                if timezone_config:
-                    print(f"  🌍 Timezone configured: {timezone_config}")
-                
-                # Get current time in specified timezone
-                current_datetime = get_current_time_in_timezone(timezone_config)
-                print(f"  🕐 Current time ({timezone_config if timezone_config else 'local'}): {current_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}")
-                print(f"  📅 Current day: {current_datetime.strftime('%A')}")
-                
-                # FIRST: Check if current day is restricted
-                is_day_restricted_flag = is_day_restricted(restricted_days, current_datetime)
-                
-                if is_day_restricted_flag:
-                    # Day is restricted - NO TIME CHECK NEEDED
-                    print(f"  ⚠️ Current day is RESTRICTED - NO TRADING ALLOWED (time check skipped)")
-                    has_restriction = True
-                    # Set window to indicate full day restriction (for display purposes only)
+                if day_is_full_day:
+                    # Full day restriction
+                    print(f"  ⚠️ {current_day_name} is RESTRICTED for the FULL DAY - NO TRADING ALLOWED")
+                    is_restricted = True
                     window_start_hour = 0
                     window_start_minute = 0
                     window_end_hour = 23
                     window_end_minute = 59
-                    time_range_config = {"from": "00:00", "to": "23:59"}
-                elif time_range and "from" in time_range and "to" in time_range:
-                    # Day is NOT restricted, now check time range
-                    from_str = time_range["from"]
-                    to_str = time_range["to"]
+                    start_12hr = "12:00 AM"
+                    end_12hr = "11:59 PM"
+                else:
+                    # Time-based restriction
+                    print(f"  📅 {current_day_name} has time restriction: {day_from_time} -> {day_to_time}")
                     
-                    def is_zero_value(time_str):
-                        if not time_str:
-                            return True
-                        # Clean up string to check numerical substance
-                        clean = time_str.lower().strip().replace(" ", "").replace("am", "").replace("pm", "").replace(":", "")
-                        try:
-                            # If it converts cleanly to 0 numeric value (e.g. "0", "0.00", "0000")
-                            if float(clean) == 0.0:
-                                return True
-                        except ValueError:
-                            pass
-                        return False
-
-                    # Check if ANY value acts as a zero setup
-                    if is_zero_value(from_str) or is_zero_value(to_str):
-                        print(f"  ℹ️ Zero value detected in 'from' ({from_str}) or 'to' ({to_str}). No restriction will be applied.")
-                        has_restriction = False
-                    elif from_str and to_str:
-                        has_restriction = True
-                        time_range_config = time_range
+                    try:
+                        window_start_hour, window_start_minute = parse_time_string(day_from_time)
+                        window_end_hour, window_end_minute = parse_time_string(day_to_time)
                         
-                        def parse_time_string(time_str):
-                            time_str = time_str.lower().strip().replace(" ", "")
-                            is_pm = "pm" in time_str
-                            is_am = "am" in time_str
-                            clean_time = time_str.replace("pm", "").replace("am", "")
-                            
-                            if ":" in clean_time:
-                                parts = clean_time.split(":")
-                                hour = int(parts[0])
-                                minute = int(parts[1]) if len(parts) > 1 else 0
-                            else:
-                                hour = int(clean_time)
-                                minute = 0
-                            
-                            if is_pm and hour != 12:
-                                hour += 12
-                            elif is_am and hour == 12:
-                                hour = 0
-                            
-                            return hour, minute
-                        
-                        try:
-                            window_start_hour, window_start_minute = parse_time_string(from_str)
-                            window_end_hour, window_end_minute = parse_time_string(to_str)
-                            
+                        if window_start_hour is not None and window_end_hour is not None:
                             # Handle midnight (12:00 am) as end of day
                             if window_end_hour == 0 and window_end_minute == 0:
                                 window_end_hour = 23
                                 window_end_minute = 59
                             
-                            print(f"  📅 Loaded time restriction: {from_str} -> {to_str} (parsed: {window_start_hour:02d}:{window_start_minute:02d} to {window_end_hour:02d}:{window_end_minute:02d})")
-                        except Exception as e:
-                            print(f"  Error parsing time strings: {e}")
-                            has_restriction = False
-                else:
-                    print(f"  ℹ️ No time range configured")
-            except Exception as e:
-                print(f"  Error reading accountmanagement.json: {e}")
+                            start_12hr = to_12hr(window_start_hour, window_start_minute)
+                            end_12hr = to_12hr(window_end_hour, window_end_minute)
+                            
+                            # Check if current time is within the window
+                            is_restricted = is_time_in_window(
+                                current_datetime.hour, current_datetime.minute,
+                                window_start_hour, window_start_minute,
+                                window_end_hour, window_end_minute
+                            )
+                            
+                            # Check if crosses midnight
+                            crosses_midnight = (window_end_hour * 60 + window_end_minute) < (window_start_hour * 60 + window_start_minute)
+                            
+                            print(f"  Time Window: {start_12hr} - {end_12hr}")
+                            print(f"  🕐 Current time: {current_datetime.strftime('%I:%M:%S %p')}")
+                            
+                            if is_restricted:
+                                print(f"  🔴 WITHIN restricted time window - TRADING RESTRICTED")
+                            else:
+                                print(f"  ✅ Outside restricted window - TRADING ALLOWED")
+                        else:
+                            print(f"  ⚠️ Invalid time format: {day_from_time} -> {day_to_time}")
+                            is_restricted = False
+                    except Exception as e:
+                        print(f"  Error parsing time strings: {e}")
+                        is_restricted = False
+            else:
+                # Day not in restrictions_duration - NO RESTRICTION
+                print(f"  ✅ {current_day_name} has NO RESTRICTION - All trading allowed")
+                has_restriction = False
+                is_restricted = False
+        else:
+            print(f"  ⚠️ No accountmanagement config found in any source (file, UPDATED_INVESTORS, FETCHED_INVESTORS)")
+            config_source = "none"
         
-        # If no current_datetime set (no config file or no timezone), use local time
+        # If no current_datetime set (no config or no timezone), use local time
         if current_datetime is None:
             current_datetime = datetime.now()
+            current_day_name = current_datetime.strftime("%A")
             print(f"  🕐 Using local time: {current_datetime.strftime('%Y-%m-%d %I:%M:%S %p')}")
+            print(f"  📅 Current day: {current_day_name}")
         
-        # If no restriction configured or zeros stripped it out, skip and continue
+        # If no restriction configured, skip and continue
         if not has_restriction:
             print(f"  ℹ️ NO RESTRICTION CONFIGURED - All trading allowed")
             stats["no_restriction_configured"] += 1
@@ -3614,7 +2771,9 @@ def restricted_timerange(inv_id=None):
             activities_data['time_window_details'] = {
                 'has_restriction': False,
                 'last_check': current_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                'message': 'No time restriction configured - all trading allowed'
+                'message': 'No time restriction configured - all trading allowed',
+                'current_day': current_day_name,
+                'config_source': config_source if config_source else 'none'
             }
             
             try:
@@ -3634,56 +2793,17 @@ def restricted_timerange(inv_id=None):
             updated_record['executions_notification'] = activities_data.get('executions_notification', {})
             updated_record['current_time_window_status'] = current_time_window_status
             updated_record['last_time_window_check'] = current_datetime.isoformat()
+            updated_record['config_source'] = config_source if config_source else 'none'
             updated_investors_data[user_brokerid] = updated_record
             
             stats["processing_success"] = True
             continue
         
-        # Determine if trading is restricted
-        # If day is restricted, trading is ALWAYS restricted (no time check needed)
-        if is_day_restricted_flag:
-            is_within_window = True  # Trading is restricted for the entire day
-            start_12hr = "12:00 AM"
-            end_12hr = "11:59 PM"
-            print(f"  Time Window: {start_12hr} - {end_12hr} (FULL DAY RESTRICTION)")
-            print(f"  🕐 Current time: {current_datetime.strftime('%I:%M:%S %p')}")
-            print(f"  🔴 DAY RESTRICTED - TRADING RESTRICTED (time check skipped)")
-        else:
-            # Day is NOT restricted, now check time window
-            window_start_minutes = window_start_hour * 60 + window_start_minute
-            window_end_minutes = window_end_hour * 60 + window_end_minute
-            crosses_midnight = window_end_minutes < window_start_minutes
-            current_time_minutes = current_datetime.hour * 60 + current_datetime.minute
-            
-            if crosses_midnight:
-                is_within_window = (current_time_minutes >= window_start_minutes or 
-                                    current_time_minutes <= window_end_minutes)
-            else:
-                is_within_window = window_start_minutes <= current_time_minutes <= window_end_minutes
-            
-            def to_12hr(hour, minute):
-                period = "AM" if hour < 12 else "PM"
-                hour_12 = hour % 12
-                if hour_12 == 0:
-                    hour_12 = 12
-                return f"{hour_12}:{minute:02d} {period}"
-            
-            start_12hr = to_12hr(window_start_hour, window_start_minute)
-            end_12hr = to_12hr(window_end_hour, window_end_minute)
-            
-            print(f"  Time Window: {start_12hr} - {end_12hr}")
-            print(f"  🕐 Current time: {current_datetime.strftime('%I:%M:%S %p')}")
-            
-            if is_within_window:
-                print(f"  🔴 WITHIN restricted time window - TRADING RESTRICTED")
-            else:
-                print(f"  ✅ Outside restricted window - TRADING ALLOWED")
-        
         stats["investors_checked"] += 1
         
-        current_time_window_status = "in_window" if is_within_window else "outside_window"
+        current_time_window_status = "in_window" if is_restricted else "outside_window"
         
-        if is_within_window:
+        if is_restricted:
             stats["investors_in_window"] += 1
             any_in_window = True
             expected_message_type = "warning"
@@ -3691,20 +2811,22 @@ def restricted_timerange(inv_id=None):
                 'investor': user_brokerid,
                 'time_window': f"{start_12hr} - {end_12hr}",
                 'current_time': current_datetime.strftime('%I:%M:%S %p'),
-                'restricted_day': is_day_restricted_flag,
-                'day_restricted_only': is_day_restricted_flag and not time_range_config
+                'full_day_restriction': day_is_full_day,
+                'day': current_day_name,
+                'config_source': config_source if config_source else 'none'
             })
         else:
             expected_message_type = "success"
         
         alert_details['time_windows'][user_brokerid] = {
-            'start': f"{window_start_hour:02d}:{window_start_minute:02d}" if window_start_hour is not None else "00:00",
-            'end': f"{window_end_hour:02d}:{window_end_minute:02d}" if window_end_hour is not None else "23:59",
-            'is_in_window': is_within_window,
-            'restricted_days': restricted_days,
-            'timezone': timezone_config,
-            'is_day_restricted': is_day_restricted_flag,
-            'day_restriction_only': is_day_restricted_flag and not time_range_config
+            'start': start_12hr,
+            'end': end_12hr,
+            'is_in_window': is_restricted,
+            'timezone': timezone_config if timezone_config else 'local',
+            'current_day': current_day_name,
+            'full_day_restriction': day_is_full_day,
+            'day_restriction_configured': day_has_restriction,
+            'config_source': config_source if config_source else 'none'
         }
         alert_details['investors_processed'].append(user_brokerid)
         
@@ -3738,14 +2860,14 @@ def restricted_timerange(inv_id=None):
         print(f"     Expected type for current status: {expected_message_type}")
         
         # ALWAYS try to add notification based on current status
-        if is_within_window:
+        if is_restricted:
             # INSIDE restricted window - WARNING message
-            if is_day_restricted_flag:
-                window_message = f"⚠️ DAY RESTRICTION: Current day ({current_datetime.strftime('%A')}) is a restricted trading day. NO TRADING ALLOWED all day. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
-                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} is on a RESTRICTED DAY ({current_datetime.strftime('%A')}) at {current_datetime.strftime('%I:%M:%S %p')}. Full day trading restriction active."
+            if day_is_full_day:
+                window_message = f"⚠️ FULL DAY RESTRICTION: {current_day_name} is a fully restricted trading day. NO TRADING ALLOWED all day. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
+                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} is on a FULL DAY RESTRICTION ({current_day_name}) at {current_datetime.strftime('%I:%M:%S %p')}. Full day trading restriction active."
             else:
-                window_message = f"⚠️ RESTRICTED TIME WINDOW: You are currently in the restricted trading window ({start_12hr} - {end_12hr}). Trading activities are LIMITED during this time. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
-                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} is IN restricted time window ({start_12hr} - {end_12hr}) at {current_datetime.strftime('%I:%M:%S %p')}. Trading restrictions active."
+                window_message = f"⚠️ RESTRICTED TIME WINDOW: You are currently in the restricted trading window ({start_12hr} - {end_12hr}) for {current_day_name}. Trading activities are LIMITED during this time. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
+                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} is IN restricted time window for {current_day_name} ({start_12hr} - {end_12hr}) at {current_datetime.strftime('%I:%M:%S %p')}. Trading restrictions active."
             
             added = add_notification(activities_data['notifications'], 'RestrictedTimeWindow', window_message, 'warning', timestamp)
             if added:
@@ -3758,8 +2880,12 @@ def restricted_timerange(inv_id=None):
                 print(f"  ✅ Added execution WARNING notification")
         else:
             # OUTSIDE restricted window - SUCCESS message
-            window_message = f"✅ NORMAL TRADING HOURS: You are outside the restricted trading window ({start_12hr} - {end_12hr}). Trading activities can proceed normally. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
-            execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} is OUTSIDE restricted time window ({start_12hr} - {end_12hr}) at {current_datetime.strftime('%I:%M:%S %p')}. Normal trading allowed."
+            if day_has_restriction:
+                window_message = f"✅ NORMAL TRADING HOURS: You are outside the restricted trading window for {current_day_name} ({start_12hr} - {end_12hr}). Trading activities can proceed normally. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
+                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} is OUTSIDE restricted time window for {current_day_name} ({start_12hr} - {end_12hr}) at {current_datetime.strftime('%I:%M:%S %p')}. Normal trading allowed."
+            else:
+                window_message = f"✅ NO RESTRICTION: {current_day_name} has no trading restrictions. Trading activities can proceed normally. Current time: {current_datetime.strftime('%I:%M:%S %p')}"
+                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} has NO RESTRICTION on {current_day_name} at {current_datetime.strftime('%I:%M:%S %p')}. Normal trading allowed."
             
             added = add_notification(activities_data['notifications'], 'RestrictedTimeWindow', window_message, 'success', timestamp)
             if added:
@@ -3776,18 +2902,17 @@ def restricted_timerange(inv_id=None):
         activities_data['time_window_details'] = {
             'start_time': start_12hr,
             'end_time': end_12hr,
-            'start_raw': f"{window_start_hour:02d}:{window_start_minute:02d}" if window_start_hour is not None else "00:00",
-            'end_raw': f"{window_end_hour:02d}:{window_end_minute:02d}" if window_end_hour is not None else "23:59",
-            'crosses_midnight': crosses_midnight if not is_day_restricted_flag else False,
-            'has_restriction': True,
+            'has_restriction': has_restriction,
             'last_check': timestamp,
-            'is_in_window': is_within_window,
-            'restricted_days': restricted_days,
+            'is_in_window': is_restricted,
             'timezone_used': timezone_config if timezone_config else 'local',
-            'current_day': current_datetime.strftime('%A'),
-            'is_day_restricted': is_day_restricted_flag,
-            'day_restriction_only': is_day_restricted_flag and not time_range_config,
-            'timezone_converted': timezone_config is not None
+            'current_day': current_day_name,
+            'full_day_restriction': day_is_full_day,
+            'day_has_restriction': day_has_restriction,
+            'crosses_midnight': crosses_midnight,
+            'timezone_converted': timezone_config is not None,
+            'restrictions_available': list(restrictions_duration.keys()) if restrictions_duration else [],
+            'config_source': config_source if config_source else 'none'
         }
         
         try:
@@ -3795,7 +2920,9 @@ def restricted_timerange(inv_id=None):
                 json.dump(activities_data, f, indent=4)
             print(f"\n  ✅ activities.json saved")
             print(f"     • Time window status: {current_time_window_status}")
-            print(f"     • Day restricted: {is_day_restricted_flag}")
+            print(f"     • Day restricted: {is_restricted}")
+            print(f"     • Full day restriction: {day_is_full_day}")
+            print(f"     • Config source: {config_source if config_source else 'none'}")
             print(f"     • Notifications count: {len(activities_data['notifications'])}")
             print(f"     • Executions count: {len(activities_data['executions_notification'])}")
         except Exception as e:
@@ -3817,12 +2944,13 @@ def restricted_timerange(inv_id=None):
         updated_record['time_window_config'] = {
             'start': start_12hr,
             'end': end_12hr,
-            'has_restriction': True,
-            'restricted_days': restricted_days,
+            'has_restriction': has_restriction,
             'timezone': timezone_config if timezone_config else 'local',
-            'current_day': current_datetime.strftime('%A'),
-            'is_day_restricted': is_day_restricted_flag,
-            'day_restriction_only': is_day_restricted_flag and not time_range_config
+            'current_day': current_day_name,
+            'full_day_restriction': day_is_full_day,
+            'day_has_restriction': day_has_restriction,
+            'restrictions_available': list(restrictions_duration.keys()) if restrictions_duration else [],
+            'config_source': config_source if config_source else 'none'
         }
         
         updated_investors_data[user_brokerid] = updated_record
@@ -3999,7 +3127,7 @@ def investor_broker_symbols(inv_id=None):
     """
     Display and compare broker symbols with investor's configured symbols.
     Helps identify symbol naming mismatches.
-    Records broker symbols to activities.json and updated_investors.json for each investor.
+    Records broker symbols to activities.json and updated_harvhub_investors.json for each investor.
     
     Parameters:
     - inv_id: Optional investor ID to compare against their config
@@ -4040,7 +3168,7 @@ def investor_broker_symbols(inv_id=None):
     
     
     # ============================================================
-    # RECORD BROKER SYMBOLS TO ACTIVITIES.JSON AND UPDATED_INVESTORS.JSON
+    # RECORD BROKER SYMBOLS TO ACTIVITIES.JSON AND UPDATED_harvhub_investors.json
     # ============================================================
     print(f"📝 RECORDING BROKER SYMBOLS TO JSON FILES:\n")
     
@@ -4052,14 +3180,14 @@ def investor_broker_symbols(inv_id=None):
     else:
         updated_count = 0
         
-        # Load updated_investors.json
+        # Load updated_harvhub_investors.json
         updated_investors_data = {}
         if os.path.exists(UPDATED_INVESTORS):
             try:
                 with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                     updated_investors_data = json.load(f)
             except Exception as e:
-                print(f"   Error loading updated_investors.json: {e}")
+                print(f"   Error loading updated_harvhub_investors.json: {e}")
         
         for user_brokerid in investors_to_process:
             inv_root = Path(INV_PATH) / user_brokerid
@@ -4095,7 +3223,7 @@ def investor_broker_symbols(inv_id=None):
                 print(f"   Investor {user_brokerid}: Error saving activities.json - {e}")
             
             # ============================================================
-            # UPDATE UPDATED_INVESTORS.JSON
+            # UPDATE UPDATED_harvhub_investors.json
             # ============================================================
             if user_brokerid in updated_investors_data:
                 updated_record = updated_investors_data[user_brokerid].copy()
@@ -4117,14 +3245,14 @@ def investor_broker_symbols(inv_id=None):
             updated_investors_data[user_brokerid] = updated_record
             updated_count += 1
         
-        # Save updated_investors.json
+        # Save updated_harvhub_investors.json
         if updated_investors_data:
             os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
             try:
                 with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                     json.dump(updated_investors_data, f, indent=4)
             except Exception as e:
-                print(f"\n   Error saving updated_investors.json: {e}")
+                print(f"\n   Error saving updated_harvhub_investors.json: {e}")
         
         print(f"\n   📊 Updated {updated_count} investor(s) with broker symbols")
     
@@ -4234,9 +3362,9 @@ def investor_broker_symbols(inv_id=None):
                 else:
                     print(f"   accountmanagement.json not found for investor '{inv_id}'")
             else:
-                print(f"   Investor '{inv_id}' not found in investors.json")
+                print(f"   Investor '{inv_id}' not found in harvhub_investors.json")
         else:
-            print(f"   investors.json not found")
+            print(f"   harvhub_investors.json not found")
     
     print(f"{'='*80}\n")
     
@@ -4483,10 +3611,10 @@ def fetch_ohlc_data_for_investor(inv_id):
             return data
 
         except json.JSONDecodeError as e:
-            print(f"Invalid JSON in investors.json: {e}")
+            print(f"Invalid JSON in harvhub_investors.json: {e}")
             return {}
         except Exception as e:
-            print(f"Failed to load investors.json: {e}")
+            print(f"Failed to load harvhub_investors.json: {e}")
             return {}
     
     def load_accountmanagement(investor_id):
@@ -4878,7 +4006,7 @@ def fetch_ohlc_data_for_investor(inv_id):
         # Step 2: Get investor config
         investor_cfg = investor_users.get(inv_id)
         if not investor_cfg:
-            print(f"    Investor {inv_id} | Config not found in investors.json")
+            print(f"    Investor {inv_id} | Config not found in harvhub_investors.json")
             result['errors'].append("Investor config not found")
             return result
         
@@ -16307,11 +15435,14 @@ def deduplicate_orders(inv_id=None):
     
     return any_duplicates_removed
 
-def validate_strategy_authorized_orders():
+def validate_strategy_authorized_orders(inv_id=None):
     """
-    Validates pending orders against investor's strategy authorization in accountmanagement.
+    Validates pending orders and positions against investor's strategy authorization in accountmanagement.
+    Goes straight to working - assumes MT5 is already connected.
     
-    Processes ALL investors from FETCHED_INVESTORS using LOCAL FILES ONLY.
+    Processes investors from FETCHED_INVESTORS using LOCAL FILES ONLY.
+    If inv_id is provided, only processes that specific investor.
+    
     Checks if the strategy the investor signed up for (invested_with) has a key in 
     symbols_dictionary. If it exists, validates that:
     - Order symbols are in the allowed symbols list (case-insensitive)
@@ -16320,32 +15451,47 @@ def validate_strategy_authorized_orders():
     If the strategy key doesn't exist, assumes all orders are authorized.
     If the strategy key exists but symbols/timeframes lists are empty, removes all orders.
     
-    Supports multiple strategies separated by commas.
+    DELETES unauthorized orders from MT5 directly and removes from local JSON files.
+    CLOSES unauthorized positions from MT5 directly.
+    
+    Args:
+        inv_id (str, optional): Specific investor ID to process. If None, processes all investors.
     
     Returns:
         dict: Statistics about the validation and cleanup for all investors
     """
     print(f"\n{'='*10} 🔐 STRATEGY AUTHORIZATION VALIDATION {'='*10}")
+    if inv_id:
+        print(f" Processing single investor: {inv_id}")
 
     # Initialize stats
     stats = {
+        "investor_id": inv_id if inv_id else "all",
         "investors_checked": 0,
+        "investors_with_restrictions": 0,
+        "investors_without_restrictions": 0,
         "orders_checked": 0,
         "orders_removed": 0,
         "orders_removed_symbol_mismatch": 0,
         "orders_removed_timeframe_mismatch": 0,
         "orders_removed_empty_config": 0,
         "orders_kept": 0,
+        "positions_checked": 0,
+        "positions_closed": 0,
+        "positions_closed_symbol_mismatch": 0,
+        "positions_closed_timeframe_mismatch": 0,
+        "positions_closed_empty_config": 0,
+        "positions_kept": 0,
         "processing_success": False,
-        "investors_with_restrictions": 0,
-        "investors_without_restrictions": 0,
-        "investor_details": {}
+        "investor_details": {},
+        "errors": []
     }
     
     # Load FETCHED_INVESTORS data
     fetched_investors_path = Path(FETCHED_INVESTORS)
     if not fetched_investors_path.exists():
         print(f"❌ FETCHED_INVESTORS file not found: {FETCHED_INVESTORS}")
+        stats["errors"].append("FETCHED_INVESTORS file not found")
         return stats
     
     try:
@@ -16353,16 +15499,56 @@ def validate_strategy_authorized_orders():
             investors_data = json.load(f)
     except Exception as e:
         print(f"❌ Error loading FETCHED_INVESTORS: {e}")
+        stats["errors"].append(f"Error loading FETCHED_INVESTORS: {e}")
         return stats
     
     if not investors_data:
         print(f"⚠️ No investors found in FETCHED_INVESTORS")
         return stats
     
-    total_investors = len(investors_data)
+    # Determine which investors to process
+    if inv_id:
+        # Process single investor
+        investors_to_process = {inv_id: investors_data.get(inv_id)} if inv_id in investors_data else {}
+        if not investors_to_process:
+            print(f"❌ Investor {inv_id} not found in FETCHED_INVESTORS")
+            stats["errors"].append(f"Investor {inv_id} not found")
+            return stats
+    else:
+        # Process all investors
+        investors_to_process = investors_data
+    
+    total_investors = len(investors_to_process)
     processed = 0
     
-    for investor_id, investor_data in investors_data.items():
+    # First, build a mapping of investor ID to magic number for filtering
+    # This requires access to usersdictionary or similar
+    try:
+        active_users_dict = usersdictionary
+    except NameError:
+        active_users_dict = {}
+        print(" ⚠️ Warning: 'usersdictionary' not found. Cannot filter by magic number.")
+    
+    investor_magic_map = {}
+    for investor_id in investors_to_process.keys():
+        broker_cfg = active_users_dict.get(investor_id)
+        if broker_cfg:
+            login_id = broker_cfg.get('LOGIN_ID', '')
+            if login_id:
+                try:
+                    magic_number = int(str(login_id) + str(investor_id))
+                    investor_magic_map[investor_id] = magic_number
+                except (ValueError, TypeError):
+                    investor_magic_map[investor_id] = None
+            else:
+                investor_magic_map[investor_id] = None
+        else:
+            investor_magic_map[investor_id] = None
+    
+    for investor_id, investor_data in investors_to_process.items():
+        if investor_data is None:
+            continue
+            
         processed += 1
         stats["investors_checked"] += 1
         
@@ -16375,8 +15561,15 @@ def validate_strategy_authorized_orders():
             "orders_checked": 0,
             "orders_removed": 0,
             "orders_kept": 0,
+            "positions_checked": 0,
+            "positions_closed": 0,
+            "positions_kept": 0,
             "strategy_key_found": False,
-            "has_orders": False
+            "has_orders": False,
+            "has_positions": False,
+            "mt5_orders_deleted": 0,
+            "mt5_positions_closed": 0,
+            "mt5_errors": []
         }
         
         # Get investor data
@@ -16426,12 +15619,9 @@ def validate_strategy_authorized_orders():
                 allowed_timeframes = strategy_config.get("timeframes", [])
                 allowed_symbols_all.extend(allowed_symbols)
                 allowed_timeframes_all.extend(allowed_timeframes)
-            else:
-                pass  # Strategy not found, skip silently
         
         # If no strategies found, assume all orders are authorized
         if not found_strategies:
-            stats["strategy_key_found"] = False
             stats["investors_without_restrictions"] += 1
             stats["investor_details"][investor_id] = investor_stats
             continue
@@ -16445,126 +15635,213 @@ def validate_strategy_authorized_orders():
         investor_stats["allowed_symbols"] = [s.lower() for s in set(allowed_symbols_all)]
         investor_stats["allowed_timeframes"] = [t.lower() for t in set(allowed_timeframes_all)]
         
-        # Now validate local pending orders JSON files
-        inv_root = Path(INV_PATH) / investor_id
+        print(f"\n[{processed}/{total_investors}] 🔐 Processing: {investor_id}")
+        print(f"  └─ Strategies: {', '.join(strategy_names)}")
+        print(f"  └─ Allowed Symbols: {', '.join(investor_stats['allowed_symbols']) if investor_stats['allowed_symbols'] else 'NONE'}")
+        print(f"  └─ Allowed Timeframes: {', '.join(investor_stats['allowed_timeframes']) if investor_stats['allowed_timeframes'] else 'NONE'}")
         
-        if not inv_root.exists():
-            stats["investor_details"][investor_id] = investor_stats
-            continue
+        # Get the magic number for this investor to filter orders
+        magic_number = investor_magic_map.get(investor_id)
+        if magic_number is None:
+            print(f"  └─ ⚠️ No magic number found for investor {investor_id} - checking ALL orders/positions")
         
-        # Check each strategy folder for pending orders
-        for strategy_name in found_strategies:
-            pending_json_path = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
-            
-            if not pending_json_path.exists():
-                continue
-            
-            try:
-                with open(pending_json_path, 'r', encoding='utf-8') as f:
-                    pending_data = json.load(f)
-                
-                # Track if we need to rewrite the file
-                file_modified = False
-                filtered_data = []
-                
-                # Handle different JSON structures
-                orders_list = []
-                
-                # Case 1: It's a list of orders
-                if isinstance(pending_data, list):
-                    orders_list = pending_data
-                
-                # Case 2: It's a dict with symbol keys
-                elif isinstance(pending_data, dict):
-                    # Check if it's a dict with pending_orders structure
-                    for symbol, symbol_data in pending_data.items():
-                        if isinstance(symbol_data, dict) and "pending_orders" in symbol_data:
-                            orders_list.extend(symbol_data.get("pending_orders", []))
-                        elif isinstance(symbol_data, list):
-                            orders_list.extend(symbol_data)
-                        else:
-                            # Single order object
-                            if isinstance(symbol_data, dict) and "symbol" in symbol_data:
-                                orders_list.append(symbol_data)
+        # --- VALIDATE AND DELETE MT5 PENDING ORDERS ---
+        print(f"\n  └─ 📋 Checking MT5 pending orders...")
+        pending_orders = mt5.orders_get()
+        
+        if pending_orders:
+            # Filter orders by investor (using magic number)
+            investor_orders = []
+            for order in pending_orders:
+                # Check if order belongs to this investor
+                if magic_number is not None:
+                    # Filter by magic number
+                    if order.magic == magic_number:
+                        investor_orders.append(order)
                 else:
-                    continue
-                
-                if not orders_list:
-                    continue
-                
+                    # If no magic number, check all orders but warn
+                    investor_orders.append(order)
+            
+            if investor_orders:
                 investor_stats["has_orders"] = True
+                print(f"      • Found {len(investor_orders)} pending order(s) for this investor")
                 
-                # Validate each order
-                for order in orders_list:
+                for order in investor_orders:
                     stats["orders_checked"] += 1
                     investor_stats["orders_checked"] += 1
                     
-                    # Get symbol and timeframe (case-insensitive)
-                    order_symbol = order.get("symbol", "").strip()
-                    order_timeframe = order.get("timeframe", "").strip()
+                    order_symbol = order.symbol
+                    order_timeframe = getattr(order, 'timeframe', '')  # May not exist in MT5 order object
                     
-                    # Convert to lowercase for case-insensitive comparison
                     order_symbol_lower = order_symbol.lower() if order_symbol else ""
                     order_timeframe_lower = order_timeframe.lower() if order_timeframe else ""
                     
-                    order_removed = False
+                    order_unauthorized = False
+                    removal_reason = ""
                     
                     # --- VALIDATE SYMBOL (case-insensitive) ---
                     if investor_stats["allowed_symbols"] and order_symbol_lower:
                         if order_symbol_lower not in investor_stats["allowed_symbols"]:
-                            order_removed = True
+                            order_unauthorized = True
+                            removal_reason = "Symbol not allowed"
                             stats["orders_removed_symbol_mismatch"] += 1
                     elif investor_stats["allowed_symbols"] and not order_symbol_lower:
-                        # Symbol missing but restrictions exist
-                        order_removed = True
+                        order_unauthorized = True
+                        removal_reason = "Symbol missing"
                         stats["orders_removed_symbol_mismatch"] += 1
                     
                     # --- VALIDATE TIMEFRAME (case-insensitive, if not already removed) ---
-                    if not order_removed and investor_stats["allowed_timeframes"]:
+                    if not order_unauthorized and investor_stats["allowed_timeframes"]:
                         if order_timeframe_lower:
                             if order_timeframe_lower not in investor_stats["allowed_timeframes"]:
-                                order_removed = True
+                                order_unauthorized = True
+                                removal_reason = "Timeframe not allowed"
                                 stats["orders_removed_timeframe_mismatch"] += 1
                         else:
-                            # No timeframe specified but timeframes are restricted
-                            order_removed = True
+                            order_unauthorized = True
+                            removal_reason = "Timeframe missing"
                             stats["orders_removed_timeframe_mismatch"] += 1
                     
-                    # --- KEEP OR REMOVE ORDER ---
-                    if order_removed:
-                        stats["orders_removed"] += 1
-                        investor_stats["orders_removed"] += 1
-                        file_modified = True
+                    # --- DELETE UNAUTHORIZED ORDER FROM MT5 ---
+                    if order_unauthorized:
+                        print(f"      • Deleting unauthorized {order.symbol} #{order.ticket}: {removal_reason}")
+                        
+                        cancel_request = {
+                            "action": mt5.TRADE_ACTION_REMOVE,
+                            "order": order.ticket
+                        }
+                        result = mt5.order_send(cancel_request)
+                        
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            stats["orders_removed"] += 1
+                            investor_stats["orders_removed"] += 1
+                            investor_stats["mt5_orders_deleted"] += 1
+                            print(f"          ✅ Deleted from MT5")
+                        else:
+                            error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
+                            stats["errors"].append(f"{investor_id}: Failed to delete order #{order.ticket}: {error_msg}")
+                            investor_stats["mt5_errors"].append(f"Order #{order.ticket}: {error_msg}")
+                            print(f"          ❌ Delete failed: {error_msg}")
                     else:
                         stats["orders_kept"] += 1
                         investor_stats["orders_kept"] += 1
-                        filtered_data.append(order)
+            else:
+                print(f"      • No pending orders found for this investor (magic: {magic_number})")
+        else:
+            print(f"      • No pending orders found on account")
+        
+        # --- VALIDATE AND CLOSE MT5 POSITIONS ---
+        print(f"\n  └─ 💼 Checking MT5 open positions...")
+        positions = mt5.positions_get()
+        
+        if positions:
+            # Filter positions by investor (using magic number)
+            investor_positions = []
+            for position in positions:
+                if magic_number is not None:
+                    # Filter by magic number
+                    if position.magic == magic_number:
+                        investor_positions.append(position)
+                else:
+                    # If no magic number, check all positions but warn
+                    investor_positions.append(position)
+            
+            if investor_positions:
+                investor_stats["has_positions"] = True
+                print(f"      • Found {len(investor_positions)} open position(s) for this investor")
                 
-                # Write back the modified file if changes were made
-                if file_modified:
-                    # Preserve the original structure
-                    if isinstance(pending_data, list):
-                        with open(pending_json_path, 'w', encoding='utf-8') as f:
-                            json.dump(filtered_data, f, indent=2)
-                    elif isinstance(pending_data, dict):
-                        # Rebuild the dict structure with filtered orders
-                        new_data = {}
-                        for symbol, symbol_data in pending_data.items():
-                            if isinstance(symbol_data, dict) and "pending_orders" in symbol_data:
-                                new_data[symbol] = {"pending_orders": filtered_data}
-                            elif isinstance(symbol_data, list):
-                                new_data[symbol] = filtered_data
-                            else:
-                                new_data[symbol] = symbol_data
-                        
-                        with open(pending_json_path, 'w', encoding='utf-8') as f:
-                            json.dump(new_data, f, indent=2)
+                for position in investor_positions:
+                    stats["positions_checked"] += 1
+                    investor_stats["positions_checked"] += 1
                     
-                    print(f"  ✅ {investor_id}: Updated {strategy_name} - removed {investor_stats['orders_removed']} orders")
-                
-            except Exception as e:
-                print(f"  ⚠️ {investor_id}: Error processing {strategy_name} - {str(e)}")
-                continue
+                    position_symbol = position.symbol
+                    position_timeframe = getattr(position, 'timeframe', '')
+                    
+                    position_symbol_lower = position_symbol.lower() if position_symbol else ""
+                    position_timeframe_lower = position_timeframe.lower() if position_timeframe else ""
+                    
+                    position_unauthorized = False
+                    removal_reason = ""
+                    
+                    # --- VALIDATE SYMBOL (case-insensitive) ---
+                    if investor_stats["allowed_symbols"] and position_symbol_lower:
+                        if position_symbol_lower not in investor_stats["allowed_symbols"]:
+                            position_unauthorized = True
+                            removal_reason = "Symbol not allowed"
+                            stats["positions_closed_symbol_mismatch"] += 1
+                    elif investor_stats["allowed_symbols"] and not position_symbol_lower:
+                        position_unauthorized = True
+                        removal_reason = "Symbol missing"
+                        stats["positions_closed_symbol_mismatch"] += 1
+                    
+                    # --- VALIDATE TIMEFRAME (case-insensitive, if not already removed) ---
+                    if not position_unauthorized and investor_stats["allowed_timeframes"]:
+                        if position_timeframe_lower:
+                            if position_timeframe_lower not in investor_stats["allowed_timeframes"]:
+                                position_unauthorized = True
+                                removal_reason = "Timeframe not allowed"
+                                stats["positions_closed_timeframe_mismatch"] += 1
+                        else:
+                            position_unauthorized = True
+                            removal_reason = "Timeframe missing"
+                            stats["positions_closed_timeframe_mismatch"] += 1
+                    
+                    # --- CLOSE UNAUTHORIZED POSITION FROM MT5 ---
+                    if position_unauthorized:
+                        is_buy = position.type == mt5.POSITION_TYPE_BUY
+                        position_type = "BUY" if is_buy else "SELL"
+                        
+                        print(f"      • Closing unauthorized {position_type} position #{position.ticket} | {position.symbol}: {removal_reason}")
+                        print(f"          Volume: {position.volume:.2f} | Open: {position.price_open:.5f} | P/L: ${position.profit:.2f}")
+                        
+                        tick = mt5.symbol_info_tick(position.symbol)
+                        if not tick:
+                            stats["errors"].append(f"{investor_id}: Cannot get tick for {position.symbol}")
+                            investor_stats["mt5_errors"].append(f"Position #{position.ticket}: Cannot get tick")
+                            print(f"          ❌ Cannot get current price")
+                            continue
+                        
+                        close_price = tick.bid if is_buy else tick.ask
+                        
+                        close_request = {
+                            "action": mt5.TRADE_ACTION_DEAL,
+                            "symbol": position.symbol,
+                            "volume": position.volume,
+                            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+                            "position": position.ticket,
+                            "price": close_price,
+                            "deviation": 20,
+                            "magic": position.magic if hasattr(position, 'magic') else 0
+                        }
+                        
+                        result = mt5.order_send(close_request)
+                        
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            stats["positions_closed"] += 1
+                            investor_stats["positions_closed"] += 1
+                            investor_stats["mt5_positions_closed"] += 1
+                            print(f"          ✅ Closed from MT5")
+                        else:
+                            error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
+                            stats["errors"].append(f"{investor_id}: Failed to close position #{position.ticket}: {error_msg}")
+                            investor_stats["mt5_errors"].append(f"Position #{position.ticket}: {error_msg}")
+                            print(f"          ❌ Close failed: {error_msg}")
+                    else:
+                        stats["positions_kept"] += 1
+                        investor_stats["positions_kept"] += 1
+            else:
+                print(f"      • No open positions found for this investor (magic: {magic_number})")
+        else:
+            print(f"      • No open positions found on account")
+        
+        # --- INVESTOR SUMMARY ---
+        print(f"\n  └─ 📊 Results for {investor_id}:")
+        if investor_stats["has_orders"]:
+            print(f"      • Orders: {investor_stats['orders_checked']} checked, {investor_stats['mt5_orders_deleted']} deleted from MT5")
+        if investor_stats["has_positions"]:
+            print(f"      • Positions: {investor_stats['positions_checked']} checked, {investor_stats['mt5_positions_closed']} closed from MT5")
+        if investor_stats["mt5_errors"]:
+            print(f"      • Errors: {len(investor_stats['mt5_errors'])}")
         
         stats["investor_details"][investor_id] = investor_stats
     
@@ -16576,17 +15853,28 @@ def validate_strategy_authorized_orders():
         print(f"     - Symbol mismatches: {stats['orders_removed_symbol_mismatch']}")
     if stats["orders_removed_timeframe_mismatch"] > 0:
         print(f"     - Timeframe mismatches: {stats['orders_removed_timeframe_mismatch']}")
+    print(f"   Positions: {stats['positions_checked']} checked, {stats['positions_kept']} kept, {stats['positions_closed']} closed")
+    if stats["positions_closed_symbol_mismatch"] > 0:
+        print(f"     - Symbol mismatches: {stats['positions_closed_symbol_mismatch']}")
+    if stats["positions_closed_timeframe_mismatch"] > 0:
+        print(f"     - Timeframe mismatches: {stats['positions_closed_timeframe_mismatch']}")
     
-    # Print only investors with changes
-    print(f"\n  📋 Investor Results:")
-    for inv_id, inv_stats in stats["investor_details"].items():
-        if inv_stats.get("strategy_names"):
-            status = "🔒 RESTRICTED" if inv_stats.get("strategy_key_found") else "🔓 UNRESTRICTED"
-            orders = f"{inv_stats.get('orders_checked', 0)} checked, {inv_stats.get('orders_removed', 0)} removed" if inv_stats.get('has_orders') else "no orders"
-            print(f"     • {inv_id}: {status} - {', '.join(inv_stats['strategy_names'])} - {orders}")
+    if stats["errors"]:
+        print(f"\n   ⚠️ ERRORS ENCOUNTERED: {len(stats['errors'])}")
+        for error in stats["errors"][:5]:
+            print(f"      • {error}")
+        if len(stats["errors"]) > 5:
+            print(f"      • ... and {len(stats['errors']) - 5} more errors")
+    
+    total_actions = stats['orders_removed'] + stats['positions_closed']
+    if total_actions > 0:
+        print(f"\n   ✅ Successfully executed {total_actions} cleanup actions")
+    else:
+        print(f"\n   ℹ️  No unauthorized orders or positions found")
     
     stats["processing_success"] = True
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+    
     return stats
 
 def backup_limit_orders(inv_id=None):
@@ -24918,9 +24206,29 @@ def trades_analytics(inv_id=None):
         print("="*80)
         return stats
     
+    # Load both FETCHED_INVESTORS and UPDATED_INVESTORS for updating
+    fetched_data = {}
+    updated_data = {}
+    
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            print(f" │ Loaded {len(fetched_data)} raw profiles from upstream source matrix.")
+        except Exception as e:
+            print(f" │ Error loading FETCHED_INVESTORS: {e}")
+    
+    if os.path.exists(UPDATED_INVESTORS):
+        try:
+            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                updated_data = json.load(f)
+            print(f" │ Loaded {len(updated_data)} profiles from active destination database.")
+        except Exception as e:
+            print(f" │ Error parsing UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
+            updated_data = {}
+    
     # Dictionary to keep track of generated analytics structures for synchronization later
     generated_analytics_registry = {}
-    
     
     # Iterate System Investors
     for user_brokerid in investor_ids:
@@ -25082,6 +24390,7 @@ def trades_analytics(inv_id=None):
         
         master_flat_processed_trades = []
         unauthorized_trades_detected = False  # Track if any unauthorized trades are found
+        total_profit_loss = 0.0  # Track total P&L for profitandloss field
         
         # EVALUATE INDIVIDUAL POSITION RECORDS
         for position_id, deals in deals_by_position.items():
@@ -25105,6 +24414,9 @@ def trades_analytics(inv_id=None):
             # Track unauthorized trades
             if not is_authorized:
                 unauthorized_trades_detected = True
+            
+            # Track total P&L for profitandloss
+            total_profit_loss += total_pnl
             
             trade_type = "BUY" if entry_deal.type == 0 else "SELL"
             mt5_action = mt5.ORDER_TYPE_BUY if entry_deal.type == 0 else mt5.ORDER_TYPE_SELL
@@ -25237,14 +24549,18 @@ def trades_analytics(inv_id=None):
             }
             master_flat_processed_trades.append(trade_record)
 
-        # Update unauthorized action flags based on detected trades
-        activities_data['unauthorized_action_detected'] = unauthorized_trades_detected
-        activities_data['unauthorized_actions'] = "1" if unauthorized_trades_detected else "0"
-        
-        if unauthorized_trades_detected:
-            print(f" │ ⚠️ UNAUTHORIZED TRADES DETECTED! Setting unauthorized_actions=1")
-        else:
-            print(f" │ ✅ No unauthorized trades detected. Setting unauthorized_actions=0")
+        # Get current broker balance
+        try:
+            account_info = mt5.account_info()
+            if account_info:
+                current_balance = account_info.balance
+                print(f" │ Current broker balance: ${current_balance:.2f}")
+            else:
+                current_balance = 0.0
+                print(f" │ Warning: Could not fetch account info")
+        except Exception as e:
+            current_balance = 0.0
+            print(f" │ Error fetching account balance: {e}")
 
         # Helper function to calculate trade metrics including average closest to highest
         def calculate_trade_metrics(trades_pool):
@@ -25402,7 +24718,8 @@ def trades_analytics(inv_id=None):
                 "highest_trade_dates": highest_dates,
                 "average_trade_dates": average_dates
             }
-        # SEPARATE PIPELINE STATISTICS BUILDER UTILITY (MODIFIED - REMOVED SYMBOLS CONTEST NESTS)
+        
+        # SEPARATE PIPELINE STATISTICS BUILDER UTILITY
         def run_segment_analytics(trades_pool, window_start_dt, mode="full"):
             trades_pool.sort(key=lambda x: x["raw_close_time"])
             t_count = len(trades_pool)
@@ -25849,25 +25166,23 @@ def trades_analytics(inv_id=None):
                 
                 print(f" │ 📊 Final snapshot count: {len(final_analytics_payload['last_28_days'])} (limit: {max_snapshots_to_keep})")
 
-        # LOCAL DISK ACTIVITIES ENGINE COMMIT
-        for old_key in ['Analytics', 'AnalyticsSummary', 'AllTradesDetailed', 'last_analytics_update']:
-            activities_data.pop(old_key, None)
-            
-        activities_data['analytics'] = final_analytics_payload
+        # Update unauthorized action flags in activities data (but don't save)
+        activities_data['unauthorized_action_detected'] = unauthorized_trades_detected
+        activities_data['unauthorized_actions'] = "1" if unauthorized_trades_detected else "0"
         
-        try:
-            with open(activities_path, 'w', encoding='utf-8') as f:
-                json.dump(activities_data, f, indent=4)
-            print(f" │ ✅ Performance payload successfully updated in: activities.json")
-            print(f" │ 📅 New 28-day snapshot stored as: {snapshot_key}")
-            print(f" │ 📅 Contract period: {execution_start_date} to {end_datetime.strftime('%B %d, %Y')}")
-            print(f" │ 🔒 Unauthorized actions flag: {activities_data['unauthorized_actions']} (detected: {activities_data['unauthorized_action_detected']})")
-            print(f" │ 📋 Analytics structure template saved to 'analytics_structure' field")
-            # Cache payload internally for cross-file synchronization sequence below
-            generated_analytics_registry[str(user_brokerid)] = final_analytics_payload
-        except Exception as e:
-            print(f" │ Error recording analytics payload to profile file: {e}")
-            continue
+        if unauthorized_trades_detected:
+            print(f" │ ⚠️ UNAUTHORIZED TRADES DETECTED! Setting unauthorized_actions=1")
+        else:
+            print(f" │ ✅ No unauthorized trades detected. Setting unauthorized_actions=0")
+        
+        # Cache payload internally for cross-file synchronization sequence below
+        generated_analytics_registry[str(user_brokerid)] = final_analytics_payload
+        
+        print(f" │ 📅 New 28-day snapshot stored as: {snapshot_key}")
+        print(f" │ 📅 Contract period: {execution_start_date} to {end_datetime.strftime('%B %d, %Y')}")
+        print(f" │ 💰 Current balance: ${current_balance:.2f}")
+        print(f" │ 📊 Total P&L: ${total_profit_loss:.2f}")
+        print(f" │ 🔒 Unauthorized actions flag: {activities_data['unauthorized_actions']} (detected: {activities_data['unauthorized_action_detected']})")
 
         stats["investors_processed"] += 1
         stats["total_trades_recorded"] += total_combined_trades
@@ -25902,109 +25217,97 @@ def trades_analytics(inv_id=None):
             print(f" │ Error parsing UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
             updated_data = {}
 
-    # Define the base universe of user profiles to sync across files
-    all_target_keys = set(list(fetched_data.keys()) + list(updated_data.keys()) + [str(uid) for uid in investor_ids])
+    # =========================================================================
+    # UPDATE ONLY SPECIFIC FIELDS - DON'T REARRANGE OR OVERWRITE STRUCTURE
+    # =========================================================================
     has_mutated_database = False
 
-    for current_id in sorted(all_target_keys):
-        # Determine tracking reference vectors
-        upstream_source_record = fetched_data.get(current_id)
-        destination_record = updated_data.get(current_id)
-        runtime_broker_config = active_users_dict.get(int(current_id) if current_id.isdigit() else current_id)
-
-        # ACTION A: Record does not exist in destination at all
-        if destination_record is None:
-            print(f" │ ➕ Destination Record '{current_id}' missing entirely. Creating target entry...")
-            has_mutated_database = True
+    for current_id in generated_analytics_registry.keys():
+        # Get the analytics data for this investor
+        analytics_data = generated_analytics_registry.get(current_id)
+        if not analytics_data:
+            continue
             
-            if upstream_source_record is not None:
-                # Copy entire object structure cleanly from primary master file
-                destination_record = json.loads(json.dumps(upstream_source_record))
-            else:
-                # Upstream file is missing this ID. Fall back to local investor runtime metadata properties
-                print(f" │   ⚠️ ID '{current_id}' missing from upstream source. Building placeholder structure...")
-                destination_record = {
-                    "id": str(current_id),
-                    "broker": runtime_broker_config.get("BROKER", "NULL") if runtime_broker_config else "NULL",
-                    "email": "NULL",
-                    "fullname": "NULL",
-                    "server": "NULL",
-                    "login": str(runtime_broker_config.get("LOGIN_ID", "NULL")) if runtime_broker_config else "NULL",
-                    "password": "NULL",
-                    "application_status": "Approved",
-                    "broker_balance": "0.00",
-                    "profitandloss": "0.00",
-                    "execution_start_date": datetime.now().strftime('%Y-%m-%d'),
-                    "accountmanagement": {},
-                    "analytics": {}
-                }
-            updated_data[current_id] = destination_record
-
-        # ACTION B: Record exists but may have missing attributes
-        elif upstream_source_record is not None:
-            for field_key, field_value in upstream_source_record.items():
-                if field_key not in destination_record:
-                    print(f" │   ↳ Synchronizing missing schema property: [{field_key}] into record '{current_id}'")
-                    destination_record[field_key] = json.loads(json.dumps(field_value))
-                    has_mutated_database = True
-
-        # ACTION C: Intercept and normalize analytics format states
-        current_analytics_value = destination_record.get("analytics")
-        if isinstance(current_analytics_value, str):
-            # Convert raw SQL placeholder text structures to standard native JSON blocks
-            if current_analytics_value.strip().upper() in ["NULL", '"NULL"', "'NULL'"]:
-                destination_record["analytics"] = {}
-                has_mutated_database = True
-            else:
-                try:
-                    destination_record["analytics"] = json.loads(current_analytics_value)
-                    has_mutated_database = True
-                except Exception:
-                    destination_record["analytics"] = {}
-                    has_mutated_database = True
-
-        # ACTION D: Inject fresh analytics data blocks if generated during this execution run
-        if current_id in generated_analytics_registry:
-            print(f" │   📦 Injecting fresh chronological analytics payload for client profile: {current_id}")
-            destination_record.pop('trades_analytics', None)  # Scrub deprecated keys
-            destination_record["analytics"] = generated_analytics_registry[current_id]
-            has_mutated_database = True
-
-        # ACTION E: Synchronize unauthorized actions flags from the actual activities.json file
-        # This ensures the UPDATED_INVESTORS database reflects the current unauthorized state
+        # Calculate total P&L from analytics
+        total_pnl = 0.0
+        if "from_execution_start_date" in analytics_data:
+            for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
+                if c_group in analytics_data["from_execution_start_date"]:
+                    regular_data = analytics_data["from_execution_start_date"][c_group].get("regular_data", {})
+                    for auth_group in ["authorized", "unauthorized"]:
+                        if auth_group in regular_data:
+                            total_pnl += regular_data[auth_group].get("total_pnl", 0.0)
+        
+        # Check if unauthorized trades were detected
+        unauthorized_detected = False
         inv_id_int = int(current_id) if current_id.isdigit() else None
         if inv_id_int is not None:
-            # Read the actual activities.json to get the current unauthorized state
             try:
-                inv_activities_path = Path(root_dir_base) / str(inv_id_int) / "activities.json"
+                inv_activities_path = Path(INV_PATH) / str(inv_id_int) / "activities.json"
                 if inv_activities_path.exists():
                     with open(inv_activities_path, 'r', encoding='utf-8') as f:
                         inv_activities_data = json.load(f)
-                    
-                    # Update destination record with the current unauthorized flags
-                    if 'unauthorized_actions' in inv_activities_data:
-                        dest_unauth_actions = destination_record.get('unauthorized_actions')
-                        if dest_unauth_actions != inv_activities_data['unauthorized_actions']:
-                            destination_record['unauthorized_actions'] = inv_activities_data['unauthorized_actions']
-                            has_mutated_database = True
-                            print(f" │   🔄 Synced unauthorized_actions for {current_id}: {inv_activities_data['unauthorized_actions']}")
-                    
-                    if 'unauthorized_action_detected' in inv_activities_data:
-                        dest_unauth_detected = destination_record.get('unauthorized_action_detected')
-                        if dest_unauth_detected != inv_activities_data['unauthorized_action_detected']:
-                            destination_record['unauthorized_action_detected'] = inv_activities_data['unauthorized_action_detected']
-                            has_mutated_database = True
-                            print(f" │   🔄 Synced unauthorized_action_detected for {current_id}: {inv_activities_data['unauthorized_action_detected']}")
-                    
-            except Exception as e:
-                print(f" │   ⚠️ Could not sync unauthorized flags for {current_id}: {e}")
+                        unauthorized_detected = inv_activities_data.get('unauthorized_action_detected', False)
+            except:
+                pass
+        
+        # ============================================================
+        # UPDATE FETCHED_INVESTORS - ONLY SPECIFIC FIELDS
+        # ============================================================
+        if current_id in fetched_data:
+            # Only update specific fields, preserve everything else
+            fetched_data[current_id]['analytics'] = analytics_data
+            fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+            has_mutated_database = True
+            print(f" │   📦 Updated analytics for {current_id} in FETCHED_INVESTORS")
+        else:
+            # Record doesn't exist, create minimal entry
+            fetched_data[current_id] = {
+                'id': str(current_id),
+                'analytics': analytics_data,
+                'profitandloss': str(round(total_pnl, 2)),
+                'unauthorized_action_detected': unauthorized_detected
+            }
+            has_mutated_database = True
+            print(f" │   ➕ Created minimal entry for {current_id} in FETCHED_INVESTORS")
+        
+        # ============================================================
+        # UPDATE UPDATED_INVESTORS - ONLY SPECIFIC FIELDS
+        # ============================================================
+        if current_id in updated_data:
+            # Only update specific fields, preserve everything else
+            updated_data[current_id]['analytics'] = analytics_data
+            updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+            has_mutated_database = True
+            print(f" │   📦 Updated analytics for {current_id} in UPDATED_INVESTORS")
+        else:
+            # Record doesn't exist, create minimal entry
+            updated_data[current_id] = {
+                'id': str(current_id),
+                'analytics': analytics_data,
+                'profitandloss': str(round(total_pnl, 2)),
+                'unauthorized_action_detected': unauthorized_detected
+            }
+            has_mutated_database = True
+            print(f" │   ➕ Created minimal entry for {current_id} in UPDATED_INVESTORS")
 
-    # 3. Save updates back to disk if modifications occurred
+    # =========================================================================
+    # SAVE UPDATES BACK TO DISK
+    # =========================================================================
     if has_mutated_database:
         try:
+            # Save UPDATED_INVESTORS
             with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(updated_data, f, indent=4)
             print(f" │\n │ ✅ Synchronization transaction committed to: {UPDATED_INVESTORS}")
+            
+            # Save FETCHED_INVESTORS with the same data
+            with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(fetched_data, f, indent=4)
+            print(f" │ ✅ Synchronization transaction committed to: {FETCHED_INVESTORS}")
+            
         except Exception as e:
             print(f" │ Critical failure saving database matrix to storage path: {e}")
     else:
@@ -26375,7 +25678,7 @@ def process_single_investor(inv_folder):
         "grid_strategy_enabled": False,           # Track if grid strategy was enabled
         "ohlc_strategy_enabled": False            # Track if OHLC strategy was enabled
     }
-    validate_strategy_authorized_orders()
+    
     # 1. Extract structural demo permission policies from investor JSON log
     allow_demo_processing = True 
     try:
@@ -26684,6 +25987,7 @@ def process_single_investor(inv_folder):
             # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
             # =================================================================
             deduplicate_orders(inv_id=inv_id)
+            validate_strategy_authorized_orders(inv_id=inv_id)
             backup_limit_orders(inv_id=inv_id)
             populate_orders_missing_fields(inv_id=inv_id)
             calculate_investor_symbols_orders(inv_id=inv_id)
