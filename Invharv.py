@@ -233,6 +233,7 @@ def move_fetched_investors():
     - activate_autotrading is False
     - broker_balance < min_broker_balance (insufficient funds)
     - demo_account is "0" when account_mode is "demo"
+    - Contract has expired (current date > execution_start_date + contract_duration)
     
     Uses DEFAULT_ACCOUNTMANAGEMENT as fallback for contract_duration and min_broker_balance
     
@@ -242,6 +243,7 @@ def move_fetched_investors():
     
     import traceback
     import sys
+    from datetime import datetime, timedelta
     
     print(f"\n{'='*60}")
     print(f"MOVE VERIFIED INVESTORS".center(60))
@@ -297,6 +299,51 @@ def move_fetched_investors():
             return ""
         
         return date_value
+    
+    def parse_date(date_string):
+        """Parse date string in various formats and return datetime object"""
+        if not date_string:
+            return None
+        
+        date_formats = [
+            "%Y-%m-%d",
+            "%Y-%m-%d %H:%M:%S",
+            "%B %d, %Y",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%Y/%m/%d"
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return datetime.strptime(date_string, fmt)
+            except:
+                continue
+        return None
+    
+    def is_contract_expired(execution_start_date, contract_duration_days):
+        """
+        Check if the contract has expired.
+        Returns (is_expired, days_remaining, expiry_date)
+        """
+        if not execution_start_date or not contract_duration_days or contract_duration_days <= 0:
+            return False, None, None
+        
+        start_date = parse_date(execution_start_date)
+        if not start_date:
+            return False, None, None
+        
+        expiry_date = start_date + timedelta(days=contract_duration_days)
+        current_date = datetime.now()
+        
+        # Compare only dates (ignore time)
+        expiry_date_only = expiry_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        current_date_only = current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        days_remaining = (expiry_date_only - current_date_only).days
+        is_expired = days_remaining < 0
+        
+        return is_expired, days_remaining, expiry_date.strftime("%B %d, %Y")
     
     # Helper function to get the last message for a specific section
     def get_last_message(notifications_dict, section_key):
@@ -508,6 +555,8 @@ def move_fetched_investors():
         "execution_start_date": "",
         "contract_duration": None,
         "contract_expiry_date": "",
+        "contract_days_remaining": None,
+        "contract_expired": False,
         "min_broker_balance": None,
         "broker_balance": None,
         "unauthorized_trades": {},
@@ -582,8 +631,98 @@ def move_fetched_investors():
     incomplete_investors = []
     # Track demo account restricted investors
     demo_restricted_investors = []
+    # Track expired contract investors
+    expired_contract_investors = []
+    # Track investors that will be processed
+    investors_to_process = []
+    
+    # FIRST PASS: Check all investors for expiration BEFORE adding to investors.json
+    print(f"\n   🔍 Pre-screening investors for contract expiration...")
     
     for inv_id, investor_data in verified_data.items():
+        # Check if investor has required fields
+        invested_with = investor_data.get('invested_with', investor_data.get('invested_with', '')).strip()
+        execution_start_raw = investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', ''))
+        if isinstance(execution_start_raw, str) and execution_start_raw.upper() in ['NULL', 'NONE', '']:
+            execution_start = ""
+        else:
+            execution_start = normalize_date(execution_start_raw)
+        Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
+        login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
+        password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
+        server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
+        
+        # Check required fields
+        missing_required = []
+        if not invested_with: missing_required.append('invested_with')
+        if not execution_start: missing_required.append('execution_start_date')
+        if not Terminal_path: missing_required.append('Terminal_path')
+        
+        missing_investor_fields = []
+        if not login: missing_investor_fields.append('login')
+        if not password: missing_investor_fields.append('password')
+        if not server: missing_investor_fields.append('server')
+        
+        is_complete = len(missing_required) == 0 and len(missing_investor_fields) == 0
+        
+        if not is_complete:
+            print(f"   ⏭️ Investor {inv_id} is incomplete - will be handled later")
+            continue
+        
+        # Check contract expiration
+        contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
+        contract_duration_val = None
+        
+        if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
+            try:
+                contract_days = int(contract_days_raw)
+                if contract_days > 0:
+                    contract_duration_val = contract_days
+            except:
+                pass
+        
+        if contract_duration_val is None and default_contract_duration is not None:
+            contract_duration_val = default_contract_duration
+        
+        # Check if expired
+        if execution_start and contract_duration_val and contract_duration_val > 0:
+            is_expired, days_remaining, expiry_date_str = is_contract_expired(execution_start, contract_duration_val)
+            if is_expired:
+                print(f"   ❌ Investor {inv_id} has EXPIRED CONTRACT - will NOT be added to investors.json")
+                expired_contract_investors.append(inv_id)
+                
+                # Update record in updated_investors.json
+                updated_investors_data[inv_id] = {
+                    "id": inv_id,
+                    "contract_expired": True,
+                    "expiry_date": expiry_date_str,
+                    "days_remaining": days_remaining,
+                    "execution_start_date": execution_start,
+                    "contract_duration": contract_duration_val,
+                    "error_messages": [f"Contract expired on {expiry_date_str}"],
+                    "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "processed": False,
+                    "removed_from_investors": True,
+                    "folder_deleted": True
+                }
+                
+                # Remove folder if exists
+                inv_folder = Path(INV_PATH) / inv_id
+                if inv_folder.exists():
+                    import shutil
+                    shutil.rmtree(inv_folder)
+                    print(f"      🗑️ Deleted folder for expired contract: {inv_folder}")
+                continue
+        
+        # If not expired, add to processing list
+        investors_to_process.append(inv_id)
+        print(f"   ✅ Investor {inv_id} has valid contract - will be processed")
+    
+    # SECOND PASS: Process only valid (non-expired) investors
+    print(f"\n   📋 Processing {len(investors_to_process)} valid investors...")
+    
+    for inv_id in investors_to_process:
+        investor_data = verified_data.get(inv_id, {})
         print(f"\n   📋 Processing investor {inv_id} for investors.json...")
         
         # Extract required fields (case-insensitive)
@@ -631,7 +770,7 @@ def move_fetched_investors():
                 'investor_data': investor_data
             })
             
-            # FIX: Create folder and add notifications for incomplete investors
+            # Create folder and add notifications for incomplete investors
             inv_root = Path(INV_PATH) / inv_id
             inv_root.mkdir(parents=True, exist_ok=True)
             print(f"   📁 Created folder for incomplete investor: {inv_id}")
@@ -752,10 +891,16 @@ def move_fetched_investors():
         investors_data[inv_id] = investor_entry
         investors_updated.append(inv_id)
     
-    # Remove invalid investors
+    # Remove invalid investors (including expired ones)
     investors_to_remove = []
     for inv_id in list(investors_data.keys()):
+        # Remove if not in verified_data
         if inv_id not in verified_data:
+            investors_to_remove.append(inv_id)
+            continue
+        
+        # Remove if expired
+        if inv_id in expired_contract_investors:
             investors_to_remove.append(inv_id)
             continue
         
@@ -792,6 +937,7 @@ def move_fetched_investors():
         safe_json_write(INVESTOR_USERS, investors_data)
     
     print(f"   ✅ Added/Updated: {len(investors_updated)} | 🗑️ Removed: {len(investors_removed)} | ⏭️ Skipped: {len(investors_skipped)}")
+    print(f"   ❌ Expired contracts skipped: {len(expired_contract_investors)}")
     
     # ============================================
     # STEP 2: RECORD INCOMPLETE INVESTORS
@@ -830,7 +976,7 @@ def move_fetched_investors():
         print(f"   📝 Recorded incomplete investor: {inv_id} (notifications added)")
     
     # ============================================
-    # STEP 3: PROCESS COMPLETE INVESTORS
+    # STEP 3: PROCESS COMPLETE INVESTORS (NON-EXPIRED)
     # ============================================
     print(f"\n[3/4] Processing complete investors...")
     
@@ -847,6 +993,11 @@ def move_fetched_investors():
         # Skip incomplete investors
         if inv_id in incomplete_ids:
             print(f"\n   ⏭️ Skipping incomplete investor: {inv_id}")
+            continue
+        
+        # Skip expired investors
+        if inv_id in expired_contract_investors:
+            print(f"\n   ⏭️ Skipping expired investor: {inv_id}")
             continue
         
         print(f"\n   🔄 Processing investor: {inv_id}")
@@ -935,6 +1086,28 @@ def move_fetched_investors():
                 contract_duration_val = default_contract_duration
                 print(f"      Using default contract_duration: {contract_duration_val}")
             
+            # Check contract expiration (should not be expired here, but double-check)
+            contract_expired = False
+            days_remaining = None
+            expiry_date_str = None
+            formatted_start_date = execution_start
+            
+            if execution_start and contract_duration_val and contract_duration_val > 0:
+                is_expired, days_remaining, expiry_date_str = is_contract_expired(execution_start, contract_duration_val)
+                contract_expired = is_expired
+                
+                if contract_expired:
+                    # This shouldn't happen since we already filtered, but just in case
+                    print(f"      ❌ CONTRACT EXPIRED (should not happen)")
+                    error_messages.append(f"Contract expired on {expiry_date_str}")
+                    has_error = True
+                    error_investors_to_delete.append(inv_id)
+                    continue
+                else:
+                    print(f"      ✅ Contract active: {days_remaining} days remaining")
+            else:
+                print(f"      ℹ️ No contract duration set - skipping expiration check")
+            
             # Handle min_broker_balance
             min_broker_balance = None
             if 'min_broker_balance' in investor_data:
@@ -1007,25 +1180,24 @@ def move_fetched_investors():
             
             # Format date and calculate expiry
             formatted_start_date = execution_start
-            expiry_date_str = ""
             
-            if execution_start:
+            if execution_start and contract_duration_val and contract_duration_val > 0:
                 try:
                     date_obj = datetime.strptime(execution_start, "%Y-%m-%d")
                     formatted_start_date = date_obj.strftime("%B %d, %Y")
                     
-                    if contract_duration_val is not None and contract_duration_val > 0:
-                        expiry_date = date_obj + timedelta(days=contract_duration_val)
+                    expiry_date = date_obj + timedelta(days=contract_duration_val)
+                    if not expiry_date_str:  # Only set if not already calculated
                         expiry_date_str = expiry_date.strftime("%B %d, %Y")
-                        print(f"      expiry_date: {expiry_date_str}")
+                    print(f"      expiry_date: {expiry_date_str}")
                 except Exception as e:
                     try:
                         date_obj = datetime.strptime(execution_start, "%B %d, %Y")
                         formatted_start_date = execution_start
-                        if contract_duration_val is not None and contract_duration_val > 0:
-                            expiry_date = date_obj + timedelta(days=contract_duration_val)
+                        expiry_date = date_obj + timedelta(days=contract_duration_val)
+                        if not expiry_date_str:
                             expiry_date_str = expiry_date.strftime("%B %d, %Y")
-                            print(f"      expiry_date: {expiry_date_str}")
+                        print(f"      expiry_date: {expiry_date_str}")
                     except Exception as e2:
                         print(f"      ⚠️ Could not parse date '{execution_start}': {e2}")
             
@@ -1058,6 +1230,9 @@ def move_fetched_investors():
                 activities_data["execution_start_date"] = formatted_start_date
             if expiry_date_str:
                 activities_data["contract_expiry_date"] = expiry_date_str
+            if days_remaining is not None:
+                activities_data["contract_days_remaining"] = days_remaining
+            activities_data["contract_expired"] = contract_expired
             
             if 'notifications' not in activities_data:
                 activities_data['notifications'] = {}
@@ -1132,12 +1307,12 @@ def move_fetched_investors():
                 duration_message = "Your contract duration is not set. Trading will continue without a contract end date."
                 add_notification(activities_data['notifications'], 'ContractDuration', duration_message, 'success', timestamp)
             else:
-                if expiry_date_str:
-                    duration_message = f"Your trading contract duration is set to {contract_duration_val} days. Your contract will expire on {expiry_date_str}. You are currently within your active trading period."
+                if days_remaining is not None and days_remaining >= 0:
+                    duration_message = f"Your trading contract duration is set to {contract_duration_val} days. Your contract will expire on {expiry_date_str}. You have {days_remaining} days remaining in your trading contract."
                 else:
-                    duration_message = f"Your trading contract duration is set to {contract_duration_val} days. You are currently within your active trading period."
+                    duration_message = f"Your trading contract duration is set to {contract_duration_val} days. Your contract will expire on {expiry_date_str}."
                 add_notification(activities_data['notifications'], 'ContractDuration', duration_message, 'success', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'ContractDuration', f"SERVER NOTIFICATION: Investor {inv_id} contract duration configured: {contract_duration_val} days.", 'success', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'ContractDuration', f"SERVER NOTIFICATION: Investor {inv_id} contract duration configured: {contract_duration_val} days, {days_remaining if days_remaining is not None else '0'} days remaining.", 'success', timestamp)
             
             # 6. TERMINAL PATH section
             if not Terminal_path or Terminal_path.strip() == '':
@@ -1198,6 +1373,9 @@ def move_fetched_investors():
                 if 'requirements' not in final_accountmanagement:
                     final_accountmanagement['requirements'] = {}
                 final_accountmanagement['requirements']['contract_duration'] = str(contract_duration_val)
+                if days_remaining is not None:
+                    final_accountmanagement['requirements']['days_remaining'] = str(days_remaining)
+                final_accountmanagement['requirements']['contract_expired'] = contract_expired
             
             if min_broker_balance is not None:
                 if 'requirements' not in final_accountmanagement:
@@ -1230,6 +1408,8 @@ def move_fetched_investors():
             updated_record["processed"] = True
             updated_record["folder_created"] = True
             updated_record["contract_expiry_date_calculated"] = expiry_date_str if expiry_date_str else None
+            updated_record["contract_days_remaining"] = days_remaining
+            updated_record["contract_expired"] = contract_expired
             updated_record["meets_balance_requirement"] = meets_balance_requirement
             updated_record["min_broker_balance"] = min_broker_balance
             updated_record["error_messages"] = error_messages if has_error else []
@@ -1407,6 +1587,7 @@ def move_fetched_investors():
                         folder_path.name not in error_investors_to_delete and
                         folder_path.name not in balance_insufficient_investors and
                         folder_path.name not in demo_restricted_investors and
+                        folder_path.name not in expired_contract_investors and
                         folder_path.name not in incomplete_ids
                     )
                     
@@ -1432,7 +1613,8 @@ def move_fetched_investors():
     print(f"Auto-trading disabled (removed): {len(autotrading_disabled_investors)}")
     print(f"Demo restricted (removed): {len(demo_restricted_investors)}")
     print(f"Insufficient balance (moved to issues): {len(balance_insufficient_investors)}")
-    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)}")
+    print(f"❌ Expired contracts (removed): {len(expired_contract_investors)}")
+    print(f"📁 investors.json: +{len(investors_updated)} -{len(investors_removed)} -{len(autotrading_disabled_investors)} -{len(error_investors_to_delete)} -{len(balance_insufficient_investors)} -{len(demo_restricted_investors)} -{len(expired_contract_investors)}")
     print(f"📝 activities.json: {len(processed_summary) + len(incomplete_investors)} updated (including incomplete investors)")
     print(f"💰 accountmanagement.json: {len(processed_summary)} updated")
     print(f"📋 updated_investors.json: {len(updated_investors_data)} investor records")
