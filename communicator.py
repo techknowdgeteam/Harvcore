@@ -16,6 +16,7 @@ import psutil
 import re
 from typing import Any, Dict, List, Union
 import socket
+import sys
 
 
 DEFAULT_MT5_PATH = r"C:\xampp\htdocs\harvcore\mt5\MetaTrader 5"
@@ -3285,274 +3286,222 @@ def process_single_investor(inv_id):
     
     return account_stats
 
-def place_orders_parallel():
+def main_once():
     """
-    ORCHESTRATOR: Processes all investors from fetched_investors.json
-    No INV_PATH dependency - dynamically gauges global system RAM and CPU capabilities
-    to adjust batch sizing and prevent server resource exhaustion.
+    ORCHESTRATOR (Single Execution): Processes ALL investor folders
+    once without any capacity limitations or restrictions.
     """
-    # Check if fetched investors file exists - if not, generate it
-    if not os.path.exists(FETCHED_INVESTORS):
-        print(f"⚠️ Fetched investors file not found: {FETCHED_INVESTORS}")
-        print("🔄 Generating investor data before proceeding...")
-        fetch_tables_streaming()
-        update_tables_streaming()
-        
-        # Verify file was created
-        if not os.path.exists(FETCHED_INVESTORS):
-            print(f" Failed to generate {FETCHED_INVESTORS}")
-            return False
-        print(f"✅ Successfully generated {FETCHED_INVESTORS}")
+    # Parse command line arguments for control flags
+    run_as_loop = False 
+    loop_interval = 1  # Default 1 second between loops (matching original)
+    max_loops = None  # None means infinite
     
-    # Load investors from JSON
-    try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-            investors_data = json.load(f)
-        print(f"📋 Found {len(investors_data)} investors in fetched_investors.json")
-    except Exception as e:
-        print(f"Error loading investors: {e}")
-        return False
-    
-    if not investors_data:
-        print("⚠️ No investor data found, attempting to regenerate...")
-        fetch_tables_streaming()
-        update_tables_streaming()
-        
-        # Try loading again
-        try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                investors_data = json.load(f)
-            if not investors_data:
-                print(" Still no investor data available")
-                return False
-        except Exception as e:
-            print(f"Error reloading investors: {e}")
-            return False
-
-    investor_ids = list(investors_data.keys())
-
-    # --- SENSE HARDWARE SPECS DYNAMICALLY ---
-    cpu_cores = os.cpu_count() or 1
-    available_ram_bytes = psutil.virtual_memory().available
-    available_ram_mb = available_ram_bytes / (1024 * 1024)
-
-    # Base capacity limits based on raw resources
-    max_by_cpu = cpu_cores * 4  
-    max_by_ram = int(available_ram_mb // 300)  
-    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
-
-    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} (Cap: {max_by_cpu}) | Free RAM: {available_ram_mb:.1f}MB (Cap: {max_by_ram})")
-
-    # --- CROSS-WINDOW SYSTEM DEDUCTION ---
-    active_mt5_count = 0
-    for proc in psutil.process_iter(['name']):
-        try:
-            pname = proc.info['name'].lower() if proc.info['name'] else ""
-            if "terminal.exe" in pname or "terminal64.exe" in pname:
-                active_mt5_count += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
-
-    # Subtract active background terminals running in other VS Code instances
-    remaining_slots_left = max(0, hardware_max_limit - active_mt5_count)
-    
-    print(f"📊 Global System Load -> Active MT5 instances in other windows: {active_mt5_count}")
-    print(f"🔒 Adjusted Safe Limit for THIS Window: {remaining_slots_left} available slots remaining.")
-
-    if remaining_slots_left == 0:
-        print("  SYSTEM AT MAXIMUM SAFE CAPACITY: No resource slots left. Standby to protect VPS.")
-        return False
-
-    # --- BATCH LOAD BALANCING SLICE ---
-    total_detected = len(investor_ids)
-    if total_detected > remaining_slots_left:
-        print(f"   OVERLOAD PREVENTED: {total_detected} investors exceeds adjusted limit of {remaining_slots_left}.")
-        active_batch = investor_ids[:remaining_slots_left]
-        print(f" ⏳ Sliced batch: Processing first {remaining_slots_left} accounts. Deferring remaining {total_detected - remaining_slots_left} accounts.")
-    else:
-        active_batch = investor_ids
-
-    print(f" 📋 Processing investors: {active_batch}")
-    print(f" 🔧 Creating pool with {len(active_batch)} processes...")
-    
-    # Use a process pool
-    try:
-        # Use multiprocessing with spawn context (more reliable on Windows)
-        mp.set_start_method('spawn', force=True)
-        
-        with mp.Pool(processes=len(active_batch)) as pool:
-            results = pool.map(process_single_investor, active_batch)
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
-        #update_tables_streaming()
-        
-        # Print summary
-        successful = sum(1 for r in results if r.get("success", False))
-        created = sum(1 for r in results if r.get("folder_created", False))
-        existed = sum(1 for r in results if r.get("folder_existed", False))
-        
-        print(f"\n{'='*60}")
-        print(f"📊 SUMMARY:")
-        print(f"   Total investors: {len(results)}")
-        print(f"   Successful: {successful}")
-        print(f"   New folders created: {created}")
-        print(f"   Existing folders: {existed}")
-        print(f"{'='*60}")
-        
-        return True
-    except Exception as e:
-        print(f"Error in parallel processing: {e}")
-        # Fallback to sequential processing
-        print(" Falling back to sequential processing...")
-        results = []
-        for inv_id in active_batch:
-            result = process_single_investor(inv_id)
-            results.append(result)
-        
-        successful = sum(1 for r in results if r.get("success", False))
-        print(f" Sequential: {successful}/{len(results)} successful")
-        
-        return True
-
-def place_orders_parallel_loop():
-    """
-    ORCHESTRATOR: Processes all investors from fetched_investors.json
-    Runs in a continuous loop. Measures external system terminal loads on every cycle 
-    to dynamically scale worker pool slices down if hardware resources become tight.
-    """
-    print(f"🚀 Starting Perpetual Trading Loop (using fetched_investors.json)...")
-    
-    # --- BOOT SENSE HARDWARE CAPACITY SPECS ---
-    cpu_cores = os.cpu_count() or 1
-    available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
-
-    max_by_cpu = cpu_cores * 4
-    max_by_ram = int(available_ram_mb // 300)
-    hardware_max_limit = max(1, min(max_by_cpu, max_by_ram))
-
-    print(f"🖥️  Hardware Profile Sensed -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-    print(f" 🔧 Hardware Gate: Pre-configuring maximum capacity cap to {hardware_max_limit} accounts.")
-
-    # Initialize pool context safely on Windows
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass  # Context already set
-
-    # Open permanent worker process slots matching hardware capacity limits
-    pool = mp.Pool(processes=hardware_max_limit)
-    my_pid = os.getpid()
-
-    try:
-        while True:
+    # Check for command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('--loop='):
+            loop_value = arg.split('=')[1].lower()
+            run_as_loop = loop_value in ['true', 'yes', '1', 'on']
+        elif arg.startswith('--interval='):
             try:
-                # Check if fetched investors file exists - if not, generate it
-                if not os.path.exists(FETCHED_INVESTORS):
-                    print(f"⚠️ Fetched investors file not found: {FETCHED_INVESTORS}")
-                    print("🔄 Generating investor data before proceeding...")
-                    # fetch_tables_streaming()  # REMOVED
-                    # update_tables_streaming()  # REMOVED
-                    
-                    # Verify file was created
-                    if not os.path.exists(FETCHED_INVESTORS):
-                        print(f" Failed to generate {FETCHED_INVESTORS}, retrying in 10 seconds...")
-                        time.sleep(10)
-                        continue
-                    print(f"✅ Successfully generated {FETCHED_INVESTORS}")
-                
-                # Load investors from JSON
-                with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                    investors_data = json.load(f)
-                
-                if not investors_data:
-                    print("⚠️ No investor data found, attempting to regenerate...")
-                    # fetch_tables_streaming()  # REMOVED
-                    # update_tables_streaming()  # REMOVED
-                    
-                    # Try loading again
-                    try:
-                        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                            investors_data = json.load(f)
-                        if not investors_data:
-                            print("⏳ Still no investor data, retrying in 10 seconds...")
-                            time.sleep(10)
-                            continue
-                    except Exception as e:
-                        print(f"Error reloading investors: {e}")
-                        time.sleep(10)
-                        continue
-                
-                investor_ids = list(investors_data.keys())
+                loop_interval = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid interval value: {arg.split('=')[1]}. Using default 1 second.")
+        elif arg.startswith('--max-loops='):
+            try:
+                max_loops = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
+    
+    print("\n" + "="*60)
+    print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
+    print("="*60)
+    print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
+    if run_as_loop:
+        print(f"  Interval: {loop_interval}s")
+        if max_loops:
+            print(f"  Max Loops: {max_loops}")
+        else:
+            print("  Max Loops: Infinite")
+    print("="*60 + "\n")
+    
+    loop_count = 0
+        
+    inv_base_path = Path(INV_PATH)
+    print(f"🚀 Initializing Trading Engine Pool...")
+    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
-                # --- LIVE RUNTIME HARDWARE AUDIT ---
-                active_mt5_count = 0
-                for proc in psutil.process_iter(['name', 'ppid']):
-                    try:
-                        pname = proc.info['name'].lower() if proc.info['name'] else ""
-                        if "terminal.exe" in pname or "terminal64.exe" in pname:
-                            # Exclude processes spawned by this specific script execution channel
-                            try:
-                                parent = proc.parent()
-                                if parent and (parent.pid == my_pid or parent.ppid() == my_pid):
-                                    continue
-                            except:
-                                pass
-                            active_mt5_count += 1
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                        pass
+    while True:
+        loop_count += 1
+        
+        if run_as_loop:
+            print("\n" + "="*60)
+            print(f"LOOP #{loop_count} STARTED")
+            print("="*60)
+        
+        try:
+            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            
+            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
+            if not all_investor_folders:
+                print(" ⏳ No investor directories found. Sleeping for 10 seconds before next scan...")
+                time.sleep(10)
+                if not run_as_loop:
+                    print("Single execution completed. Exiting...")
+                    break
+                continue
 
-                # Derive current remaining execution room
-                adjusted_capacity = max(0, hardware_max_limit - active_mt5_count)
-                current_safe_cap = min(hardware_max_limit, adjusted_capacity)
+            # Display system info for awareness only (no limiting)
+            cpu_cores = os.cpu_count() or 1
+            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+            
+            print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
 
-                if current_safe_cap <= 0:
-                    print(f"⏳ [STANDBY] System fully utilized by other terminal instances ({active_mt5_count} running). Retrying pool slice in 3 seconds...")
-                    time.sleep(3)
-                    continue
+            # Process ALL investor folders - NO CAPACITY LIMITS
+            active_batch = all_investor_folders
 
-                # --- DYNAMIC BATCH ALLOCATION ---
-                if len(investor_ids) > current_safe_cap:
-                    print(f"   RESOURCE CEILING CEILING APPLIED: Capping active slice loop execution to {current_safe_cap} rows.")
-                    active_batch = investor_ids[:current_safe_cap]
-                    deferred_count = len(investor_ids) - current_safe_cap
-                    print(f" ⏳ Slicing batch: Processing first {current_safe_cap} accounts. {deferred_count} deferred to next loop cycle.")
-                else:
-                    active_batch = investor_ids
-
-                print(f"\n--- Cycle Start: Processing {len(active_batch)} investors within safe limits ---")
-                print(f"   Investors: {active_batch}")
-                
-                # Use permanent worker channel execution hooks (Async Mapping)
+            print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
+            
+            # Pool with ALL investors - no capacity checks
+            with mp.Pool(processes=len(active_batch)) as pool:
                 jobs = []
-                for inv_id in active_batch:
-                    job = pool.apply_async(process_single_investor, args=(inv_id,))
+                for folder in active_batch:
+                    job = pool.apply_async(process_single_investor, args=(folder,))
                     jobs.append(job)
-                merge_create_results()
-                merge_balance_results()
-                merge_verify_results()
-                # update_tables_streaming()  # REMOVED
                 
-                # Resolve active execution batches concurrently
+                # Force synchronization bar before closing the pool step block
                 results = [job.get() for job in jobs]
                 
-                successful = sum(1 for r in results if r and r.get("success", False))
-                print(f"--- Cycle Complete: {successful}/{len(results)} successful ---")
-                
-            except Exception as e:
-                print(f" Critical Error in Orchestrator Loop: {e}")
-                print("   Retrying in 5 seconds...")
-                time.sleep(5)
-                
-            time.sleep(120)
+            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. ---")
+            
+        except Exception as e:
+            print(f"Critical Error in Orchestrator Loop: {e}")
+            time.sleep(5)
+        
+        # Check loop conditions
+        if not run_as_loop:
+            # Single execution - exit
+            print("Single execution completed. Exiting...")
+            break
+        
+        # Check max loops
+        if max_loops and loop_count >= max_loops:
+            print(f"Maximum loops ({max_loops}) reached. Exiting...")
+            break
+        
+        # Wait before next iteration
+        if run_as_loop and loop_interval > 0:
+            print(f"Waiting {loop_interval} seconds before next loop...")
+            time.sleep(loop_interval)
+        
+def main_loop():
+    """
+    ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
+    on every cycle without any capacity limitations or restrictions.
+    """
+    # Parse command line arguments for control flags
+    run_as_loop = True 
+    loop_interval = 1  # Default 1 second between loops (matching original)
+    max_loops = None  # None means infinite
+    
+    # Check for command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('--loop='):
+            loop_value = arg.split('=')[1].lower()
+            run_as_loop = loop_value in ['true', 'yes', '1', 'on']
+        elif arg.startswith('--interval='):
+            try:
+                loop_interval = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid interval value: {arg.split('=')[1]}. Using default 1 second.")
+        elif arg.startswith('--max-loops='):
+            try:
+                max_loops = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
+    
+    print("\n" + "="*60)
+    print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
+    print("="*60)
+    print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
+    if run_as_loop:
+        print(f"  Interval: {loop_interval}s")
+        if max_loops:
+            print(f"  Max Loops: {max_loops}")
+        else:
+            print("  Max Loops: Infinite")
+    print("="*60 + "\n")
+    
+    loop_count = 0
+        
+    inv_base_path = Path(INV_PATH)
+    print(f"🚀 Initializing Trading Engine Pool...")
+    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
-    except KeyboardInterrupt:
-        print("\n🛑 Received shutdown signal. Disposing worker process tree gracefully...")
-    finally:
-        pool.close()
-        pool.join()
+    while True:
+        loop_count += 1
+        
+        if run_as_loop:
+            print("\n" + "="*60)
+            print(f"LOOP #{loop_count} STARTED")
+            print("="*60)
+        
+        try:
+            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            
+            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
+            if not all_investor_folders:
+                print(" ⏳ No investor directories found. Sleeping for 10 seconds before next scan...")
+                time.sleep(10)
+                if not run_as_loop:
+                    print("Single execution completed. Exiting...")
+                    break
+                continue
 
+            # Display system info for awareness only (no limiting)
+            cpu_cores = os.cpu_count() or 1
+            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+            
+            print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
+
+            # Process ALL investor folders - NO CAPACITY LIMITS
+            active_batch = all_investor_folders
+
+            print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
+            
+            # Pool with ALL investors - no capacity checks
+            with mp.Pool(processes=len(active_batch)) as pool:
+                jobs = []
+                for folder in active_batch:
+                    job = pool.apply_async(process_single_investor, args=(folder,))
+                    jobs.append(job)
+                
+                # Force synchronization bar before closing the pool step block
+                results = [job.get() for job in jobs]
+                
+            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. ---")
+            
+        except Exception as e:
+            print(f"Critical Error in Orchestrator Loop: {e}")
+            time.sleep(5)
+        
+        # Check loop conditions
+        if not run_as_loop:
+            # Single execution - exit
+            print("Single execution completed. Exiting...")
+            break
+        
+        # Check max loops
+        if max_loops and loop_count >= max_loops:
+            print(f"Maximum loops ({max_loops}) reached. Exiting...")
+            break
+        
+        # Wait before next iteration
+        if run_as_loop and loop_interval > 0:
+            print(f"Waiting {loop_interval} seconds before next loop...")
+            time.sleep(loop_interval)
 
 if __name__ == "__main__":
-    update_tables_streaming()
+   main_once()
     

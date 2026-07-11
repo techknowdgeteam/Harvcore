@@ -23,6 +23,7 @@ from pathlib import Path
 import time
 import random
 import psutil
+import sys
 
 
 INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\investors"
@@ -26223,59 +26224,48 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def place_orders_parallel():
-    """
-    ORCHESTRATOR (Unlimited One-Shot): Processes all investor folders
-    regardless of system capacity or active MT5 instances.
-    """
-    inv_base_path = Path(INV_PATH)
-    investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-    
-    if not investor_folders:
-        print(" └─ 🔘 No investor directories found. Calling move_fetched_investors()...")
-        try:
-            move_fetched_investors()
-            validate_strategy_authorized_orders()
-        except Exception as err:
-            print(f"[CRITICAL ERROR] move_fetched_investors crashed: {err}")
-
-        investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-
-        if not investor_folders:
-            print(" └─  No investor directories found to process. Aborting execution safely.")
-            return
-
-    # Display system info for awareness only (no limiting)
-    cpu_cores = os.cpu_count() or 1
-    available_ram_bytes = psutil.virtual_memory().available
-    available_ram_mb = available_ram_bytes / (1024 * 1024)
-    
-    print(f"🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-    print(f"📊 Processing all {len(investor_folders)} investor folders without capacity restrictions...")
-
-    # Process ALL investor folders regardless of capacity
-    active_batch = investor_folders
-
-    if not active_batch:
-        print(" └─  No investors to process.")
-        return
-
-    # Executing pool with all investors
-    try:
-        with mp.Pool(processes=len(active_batch)) as pool:
-            results = pool.map(process_single_investor, active_batch)
-        print(f"✅ Completed processing all {len(active_batch)} investors.")
-    except Exception as pool_err:
-        print(f"[CRITICAL] Error executing multiprocessing pool: {pool_err}")
-        
-def place_orders_parallel_loop():
+def main_once():
     """
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
     on every cycle without any capacity limitations or restrictions.
     """
+    # Parse command line arguments for control flags
+    run_as_loop = False 
+    loop_interval = 1  # Default 1 second between loops (matching original)
+    max_loops = None  # None means infinite
+    
+    # Check for command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('--loop='):
+            loop_value = arg.split('=')[1].lower()
+            run_as_loop = loop_value in ['true', 'yes', '1', 'on']
+        elif arg.startswith('--interval='):
+            try:
+                loop_interval = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid interval value: {arg.split('=')[1]}. Using default 1 second.")
+        elif arg.startswith('--max-loops='):
+            try:
+                max_loops = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
+    
+    print("\n" + "="*60)
+    print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
+    print("="*60)
+    print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
+    if run_as_loop:
+        print(f"  Interval: {loop_interval}s")
+        if max_loops:
+            print(f"  Max Loops: {max_loops}")
+        else:
+            print("  Max Loops: Infinite")
+    print("="*60 + "\n")
+    
+    loop_count = 0
+    
     try:
         move_fetched_investors()
-        validate_strategy_authorized_orders()
     except Exception as err:
         print(f"[ERROR] Initial fetch failed: {err}")
         
@@ -26284,6 +26274,13 @@ def place_orders_parallel_loop():
     print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
     while True:
+        loop_count += 1
+        
+        if run_as_loop:
+            print("\n" + "="*60)
+            print(f"LOOP #{loop_count} STARTED")
+            print("="*60)
+        
         try:
             all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
             
@@ -26328,12 +26325,143 @@ def place_orders_parallel_loop():
         except Exception as e:
             print(f"Critical Error in Orchestrator Loop: {e}")
             time.sleep(5)
-            
-        time.sleep(1)
+        
+        # Check loop conditions
+        if not run_as_loop:
+            # Single execution - exit
+            print("Single execution completed. Exiting...")
+            break
+        
+        # Check max loops
+        if max_loops and loop_count >= max_loops:
+            print(f"Maximum loops ({max_loops}) reached. Exiting...")
+            break
+        
+        # Wait before next iteration
+        if run_as_loop and loop_interval > 0:
+            print(f"Waiting {loop_interval} seconds before next loop...")
+            time.sleep(loop_interval)
+        
+def main_loop():
+    """
+    ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
+    on every cycle without any capacity limitations or restrictions.
+    """
+    # Parse command line arguments for control flags
+    run_as_loop = True 
+    loop_interval = 1  # Default 1 second between loops (matching original)
+    max_loops = None  # None means infinite
+    
+    # Check for command line arguments
+    for arg in sys.argv[1:]:
+        if arg.startswith('--loop='):
+            loop_value = arg.split('=')[1].lower()
+            run_as_loop = loop_value in ['true', 'yes', '1', 'on']
+        elif arg.startswith('--interval='):
+            try:
+                loop_interval = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid interval value: {arg.split('=')[1]}. Using default 1 second.")
+        elif arg.startswith('--max-loops='):
+            try:
+                max_loops = int(arg.split('=')[1])
+            except ValueError:
+                print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
+    
+    print("\n" + "="*60)
+    print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
+    print("="*60)
+    print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
+    if run_as_loop:
+        print(f"  Interval: {loop_interval}s")
+        if max_loops:
+            print(f"  Max Loops: {max_loops}")
+        else:
+            print("  Max Loops: Infinite")
+    print("="*60 + "\n")
+    
+    loop_count = 0
+    
+    try:
+        move_fetched_investors()
+    except Exception as err:
+        print(f"[ERROR] Initial fetch failed: {err}")
+        
+    inv_base_path = Path(INV_PATH)
+    print(f"🚀 Initializing Unlimited Persistent Trading Engine Pool...")
+    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
+    while True:
+        loop_count += 1
+        
+        if run_as_loop:
+            print("\n" + "="*60)
+            print(f"LOOP #{loop_count} STARTED")
+            print("="*60)
+        
+        try:
+            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            
+            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
+            if not all_investor_folders:
+                print(" └─ 🔘 No investor directories found during loop. Executing move_fetched_investors()...")
+                try:
+                    move_fetched_investors()
+                    all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+                except Exception as inner_err:
+                    print(f" [ERROR] Fallback shift error: {inner_err}")
+                
+                if not all_investor_folders:
+                    print(" ⏳ Directory empty. Sleeping for 10 seconds before next scan...")
+                    time.sleep(10)
+                    continue
+
+            # Display system info for awareness only (no limiting)
+            cpu_cores = os.cpu_count() or 1
+            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+            
+            print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
+
+            # Process ALL investor folders - NO CAPACITY LIMITS
+            active_batch = all_investor_folders
+
+            print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
+            
+            # Pool with ALL investors - no capacity checks
+            with mp.Pool(processes=len(active_batch)) as pool:
+                jobs = []
+                for folder in active_batch:
+                    job = pool.apply_async(process_single_investor, args=(folder,))
+                    jobs.append(job)
+                
+                # Force synchronization bar before closing the pool step block
+                results = [job.get() for job in jobs]
+                
+            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. Cooldown sleep ---")
+            
+        except Exception as e:
+            print(f"Critical Error in Orchestrator Loop: {e}")
+            time.sleep(5)
+        
+        # Check loop conditions
+        if not run_as_loop:
+            # Single execution - exit
+            print("Single execution completed. Exiting...")
+            break
+        
+        # Check max loops
+        if max_loops and loop_count >= max_loops:
+            print(f"Maximum loops ({max_loops}) reached. Exiting...")
+            break
+        
+        # Wait before next iteration
+        if run_as_loop and loop_interval > 0:
+            print(f"Waiting {loop_interval} seconds before next loop...")
+            time.sleep(loop_interval)
 
 if __name__ == "__main__":
-   place_orders_parallel()
+   main_once()
 
 
  

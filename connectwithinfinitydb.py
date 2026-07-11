@@ -18,6 +18,8 @@ import psutil
 import shutil
 import traceback
 import threading
+import subprocess
+import tempfile
 
 # ==============================================================================
 #  CRITICAL CONFIGURATION
@@ -64,21 +66,21 @@ def print_step(step_num, total_steps, description):
 
 def print_success(message):
     """Print a success message."""
-    print(f"   {message}")
+    print(f"   ✅ {message}")
 
 def print_error(message, details=None):
     """Print an error message with optional details."""
-    print(f"   {message}")
+    print(f"   ❌ {message}")
     if details:
         print(f"     └─ Details: {details}")
 
 def print_warning(message):
     """Print a warning message."""
-    print(f"    {message}")
+    print(f"   ⚠️  {message}")
 
 def print_info(message):
     """Print an info message."""
-    print(f"    {message}")
+    print(f"   ℹ️  {message}")
 
 def print_divider(char="─", width=70):
     """Print a divider line."""
@@ -103,31 +105,30 @@ def is_browser_alive():
 def kill_chrome_processes_and_clean_locks():
     """Force kill all Chrome processes and remove webdriver locks"""
     
-    print("  🔧 Cleaning Chrome processes and locks...")
+    print_info("Cleaning Chrome processes and locks...")
     
     # 1. Kill all Chrome processes using taskkill (more aggressive)
     killed_count = 0
     try:
-        import subprocess
         # Kill all Chrome processes
         result = subprocess.run(["taskkill", "/f", "/im", "chrome.exe", "/t"], 
                                capture_output=True, text=True)
         if "SUCCESS" in result.stdout or result.returncode == 0:
             killed_count += 1
-            print("    Killed Chrome processes via taskkill")
+            print_success("Killed Chrome processes via taskkill")
         
         # Kill all ChromeDriver processes
         result = subprocess.run(["taskkill", "/f", "/im", "chromedriver.exe", "/t"], 
                                capture_output=True, text=True)
         if "SUCCESS" in result.stdout or result.returncode == 0:
             killed_count += 1
-            print("    Killed ChromeDriver processes via taskkill")
+            print_success("Killed ChromeDriver processes via taskkill")
         
         if killed_count > 0:
-            print(f"  ✅ Killed processes")
+            print_success(f"Killed {killed_count} process group(s)")
             time.sleep(2)  # Wait for processes to fully terminate
     except Exception as e:
-        print(f"  ⚠️ Error killing processes: {e}")
+        print_warning(f"Error killing processes: {e}")
     
     # 2. Remove the entire .wdm directory
     wdm_dir = os.path.expanduser(r"~\.wdm")
@@ -135,13 +136,12 @@ def kill_chrome_processes_and_clean_locks():
     
     if os.path.exists(wdm_dir):
         try:
-            import shutil
             # Try to remove the entire directory
             shutil.rmtree(wdm_dir, ignore_errors=True)
-            print(f"  ✅ Removed entire .wdm directory")
+            print_success("Removed entire .wdm directory")
             removed_count += 1
         except Exception as e:
-            print(f"  ⚠️ Could not remove entire .wdm directory: {e}")
+            print_warning(f"Could not remove entire .wdm directory: {e}")
             # Fallback: remove individual lock files
             for root, dirs, files in os.walk(wdm_dir):
                 for file in files:
@@ -150,18 +150,18 @@ def kill_chrome_processes_and_clean_locks():
                         try:
                             os.remove(lock_path)
                             removed_count += 1
-                            print(f"  ✅ Removed lock: {file}")
+                            print_success(f"Removed lock: {file}")
                         except Exception as e:
-                            print(f"  ⚠️ Could not remove {file}: {e}")
+                            print_warning(f"Could not remove {file}: {e}")
     
     if removed_count > 0:
-        print(f"  ✅ Removed {removed_count} lock file(s)")
+        print_success(f"Removed {removed_count} lock file(s)")
     
     return killed_count > 0 or removed_count > 0
 
 def initialize_browser(force_new=False):
     """
-    Initialize Chrome browser - REUSES existing instance if available.
+    Initialize Chrome browser in HEADLESS mode - ALWAYS HEADLESS.
     
     Args:
         force_new (bool): If True, creates a new instance even if one exists
@@ -170,7 +170,6 @@ def initialize_browser(force_new=False):
         bool: True if browser is ready, False otherwise
     """
     global driver, session, current_servers, _is_shutdown
-    
     
     with _browser_lock:
         # If shutdown was explicitly called, don't reuse
@@ -201,72 +200,51 @@ def initialize_browser(force_new=False):
                 driver = None
                 session = None
         
-        print_header("BROWSER INITIALIZATION")
+        # Clean up any existing Chrome processes before starting new one
+        print_info("Cleaning up existing Chrome processes...")
+        kill_chrome_processes_and_clean_locks()
         
-        # Step 1: Profile Setup
-        print_step(1, 3, "Setting Up Chrome Environment")
+        print_header("BROWSER INITIALIZATION (HEADLESS MODE)")
         
-        real_user_data = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-        source_profile = os.path.join(real_user_data, "Profile 1")
-        selenium_profile = os.path.expanduser(r"~\.chrome_selenium_profile")
-
-        if not os.path.exists(selenium_profile) and os.path.exists(source_profile):
-            print_info("Creating Selenium Chrome profile copy...")
-            try:
-                shutil.copytree(source_profile, selenium_profile, dirs_exist_ok=True)
-                print_success("Profile copied successfully")
-            except Exception as e:
-                print_warning(f"Profile copy failed: {e}")
-
-        # Chrome Options Configured with Option B (Dynamic Hand-off)
+        # Step 1: Setup Chrome Options - ALWAYS HEADLESS
+        print_step(1, 3, "Setting Up Chrome Environment (Headless)")
+        
+        # Create a temporary directory for this session
+        temp_dir = tempfile.mkdtemp(prefix='chrome_selenium_')
+        
         chrome_options = Options()
         if os.path.exists(CHROME_PATH):
             chrome_options.binary_location = CHROME_PATH
             print_info(f"Using manual Chrome path: {CHROME_PATH}")
-        else:
-            print_info("CHROME_PATH location not found. Allowing Selenium to auto-detect the Chrome binary...")
         
-        chrome_options.add_argument(f"--user-data-dir={selenium_profile}")
-        chrome_options.add_argument("--profile-directory=Default")
-        chrome_options.add_argument("--headless=new") 
-        chrome_options.add_argument("--disable-gpu")
+        # ALWAYS HEADLESS - THIS IS THE KEY
+        chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--log-level=3")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+        chrome_options.add_argument(f"--user-data-dir={temp_dir}")
+        
+        print_info("🔧 Headless mode enabled")
 
         # Step 2: Initialize ChromeDriver with retry
         print_step(2, 3, "Initializing ChromeDriver")
         
         # Try multiple times with increasing delays
         max_attempts = 3
+        driver_initialized = False
+        
         for attempt in range(1, max_attempts + 1):
             try:
-                # Clean locks again before each attempt (especially important after failures)
                 if attempt > 1:
                     print_info(f"Retry attempt {attempt}/{max_attempts}...")
-                    # Force kill any remaining Chrome processes
-                    for proc in psutil.process_iter(['pid', 'name']):
-                        try:
-                            if 'chrome' in proc.info['name'].lower() or 'chromedriver' in proc.info['name'].lower():
-                                proc.kill()
-                        except:
-                            pass
+                    # Clean up again before retry
+                    kill_chrome_processes_and_clean_locks()
                     time.sleep(2)
-                    # Remove lock files again
-                    wdm_dir = os.path.expanduser(r"~\.wdm")
-                    if os.path.exists(wdm_dir):
-                        for root, dirs, files in os.walk(wdm_dir):
-                            for file in files:
-                                if ".wdm-lock" in file:
-                                    try:
-                                        os.remove(os.path.join(root, file))
-                                    except:
-                                        pass
-                
-                # Use a different approach - install ChromeDriver to a specific location
-                from webdriver_manager.chrome import ChromeDriverManager
-                import shutil
                 
                 # Try to use cached ChromeDriver first
                 chromedriver_cache = os.path.expanduser(r"~\.chromedriver_cache")
@@ -291,18 +269,21 @@ def initialize_browser(force_new=False):
                     service = Service(driver_path)
                 
                 driver = webdriver.Chrome(service=service, options=chrome_options)
-                print_success("ChromeDriver initialized successfully")
+                print_success("ChromeDriver initialized successfully in HEADLESS mode")
+                driver_initialized = True
                 break  # Success, exit retry loop
                 
             except Exception as e:
                 error_msg = str(e)
                 if attempt < max_attempts:
                     print_warning(f"Attempt {attempt} failed: {error_msg[:100]}")
-                    print_info("Waiting 3 seconds before retry...")
                     time.sleep(3)
                 else:
                     print_error("Failed to initialize ChromeDriver after multiple attempts", error_msg)
                     return False
+
+        if not driver_initialized:
+            return False
 
         # Step 3: Authenticate
         print_step(3, 3, "Authenticating and Accessing Query Page")
@@ -506,34 +487,93 @@ def execute_query(sql_query, params=None, reuse_browser=True):
     print_divider()
     
     try:
-        # Initialize browser
-        if not initialize_browser(force_new=not reuse_browser):
-            return {
-                'status': 'error', 
-                'message': 'Browser initialization failed', 
-                'results': [],
-                'affected_rows': 0
-            }
+        # Initialize browser with retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            if attempt > 0:
+                print_info(f"Retry attempt {attempt + 1}/{max_retries} for browser initialization...")
+                time.sleep(3)
+                # Clean up before retry
+                kill_chrome_processes_and_clean_locks()
+            
+            if initialize_browser(force_new=True):
+                break
+            elif attempt == max_retries - 1:
+                return {
+                    'status': 'error', 
+                    'message': 'Browser initialization failed after multiple attempts', 
+                    'results': [],
+                    'affected_rows': 0
+                }
 
-        # Step 4: Inject SQL Query
+        # Step 4: Inject SQL Query with robust element finding
         print_step(4, 6, "Injecting SQL Query")
         try:
-            query_textarea = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "sql-query"))
-            )
-            # Clear previous content
-            driver.execute_script("arguments[0].value = '';", query_textarea)
+            # Wait for page to be ready with multiple selector attempts
+            query_textarea = None
+            for selector in ["#sql-query", "textarea#sql-query", "textarea[name='sql-query']"]:
+                try:
+                    query_textarea = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    break
+                except:
+                    continue
             
-            # Set the final SQL query
+            if not query_textarea:
+                # Try to find any textarea on the page
+                try:
+                    query_textarea = driver.find_element(By.TAG_NAME, "textarea")
+                except:
+                    pass
+            
+            if not query_textarea:
+                raise Exception("Could not find query textarea")
+            
+            # Clear and set value using JavaScript (more reliable)
+            driver.execute_script("arguments[0].value = '';", query_textarea)
             driver.execute_script("arguments[0].value = arguments[1];", query_textarea, final_sql)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", query_textarea)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", query_textarea)
             
             # Small delay to ensure UI updates
             time.sleep(0.5)
             
-            execute_button = driver.find_element(By.XPATH, "//button[text()='Execute Query']")
-            execute_button.click()
-            print_success("Query injected and executed")
+            # Find execute button with multiple strategies
+            execute_button = None
+            button_selectors = [
+                "//button[text()='Execute Query']",
+                "//button[contains(text(), 'Execute')]",
+                "//button[@id='execute-query']",
+                "//button[@class='execute-query']",
+                "//button[@type='submit']",
+                "//input[@type='submit' and contains(@value, 'Execute')]"
+            ]
+            
+            for selector in button_selectors:
+                try:
+                    if selector.startswith("//"):
+                        execute_button = driver.find_element(By.XPATH, selector)
+                    else:
+                        execute_button = driver.find_element(By.CSS_SELECTOR, selector)
+                    if execute_button:
+                        break
+                except:
+                    continue
+            
+            if execute_button:
+                # Try JavaScript click first
+                driver.execute_script("arguments[0].click();", execute_button)
+                print_success("Query injected and executed")
+            else:
+                print_warning("Execute button not found, attempting form submission...")
+                # Try to submit the form directly
+                try:
+                    driver.execute_script("document.querySelector('form').submit();")
+                    print_success("Form submitted")
+                except:
+                    raise Exception("Could not find execute button or form")
+                
         except Exception as e:
             print_error("Failed to inject query", str(e))
             return {
@@ -552,10 +592,35 @@ def execute_query(sql_query, params=None, reuse_browser=True):
             is_select = final_sql.strip().upper().startswith("SELECT")
             
             if is_select:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "#query-result table, #column-data table"))
-                )
-                print_success("Result table detected")
+                # Wait for table with multiple possible selectors
+                table_found = False
+                for selector in ["#query-result table", "#column-data table", ".result-table", ".data-table", "table"]:
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                        )
+                        table_found = True
+                        break
+                    except:
+                        continue
+                
+                if table_found:
+                    print_success("Result table detected")
+                else:
+                    # Check if there's an error message
+                    try:
+                        error_element = driver.find_element(By.CSS_SELECTOR, ".error, #error, .alert-danger, .alert-error")
+                        error_text = error_element.text
+                        if error_text:
+                            return {
+                                'status': 'error',
+                                'message': error_text,
+                                'results': [],
+                                'affected_rows': 0
+                            }
+                    except:
+                        pass
+                    print_warning("Result table not found, but proceeding...")
             else:
                 # For UPDATE, INSERT, DELETE - wait for message
                 try:
@@ -568,6 +633,7 @@ def execute_query(sql_query, params=None, reuse_browser=True):
                     
         except Exception as e:
             print_warning(f"Timeout waiting for results: {str(e)[:100]}")
+            # Check for errors in page source
             try:
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
                 error_msg = soup.find('div', class_='error') or soup.find('div', id='error')
@@ -662,6 +728,3 @@ def execute_query(sql_query, params=None, reuse_browser=True):
     
 # Register signal handler
 signal.signal(signal.SIGINT, signal_handler)
-
-
-
