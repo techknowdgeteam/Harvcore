@@ -1040,8 +1040,8 @@ def fetch_tables_streaming(batch_size=5000):
         
         # Step 5: Prepare Output Directory and Stream Data
         print(f"\n📁 [5/6] Preparing Output Directory for Insiders Data...")
-        os.makedirs(os.path.dirname(FETCHED_INVESTORS), exist_ok=True)
-        print(f"   Directory ready: {os.path.dirname(FETCHED_INVESTORS)}")
+        os.makedirs(os.path.dirname(ALL_FETCHED_INVESTORS), exist_ok=True)
+        print(f"   Directory ready: {os.path.dirname(ALL_FETCHED_INVESTORS)}")
         
         # Step 6: Stream Insiders Data
         print(f"\n📥 [6/6] Streaming Insiders Records to File...")
@@ -1072,7 +1072,7 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"  📋 Exporting columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
         print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs")
         
-        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             # Write opening brace - NO METADATA SECTION
             f.write('{\n')
             first_record = True
@@ -1194,7 +1194,7 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"  💾 File Size        : {bytes_written/1024:,.1f} KB ({bytes_written/1048576:.2f} MB)")
         print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
         print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
-        print(f"  📁 Output File      : {FETCHED_INVESTORS}")
+        print(f"  📁 Output File      : {ALL_FETCHED_INVESTORS}")
         print(f"  📁 Account Mgmt File: {DEFAULT_ACCOUNTMANAGEMENT}")
         print(f"  ⚠️  Database         : server_account.accountmanagement NOT modified (read-only)")
         print("="*70)
@@ -1219,7 +1219,7 @@ def update_tables_streaming(batch_size=5000):
     - Merges data from both files
     - Does NOT delete files after updating
     """
-    combine_investors_to_all_files()
+    
     print("\n" + "="*70)
     print(f"  UPDATING TABLES")
     print("="*70)
@@ -2932,23 +2932,35 @@ def verify_investors_balance():
        
 def combine_investors_to_all_files():
     """
-    Combines investor data from invharv and harvhub into single all-in-one files.
+    Intelligently merges investor data between invharv, harvhub, and all files.
+    
+    This function performs a bidirectional sync:
+    1. For each investor ID in all files, it checks invharv and harvhub
+    2. If invharv/harvhub have missing fields, it copies from all files
+    3. If invharv/harvhub have updated field values, it updates all files
+    4. Then saves all updated files
     
     Reads:
         - INVHARV_FETCHED_INVESTORS
         - HARVHUB_FETCHED_INVESTORS
         - INVHARV_UPDATED_INVESTORS
         - HARVHUB_UPDATED_INVESTORS
+        - ALL_FETCHED_INVESTORS (if exists)
+        - ALL_UPDATED_INVESTORS (if exists)
     
     Writes:
-        - ALL_FETCHED_INVESTORS (combined fetched data from both sources)
-        - ALL_UPDATED_INVESTORS (combined updated data from both sources)
+        - ALL_FETCHED_INVESTORS (merged fetched data)
+        - ALL_UPDATED_INVESTORS (merged updated data)
+        - INVHARV_FETCHED_INVESTORS (updated with missing fields)
+        - HARVHUB_FETCHED_INVESTORS (updated with missing fields)
+        - INVHARV_UPDATED_INVESTORS (updated with missing fields)
+        - HARVHUB_UPDATED_INVESTORS (updated with missing fields)
     
     Returns:
         dict: Statistics about the combination process
     """
     print("\n" + "="*70)
-    print(f"  COMBINING INVESTOR FILES")
+    print(f"  INTELLIGENT INVESTOR MERGE")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
@@ -2956,168 +2968,289 @@ def combine_investors_to_all_files():
     stats = {
         "processing_success": False,
         "fetched": {
-            "invharv": {"loaded": False, "count": 0, "path": INVHARV_FETCHED_INVESTORS},
-            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_FETCHED_INVESTORS},
+            "invharv": {"loaded": False, "count": 0, "path": INVHARV_FETCHED_INVESTORS, "updated_count": 0, "filled_fields": 0},
+            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_FETCHED_INVESTORS, "updated_count": 0, "filled_fields": 0},
+            "all": {"loaded": False, "count": 0, "path": ALL_FETCHED_INVESTORS, "updated_count": 0, "filled_fields": 0},
             "combined_count": 0,
             "output_path": ALL_FETCHED_INVESTORS
         },
         "updated": {
-            "invharv": {"loaded": False, "count": 0, "path": INVHARV_UPDATED_INVESTORS},
-            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_UPDATED_INVESTORS},
+            "invharv": {"loaded": False, "count": 0, "path": INVHARV_UPDATED_INVESTORS, "updated_count": 0, "filled_fields": 0},
+            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_UPDATED_INVESTORS, "updated_count": 0, "filled_fields": 0},
+            "all": {"loaded": False, "count": 0, "path": ALL_UPDATED_INVESTORS, "updated_count": 0, "filled_fields": 0},
             "combined_count": 0,
             "output_path": ALL_UPDATED_INVESTORS
         },
         "errors": [],
+        "warnings": [],
         "timestamp": datetime.now().isoformat()
     }
     
+    def deep_merge(base_dict, override_dict, prefer_override=True):
+        """
+        Deep merge two dictionaries.
+        
+        Args:
+            base_dict: The base dictionary to merge into
+            override_dict: The dictionary with potential updates
+            prefer_override: If True, override_dict values take precedence
+        
+        Returns:
+            dict: Merged dictionary
+        """
+        result = base_dict.copy()
+        
+        for key, value in override_dict.items():
+            if key in result:
+                # If both are dicts, recursively merge
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value, prefer_override)
+                # If value is not None or empty, update based on preference
+                elif value is not None and value != "NULL" and value != "":
+                    if prefer_override:
+                        result[key] = value
+                    # If we prefer base, only update if base value is empty/missing
+                    elif result.get(key) is None or result.get(key) == "NULL" or result.get(key) == "":
+                        result[key] = value
+            else:
+                # Key doesn't exist in base, add it
+                result[key] = value
+        
+        return result
+    
+    def count_non_empty_fields(obj, ignore_keys=[]):
+        """Count non-empty fields in an object."""
+        if not isinstance(obj, dict):
+            return 0
+        
+        count = 0
+        for key, value in obj.items():
+            if key in ignore_keys:
+                continue
+            if value is not None and value != "" and value != "NULL":
+                if isinstance(value, dict):
+                    # Recursively count nested dict fields
+                    count += count_non_empty_fields(value, ignore_keys)
+                elif isinstance(value, list) and len(value) > 0:
+                    count += 1
+                elif not isinstance(value, list):
+                    count += 1
+        return count
+    
+    def merge_investor_records(source_data, target_data, source_name):
+        """
+        Merge source_data into target_data at the field level.
+        
+        Returns:
+            tuple: (updated_target, missing_fields_count, updated_fields_count)
+        """
+        updated_target = target_data.copy() if target_data else {}
+        total_missing_fields = 0
+        total_updated_fields = 0
+        
+        # For each investor in source_data
+        for investor_id, source_record in source_data.items():
+            if not isinstance(source_record, dict):
+                continue
+                
+            # If investor doesn't exist in target, add the entire record
+            if investor_id not in updated_target:
+                updated_target[investor_id] = source_record.copy()
+                # Count fields added
+                total_missing_fields += count_non_empty_fields(source_record)
+                continue
+            
+            # Investor exists, merge fields
+            target_record = updated_target[investor_id]
+            
+            # Count fields before merge
+            before_fields = count_non_empty_fields(target_record)
+            
+            # Deep merge: source updates take precedence for existing fields,
+            # but we also fill missing fields from target if source has them
+            merged_record = deep_merge(target_record, source_record, prefer_override=True)
+            
+            # Now fill any fields that exist in target but missing in source
+            # This ensures bidirectionality
+            merged_record = deep_merge(merged_record, target_record, prefer_override=False)
+            
+            after_fields = count_non_empty_fields(merged_record)
+            
+            # Count changes
+            if before_fields < after_fields:
+                total_missing_fields += (after_fields - before_fields)
+            elif before_fields > after_fields:
+                total_updated_fields += (before_fields - after_fields)
+            
+            updated_target[investor_id] = merged_record
+        
+        return updated_target, total_missing_fields, total_updated_fields
+    
+    def load_json_file(filepath, stats_section, name):
+        """Load a JSON file safely."""
+        if not os.path.exists(filepath):
+            stats["warnings"].append(f"{name} file not found: {filepath}")
+            return None, False
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    stats_section["loaded"] = True
+                    stats_section["count"] = len(data)
+                    print(f"   ✅ Loaded {name}: {len(data):,} records")
+                    return data, True
+                else:
+                    stats["errors"].append(f"{name} has invalid format (expected dict)")
+                    return None, False
+        except Exception as e:
+            error_msg = f"Error loading {name}: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            stats["errors"].append(error_msg)
+            return None, False
+    
+    def save_json_file(filepath, data, name):
+        """Save JSON data to file safely."""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            error_msg = f"Error saving {name}: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            stats["errors"].append(error_msg)
+            return False
+    
     try:
         # ============================================================
-        # 1. COMBINE FETCHED INVESTORS
+        # 1. PROCESS FETCHED INVESTORS
         # ============================================================
-        print("\n📥 [1/2] Combining FETCHED investors...")
+        print("\n📥 [1/2] Processing FETCHED investors...")
         print("-"*40)
         
+        # Load all fetched files
+        invharv_fetched, _ = load_json_file(INVHARV_FETCHED_INVESTORS, stats["fetched"]["invharv"], "INVHARV fetched")
+        harvhub_fetched, _ = load_json_file(HARVHUB_FETCHED_INVESTORS, stats["fetched"]["harvhub"], "HARVHUB fetched")
+        all_fetched, _ = load_json_file(ALL_FETCHED_INVESTORS, stats["fetched"]["all"], "ALL fetched")
+        
+        # Initialize combined
         combined_fetched = {}
         
-        # Load INVHARV fetched
-        if os.path.exists(INVHARV_FETCHED_INVESTORS):
-            try:
-                with open(INVHARV_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        combined_fetched.update(data)
-                        stats["fetched"]["invharv"]["loaded"] = True
-                        stats["fetched"]["invharv"]["count"] = len(data)
-                        print(f"   ✅ Loaded INVHARV fetched: {len(data):,} records")
-                    else:
-                        print(f"   ⚠️ INVHARV fetched has invalid format (expected dict)")
-                        stats["errors"].append("INVHARV fetched file is not a dict")
-            except Exception as e:
-                error_msg = f"Error loading INVHARV fetched: {str(e)}"
-                print(f"   ❌ {error_msg}")
-                stats["errors"].append(error_msg)
-        else:
-            print(f"   ⚠️ INVHARV fetched file not found: {INVHARV_FETCHED_INVESTORS}")
-            stats["errors"].append("INVHARV fetched file not found")
+        # If ALL fetched exists, start with it
+        if all_fetched:
+            combined_fetched = all_fetched.copy()
         
-        # Load HARVHUB fetched
-        if os.path.exists(HARVHUB_FETCHED_INVESTORS):
-            try:
-                with open(HARVHUB_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        # Merge without overwriting existing keys (invharv takes priority)
-                        for key, value in data.items():
-                            if key not in combined_fetched:
-                                combined_fetched[key] = value
-                        stats["fetched"]["harvhub"]["loaded"] = True
-                        stats["fetched"]["harvhub"]["count"] = len(data)
-                        print(f"   ✅ Loaded HARVHUB fetched: {len(data):,} records")
-                    else:
-                        print(f"   ⚠️ HARVHUB fetched has invalid format (expected dict)")
-                        stats["errors"].append("HARVHUB fetched file is not a dict")
-            except Exception as e:
-                error_msg = f"Error loading HARVHUB fetched: {str(e)}"
-                print(f"   ❌ {error_msg}")
-                stats["errors"].append(error_msg)
-        else:
-            print(f"   ⚠️ HARVHUB fetched file not found: {HARVHUB_FETCHED_INVESTORS}")
-            stats["errors"].append("HARVHUB fetched file not found")
+        # Merge invharv into combined
+        if invharv_fetched:
+            combined_fetched, missing_fields, updated_fields = merge_investor_records(
+                invharv_fetched, combined_fetched, "INVHARV"
+            )
+            stats["fetched"]["invharv"]["filled_fields"] = missing_fields
+            stats["fetched"]["invharv"]["updated_count"] = updated_fields
+            print(f"   🔄 INVHARV filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
         
-        # Write combined fetched file
+        # Merge harvhub into combined
+        if harvhub_fetched:
+            combined_fetched, missing_fields, updated_fields = merge_investor_records(
+                harvhub_fetched, combined_fetched, "HARVHUB"
+            )
+            stats["fetched"]["harvhub"]["filled_fields"] = missing_fields
+            stats["fetched"]["harvhub"]["updated_count"] = updated_fields
+            print(f"   🔄 HARVHUB filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
+        
+        # Now update invharv and harvhub files with combined data (bidirectional sync)
+        if invharv_fetched and combined_fetched:
+            updated_invharv, inv_missing, inv_updated = merge_investor_records(
+                combined_fetched, invharv_fetched, "Combined -> INVHARV"
+            )
+            if inv_missing > 0 or inv_updated > 0:
+                if save_json_file(INVHARV_FETCHED_INVESTORS, updated_invharv, "INVHARV fetched (updated)"):
+                    print(f"   📝 Updated INVHARV fetched: added {inv_missing:,} missing fields, updated {inv_updated:,} fields")
+                    stats["fetched"]["invharv"]["filled_fields"] += inv_missing
+                    stats["fetched"]["invharv"]["updated_count"] += inv_updated
+        
+        if harvhub_fetched and combined_fetched:
+            updated_harvhub, hub_missing, hub_updated = merge_investor_records(
+                combined_fetched, harvhub_fetched, "Combined -> HARVHUB"
+            )
+            if hub_missing > 0 or hub_updated > 0:
+                if save_json_file(HARVHUB_FETCHED_INVESTORS, updated_harvhub, "HARVHUB fetched (updated)"):
+                    print(f"   📝 Updated HARVHUB fetched: added {hub_missing:,} missing fields, updated {hub_updated:,} fields")
+                    stats["fetched"]["harvhub"]["filled_fields"] += hub_missing
+                    stats["fetched"]["harvhub"]["updated_count"] += hub_updated
+        
+        # Save combined fetched
         if combined_fetched:
             stats["fetched"]["combined_count"] = len(combined_fetched)
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(ALL_FETCHED_INVESTORS), exist_ok=True)
-            
-            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(combined_fetched, f, indent=2, ensure_ascii=False)
-            
-            print(f"\n   💾 Written combined fetched to: {ALL_FETCHED_INVESTORS}")
-            print(f"   📊 Total combined fetched records: {len(combined_fetched):,}")
-            
-            # Show breakdown
-            if stats["fetched"]["invharv"]["loaded"] and stats["fetched"]["harvhub"]["loaded"]:
-                overlap = stats["fetched"]["invharv"]["count"] + stats["fetched"]["harvhub"]["count"] - len(combined_fetched)
-                if overlap > 0:
-                    print(f"   🔄 Overlapping records (invharv kept): {overlap:,}")
+            if save_json_file(ALL_FETCHED_INVESTORS, combined_fetched, "ALL fetched combined"):
+                print(f"\n   💾 Saved combined fetched: {len(combined_fetched):,} records")
         else:
             print(f"\n   ⚠️ No fetched data to combine")
             stats["errors"].append("No fetched data available")
         
         # ============================================================
-        # 2. COMBINE UPDATED INVESTORS
+        # 2. PROCESS UPDATED INVESTORS
         # ============================================================
-        print("\n📤 [2/2] Combining UPDATED investors...")
+        print("\n📤 [2/2] Processing UPDATED investors...")
         print("-"*40)
         
+        # Load all updated files
+        invharv_updated, _ = load_json_file(INVHARV_UPDATED_INVESTORS, stats["updated"]["invharv"], "INVHARV updated")
+        harvhub_updated, _ = load_json_file(HARVHUB_UPDATED_INVESTORS, stats["updated"]["harvhub"], "HARVHUB updated")
+        all_updated, _ = load_json_file(ALL_UPDATED_INVESTORS, stats["updated"]["all"], "ALL updated")
+        
+        # Initialize combined
         combined_updated = {}
         
-        # Load INVHARV updated
-        if os.path.exists(INVHARV_UPDATED_INVESTORS):
-            try:
-                with open(INVHARV_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        combined_updated.update(data)
-                        stats["updated"]["invharv"]["loaded"] = True
-                        stats["updated"]["invharv"]["count"] = len(data)
-                        print(f"   ✅ Loaded INVHARV updated: {len(data):,} records")
-                    else:
-                        print(f"   ⚠️ INVHARV updated has invalid format (expected dict)")
-                        stats["errors"].append("INVHARV updated file is not a dict")
-            except Exception as e:
-                error_msg = f"Error loading INVHARV updated: {str(e)}"
-                print(f"   ❌ {error_msg}")
-                stats["errors"].append(error_msg)
-        else:
-            print(f"   ⚠️ INVHARV updated file not found: {INVHARV_UPDATED_INVESTORS}")
-            stats["errors"].append("INVHARV updated file not found")
+        # If ALL updated exists, start with it
+        if all_updated:
+            combined_updated = all_updated.copy()
         
-        # Load HARVHUB updated
-        if os.path.exists(HARVHUB_UPDATED_INVESTORS):
-            try:
-                with open(HARVHUB_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        # Merge without overwriting existing keys (invharv takes priority)
-                        for key, value in data.items():
-                            if key not in combined_updated:
-                                combined_updated[key] = value
-                        stats["updated"]["harvhub"]["loaded"] = True
-                        stats["updated"]["harvhub"]["count"] = len(data)
-                        print(f"   ✅ Loaded HARVHUB updated: {len(data):,} records")
-                    else:
-                        print(f"   ⚠️ HARVHUB updated has invalid format (expected dict)")
-                        stats["errors"].append("HARVHUB updated file is not a dict")
-            except Exception as e:
-                error_msg = f"Error loading HARVHUB updated: {str(e)}"
-                print(f"   ❌ {error_msg}")
-                stats["errors"].append(error_msg)
-        else:
-            print(f"   ⚠️ HARVHUB updated file not found: {HARVHUB_UPDATED_INVESTORS}")
-            stats["errors"].append("HARVHUB updated file not found")
+        # Merge invharv into combined
+        if invharv_updated:
+            combined_updated, missing_fields, updated_fields = merge_investor_records(
+                invharv_updated, combined_updated, "INVHARV"
+            )
+            stats["updated"]["invharv"]["filled_fields"] = missing_fields
+            stats["updated"]["invharv"]["updated_count"] = updated_fields
+            print(f"   🔄 INVHARV filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
         
-        # Write combined updated file
+        # Merge harvhub into combined
+        if harvhub_updated:
+            combined_updated, missing_fields, updated_fields = merge_investor_records(
+                harvhub_updated, combined_updated, "HARVHUB"
+            )
+            stats["updated"]["harvhub"]["filled_fields"] = missing_fields
+            stats["updated"]["harvhub"]["updated_count"] = updated_fields
+            print(f"   🔄 HARVHUB filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
+        
+        # Now update invharv and harvhub files with combined data (bidirectional sync)
+        if invharv_updated and combined_updated:
+            updated_invharv, inv_missing, inv_updated = merge_investor_records(
+                combined_updated, invharv_updated, "Combined -> INVHARV"
+            )
+            if inv_missing > 0 or inv_updated > 0:
+                if save_json_file(INVHARV_UPDATED_INVESTORS, updated_invharv, "INVHARV updated (updated)"):
+                    print(f"   📝 Updated INVHARV updated: added {inv_missing:,} missing fields, updated {inv_updated:,} fields")
+                    stats["updated"]["invharv"]["filled_fields"] += inv_missing
+                    stats["updated"]["invharv"]["updated_count"] += inv_updated
+        
+        if harvhub_updated and combined_updated:
+            updated_harvhub, hub_missing, hub_updated = merge_investor_records(
+                combined_updated, harvhub_updated, "Combined -> HARVHUB"
+            )
+            if hub_missing > 0 or hub_updated > 0:
+                if save_json_file(HARVHUB_UPDATED_INVESTORS, updated_harvhub, "HARVHUB updated (updated)"):
+                    print(f"   📝 Updated HARVHUB updated: added {hub_missing:,} missing fields, updated {hub_updated:,} fields")
+                    stats["updated"]["harvhub"]["filled_fields"] += hub_missing
+                    stats["updated"]["harvhub"]["updated_count"] += hub_updated
+        
+        # Save combined updated
         if combined_updated:
             stats["updated"]["combined_count"] = len(combined_updated)
-            
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(ALL_UPDATED_INVESTORS), exist_ok=True)
-            
-            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(combined_updated, f, indent=2, ensure_ascii=False)
-            
-            print(f"\n   💾 Written combined updated to: {ALL_UPDATED_INVESTORS}")
-            print(f"   📊 Total combined updated records: {len(combined_updated):,}")
-            
-            # Show breakdown
-            if stats["updated"]["invharv"]["loaded"] and stats["updated"]["harvhub"]["loaded"]:
-                overlap = stats["updated"]["invharv"]["count"] + stats["updated"]["harvhub"]["count"] - len(combined_updated)
-                if overlap > 0:
-                    print(f"   🔄 Overlapping records (invharv kept): {overlap:,}")
+            if save_json_file(ALL_UPDATED_INVESTORS, combined_updated, "ALL updated combined"):
+                print(f"\n   💾 Saved combined updated: {len(combined_updated):,} records")
         else:
             print(f"\n   ⚠️ No updated data to combine")
             stats["errors"].append("No updated data available")
@@ -3128,23 +3261,36 @@ def combine_investors_to_all_files():
         stats["processing_success"] = True
         
         print("\n" + "="*70)
-        print(f"  COMBINATION SUMMARY")
+        print(f"  MERGE SUMMARY")
         print("="*70)
         
         print(f"\n  📥 FETCHED FILES:")
         print(f"     INVHARV  : {'✅' if stats['fetched']['invharv']['loaded'] else '❌'} {stats['fetched']['invharv']['count']:,} records")
+        print(f"                Filled: {stats['fetched']['invharv']['filled_fields']:,} missing fields")
+        print(f"                Updated: {stats['fetched']['invharv']['updated_count']:,} fields")
         print(f"     HARVHUB  : {'✅' if stats['fetched']['harvhub']['loaded'] else '❌'} {stats['fetched']['harvhub']['count']:,} records")
+        print(f"                Filled: {stats['fetched']['harvhub']['filled_fields']:,} missing fields")
+        print(f"                Updated: {stats['fetched']['harvhub']['updated_count']:,} fields")
         print(f"     Combined : {stats['fetched']['combined_count']:,} records")
         print(f"     Output   : {ALL_FETCHED_INVESTORS}")
         
         print(f"\n  📤 UPDATED FILES:")
         print(f"     INVHARV  : {'✅' if stats['updated']['invharv']['loaded'] else '❌'} {stats['updated']['invharv']['count']:,} records")
+        print(f"                Filled: {stats['updated']['invharv']['filled_fields']:,} missing fields")
+        print(f"                Updated: {stats['updated']['invharv']['updated_count']:,} fields")
         print(f"     HARVHUB  : {'✅' if stats['updated']['harvhub']['loaded'] else '❌'} {stats['updated']['harvhub']['count']:,} records")
+        print(f"                Filled: {stats['updated']['harvhub']['filled_fields']:,} missing fields")
+        print(f"                Updated: {stats['updated']['harvhub']['updated_count']:,} fields")
         print(f"     Combined : {stats['updated']['combined_count']:,} records")
         print(f"     Output   : {ALL_UPDATED_INVESTORS}")
         
+        if stats["warnings"]:
+            print(f"\n  ⚠️ WARNINGS ({len(stats['warnings'])}):")
+            for warning in stats["warnings"]:
+                print(f"     - {warning}")
+        
         if stats["errors"]:
-            print(f"\n  ⚠️ ERRORS/WARNINGS ({len(stats['errors'])}):")
+            print(f"\n  ❌ ERRORS ({len(stats['errors'])}):")
             for error in stats["errors"]:
                 print(f"     - {error}")
         
@@ -3169,7 +3315,7 @@ def combine_investors_to_all_files():
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
-    
+      
 def process_single_investor_(inv_id):
     """
     WORKER FUNCTION: Only creates MT5 folders if they don't exist
@@ -3291,6 +3437,7 @@ def main_once():
     ORCHESTRATOR (Single Execution): Processes ALL investor folders
     once without any capacity limitations or restrictions.
     """
+    combine_investors_to_all_files()
     # Parse command line arguments for control flags
     run_as_loop = False 
     loop_interval = 1  # Default 1 second between loops (matching original)
@@ -3399,6 +3546,7 @@ def main_loop():
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
     on every cycle without any capacity limitations or restrictions.
     """
+    combine_investors_to_all_files()
     # Parse command line arguments for control flags
     run_as_loop = True 
     loop_interval = 1  # Default 1 second between loops (matching original)
@@ -3503,5 +3651,5 @@ def main_loop():
             time.sleep(loop_interval)
 
 if __name__ == "__main__":
-   main_once()
+   main_loop()
     

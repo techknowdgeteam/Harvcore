@@ -1,0 +1,1036 @@
+{
+  "5": {
+    "id": "5",
+    "broker": "Deriv",
+    "email": "mumstandarddemo@gmail.com",
+    "fullname": "T.O",
+    "server": "Deriv-demo",
+    "login": "201849087",
+    "password": "@Techknowdge12#",
+    "application_status": "approved",
+    "broker_balance": "10000.00",
+    "balance_verification": "verified",
+    "profitandloss": "-1886.68",
+    "passkey": "$2y$10$yaSmr4G1J9lrpL1IZIRaheO0kU2hAD9kKW.SWoNf74qPZJzE/OM9q",
+    "submitted_at": "NULL",
+    "invested_with": "6_key-level-breakout",
+    "enable_autotrading": "1",
+    "bypass_restriction": "1",
+    "demo_account": "1",
+    "account_mode": "demo",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 mumstandarddemo_at_gmail_dot_com 5 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 mumstandarddemo_at_gmail_dot_com 5 Deriv",
+    "account_balance": 10000.0,
+    "account_currency": "USD",
+    "account_leverage": 1000,
+    "has_error": false,
+    "processed": true,
+    "folder_created": true,
+    "meets_balance_requirement": true,
+    "min_broker_balance": 50.0,
+    "error_messages": [],
+    "strategies": [
+      "techknowdge_revenue"
+    ],
+    "balance_display": "NULL",
+    "execution_start_date": "June 24, 2026",
+    "analytics_history": "NULL",
+    "revenue_history": [
+      {
+        "id": 1783177238,
+        "execution_start_date": "2026-07-04",
+        "execution_end_date": "2026-08-03",
+        "starting_balance": 9744.54,
+        "current_balance": 9744.54,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "contract_cancelled",
+        "invested_with": "6_key-level-breakout",
+        "cancelled_at": "2026-07-09 09:06:32",
+        "cancelled_by": "techknowdge12"
+      }
+    ],
+    "loyalties": "active",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "0",
+    "notifications": {
+      "1": 
+        "section": "AccountMode",
+        "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "Your account has been configured with the following trading strategy(s): 6_key-level-breakout. The system will execute trades according to this strategy configuration.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "Your trading program is active as of July 09, 2026. Welcome aboard!",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
+        "time": "2026-07-09 14:17:06",
+        "type": "error",
+        "update": "new"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "Your trading contract duration is set to 30 days. Your contract will expire on August 08, 2026. You are currently within your active trading period.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "Your trading terminal has been configured and is ready for automated trading.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $7106.20 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "9": {
+        "section": "AccountMode",
+        "message": "Account mode is not specified. The system cannot determine if this is a demo or live account. Trading will proceed once account mode is confirmed.",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      },
+      "10": {
+        "section": "RegistrationRequired",
+        "message": " You have not yet enrolled or your configuration is incomplete. Please contact support if you experience any issues.",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      },
+      "11": {
+        "section": "CredentialsMissing",
+        "message": " ACCOUNT CREDENTIALS MISSING: The following account information is incomplete: login, password, server. Trading cannot be activated until this information is provided.",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      },
+      "12": {
+        "section": "RegistrationStatus",
+        "message": "Your investor registration is incomplete. Please provide all required information to begin automated trading.",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      }
+    },
+    "executions_notification": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "SERVER NOTIFICATION: Investor 1 successfully configured with strategies: 6_key-level-breakout",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "SERVER NOTIFICATION: Investor 1 enrollment confirmed. Start date: July 09, 2026",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "SERVER NOTIFICATION: Investor 1 auto-trading is active and ready for automated execution.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "SERVER NOTIFICATION: Investor 1 has bypass_restriction ENABLED.",
+        "time": "2026-07-09 14:17:06",
+        "type": "error",
+        "update": "new"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "SERVER NOTIFICATION: Investor 1 contract duration configured: 30 days.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "SERVER NOTIFICATION: Investor 1 terminal path configured successfully.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $7106.20 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "9": {
+        "section": "AccountMode",
+        "message": "SERVER NOTIFICATION: Investor 5 has unknown account mode.",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      },
+      "10": {
+        "section": "RegistrationRequired",
+        "message": "SERVER NOTIFICATION: Investor 5 has missing required fields: invested_with, execution_start_date, Terminal_path",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      },
+      "11": {
+        "section": "CredentialsMissing",
+        "message": "SERVER NOTIFICATION: Investor 5 has missing credentials: login, password, server",
+        "time": "2026-07-09 22:45:48",
+        "type": "error",
+        "update": "new"
+      }
+    },
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        3
+      ],
+      "hedge_orders_risk_reward": [
+        3
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 5,
+      "symbols_dictionary": {
+        "xxxjpy": [],
+        "xxxusd": [
+          "BTCUSD"
+        ],
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "skip_orders_close_to_position": false,
+        "cancel_orders_close_to_position": false,
+        "also_restrict_opposite_order_too_close_to_position": false,
+        "pending_orders_limitation_per_symbol": 2,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {
+            "from": "11:55 pm",
+            "to": "12:00 am"
+          },
+          "restricted_days": [
+            "saturday",
+            "sunday"
+          ],
+          "timezone": "african"
+        },
+        "enable_latest_fallback_to_older_order": false,
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 0.5,
+            "breakeven_at_reward": 0.05
+          },
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.1
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": false
+      },
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 1
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 20
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 250
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 260
+      },
+      "requirements": {
+        "contract_duration": "50",
+        "min_broker_balance": "50.00"
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9054.15,
+      "account_mode": "demo",
+      "demo_account": "1",
+      "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
+    }
+  },
+  "1": {
+    "id": "1",
+    "broker": "Deriv",
+    "email": "kennystandarddemo@gmail.com",
+    "fullname": "Arobieke kenny",
+    "server": "Deriv-demo",
+    "login": "5996427",
+    "password": "@Techknowdge12#",
+    "application_status": "approved",
+    "broker_balance": "10000.00",
+    "balance_verification": "verified",
+    "profitandloss": "0.00",
+    "passkey": "$2y$10$skBBvRTkJH68ec.MkuqWiuLQY286JkwMRB6dDofh72PXWojm3Bay2",
+    "invested_with": "6_key-level-breakout",
+    "enable_autotrading": "1",
+    "bypass_restriction": "1",
+    "demo_account": "1",
+    "account_mode": "demo",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 kennystandarddemo_at_gmail_dot_com 1 Deriv",
+    "account_balance": 7626.56,
+    "account_currency": "USD",
+    "account_leverage": 1000,
+    "last_updated": "2026-06-18 11:12:18",
+    "has_error": false,
+    "processed": true,
+    "folder_created": true,
+    "contract_expiry_date_calculated": "July 17, 2026",
+    "meets_balance_requirement": true,
+    "min_broker_balance": 50.0,
+    "error_messages": [],
+    "strategies": [
+      "techknowdge_revenue"
+    ],
+    "submitted_at": "NULL",
+    "balance_display": "show",
+    "execution_start_date": "June 24, 2026",
+    "analytics_history": "NULL",
+    "revenue_history": [
+      {
+        "id": 1783710596,
+        "execution_start_date": "2026-07-10",
+        "execution_end_date": "2026-08-09",
+        "starting_balance": 6931.33,
+        "current_balance": 6931.33,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "active",
+        "invested_with": "6_key-level-breakout"
+      },
+      {
+        "id": 1783604035,
+        "execution_start_date": "2026-07-09",
+        "execution_end_date": "2026-08-08",
+        "starting_balance": 6931.33,
+        "current_balance": 6931.33,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "active",
+        "invested_with": "6_key-level-breakout"
+      },
+      {
+        "id": 1783598449,
+        "execution_start_date": "2026-07-09",
+        "execution_end_date": "2026-08-08",
+        "starting_balance": 7106.2,
+        "current_balance": 7106.2,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "contract_cancelled",
+        "invested_with": "6_key-level-breakout",
+        "cancelled_at": "2026-07-09 09:29:36",
+        "cancelled_by": "techknowdge12"
+      }
+    ],
+    "loyalties": "NULL",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "0",
+    "notifications": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? DEMO ACCOUNT RESTRICTION: Demo accounts are not allowed",
+        "time": "2026-07-11 14:08:50",
+        "type": "error",
+        "update": "read"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "Your account has been configured with the following trading strategy(s): 6_key-level-breakout. The system will execute trades according to this strategy configuration.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "read"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "Your trading program is active as of July 10, 2026. Welcome aboard!",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "read"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "read"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
+        "time": "2026-07-11 14:08:50",
+        "type": "error",
+        "update": "read"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "Your trading contract duration is set to 30 days. Your contract will expire on August 09, 2026. You have 29 days remaining in your trading contract.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "read"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "Your trading terminal has been configured and is ready for automated trading.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "read"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $6931.33 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "read"
+      }
+    },
+    "executions_notification": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? DEMO ACCOUNT RESTRICTION: Demo accounts are not allowed",
+        "time": "2026-07-11 14:08:50",
+        "type": "error",
+        "update": "new"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "SERVER NOTIFICATION: Investor 1 successfully configured with strategies: 6_key-level-breakout",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "new"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "SERVER NOTIFICATION: Investor 1 enrollment confirmed. Start date: July 10, 2026",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "new"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "SERVER NOTIFICATION: Investor 1 auto-trading is active and ready for automated execution.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "new"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "SERVER NOTIFICATION: Investor 1 has bypass_restriction ENABLED.",
+        "time": "2026-07-11 14:08:50",
+        "type": "error",
+        "update": "new"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "SERVER NOTIFICATION: Investor 1 contract duration configured: 30 days, 29 days remaining.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "new"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "SERVER NOTIFICATION: Investor 1 terminal path configured successfully.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "new"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $6931.33 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-07-11 14:08:50",
+        "type": "success",
+        "update": "new"
+      }
+    },
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        3
+      ],
+      "hedge_orders_risk_reward": [
+        3
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 3,
+      "symbols_dictionary": {
+        "key-level-breakout": {
+          "symbols": [
+            "BTCUSD"
+          ],
+          "timeframes": [
+            "15m"
+          ]
+        },
+        "xxxjpy": [],
+        "xxxusd": [
+          "BTCUSD"
+        ],
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "skip_orders_close_to_position": false,
+        "cancel_orders_close_to_position": false,
+        "also_restrict_opposite_order_too_close_to_position": false,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {},
+          "restricted_days": [],
+          "timezone": "african"
+        },
+        "enable_latest_fallback_to_older_order": false,
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 0.5,
+            "breakeven_at_reward": 0.05
+          },
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.1
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": false
+      },
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 0.9
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 18
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 250
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 260
+      },
+      "requirements": {
+        "contract_duration": "30",
+        "min_broker_balance": "50.00",
+        "days_remaining": "29",
+        "contract_expired": false
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9024.15,
+      "account_mode": "demo",
+      "demo_account": "1",
+      "configuration_title": "investor_config_for_invest_in_key-level-breakout-only-btc"
+    }
+  },
+  "3": {
+    "id": "3",
+    "broker": "Deriv",
+    "email": "davidolastandarddemo@gmail.com",
+    "fullname": "D.Ola",
+    "server": "Deriv-demo",
+    "login": "32264928",
+    "password": "@Ayomide12#",
+    "application_status": "approved",
+    "broker_balance": "9544.54",
+    "balance_verification": "verified",
+    "profitandloss": "-1886.68",
+    "invested_with": "6_key-level-bias",
+    "enable_autotrading": "1",
+    "bypass_restriction": "0",
+    "demo_account": "1",
+    "account_mode": "demo",
+    "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 davidolastandarddemo_at_gmail_dot_com 3 Deriv\\terminal64.exe",
+    "mt5_folder_name": "MetaTrader 5 davidolastandarddemo_at_gmail_dot_com 3 Deriv",
+    "passkey": "$2y$10$OSFt5RMQjU9HMhFxj3Ecze/LTCewf0HqUYT0D0psNC4xyn1Cc3pe.",
+    "submitted_at": "NULL",
+    "balance_display": "NULL",
+    "execution_start_date": "2026-06-07",
+    "analytics_history": "NULL",
+    "revenue_history": [
+      {
+        "id": 1783177150,
+        "execution_start_date": "2026-07-04",
+        "execution_end_date": "2026-08-03",
+        "starting_balance": 9544.54,
+        "current_balance": 9544.54,
+        "profit": 0,
+        "user_share": 0,
+        "server_share": 0,
+        "loyalties": "contract_cancelled",
+        "invested_with": "6_key-level-bias",
+        "cancelled_at": "2026-07-09 09:06:40",
+        "cancelled_by": "techknowdge12"
+      }
+    ],
+    "loyalties": "contract_cancelled",
+    "contract_days_left": "NULL",
+    "paymentdetails": "NULL",
+    "message": "NULL",
+    "unauthorized_actions": "0",
+    "notifications": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "Your account has been configured with the following trading strategy(s): 6_key-level-breakout. The system will execute trades according to this strategy configuration.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "Your trading program is active as of July 09, 2026. Welcome aboard!",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
+        "time": "2026-07-09 14:17:06",
+        "type": "error",
+        "update": "new"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "Your trading contract duration is set to 30 days. Your contract will expire on August 08, 2026. You are currently within your active trading period.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "Your trading terminal has been configured and is ready for automated trading.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $7106.20 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      }
+    },
+    "executions_notification": {
+      "1": {
+        "section": "AccountMode",
+        "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "2": {
+        "section": "Strategies",
+        "message": "SERVER NOTIFICATION: Investor 1 successfully configured with strategies: 6_key-level-breakout",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "3": {
+        "section": "StartDate",
+        "message": "SERVER NOTIFICATION: Investor 1 enrollment confirmed. Start date: July 09, 2026",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "4": {
+        "section": "Autotrading",
+        "message": "SERVER NOTIFICATION: Investor 1 auto-trading is active and ready for automated execution.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "5": {
+        "section": "BypassRestriction",
+        "message": "SERVER NOTIFICATION: Investor 1 has bypass_restriction ENABLED.",
+        "time": "2026-07-09 14:17:06",
+        "type": "error",
+        "update": "new"
+      },
+      "6": {
+        "section": "ContractDuration",
+        "message": "SERVER NOTIFICATION: Investor 1 contract duration configured: 30 days.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "7": {
+        "section": "TerminalPath",
+        "message": "SERVER NOTIFICATION: Investor 1 terminal path configured successfully.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      },
+      "8": {
+        "section": "BalanceCheck",
+        "message": "? BALANCE VERIFICATION: Investor's broker balance of $7106.20 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+        "time": "2026-07-09 14:17:06",
+        "type": "success",
+        "update": "new"
+      }
+    },
+    "server_decision": "NULL",
+    "accountmanagement": {
+      "selected_risk_reward": [
+        3
+      ],
+      "hedge_orders_risk_reward": [
+        3
+      ],
+      "timeframe": [
+        "15m"
+      ],
+      "bars": 5,
+      "symbols_dictionary": {
+        "xxxjpy": [],
+        "xxxusd": [
+          "BTCUSD"
+        ],
+        "xxxaud": [],
+        "xxxnzd": [],
+        "usdxxx": [],
+        "xxxchf": [],
+        "xxxcad": [],
+        "xxxbasket": [],
+        "indices": [],
+        "metals": [],
+        "energies": [],
+        "synthetics": []
+      },
+      "settings": {
+        "skip_orders_close_to_position": false,
+        "cancel_orders_close_to_position": false,
+        "also_restrict_opposite_order_too_close_to_position": false,
+        "pending_orders_limitation_per_symbol": 2,
+        "switch_invalid_to_instant_order": false,
+        "enable_order_type_conversion": false,
+        "restrictions_duration": {
+          "restrict_orders_in_time_range_of": {
+            "from": "11:55 pm",
+            "to": "12:00 am"
+          },
+          "restricted_days": [
+            "saturday",
+            "sunday"
+          ],
+          "timezone": "african"
+        },
+        "enable_latest_fallback_to_older_order": false,
+        "enable_breakeven": true,
+        "breakeven_dictionary": [
+          {
+            "reward": 1,
+            "breakeven_at_reward": 0.1
+          },
+          {
+            "reward": 1.8,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2,
+            "breakeven_at_reward": 0.5
+          },
+          {
+            "reward": 2.8,
+            "breakeven_at_reward": 1
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 1.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 1.7
+          },
+          {
+            "reward": 4,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 4.8,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 5.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 6,
+            "breakeven_at_reward": 5
+          },
+          {
+            "reward": 7,
+            "breakeven_at_reward": 5.5
+          },
+          {
+            "reward": 7.8,
+            "breakeven_at_reward": 5.8
+          },
+          {
+            "reward": 8,
+            "breakeven_at_reward": 4
+          },
+          {
+            "reward": 8.8,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 9,
+            "breakeven_at_reward": 4.5
+          },
+          {
+            "reward": 10,
+            "breakeven_at_reward": 5
+          }
+        ],
+        "restrict_order_from_timeframe": "none",
+        "default_price": false,
+        "risk_reward_correction": true,
+        "enable_martingale": false
+      },
+      "minimum_balance_risk_distance": {
+        "1-10000000.99_risk": 1
+      },
+      "maximum_balance_risk_distance": {
+        "1-10000000.99_risk": 10
+      },
+      "account_balance_default_risk_management": {
+        "1-10000000.99_risk": 250
+      },
+      "account_balance_maximum_risk_management": {
+        "1-10000000.99_risk": 260
+      },
+      "requirements": {
+        "contract_duration": "50",
+        "min_broker_balance": "50.00"
+      },
+      "bypass_restriction": true,
+      "activate_autotrading": true,
+      "broker_balance": 9054.15,
+      "account_mode": "demo",
+      "demo_account": "1",
+      "configuration_title": "Grid_100pricestages_4grid_6levels_1k-10k-balance-Deriv_GBPUSD_for5mtf_with_martingale"
+    }
+  }
+}

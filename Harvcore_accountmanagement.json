@@ -1618,10 +1618,6 @@
         "enable_breakeven": true,
         "breakeven_dictionary": [
           {
-            "reward": 0.5,
-            "breakeven_at_reward": 0.05
-          },
-          {
             "reward": 1,
             "breakeven_at_reward": 0.1
           },
