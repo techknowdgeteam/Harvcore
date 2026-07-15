@@ -3354,7 +3354,7 @@ def process_single_investor(inv_id):
     This function processes investors from the FETCHED_INVESTORS file.
     
     Args:
-        inv_id: Investor ID string
+        inv_id: Investor ID string (e.g., "1", "5", etc.)
         
     Returns:
         dict: Statistics about the operation
@@ -3401,7 +3401,8 @@ def process_single_investor(inv_id):
             return account_stats
         
         # Get investor data from fetched investors
-        investor_data = investors_data.get(inv_id)
+        # inv_id is now a string like "1" or "5"
+        investor_data = investors_data.get(str(inv_id))  # Ensure it's a string
         if not investor_data:
             print(f"[ERROR] Investor {inv_id} not found in fetched investors")
             account_stats["error"] = "Investor not found in fetched data"
@@ -3413,12 +3414,26 @@ def process_single_investor(inv_id):
         print(f"🔄 Processing investor: {inv_id}")
         
         # Execute the operations only if within time range
+        print(f"📊 Fetching tables for investor: {inv_id}")
         fetch_tables_streaming()
-        #create_investor_mt5_files(inv_id=inv_id)
-        #get_investors_balance(inv_id=inv_id)
-        #verify_investors_balance(inv_id=inv_id)
+        
+        # Uncomment these if you want them to run
+        # print(f"📁 Creating MT5 files for investor: {inv_id}")
+        # create_investor_mt5_files(inv_id=inv_id)
+        # 
+        # print(f"💰 Getting balance for investor: {inv_id}")
+        # get_investors_balance(inv_id=inv_id)
+        # 
+        # print(f"✅ Verifying balance for investor: {inv_id}")
+        # verify_investors_balance(inv_id=inv_id)
+        
+        print(f"🔒 Closing database browser for investor: {inv_id}")
         close_db_browser()
+        
+        print(f"🌐 Initializing browser for investor: {inv_id}")
         initialize_browser(force_new=True)
+        
+        print(f"🔄 Updating tables for investor: {inv_id}")
         update_tables_streaming()
         
         account_stats["success"] = True
@@ -3426,7 +3441,7 @@ def process_single_investor(inv_id):
         
     except Exception as e:
         account_stats["error"] = str(e)
-        print(f"Error for {inv_id}: {e}")
+        print(f"❌ Error for {inv_id}: {e}")
         import traceback
         traceback.print_exc()
     
@@ -3486,7 +3501,10 @@ def main_once():
             print("="*60)
         
         try:
-            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            # ============ FIX: Get only the folder names (investor IDs) ============
+            all_investor_folders = [f.name for f in inv_base_path.iterdir() if f.is_dir()]
+            # all_investor_folders now contains string IDs like ['1', '5', ...]
+            # =========================================================================
             
             # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
             if not all_investor_folders:
@@ -3503,6 +3521,7 @@ def main_once():
             
             print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
             print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
+            print(f"📋 Investor IDs found: {all_investor_folders}")
 
             # Process ALL investor folders - NO CAPACITY LIMITS
             active_batch = all_investor_folders
@@ -3512,17 +3531,30 @@ def main_once():
             # Pool with ALL investors - no capacity checks
             with mp.Pool(processes=len(active_batch)) as pool:
                 jobs = []
-                for folder in active_batch:
-                    job = pool.apply_async(process_single_investor, args=(folder,))
+                for investor_id in active_batch:
+                    # Now passing string ID instead of Path object
+                    job = pool.apply_async(process_single_investor, args=(investor_id,))
                     jobs.append(job)
                 
                 # Force synchronization bar before closing the pool step block
                 results = [job.get() for job in jobs]
                 
-            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. ---")
+            # Print summary of results
+            print(f"\n--- Cycle Complete. Processed {len(active_batch)} investors. ---")
+            successful = sum(1 for r in results if r.get("success", False))
+            skipped = sum(1 for r in results if r.get("execution_skipped", False))
+            failed = len(results) - successful - skipped
+            print(f"📊 Results: ✅ {successful} successful | ⏰ {skipped} skipped | ❌ {failed} failed")
+            
+            # Print any errors
+            for r in results:
+                if r.get("error"):
+                    print(f"  ❌ Investor {r.get('inv_id')}: {r.get('error')}")
             
         except Exception as e:
             print(f"Critical Error in Orchestrator Loop: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(5)
         
         # Check loop conditions
@@ -3540,15 +3572,15 @@ def main_once():
         if run_as_loop and loop_interval > 0:
             print(f"Waiting {loop_interval} seconds before next loop...")
             time.sleep(loop_interval)
-        
+
 def main_loop():
     """
-    ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
-    on every cycle without any capacity limitations or restrictions.
+    ORCHESTRATOR (Single Execution): Processes ALL investor folders
+    once without any capacity limitations or restrictions.
     """
     combine_investors_to_all_files()
     # Parse command line arguments for control flags
-    run_as_loop = True 
+    run_as_loop = True
     loop_interval = 1  # Default 1 second between loops (matching original)
     max_loops = None  # None means infinite
     
@@ -3595,7 +3627,10 @@ def main_loop():
             print("="*60)
         
         try:
-            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+            # ============ FIX: Get only the folder names (investor IDs) ============
+            all_investor_folders = [f.name for f in inv_base_path.iterdir() if f.is_dir()]
+            # all_investor_folders now contains string IDs like ['1', '5', ...]
+            # =========================================================================
             
             # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
             if not all_investor_folders:
@@ -3612,6 +3647,7 @@ def main_loop():
             
             print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
             print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
+            print(f"📋 Investor IDs found: {all_investor_folders}")
 
             # Process ALL investor folders - NO CAPACITY LIMITS
             active_batch = all_investor_folders
@@ -3621,17 +3657,30 @@ def main_loop():
             # Pool with ALL investors - no capacity checks
             with mp.Pool(processes=len(active_batch)) as pool:
                 jobs = []
-                for folder in active_batch:
-                    job = pool.apply_async(process_single_investor, args=(folder,))
+                for investor_id in active_batch:
+                    # Now passing string ID instead of Path object
+                    job = pool.apply_async(process_single_investor, args=(investor_id,))
                     jobs.append(job)
                 
                 # Force synchronization bar before closing the pool step block
                 results = [job.get() for job in jobs]
                 
-            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. ---")
+            # Print summary of results
+            print(f"\n--- Cycle Complete. Processed {len(active_batch)} investors. ---")
+            successful = sum(1 for r in results if r.get("success", False))
+            skipped = sum(1 for r in results if r.get("execution_skipped", False))
+            failed = len(results) - successful - skipped
+            print(f"📊 Results: ✅ {successful} successful | ⏰ {skipped} skipped | ❌ {failed} failed")
+            
+            # Print any errors
+            for r in results:
+                if r.get("error"):
+                    print(f"  ❌ Investor {r.get('inv_id')}: {r.get('error')}")
             
         except Exception as e:
             print(f"Critical Error in Orchestrator Loop: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(5)
         
         # Check loop conditions
@@ -3650,6 +3699,9 @@ def main_loop():
             print(f"Waiting {loop_interval} seconds before next loop...")
             time.sleep(loop_interval)
 
+
 if __name__ == "__main__":
-   main_loop()
+   main_once()
+
+
     
