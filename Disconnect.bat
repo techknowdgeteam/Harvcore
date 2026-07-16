@@ -1,5 +1,5 @@
 @echo off
-:: Disconnects RDP but keeps the GUI console alive for AnyDesk
-tscon %sessionname% /dest:console
-tscon 1 /dest:console
-tscon 2 /dest:console
+tscon %sessionname% /dest:console >nul 2>&1
+timeout /t 1 >nul
+tscon rdp-tcp#0 /dest:console >nul 2>&1
+exit
