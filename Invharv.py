@@ -25764,6 +25764,80 @@ def trades_analytics(inv_id=None):
     # Dictionary to keep track of generated analytics structures for synchronization later
     generated_analytics_registry = {}
     
+    # Helper function to calculate recent risk reward
+    def calculate_recent_risk_reward(trades_pool):
+        """
+        Calculate recent risk-reward ratio using the latest loss trade and latest profit trade.
+        Returns an approximate whole number (1, 2, 3, etc.) based on the ratio.
+        
+        If no loss trade exists, returns 0.
+        If no profit trade exists or ratio is very low, returns 1 (minimum).
+        """
+        if not trades_pool:
+            return 0
+        
+        # Sort trades by close time (newest first)
+        sorted_trades = sorted(trades_pool, key=lambda x: x["raw_close_time"], reverse=True)
+        
+        # Find the latest loss trade (most recent trade with negative P&L)
+        latest_loss = None
+        for trade in sorted_trades:
+            if trade["total_pnl"] < 0:
+                latest_loss = trade
+                break
+        
+        # If no loss trade found, return 0
+        if not latest_loss:
+            return 0
+        
+        # Find the latest profit trade (most recent trade with positive P&L)
+        # Look for a profit trade that is NOT the same as the loss trade
+        latest_profit = None
+        for trade in sorted_trades:
+            if trade["total_pnl"] > 0 and trade["ticket"] != latest_loss["ticket"]:
+                latest_profit = trade
+                break
+        
+        # If no profit trade found, return 1 (minimum)
+        if not latest_profit:
+            return 1
+        
+        # Calculate risk-reward ratio
+        loss_amount = abs(latest_loss["total_pnl"])
+        profit_amount = latest_profit["total_pnl"]
+        
+        # If loss amount is 0, return 0
+        if loss_amount == 0:
+            return 0
+        
+        # Calculate raw ratio
+        ratio = profit_amount / loss_amount
+        
+        # Approximate to nearest whole or even number
+        # If ratio is less than 1.0, round up to 1
+        if ratio < 1.0:
+            return 1
+        # If ratio is between 1.0 and 1.5, return 1
+        elif 1.0 <= ratio < 1.5:
+            return 1
+        # If ratio is between 1.5 and 2.5, return 2
+        elif 1.5 <= ratio < 2.5:
+            return 2
+        # If ratio is between 2.5 and 3.5, return 3
+        elif 2.5 <= ratio < 3.5:
+            return 3
+        # If ratio is between 3.5 and 4.5, return 4
+        elif 3.5 <= ratio < 4.5:
+            return 4
+        # If ratio is between 4.5 and 5.5, return 5
+        elif 4.5 <= ratio < 5.5:
+            return 5
+        # For higher ratios, use rounding
+        else:
+            rounded = round(ratio)
+            # Ensure we don't return 0
+            return max(1, rounded)
+    
     # Iterate System Investors
     for user_brokerid in investor_ids:
         print(f"\n" + "═"*80)
@@ -26214,6 +26288,73 @@ def trades_analytics(inv_id=None):
             
             return daily_records
         
+        # Helper function to calculate revenue metrics
+        def calculate_revenue_metrics(daily_trades_record, recent_risk_reward=0):
+            """
+            Calculate revenue metrics:
+            - revenue_percentage: Net revenue percentage (adjusted by recent risk reward)
+            - revenue_profit_percentage: Percentage of total revenue from profits (adjusted by recent risk reward)
+            - revenue_loss_percentage: Percentage of total revenue from losses (unchanged)
+            
+            The revenue_profit_percentage is divided by the recent_risk_reward value.
+            The revenue_percentage is then recalculated based on the adjusted values.
+            """
+            if not daily_trades_record:
+                return {
+                    "revenue_percentage": 0.0,
+                    "revenue_profit_percentage": 0.0,
+                    "revenue_loss_percentage": 0.0
+                }
+            
+            total_profit_revenue = 0.0
+            total_loss_revenue = 0.0
+            
+            for date, day_data in daily_trades_record.items():
+                pnl = day_data.get("profit_and_loss", 0.0)
+                if pnl > 0:
+                    total_profit_revenue += pnl
+                elif pnl < 0:
+                    total_loss_revenue += abs(pnl)
+            
+            total_revenue = total_profit_revenue + total_loss_revenue
+            
+            if total_revenue == 0:
+                return {
+                    "revenue_percentage": 0.0,
+                    "revenue_profit_percentage": 0.0,
+                    "revenue_loss_percentage": 0.0
+                }
+            
+            # Calculate initial revenue percentages
+            initial_revenue_profit_percentage = round((total_profit_revenue / total_revenue) * 100, 2)
+            revenue_loss_percentage = round((total_loss_revenue / total_revenue) * 100, 2)
+            
+            # Adjust revenue_profit_percentage by dividing by recent_risk_reward
+            # If recent_risk_reward is 0 or 1, keep the original value
+            if recent_risk_reward > 1:
+                adjusted_revenue_profit_percentage = round(initial_revenue_profit_percentage / recent_risk_reward, 2)
+            else:
+                adjusted_revenue_profit_percentage = initial_revenue_profit_percentage
+            
+            # Ensure the adjusted value doesn't exceed 100%
+            if adjusted_revenue_profit_percentage > 100.0:
+                adjusted_revenue_profit_percentage = 100.0
+            
+            # Recalculate revenue_percentage based on adjusted values
+            # revenue_percentage = revenue_profit_percentage - revenue_loss_percentage
+            # But if the result is negative, set it to 0
+            revenue_percentage = adjusted_revenue_profit_percentage - revenue_loss_percentage
+            if revenue_percentage < 0:
+                revenue_percentage = 0.0
+            else:
+                revenue_percentage = round(revenue_percentage, 2)
+            
+            return {
+                "revenue_percentage": revenue_percentage,
+                "revenue_profit_percentage": adjusted_revenue_profit_percentage,
+                "revenue_loss_percentage": revenue_loss_percentage
+            }
+        
         # SEPARATE PIPELINE STATISTICS BUILDER UTILITY
         def run_segment_analytics(trades_pool, window_start_dt):
             trades_pool.sort(key=lambda x: x["raw_close_time"])
@@ -26225,14 +26366,17 @@ def trades_analytics(inv_id=None):
             p_count, l_count = len(p_list), len(l_list)
             t_pnl = sum(t["total_pnl"] for t in trades_pool)
             
-            w_rate = round((p_count / t_count * 100), 2) if t_count > 0 else 0.0
-            l_rate = round((l_count / t_count * 100), 2) if t_count > 0 else 0.0
-            
             # Calculate trade metrics using the helper function
             trade_metrics = calculate_trade_metrics(trades_pool)
             
             # Calculate daily trades record
             daily_trades_record = calculate_daily_trades_record(trades_pool)
+            
+            # Calculate recent risk reward
+            recent_risk_reward = calculate_recent_risk_reward(trades_pool)
+            
+            # Calculate revenue metrics with recent risk reward adjustment
+            revenue_metrics = calculate_revenue_metrics(daily_trades_record, recent_risk_reward)
             
             # Calculate highest loss per trade (single highest loss amount)
             highest_loss_per_trade = 0.0
@@ -26370,9 +26514,6 @@ def trades_analytics(inv_id=None):
 
             p_rev = sum(t["total_pnl"] for t in p_list)
             l_rev = sum(t["total_pnl"] for t in l_list)
-            turnover = p_rev + abs(l_rev)
-            w_rev_rate = round((p_rev / turnover * 100), 2) if turnover > 0 else 0.0
-            l_rev_rate = round((abs(l_rev) / turnover * 100), 2) if turnover > 0 else 0.0
             
             return {
                 "total_trades": t_count, 
@@ -26381,10 +26522,6 @@ def trades_analytics(inv_id=None):
                 "loss_trades": l_count, 
                 "profit_amount": round(p_rev, 2), 
                 "loss_amount": round(abs(l_rev), 2),
-                "win_rate_by_count_percentage": w_rate, 
-                "loss_rate_by_count_percentage": l_rate, 
-                "win_rate_by_revenue_percentage": w_rev_rate, 
-                "loss_rate_by_revenue_percentage": l_rev_rate,
                 "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
                 "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
                 "average_trades_per_day": trade_metrics["average_trades_per_day"],
@@ -26398,7 +26535,11 @@ def trades_analytics(inv_id=None):
                 "closed_deals_without_sl_tp": no_sl_tp_count,
                 "highest_sequential_losses": hi_losses, 
                 "highest_sequential_days_in_loss": hi_days,
-                "daily_trades_record": daily_trades_record
+                "daily_trades_record": daily_trades_record,
+                "revenue_percentage": revenue_metrics["revenue_percentage"],
+                "revenue_profit_percentage": revenue_metrics["revenue_profit_percentage"],
+                "revenue_loss_percentage": revenue_metrics["revenue_loss_percentage"],
+                "recent_risk_reward": recent_risk_reward
             }
 
         # ================================================================
@@ -26477,6 +26618,40 @@ def trades_analytics(inv_id=None):
                 auth_avg = auth_summary.get("average_trades_per_day", 0)
                 unauth_avg = unauth_summary.get("average_trades_per_day", 0)
                 
+                # Get recent risk reward from authorized (primary) or unauthorized
+                auth_recent_rr = auth_summary.get("recent_risk_reward", 0)
+                unauth_recent_rr = unauth_summary.get("recent_risk_reward", 0)
+                
+                # Use the better recent risk reward (from authorized if available, else from unauthorized)
+                if auth_recent_rr > 0:
+                    recent_risk_reward = auth_recent_rr
+                elif unauth_recent_rr > 0:
+                    recent_risk_reward = unauth_recent_rr
+                else:
+                    recent_risk_reward = 0
+                
+                # Get revenue metrics from authorized (primary) or unauthorized
+                auth_revenue_percentage = auth_summary.get("revenue_percentage", 0.0)
+                unauth_revenue_percentage = unauth_summary.get("revenue_percentage", 0.0)
+                auth_revenue_profit_percentage = auth_summary.get("revenue_profit_percentage", 0.0)
+                unauth_revenue_profit_percentage = unauth_summary.get("revenue_profit_percentage", 0.0)
+                auth_revenue_loss_percentage = auth_summary.get("revenue_loss_percentage", 0.0)
+                unauth_revenue_loss_percentage = unauth_summary.get("revenue_loss_percentage", 0.0)
+                
+                # Use the better revenue metrics (from authorized if available, else from unauthorized)
+                if auth_revenue_percentage > 0 or auth_revenue_profit_percentage > 0:
+                    revenue_percentage = auth_revenue_percentage
+                    revenue_profit_percentage = auth_revenue_profit_percentage
+                    revenue_loss_percentage = auth_revenue_loss_percentage
+                elif unauth_revenue_percentage > 0 or unauth_revenue_profit_percentage > 0:
+                    revenue_percentage = unauth_revenue_percentage
+                    revenue_profit_percentage = unauth_revenue_profit_percentage
+                    revenue_loss_percentage = unauth_revenue_loss_percentage
+                else:
+                    revenue_percentage = 0.0
+                    revenue_profit_percentage = 0.0
+                    revenue_loss_percentage = 0.0
+                
                 # Use the max for lowest (since we want the lowest across both)
                 lowest_trades_per_day = min(auth_lowest, unauth_lowest) if (auth_lowest > 0 or unauth_lowest > 0) else 0
                 # Use the max for highest
@@ -26513,7 +26688,11 @@ def trades_analytics(inv_id=None):
                             "average_trades_per_day": average_trades_per_day,
                             "lowest_trade_dates": lowest_trade_dates,
                             "highest_trade_dates": highest_trade_dates,
-                            "average_trade_dates": average_trade_dates
+                            "average_trade_dates": average_trade_dates,
+                            "recent_risk_reward": recent_risk_reward,
+                            "revenue_percentage": revenue_percentage,
+                            "revenue_profit_percentage": revenue_profit_percentage,
+                            "revenue_loss_percentage": revenue_loss_percentage
                         }
                     }
                 }
@@ -26634,9 +26813,26 @@ def trades_analytics(inv_id=None):
             
         # Calculate total P&L from analytics
         total_pnl = 0.0
+        recent_risk_reward = 0
+        revenue_percentage = 0.0
+        revenue_profit_percentage = 0.0
+        revenue_loss_percentage = 0.0
+        
         if "from_execution_start_date" in analytics_data:
             for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
                 if c_group in analytics_data["from_execution_start_date"]:
+                    # Get metrics from summaries
+                    summaries = analytics_data["from_execution_start_date"][c_group].get("summaries", {})
+                    summary_profits = summaries.get("summaries_of_profits_only", {})
+                    
+                    if summary_profits.get("recent_risk_reward", 0) > recent_risk_reward:
+                        recent_risk_reward = summary_profits.get("recent_risk_reward", 0)
+                    
+                    if summary_profits.get("revenue_percentage", 0.0) > revenue_percentage:
+                        revenue_percentage = summary_profits.get("revenue_percentage", 0.0)
+                        revenue_profit_percentage = summary_profits.get("revenue_profit_percentage", 0.0)
+                        revenue_loss_percentage = summary_profits.get("revenue_loss_percentage", 0.0)
+                    
                     regular_data = analytics_data["from_execution_start_date"][c_group].get("regular_data", {})
                     for auth_group in ["authorized", "unauthorized"]:
                         if auth_group in regular_data:
@@ -26657,6 +26853,10 @@ def trades_analytics(inv_id=None):
         
         print(f"\n │ Updating records for investor: {current_id}")
         print(f" │   Total P&L: ${total_pnl:.2f}")
+        print(f" │   Recent Risk-Reward: {recent_risk_reward}:1")
+        print(f" │   Revenue Profit %: {revenue_profit_percentage}%")
+        print(f" │   Revenue Loss %: {revenue_loss_percentage}%")
+        print(f" │   Revenue %: {revenue_percentage}%")
         print(f" │   Unauthorized detected: {unauthorized_detected}")
         
         # ============================================================
@@ -26665,6 +26865,10 @@ def trades_analytics(inv_id=None):
         if current_id in fetched_data:
             fetched_data[current_id]['analytics'] = analytics_data
             fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
+            fetched_data[current_id]['revenue_percentage'] = revenue_percentage
+            fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+            fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
             fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
             has_mutated_database = True
             print(f" │   ✅ Updated FETCHED_INVESTORS for {current_id}")
@@ -26673,6 +26877,10 @@ def trades_analytics(inv_id=None):
                 'id': str(current_id),
                 'analytics': analytics_data,
                 'profitandloss': str(round(total_pnl, 2)),
+                'recent_risk_reward': recent_risk_reward,
+                'revenue_percentage': revenue_percentage,
+                'revenue_profit_percentage': revenue_profit_percentage,
+                'revenue_loss_percentage': revenue_loss_percentage,
                 'unauthorized_action_detected': unauthorized_detected
             }
             has_mutated_database = True
@@ -26684,6 +26892,10 @@ def trades_analytics(inv_id=None):
         if current_id in updated_data:
             updated_data[current_id]['analytics'] = analytics_data
             updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
+            updated_data[current_id]['revenue_percentage'] = revenue_percentage
+            updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+            updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
             updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
             has_mutated_database = True
             print(f" │   ✅ Updated UPDATED_INVESTORS for {current_id}")
@@ -26692,6 +26904,10 @@ def trades_analytics(inv_id=None):
                 'id': str(current_id),
                 'analytics': analytics_data,
                 'profitandloss': str(round(total_pnl, 2)),
+                'recent_risk_reward': recent_risk_reward,
+                'revenue_percentage': revenue_percentage,
+                'revenue_profit_percentage': revenue_profit_percentage,
+                'revenue_loss_percentage': revenue_loss_percentage,
                 'unauthorized_action_detected': unauthorized_detected
             }
             has_mutated_database = True
@@ -26703,6 +26919,10 @@ def trades_analytics(inv_id=None):
         if current_id in all_fetched_data:
             all_fetched_data[current_id]['analytics'] = analytics_data
             all_fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            all_fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
+            all_fetched_data[current_id]['revenue_percentage'] = revenue_percentage
+            all_fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+            all_fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
             all_fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
             has_mutated_database = True
             print(f" │   ✅ Updated ALL_FETCHED_INVESTORS for {current_id}")
@@ -26711,6 +26931,10 @@ def trades_analytics(inv_id=None):
                 'id': str(current_id),
                 'analytics': analytics_data,
                 'profitandloss': str(round(total_pnl, 2)),
+                'recent_risk_reward': recent_risk_reward,
+                'revenue_percentage': revenue_percentage,
+                'revenue_profit_percentage': revenue_profit_percentage,
+                'revenue_loss_percentage': revenue_loss_percentage,
                 'unauthorized_action_detected': unauthorized_detected
             }
             has_mutated_database = True
@@ -26722,6 +26946,10 @@ def trades_analytics(inv_id=None):
         if current_id in all_updated_data:
             all_updated_data[current_id]['analytics'] = analytics_data
             all_updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            all_updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
+            all_updated_data[current_id]['revenue_percentage'] = revenue_percentage
+            all_updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+            all_updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
             all_updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
             has_mutated_database = True
             print(f" │   ✅ Updated ALL_UPDATED_INVESTORS for {current_id}")
@@ -26730,6 +26958,10 @@ def trades_analytics(inv_id=None):
                 'id': str(current_id),
                 'analytics': analytics_data,
                 'profitandloss': str(round(total_pnl, 2)),
+                'recent_risk_reward': recent_risk_reward,
+                'revenue_percentage': revenue_percentage,
+                'revenue_profit_percentage': revenue_profit_percentage,
+                'revenue_loss_percentage': revenue_loss_percentage,
                 'unauthorized_action_detected': unauthorized_detected
             }
             has_mutated_database = True

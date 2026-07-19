@@ -3698,7 +3698,7 @@ def main_loop():
 
 
 if __name__ == "__main__":
-   main_once()
+   update_tables_streaming()
 
 
     
