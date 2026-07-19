@@ -21,9 +21,9 @@ import multiprocessing as mp
 import multiprocessing
 from pathlib import Path
 import time
+import sys
 import random
 import psutil
-import sys
 
 
 INV_PATH = r"C:\xampp\htdocs\harvcore\harvox\invharv\usersdata\investors"
@@ -138,7 +138,7 @@ def repair_json_files():
         dirname = os.path.dirname(filepath)
         basename = os.path.basename(filepath)
         name, ext = os.path.splitext(basename)
-        backup_name = f"{name}_corrupted_{timestamp}{ext}"
+        backup_name = f"{name}_corrupted"
         return os.path.join(dirname, backup_name)
     
     def create_backup(filepath):
@@ -1430,7 +1430,7 @@ def sync_and_distribute_investors():
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
-      
+     
 def move_fetched_investors():
     """
     Moves verified investors from fetched_investors.json to:
@@ -2006,31 +2006,31 @@ def move_fetched_investors():
             
             # Add AccountMode notification for incomplete investors
             if not account_mode:
-                account_mode_msg = "Account mode is not specified. The system cannot determine if this is a demo or live account. Trading will proceed once account mode is confirmed."
+                account_mode_msg = "Trading will proceed once account mode is confirmed."
                 add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} has unknown account mode.", 'error', timestamp)
             elif account_mode == 'demo':
                 if demo_account is False:
-                    account_mode_msg = "This is a demo account but demo trading is disabled. Demo accounts must have demo trading enabled to proceed."
+                    account_mode_msg = "This is a demo account and not allowed for configuration."
                     add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
                     add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} has demo account mode but demo_account is disabled.", 'error', timestamp)
                 elif demo_account is True:
-                    account_mode_msg = "This is a demo account with demo trading enabled. Trading will proceed in demo mode."
+                    account_mode_msg = "This is a demo account with trade configurations allowed"
                     add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
                     add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode confirmed and enabled.", 'success', timestamp)
                 else:
-                    account_mode_msg = "This is a demo account but demo trading status is unknown. Please verify your demo account settings."
+                    account_mode_msg = "This is a demo account and is not allowed for trading activities."
                     add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'error', timestamp)
                     add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} demo account mode but demo_account status unknown.", 'error', timestamp)
             else:
-                account_mode_msg = f"Account mode is {account_mode}. Trading will be paused until the account mode is identified with this configuration."
+                account_mode_msg = f"Trading operations are paused until the account mode is identified."
                 add_notification(activities_data['notifications'], 'AccountMode', account_mode_msg, 'success', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'AccountMode', f"SERVER NOTIFICATION: Investor {inv_id} account mode: {account_mode}.", 'success', timestamp)
             
             # Add notifications for missing required fields
             if missing_required:
                 missing_fields_str = ', '.join(missing_required)
-                missing_message = f" You have not yet enrolled or your configuration is incomplete. Please contact support if you experience any issues."
+                missing_message = f" You have not yet enrolled. Please contact support if you experience any issues."
                 add_notification(activities_data['notifications'], 'RegistrationRequired', missing_message, 'error', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'RegistrationRequired', f"SERVER NOTIFICATION: Investor {inv_id} has missing required fields: {missing_fields_str}", 'error', timestamp)
             
@@ -2038,13 +2038,11 @@ def move_fetched_investors():
             if missing_investor_fields:
                 missing_creds_str = ', '.join(missing_investor_fields)
                 creds_message = f" ACCOUNT CREDENTIALS MISSING: The following account information is incomplete: {missing_creds_str}. Trading cannot be activated until this information is provided."
-                add_notification(activities_data['notifications'], 'CredentialsMissing', creds_message, 'error', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'CredentialsMissing', f"SERVER NOTIFICATION: Investor {inv_id} has missing credentials: {missing_creds_str}", 'error', timestamp)
             
             # Add overall incomplete registration message if both types missing
             if missing_required and missing_investor_fields:
-                overall_message = "Your investor registration is incomplete. Please provide all required information to begin automated trading."
-                add_notification(activities_data['notifications'], 'RegistrationStatus', overall_message, 'error', timestamp)
+                overall_message = "Your investor registration is incomplete. Please provide all required information."
             
             # Set initial notifications flag
             if activities_data['notifications']:
@@ -2344,12 +2342,12 @@ def move_fetched_investors():
                     meets_balance_requirement = False
                     has_error = True
                     error_messages.append(f"Insufficient balance: ${broker_balance_val:.2f} < ${min_broker_balance:.2f}")
-                    balance_check_message = f"💰 BALANCE VERIFICATION: Broker balance of ${broker_balance_val:.2f} is below the minimum requirement of ${min_broker_balance:.2f}. Trading operations are paused until minimum balance is met."
+                    balance_check_message = f"💰 BALANCE VERIFICATION: Your Broker balance of ${broker_balance_val:.2f} is below the minimum requirement of ${min_broker_balance:.2f}. Trading operations are paused until minimum balance is met."
                     balance_message_type = 'error'
                     balance_insufficient_investors.append(inv_id)
                     print(f"       Insufficient balance: {broker_balance_val} < {min_broker_balance}")
                 else:
-                    balance_check_message = f"💰 BALANCE VERIFICATION: Investor's broker balance of ${broker_balance_val:.2f} meets the minimum requirement of ${min_broker_balance:.2f}. Trading operations can proceed normally."
+                    balance_check_message = f"💰 BALANCE VERIFICATION: Your broker balance of ${broker_balance_val:.2f} meets the minimum requirement of ${min_broker_balance:.2f}. Trading operations can proceed normally."
                     balance_message_type = 'success'
                     print(f"      ✅ Balance sufficient: {broker_balance_val} >= {min_broker_balance}")
             
@@ -2372,7 +2370,7 @@ def move_fetched_investors():
                     demo_account_message_type = 'success'
                     print(f"      ✅ Demo account enabled")
                 elif demo_account is None:
-                    demo_account_message = f"⚠️ DEMO ACCOUNT UNKNOWN: Account mode is 'demo' but demo_account status is unknown. Please verify your account configuration."
+                    demo_account_message = f"⚠️ DEMO ACCOUNTS: Account mode is demo"
                     demo_account_message_type = 'error'
                     has_error = True
                     error_messages.append("Demo account mode but demo_account status unknown")
@@ -2469,20 +2467,20 @@ def move_fetched_investors():
             
             # 1. STRATEGIES section
             if not strategy_names:
-                strategy_message = "You are currently not enrolled in any trading strategy partnership. Please contact your account manager to enroll in a strategy to begin automated trading."
-                add_notification(activities_data['notifications'], 'Strategies', strategy_message, 'error', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'Strategies', f"SERVER NOTIFICATION: Investor {inv_id} has no strategy partnership.", 'error', timestamp)
+                strategy_message = "You are currently not invested with any trade manager. Please invest in a trader market configuration or contact support if needed."
+                add_notification(activities_data['notifications'], 'InvestWith', strategy_message, 'error', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'InvestWith', f"SERVER NOTIFICATION: Investor {inv_id} doesn't invest or partner with any trader configuration.", 'error', timestamp)
                 has_error = True
                 error_messages.append("No strategy partnership")
             else:
-                strategy_message = f"Your account has been configured with the following trading strategy(s): {', '.join(strategy_names)}. The system will execute trades according to this strategy configuration."
-                add_notification(activities_data['notifications'], 'Strategies', strategy_message, 'success', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'Strategies', f"SERVER NOTIFICATION: Investor {inv_id} successfully configured with strategies: {', '.join(strategy_names)}", 'success', timestamp)
+                strategy_message = f"You invested in trader {', '.join(strategy_names)}'s market. Our AI will execute trades according to this trader's market configuration in your terminal."
+                add_notification(activities_data['notifications'], 'InvestWith', strategy_message, 'success', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'InvestWith', f"SERVER NOTIFICATION: Investor {inv_id} invests with : {', '.join(strategy_names)}", 'success', timestamp)
                 activities_data["strategies"] = strategy_names
             
             # 2. START DATE section
             if not execution_start:
-                start_message = "Your program start date is not set. You haven't officially enrolled in the trading program. Please complete your enrollment to activate trading."
+                start_message = "You haven't officially enrolled in the trading program. Please complete your enrollment to activate trading."
                 add_notification(activities_data['notifications'], 'StartDate', start_message, 'error', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'StartDate', f"SERVER NOTIFICATION: Investor {inv_id} has no execution start date.", 'error', timestamp)
                 has_error = True
@@ -2494,14 +2492,14 @@ def move_fetched_investors():
             
             # 3. AUTOTRADING section
             if final_activate is False:
-                autotrading_message = "Auto-trading has been disabled on your account. No automated trades will be executed. Please contact support."
+                autotrading_message = "Auto-trading has been disabled on your account. No trades will be executed. Please contact support."
                 add_notification(activities_data['notifications'], 'Autotrading', autotrading_message, 'error', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'Autotrading', f"SERVER NOTIFICATION: Investor {inv_id} has auto-trading disabled.", 'error', timestamp)
                 autotrading_disabled_investors.append(inv_id)
                 has_error = True
                 error_messages.append("Auto-trading disabled by user")
             elif final_activate is True:
-                autotrading_message = "Your auto-trading feature is now active. The system will automatically execute trades according to your strategy configuration."
+                autotrading_message = "Your auto-trading feature is active. Our AI will automatically execute trades according to your manager configuration."
                 add_notification(activities_data['notifications'], 'Autotrading', autotrading_message, 'success', timestamp)
                 add_execution_notification(activities_data['executions_notification'], 'Autotrading', f"SERVER NOTIFICATION: Investor {inv_id} auto-trading is active and ready for automated execution.", 'success', timestamp)
             
@@ -2529,15 +2527,15 @@ def move_fetched_investors():
             
             # 6. TERMINAL PATH section
             if not Terminal_path or Terminal_path.strip() == '':
-                terminal_message = "Your terminal path is missing. Please contact support to resolve your account status."
-                add_notification(activities_data['notifications'], 'TerminalPath', terminal_message, 'error', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'TerminalPath', f"SERVER NOTIFICATION: Investor {inv_id} has NO TERMINAL PATH.", 'error', timestamp)
+                terminal_message = "Your trading terminal is not ready. Please contact support to resolve your account status."
+                add_notification(activities_data['notifications'], 'TradingTerminal', terminal_message, 'error', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'TradingTerminal', f"SERVER NOTIFICATION: Investor {inv_id} has NO TERMINAL PATH.", 'error', timestamp)
                 has_error = True
                 error_messages.append("Terminal path missing")
             else:
-                terminal_message = "Your trading terminal has been configured and is ready for automated trading."
-                add_notification(activities_data['notifications'], 'TerminalPath', terminal_message, 'success', timestamp)
-                add_execution_notification(activities_data['executions_notification'], 'TerminalPath', f"SERVER NOTIFICATION: Investor {inv_id} terminal path configured successfully.", 'success', timestamp)
+                terminal_message = "Your trading terminal has been configured and is ready for trades executions."
+                add_notification(activities_data['notifications'], 'TradingTerminal', terminal_message, 'success', timestamp)
+                add_execution_notification(activities_data['executions_notification'], 'TradingTerminal', f"SERVER NOTIFICATION: Investor {inv_id} terminal path configured successfully.", 'success', timestamp)
             
             # 7. BALANCE CHECK section
             if balance_check_message:
@@ -3433,8 +3431,14 @@ def check_and_record_unauthorized_actions(inv_id=None):
         # NOTIFICATION 4: BALANCE DISCREPANCY
         # ============================================================
         if abs(balance_discrepancy) > 0.01:
-            discrepancy_type = "higher" if balance_discrepancy > 0 else "lower"
-            discrepancy_message = f"💰 BALANCE MISMATCH DETECTED: Your calculated balance (${calculated_balance:.2f}) is {discrepancy_type} than your MT5 actual balance (${mt5_balance:.2f}) by ${abs(balance_discrepancy):.2f}. This indicates that an unauthorized activity has been taken.."
+            if mt5_balance > calculated_balance:
+                discrepancy_type = "higher"  # MT5 is higher than calculated
+                comparison = "lower"  # calculated is lower than MT5
+            else:
+                discrepancy_type = "lower"  # MT5 is lower than calculated
+                comparison = "higher"  # calculated is higher than MT5
+            
+            discrepancy_message = f"💰 BALANCE MISMATCH DETECTED: Your calculated balance (${calculated_balance:.2f}) is {comparison} than your MT5 actual balance (${mt5_balance:.2f}) by ${abs(balance_discrepancy):.2f}. This indicates that an unauthorized activity has been taken.."
             add_notification(activities_data['notifications'], 'BalanceDiscrepancy', discrepancy_message, 'error', timestamp)
             add_execution_notification(activities_data['executions_notification'], 'BalanceDiscrepancy', f"SERVER NOTIFICATION: Investor {user_brokerid} balance discrepancy of ${abs(balance_discrepancy):.2f} detected. Calculated: ${calculated_balance:.2f}, MT5 Actual: ${mt5_balance:.2f}", 'error', timestamp)
         
@@ -21326,7 +21330,7 @@ def pending_orders_per_symbol_limitation(inv_id=None):
     print("="*80 + "\n")
     
     return global_stats
-
+  
 def place_usd_orders(inv_id=None):
     
     # --- SUFFIX DICTIONARY FOR RETRY LOGIC ---
@@ -25643,20 +25647,49 @@ def apply_dynamic_breakeven(inv_id=None):
 def trades_analytics(inv_id=None):
     """
     Fetch and record all individual trades grouped by risk configurations,
-    segregated into dual chronological windows:
-      - from_execution_start_date: Full lifetime history since broker launch up to contract expiry
-        or current date if no contract expiry defined.
-      - last_28_days: A rolling snapshot tracking the immediate trailing 28 days.
-        Each day's run creates a new dated entry (e.g., april_22_2026_to_may_20_2026)
-        preserving historical snapshots without overwriting.
+    using a single chronological window from execution start date to contract expiry.
     
-    Reconciles missing profiles and fields between FETCHED_INVESTORS and UPDATED_INVESTORS.
+    Reconciles missing profiles and fields between ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS.
     Also tracks unauthorized actions and updates the unauthorized_actions flag.
     """
     
     print("\n" + "="*80)
     print(" 📊 TRADES ANALYTICS SYSTEM DIAGNOSTIC INITIALIZED".ljust(79) + "=")
     print("="*80)
+    
+    # ========================================================================
+    # DISPLAY ALL FILE PATHS BEING USED
+    # ========================================================================
+    print("\n" + "─"*80)
+    print(" 📁 FILE PATHS CONFIGURATION")
+    print("─"*80)
+    
+    try:
+        print(f" │ INV_PATH: {INV_PATH}")
+    except NameError:
+        print(" │ ⚠️ INV_PATH not defined, using default")
+    
+    try:
+        print(f" │ FETCHED_INVESTORS: {FETCHED_INVESTORS}")
+    except NameError:
+        print(" │ ⚠️ FETCHED_INVESTORS not defined")
+    
+    try:
+        print(f" │ UPDATED_INVESTORS: {UPDATED_INVESTORS}")
+    except NameError:
+        print(" │ ⚠️ UPDATED_INVESTORS not defined")
+    
+    try:
+        print(f" │ ALL_FETCHED_INVESTORS: {ALL_FETCHED_INVESTORS}")
+    except NameError:
+        print(" │ ⚠️ ALL_FETCHED_INVESTORS not defined")
+    
+    try:
+        print(f" │ ALL_UPDATED_INVESTORS: {ALL_UPDATED_INVESTORS}")
+    except NameError:
+        print(" │ ⚠️ ALL_UPDATED_INVESTORS not defined")
+    
+    print("─"*80)
     
     stats = {
         "investor_id": inv_id if inv_id else "all",
@@ -25678,26 +25711,55 @@ def trades_analytics(inv_id=None):
         print("="*80)
         return stats
     
-    # Load both FETCHED_INVESTORS and UPDATED_INVESTORS for updating
+    # Load both ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS for updating
     fetched_data = {}
     updated_data = {}
+    all_fetched_data = {}
+    all_updated_data = {}
     
+    # Load FETCHED_INVESTORS (legacy)
     if os.path.exists(FETCHED_INVESTORS):
         try:
             with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
                 fetched_data = json.load(f)
-            print(f" │ Loaded {len(fetched_data)} raw profiles from upstream source matrix.")
+            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
         except Exception as e:
             print(f" │ Error loading FETCHED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ FETCHED_INVESTORS not found at: {FETCHED_INVESTORS}")
     
+    # Load UPDATED_INVESTORS (legacy)
     if os.path.exists(UPDATED_INVESTORS):
         try:
             with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                 updated_data = json.load(f)
-            print(f" │ Loaded {len(updated_data)} profiles from active destination database.")
+            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
         except Exception as e:
-            print(f" │ Error parsing UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
-            updated_data = {}
+            print(f" │ Error loading UPDATED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ UPDATED_INVESTORS not found at: {UPDATED_INVESTORS}")
+    
+    # Load ALL_FETCHED_INVESTORS
+    if os.path.exists(ALL_FETCHED_INVESTORS):
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ ALL_FETCHED_INVESTORS not found at: {ALL_FETCHED_INVESTORS}")
+    
+    # Load ALL_UPDATED_INVESTORS
+    if os.path.exists(ALL_UPDATED_INVESTORS):
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_updated_data = json.load(f)
+            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_UPDATED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ ALL_UPDATED_INVESTORS not found at: {ALL_UPDATED_INVESTORS}")
     
     # Dictionary to keep track of generated analytics structures for synchronization later
     generated_analytics_registry = {}
@@ -25721,6 +25783,8 @@ def trades_analytics(inv_id=None):
         
         activities_path = inv_root / "activities.json"
         acct_mgmt_path = inv_root / "accountmanagement.json"
+        
+        print(f" │ Activities file path: {activities_path}")
         
         if not activities_path.exists():
             print(f" │ Profile tracking state file missing: {activities_path}")
@@ -25763,7 +25827,6 @@ def trades_analytics(inv_id=None):
 
         # LOAD CONFIGURATION TARGETS
         max_allowable_risk_threshold = 0.0
-        be_dict_sorted = []
 
         if acct_mgmt_path.exists():
             try:
@@ -25771,10 +25834,6 @@ def trades_analytics(inv_id=None):
                     acct_config = json.load(f)
                     default_risks = acct_config.get("account_balance_default_risk_management", {})
                     max_risks = acct_config.get("account_balance_maximum_risk_management", {})
-                    
-                    settings = acct_config.get("settings", {})
-                    be_dict = settings.get("breakeven_dictionary", [])
-                    be_dict_sorted = sorted(be_dict, key=lambda x: float(x.get("reward", 0.0)), reverse=True)
                     
                     extracted_values = []
                     for risk_dict in [default_risks, max_risks]:
@@ -25834,20 +25893,8 @@ def trades_analytics(inv_id=None):
             print(f" │ Warning: Calculated end date ({end_datetime}) is before start date ({start_datetime}). Using current date instead.")
             end_datetime = datetime.now()
         
-        # Calculate trailing 28-day boundary floor
-        now_time = datetime.now()
-        trailing_28d_floor = now_time - timedelta(days=28)
-        
-        # Create snapshot key for today's 28-day window (e.g., "april_22_2026_to_may_20_2026")
-        start_date_str = trailing_28d_floor.strftime("%B_%d_%Y").lower()
-        end_date_str = now_time.strftime("%B_%d_%Y").lower()
-        snapshot_key = f"{start_date_str}_to_{end_date_str}"
-        
-        # Fetch widest window possible to cover both segments
-        # For from_execution_start_date, only fetch up to end_datetime (not current date)
-        query_start_datetime = min(start_datetime, trailing_28d_floor)
-        query_end_datetime = max(end_datetime, now_time)
-        history_deals = mt5.history_deals_get(query_start_datetime, query_end_datetime)
+        # Fetch trades from execution start to end date
+        history_deals = mt5.history_deals_get(start_datetime, end_datetime)
         if not history_deals:
             print(f" │ ℹ️ Zero closed trade records detected on account terminal layer history.")
             continue
@@ -25909,7 +25956,6 @@ def trades_analytics(inv_id=None):
             
             trade_risk = 0.0
             risk_reward = "N/A"
-            max_possible_r = None
             
             if stoploss > 0.0:
                 calculated_risk_pnl = mt5.order_calc_profit(mt5_action, entry_deal.symbol, total_volume, entry_price, stoploss)
@@ -25921,77 +25967,11 @@ def trades_analytics(inv_id=None):
                 if price_risk_distance > 0:
                     if takeprofit > 0.0:
                         price_reward_distance = abs(takeprofit - entry_price)
-                        max_possible_r = round(price_reward_distance / price_risk_distance, 2)
-                        risk_reward = max_possible_r
+                        risk_reward = round(price_reward_distance / price_risk_distance, 2)
                     elif total_pnl < 0:
                         risk_reward = 1.0
 
             resolved_risk = trade_risk if trade_risk > 0 else abs(total_pnl) if total_pnl < 0 else 0.0
-
-            trade_owned_by_rr = "N/A"
-            trade_owned_by_rr_raw = "N/A"
-            closed_at_reward = 0.0
-            claimed_reason = "N/A"
-            inherited_beneficiaries = []
-            
-            if resolved_risk > 0:
-                realized_r_multiplier = total_pnl / resolved_risk
-                closed_at_reward = round(realized_r_multiplier, 2)
-                
-                is_flat_breakeven = (0.0 <= total_pnl <= 0.10)
-                is_half_risk_breakeven = (total_pnl > 0.10 and total_pnl <= (resolved_risk * 0.50))
-                
-                matched_explicitly = False
-                
-                if (is_flat_breakeven or is_half_risk_breakeven) and be_dict_sorted:
-                    lowest_rule = be_dict_sorted[-1]
-                    target_reward_value = float(lowest_rule.get("reward", 0.0))
-                    trade_owned_by_rr = f"primary target:{lowest_rule.get('reward')}"
-                    
-                    reason_type = "flat market friction noise" if is_flat_breakeven else "structural exit within 50% risk boundary"
-                    claimed_reason = f"claimed because trade qualified as a breakeven exit ({reason_type}) consolidated into lowest tier {target_reward_value}"
-                    trade_owned_by_rr_raw = str(lowest_rule.get("reward"))
-                    matched_explicitly = True
-                else:
-                    for rule in be_dict_sorted:
-                        target_reward_value = float(rule.get("reward", 0.0))
-                        be_trigger_threshold = float(rule.get("breakeven_at_reward", 0.0))
-                        
-                        if max_possible_r is not None and realized_r_multiplier >= be_trigger_threshold and max_possible_r >= target_reward_value:
-                            trade_owned_by_rr = f"primary target:{rule.get('reward')}"
-                            claimed_reason = f"claimed because reward at {target_reward_value} requested to breakeven at {be_trigger_threshold}"
-                            trade_owned_by_rr_raw = str(rule.get("reward"))
-                            matched_explicitly = True
-                            break
-                
-                if matched_explicitly:
-                    primary_value = float(trade_owned_by_rr_raw)
-                    for rule in be_dict_sorted:
-                        loop_val = float(rule.get("reward", 0.0))
-                        if loop_val < primary_value:
-                            inherited_beneficiaries.append(str(rule.get("reward")))
-                    
-                    def internal_sort(v):
-                        try: return float(v)
-                        except: return 0.0
-                    inherited_beneficiaries = sorted(list(set(inherited_beneficiaries)), key=internal_sort)
-                    
-                    if inherited_beneficiaries:
-                        trade_owned_by_rr = f"primary target:{trade_owned_by_rr_raw}"
-                        trade_record_beneficiary_string = ",".join(inherited_beneficiaries)
-                    else:
-                        trade_record_beneficiary_string = "none"
-                else:
-                    if max_possible_r is not None and total_pnl > 0:
-                        trade_owned_by_rr = f"primary target:{max_possible_r}"
-                        trade_owned_by_rr_raw = str(max_possible_r)
-                        claimed_reason = f"claimed by the actual trade risk reward potential of {max_possible_r}"
-                        trade_record_beneficiary_string = "none"
-                    elif total_pnl <= 0:
-                        trade_owned_by_rr = "N/A"
-                        trade_owned_by_rr_raw = "N/A"
-                        claimed_reason = "unclaimed because trade closed out at a loss"
-                        trade_record_beneficiary_string = "none"
 
             is_within_risk = (0.0 < resolved_risk <= max_allowable_risk_threshold)
             
@@ -26004,11 +25984,6 @@ def trades_analytics(inv_id=None):
                 "take_profit": round(takeprofit, 5),
                 "trade_risk": resolved_risk,
                 "risk_reward": risk_reward,
-                "trade_owned_by_risk_reward": trade_owned_by_rr,
-                "trade_owned_by_risk_reward_raw_target": trade_owned_by_rr_raw,
-                "beneficiaries": trade_record_beneficiary_string,
-                "closed_at_reward": closed_at_reward,
-                "claimed_reason": claimed_reason,
                 "volume": round(total_volume, 2),
                 "time_open": datetime.fromtimestamp(entry_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
                 "time_close": datetime.fromtimestamp(exit_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
@@ -26034,7 +26009,7 @@ def trades_analytics(inv_id=None):
             current_balance = 0.0
             print(f" │ Error fetching account balance: {e}")
 
-        # Helper function to calculate trade metrics including average closest to highest
+        # Helper function to calculate trade metrics
         def calculate_trade_metrics(trades_pool):
             """
             Calculate trades per day metrics ensuring:
@@ -26191,8 +26166,56 @@ def trades_analytics(inv_id=None):
                 "average_trade_dates": average_dates
             }
         
+        # NEW FUNCTION: Calculate daily trades record
+        def calculate_daily_trades_record(trades_pool):
+            """
+            Calculate daily trades record with:
+            - trades_count per day
+            - trade_summary per symbol (PNL per symbol)
+            - profit_and_loss for the day
+            """
+            if not trades_pool:
+                return {}
+            
+            daily_records = {}
+            
+            # Group trades by date
+            trades_by_date = {}
+            for t in trades_pool:
+                trade_date = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
+                if trade_date not in trades_by_date:
+                    trades_by_date[trade_date] = []
+                trades_by_date[trade_date].append(t)
+            
+            # Process each day
+            for date, trades in trades_by_date.items():
+                # Count trades for the day
+                trades_count = len(trades)
+                
+                # Calculate P&L per symbol
+                symbol_pnl = {}
+                total_daily_pnl = 0.0
+                
+                for t in trades:
+                    symbol = t["symbol"]
+                    pnl = t["total_pnl"]
+                    symbol_pnl[symbol] = symbol_pnl.get(symbol, 0.0) + pnl
+                    total_daily_pnl += pnl
+                
+                # Round symbol P&L values
+                for symbol in symbol_pnl:
+                    symbol_pnl[symbol] = round(symbol_pnl[symbol], 2)
+                
+                daily_records[date] = {
+                    "trades_count": trades_count,
+                    "trade_summary": symbol_pnl,
+                    "profit_and_loss": round(total_daily_pnl, 2)
+                }
+            
+            return daily_records
+        
         # SEPARATE PIPELINE STATISTICS BUILDER UTILITY
-        def run_segment_analytics(trades_pool, window_start_dt, mode="full"):
+        def run_segment_analytics(trades_pool, window_start_dt):
             trades_pool.sort(key=lambda x: x["raw_close_time"])
             t_count = len(trades_pool)
             
@@ -26205,8 +26228,19 @@ def trades_analytics(inv_id=None):
             w_rate = round((p_count / t_count * 100), 2) if t_count > 0 else 0.0
             l_rate = round((l_count / t_count * 100), 2) if t_count > 0 else 0.0
             
-            # Calculate trade metrics using the new helper function
+            # Calculate trade metrics using the helper function
             trade_metrics = calculate_trade_metrics(trades_pool)
+            
+            # Calculate daily trades record
+            daily_trades_record = calculate_daily_trades_record(trades_pool)
+            
+            # Calculate highest loss per trade (single highest loss amount)
+            highest_loss_per_trade = 0.0
+            for t in trades_pool:
+                if t["total_pnl"] < 0:
+                    loss_amount = abs(t["total_pnl"])
+                    if loss_amount > highest_loss_per_trade:
+                        highest_loss_per_trade = loss_amount
             
             # Build symbol performance data
             sym_map = {}
@@ -26264,7 +26298,6 @@ def trades_analytics(inv_id=None):
                                 clean_trade.pop("raw_close_time", None)
                                 clean_trade.pop("is_within_risk", None)
                                 clean_trade.pop("auth_group", None)
-                                clean_trade.pop("trade_owned_by_risk_reward_raw_target", None)
                                 streak_trades.append(clean_trade)
                             hi_losses = {
                                 "consecutive_losses_count": len(curr_streak), 
@@ -26283,7 +26316,6 @@ def trades_analytics(inv_id=None):
                         clean_trade.pop("raw_close_time", None)
                         clean_trade.pop("is_within_risk", None)
                         clean_trade.pop("auth_group", None)
-                        clean_trade.pop("trade_owned_by_risk_reward_raw_target", None)
                         streak_trades.append(clean_trade)
                     hi_losses = {
                         "consecutive_losses_count": len(curr_streak), 
@@ -26320,7 +26352,6 @@ def trades_analytics(inv_id=None):
                                 clean_trade.pop("raw_close_time", None)
                                 clean_trade.pop("is_within_risk", None)
                                 clean_trade.pop("auth_group", None)
-                                clean_trade.pop("trade_owned_by_risk_reward_raw_target", None)
                                 clean_trades.append(clean_trade)
                             days_data[d] = clean_trades
                         hi_days = {
@@ -26337,223 +26368,74 @@ def trades_analytics(inv_id=None):
                     curr_day_streak.append(d)
             finish_day_streak(curr_day_streak)
 
-            if mode == "count_only":
-                return {
-                    "total_trades": t_count, 
-                    "total_pnl": round(t_pnl, 2),
-                    "profit_trades": p_count, 
-                    "loss_trades": l_count,
-                    "win_rate_by_count_percentage": w_rate, 
-                    "loss_rate_by_count_percentage": l_rate,
-                    "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
-                    "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
-                    "average_trades_per_day": trade_metrics["average_trades_per_day"],
-                    "lowest_trade_dates": trade_metrics["lowest_trade_dates"],
-                    "highest_trade_dates": trade_metrics["highest_trade_dates"],
-                    "average_trade_dates": trade_metrics["average_trade_dates"],
-                    "all_traded_symbols": all_traded_symbols,
-                    "symbols_traded": len(sym_map), 
-                    "closed_deals_with_sl_tp": sl_tp_count, 
-                    "closed_deals_without_sl_tp": no_sl_tp_count,
-                    "highest_sequential_losses": hi_losses, 
-                    "highest_sequential_days_in_loss": hi_days
-                }
-            else:
-                p_rev = sum(t["total_pnl"] for t in p_list)
-                l_rev = sum(t["total_pnl"] for t in l_list)
-                turnover = p_rev + abs(l_rev)
-                w_rev_rate = round((p_rev / turnover * 100), 2) if turnover > 0 else 0.0
-                l_rev_rate = round((abs(l_rev) / turnover * 100), 2) if turnover > 0 else 0.0
-                
-                return {
-                    "total_trades": t_count, 
-                    "total_pnl": round(t_pnl, 2),
-                    "profit_trades": p_count, 
-                    "loss_trades": l_count, 
-                    "profit_amount": round(p_rev, 2), 
-                    "loss_amount": round(abs(l_rev), 2),
-                    "win_rate_by_count_percentage": w_rate, 
-                    "loss_rate_by_count_percentage": l_rate, 
-                    "win_rate_by_revenue_percentage": w_rev_rate, 
-                    "loss_rate_by_revenue_percentage": l_rev_rate,
-                    "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
-                    "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
-                    "average_trades_per_day": trade_metrics["average_trades_per_day"],
-                    "lowest_trade_dates": trade_metrics["lowest_trade_dates"],
-                    "highest_trade_dates": trade_metrics["highest_trade_dates"],
-                    "average_trade_dates": trade_metrics["average_trade_dates"],
-                    "all_traded_symbols": all_traded_symbols,
-                    "symbols_traded": len(sym_map), 
-                    "closed_deals_with_sl_tp": sl_tp_count, 
-                    "closed_deals_without_sl_tp": no_sl_tp_count,
-                    "highest_sequential_losses": hi_losses, 
-                    "highest_sequential_days_in_loss": hi_days
-                }
+            p_rev = sum(t["total_pnl"] for t in p_list)
+            l_rev = sum(t["total_pnl"] for t in l_list)
+            turnover = p_rev + abs(l_rev)
+            w_rev_rate = round((p_rev / turnover * 100), 2) if turnover > 0 else 0.0
+            l_rev_rate = round((abs(l_rev) / turnover * 100), 2) if turnover > 0 else 0.0
+            
+            return {
+                "total_trades": t_count, 
+                "total_pnl": round(t_pnl, 2),
+                "profit_trades": p_count, 
+                "loss_trades": l_count, 
+                "profit_amount": round(p_rev, 2), 
+                "loss_amount": round(abs(l_rev), 2),
+                "win_rate_by_count_percentage": w_rate, 
+                "loss_rate_by_count_percentage": l_rate, 
+                "win_rate_by_revenue_percentage": w_rev_rate, 
+                "loss_rate_by_revenue_percentage": l_rev_rate,
+                "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
+                "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
+                "average_trades_per_day": trade_metrics["average_trades_per_day"],
+                "lowest_trade_dates": trade_metrics["lowest_trade_dates"],
+                "highest_trade_dates": trade_metrics["highest_trade_dates"],
+                "average_trade_dates": trade_metrics["average_trade_dates"],
+                "highest_loss_per_trade": round(highest_loss_per_trade, 2),
+                "all_traded_symbols": all_traded_symbols,
+                "symbols_traded": len(sym_map), 
+                "closed_deals_with_sl_tp": sl_tp_count, 
+                "closed_deals_without_sl_tp": no_sl_tp_count,
+                "highest_sequential_losses": hi_losses, 
+                "highest_sequential_days_in_loss": hi_days,
+                "daily_trades_record": daily_trades_record
+            }
 
-        # Load existing analytics if present to preserve historical snapshots
-        existing_analytics = activities_data.get('analytics', {})
-        
-        # FINAL ANALYTICS JSON CONTAINER GENERATOR
+        # ================================================================
+        # CRITICAL FIX: ALWAYS OVERWRITE ANALYTICS WITH FRESH DATA
+        # ================================================================
+        # Build fresh analytics from scratch - DO NOT preserve old data
         final_analytics_payload = {
             "from_execution_start_date": {
                 "start_date": execution_start_date,
                 "end_date": end_datetime.strftime('%Y-%m-%d'),
-                "last_updated": now_time.isoformat()
+                "last_updated": datetime.now().isoformat()
             }
         }
         
-        # Preserve existing from_execution_start_date if it exists (don't overwrite historical data)
-        if "from_execution_start_date" in existing_analytics:
-            # Keep the original start_date from first run, but update end_date based on contract
-            final_analytics_payload["from_execution_start_date"]["start_date"] = existing_analytics["from_execution_start_date"].get("start_date", execution_start_date)
-            # Always use the calculated end_datetime for consistency
-            final_analytics_payload["from_execution_start_date"]["end_date"] = end_datetime.strftime('%Y-%m-%d')
-        
-        # Initialize or retrieve the last_28_days historical container (now only contains dated snapshots)
-        if "last_28_days" not in existing_analytics:
-            final_analytics_payload["last_28_days"] = {}
-        else:
-            # Copy over existing snapshots, but filter out any non-dated wrapper objects
-            existing_snapshots = existing_analytics.get("last_28_days", {})
-            final_analytics_payload["last_28_days"] = {}
-            
-            # Collect all valid dated snapshots (keys containing "_to_")
-            valid_snapshots = {}
-            for key, value in existing_snapshots.items():
-                # Only keep keys that match the dated snapshot pattern (contain "to")
-                if "_to_" in key and isinstance(value, dict) and "start_date" in value:
-                    valid_snapshots[key] = value
-            
-            # Sort snapshots by their date (extract from key) to maintain chronological order
-            def extract_date_from_key(key):
-                # Keys are formatted as: "month_day_year_to_month_day_year"
-                try:
-                    # Extract the start date part (before "_to_")
-                    start_part = key.split("_to_")[0]
-                    # Parse the date (assuming format: month_day_year)
-                    return datetime.strptime(start_part, "%B_%d_%Y")
-                except:
-                    return datetime.min
-            
-            sorted_snapshots = sorted(valid_snapshots.items(), key=lambda x: extract_date_from_key(x[0]))
-            
-            # Keep only the 5 most recent snapshots (last 5 entries in sorted order)
-            # Since sorting ascending, the most recent are at the end
-            max_snapshots_to_keep = 5
-            if len(sorted_snapshots) > max_snapshots_to_keep:
-                # Calculate how many to remove
-                num_to_remove = len(sorted_snapshots) - max_snapshots_to_keep
-                removed_snapshots = sorted_snapshots[:num_to_remove]
-                kept_snapshots = sorted_snapshots[num_to_remove:]
-                
-                print(f" │ 📊 Rolling window: Keeping {max_snapshots_to_keep} most recent snapshots, removing {num_to_remove} oldest")
-                for removed_key, _ in removed_snapshots:
-                    print(f" │    🗑️ Removed old snapshot: {removed_key}")
-                
-                # Add only the kept snapshots
-                for key, value in kept_snapshots:
-                    final_analytics_payload["last_28_days"][key] = value
-            else:
-                # Keep all if we have 5 or less
-                for key, value in sorted_snapshots:
-                    final_analytics_payload["last_28_days"][key] = value
-        
         total_combined_trades = 0
-
-        # Helper function to build summaries for a window (with combined inherited+claimed counts)
-        def build_summaries_only(bracket_trades, c_group, sorted_rewards):
-            summaries = {
-                "summaries_of_profits_only": {}
-            }
-            
-            # Calculate trade metrics using the helper function
-            trade_metrics = calculate_trade_metrics(bracket_trades)
-            
-            # --- CATEGORY: SUMMARIES OF PROFITS ONLY ---
-            total_losses_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] <= 0)
-            total_won_profits_only = sum(1 for t in bracket_trades if t["total_pnl"] > 0)
-            
-            revenue_lost_profits_only = sum(abs(t["total_pnl"]) for t in bracket_trades if t["total_pnl"] <= 0)
-            revenue_won_profits_only = sum(t["total_pnl"] for t in bracket_trades if t["total_pnl"] > 0)
-            
-            # FIRST PASS: Calculate claimed trades count for each reward level
-            # (trades where this reward level is the primary target)
-            claimed_counts = {}
-            for reward_key in sorted_rewards:
-                primary_claimed = 0
-                for t in bracket_trades:
-                    if t["trade_owned_by_risk_reward_raw_target"] == reward_key and t["total_pnl"] > 0:
-                        primary_claimed += 1
-                claimed_counts[reward_key] = primary_claimed
-            
-            # SECOND PASS: Calculate inherited counts
-            # Lower risk rewards inherit from higher risk rewards
-            # Convert reward keys to float for proper numeric comparison
-            reward_values = []
-            for rk in sorted_rewards:
-                try:
-                    reward_values.append((float(rk), rk))
-                except ValueError:
-                    pass
-            reward_values.sort(key=lambda x: x[0])  # Sort ascending
-            
-            # For each reward level, calculate combined inherited + claimed count
-            for i, (r_val, r_key) in enumerate(reward_values):
-                # Start with its own claimed count
-                combined_total = claimed_counts.get(r_key, 0)
-                # Add all claimed trades from higher reward levels (greater value)
-                for j in range(i + 1, len(reward_values)):
-                    higher_val, higher_key = reward_values[j]
-                    combined_total += claimed_counts.get(higher_key, 0)
-                
-                # Create single combined field
-                summaries["summaries_of_profits_only"][f"inherited_and_claimed_trades_by_risk_reward_{r_key}"] = combined_total
-
-            summaries["summaries_of_profits_only"]["total_lost_trades"] = total_losses_profits_only
-            summaries["summaries_of_profits_only"]["total_won_trades"] = total_won_profits_only
-            summaries["summaries_of_profits_only"]["total_lost_trades_amount"] = round(revenue_lost_profits_only, 2)
-            summaries["summaries_of_profits_only"]["total_won_trades_amount"] = round(revenue_won_profits_only, 2)
-            
-            # Add trade metrics to summaries
-            summaries["summaries_of_profits_only"]["lowest_trades_per_day"] = trade_metrics["lowest_trades_per_day"]
-            summaries["summaries_of_profits_only"]["highest_trades_per_day"] = trade_metrics["highest_trades_per_day"]
-            summaries["summaries_of_profits_only"]["average_trades_per_day"] = trade_metrics["average_trades_per_day"]
-            summaries["summaries_of_profits_only"]["lowest_trade_dates"] = trade_metrics["lowest_trade_dates"]
-            summaries["summaries_of_profits_only"]["highest_trade_dates"] = trade_metrics["highest_trade_dates"]
-            summaries["summaries_of_profits_only"]["average_trade_dates"] = trade_metrics["average_trade_dates"]
-            
-            return summaries
 
         # PROCESS FROM_EXECUTION_START_DATE (full history from start_date to end_datetime)
         window_floor_ts = start_datetime.timestamp()
         window_end_ts = end_datetime.timestamp()
         window_start_dt_obj = start_datetime
         
-        # Filter trades within the start to end date range (not beyond contract expiry)
+        # Filter trades within the start to end date range
         timeframe_filtered_pool = [t for t in master_flat_processed_trades if window_floor_ts <= t["raw_close_time"] <= window_end_ts]
+        
+        # Initialize storage for all segment summaries
+        all_segment_summaries = {}
         
         for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
             if "from_execution_start_date" not in final_analytics_payload:
                 final_analytics_payload["from_execution_start_date"] = {}
             
             final_analytics_payload["from_execution_start_date"][c_group] = {
-                "summaries": {},
                 "regular_data": {}
             }
             
             is_within = (c_group == "trades_within_risks_config")
             bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
-            
-            all_discovered_rewards = set(str(t["trade_owned_by_risk_reward_raw_target"]) for t in bracket_trades if t["trade_owned_by_risk_reward_raw_target"] != "N/A")
-            
-            def numeric_sort(val):
-                try: return float(val)
-                except ValueError: return 999.0
-            sorted_rewards = sorted(list(all_discovered_rewards), key=numeric_sort)
-
-            # Build summaries with combined inherited+claimed counts
-            summaries = build_summaries_only(bracket_trades, c_group, sorted_rewards)
-            final_analytics_payload["from_execution_start_date"][c_group]["summaries"] = summaries
 
             # Compile standard baseline regular datasets
             for a_group in ["authorized", "unauthorized"]:
@@ -26561,84 +26443,88 @@ def trades_analytics(inv_id=None):
                 if len(source_trades) > 0:
                     total_combined_trades += len(source_trades)
                 
-                regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj, mode="full")
+                regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj)
+                
                 final_analytics_payload["from_execution_start_date"][c_group]["regular_data"][a_group] = regular_summary
+                
+                # Store for summaries calculation
+                if c_group not in all_segment_summaries:
+                    all_segment_summaries[c_group] = {}
+                all_segment_summaries[c_group][a_group] = regular_summary
 
-        # PROCESS LAST_28_DAYS - Create new snapshot with dated key (preserving history)
-        window_floor_ts = trailing_28d_floor.timestamp()
-        window_start_dt_obj = trailing_28d_floor
-        
-        # Filter trades for the last 28 days window
-        timeframe_filtered_pool = [t for t in master_flat_processed_trades if t["raw_close_time"] >= window_floor_ts]
-        
-        # Create the new snapshot for today's 28-day window
-        current_snapshot = {
-            "start_date": trailing_28d_floor.strftime("%B %d, %Y"),
-            "end_date": now_time.strftime('%Y-%m-%d'),
-            "last_updated": now_time.isoformat()
-        }
-        
+        # =========================================================================
+        # BUILD SUMMARIES FOR EACH CONFIG GROUP
+        # =========================================================================
         for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
-            current_snapshot[c_group] = {
-                "summaries": {},
-                "regular_data": {}
-            }
-            
-            is_within = (c_group == "trades_within_risks_config")
-            bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
-            
-            all_discovered_rewards = set(str(t["trade_owned_by_risk_reward_raw_target"]) for t in bracket_trades if t["trade_owned_by_risk_reward_raw_target"] != "N/A")
-            
-            def numeric_sort(val):
-                try: return float(val)
-                except ValueError: return 999.0
-            sorted_rewards = sorted(list(all_discovered_rewards), key=numeric_sort)
-
-            # Build summaries with combined inherited+claimed counts
-            summaries = build_summaries_only(bracket_trades, c_group, sorted_rewards)
-            current_snapshot[c_group]["summaries"] = summaries
-
-            # Compile standard baseline regular datasets
-            for a_group in ["authorized", "unauthorized"]:
-                source_trades = [t for t in bracket_trades if t["auth_group"] == a_group]
-                if len(source_trades) > 0:
-                    total_combined_trades += len(source_trades)
+            if c_group in all_segment_summaries:
+                summaries = all_segment_summaries[c_group]
                 
-                regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj, mode="full")
-                current_snapshot[c_group]["regular_data"][a_group] = regular_summary
-        
-        # Add the new snapshot to the last_28_days container with the dated key
-        final_analytics_payload["last_28_days"][snapshot_key] = current_snapshot
-        
-        # After adding the new snapshot, ensure we maintain the 5-snapshot limit
-        # Re-sort and trim to keep only the 5 most recent snapshots
-        if "last_28_days" in final_analytics_payload:
-            # Get current snapshots
-            current_snapshots = final_analytics_payload["last_28_days"]
-            
-            # Sort by date extracted from keys
-            def extract_date_from_key(key):
-                try:
-                    start_part = key.split("_to_")[0]
-                    return datetime.strptime(start_part, "%B_%d_%Y")
-                except:
-                    return datetime.min
-            
-            sorted_items = sorted(current_snapshots.items(), key=lambda x: extract_date_from_key(x[0]))
-            
-            # Keep only the 5 most recent
-            max_snapshots_to_keep = 5
-            if len(sorted_items) > max_snapshots_to_keep:
-                # Remove oldest (first items in sorted list)
-                items_to_remove = sorted_items[:len(sorted_items) - max_snapshots_to_keep]
-                for removed_key, _ in items_to_remove:
-                    if removed_key in final_analytics_payload["last_28_days"]:
-                        del final_analytics_payload["last_28_days"][removed_key]
-                        print(f" │    🗑️ After adding new snapshot, removed oldest: {removed_key}")
+                # Get authorized and unauthorized summaries
+                auth_summary = summaries.get("authorized", {})
+                unauth_summary = summaries.get("unauthorized", {})
                 
-                print(f" │ 📊 Final snapshot count: {len(final_analytics_payload['last_28_days'])} (limit: {max_snapshots_to_keep})")
+                # Calculate combined summaries
+                total_lost_trades = auth_summary.get("loss_trades", 0) + unauth_summary.get("loss_trades", 0)
+                total_won_trades = auth_summary.get("profit_trades", 0) + unauth_summary.get("profit_trades", 0)
+                total_lost_trades_amount = auth_summary.get("loss_amount", 0) + unauth_summary.get("loss_amount", 0)
+                total_won_trades_amount = auth_summary.get("profit_amount", 0) + unauth_summary.get("profit_amount", 0)
+                
+                # Get trade per day metrics from authorized (primary) or unauthorized
+                auth_lowest = auth_summary.get("lowest_trades_per_day", 0)
+                unauth_lowest = unauth_summary.get("lowest_trades_per_day", 0)
+                auth_highest = auth_summary.get("highest_trades_per_day", 0)
+                unauth_highest = unauth_summary.get("highest_trades_per_day", 0)
+                auth_avg = auth_summary.get("average_trades_per_day", 0)
+                unauth_avg = unauth_summary.get("average_trades_per_day", 0)
+                
+                # Use the max for lowest (since we want the lowest across both)
+                lowest_trades_per_day = min(auth_lowest, unauth_lowest) if (auth_lowest > 0 or unauth_lowest > 0) else 0
+                # Use the max for highest
+                highest_trades_per_day = max(auth_highest, unauth_highest)
+                # Average: use weighted average or primary
+                if auth_avg > 0 and unauth_avg > 0:
+                    average_trades_per_day = round((auth_avg + unauth_avg) / 2, 2)
+                elif auth_avg > 0:
+                    average_trades_per_day = auth_avg
+                elif unauth_avg > 0:
+                    average_trades_per_day = unauth_avg
+                else:
+                    average_trades_per_day = 0                
+                # Combine trade dates
+                lowest_trade_dates = auth_summary.get("lowest_trade_dates", []) + unauth_summary.get("lowest_trade_dates", [])
+                highest_trade_dates = auth_summary.get("highest_trade_dates", []) + unauth_summary.get("highest_trade_dates", [])
+                average_trade_dates = auth_summary.get("average_trade_dates", []) + unauth_summary.get("average_trade_dates", [])
+                
+                # Remove duplicates
+                lowest_trade_dates = list(set(lowest_trade_dates))
+                highest_trade_dates = list(set(highest_trade_dates))
+                average_trade_dates = list(set(average_trade_dates))
+                
+                # Build the summaries object
+                summaries_payload = {
+                    "summaries": {
+                        "summaries_of_profits_only": {
+                            "total_lost_trades": total_lost_trades,
+                            "total_won_trades": total_won_trades,
+                            "total_lost_trades_amount": round(total_lost_trades_amount, 2),
+                            "total_won_trades_amount": round(total_won_trades_amount, 2),
+                            "lowest_trades_per_day": lowest_trades_per_day,
+                            "highest_trades_per_day": highest_trades_per_day,
+                            "average_trades_per_day": average_trades_per_day,
+                            "lowest_trade_dates": lowest_trade_dates,
+                            "highest_trade_dates": highest_trade_dates,
+                            "average_trade_dates": average_trade_dates
+                        }
+                    }
+                }
+                
+                # Add summaries to the payload
+                if "from_execution_start_date" in final_analytics_payload:
+                    if c_group not in final_analytics_payload["from_execution_start_date"]:
+                        final_analytics_payload["from_execution_start_date"][c_group] = {}
+                    final_analytics_payload["from_execution_start_date"][c_group]["summaries"] = summaries_payload["summaries"]
 
-        # Update unauthorized action flags in activities data (but don't save)
+        # Update unauthorized action flags in activities data
         activities_data['unauthorized_action_detected'] = unauthorized_trades_detected
         activities_data['unauthorized_actions'] = "1" if unauthorized_trades_detected else "0"
         
@@ -26647,14 +26533,31 @@ def trades_analytics(inv_id=None):
         else:
             print(f" │ ✅ No unauthorized trades detected. Setting unauthorized_actions=0")
         
+        # ================================================================
+        # CRITICAL FIX: OVERWRITE THE ENTIRE ANALYTICS FIELD
+        # ================================================================
+        # Replace the entire analytics field with fresh data
+        activities_data['analytics'] = final_analytics_payload
+        
         # Cache payload internally for cross-file synchronization sequence below
         generated_analytics_registry[str(user_brokerid)] = final_analytics_payload
         
-        print(f" │ 📅 New 28-day snapshot stored as: {snapshot_key}")
         print(f" │ 📅 Contract period: {execution_start_date} to {end_datetime.strftime('%B %d, %Y')}")
         print(f" │ 💰 Current balance: ${current_balance:.2f}")
         print(f" │ 📊 Total P&L: ${total_profit_loss:.2f}")
         print(f" │ 🔒 Unauthorized actions flag: {activities_data['unauthorized_actions']} (detected: {activities_data['unauthorized_action_detected']})")
+
+        # ================================================================
+        # SAVE TO ACTIVITIES.JSON (Individual investor file)
+        # ================================================================
+        try:
+            with open(activities_path, 'w', encoding='utf-8') as f:
+                json.dump(activities_data, f, indent=4)
+            print(f" │ ✅ Updated activities.json at: {activities_path}")
+            print(f" │    - unauthorized_actions: {activities_data['unauthorized_actions']}")
+            print(f" │    - analytics fields updated with fresh data")
+        except Exception as e:
+            print(f" │ ⚠️ Error saving activities.json: {e}")
 
         stats["investors_processed"] += 1
         stats["total_trades_recorded"] += total_combined_trades
@@ -26665,18 +26568,24 @@ def trades_analytics(inv_id=None):
     print("\n" + "═"*80)
     print(" 🔄 INITIATING CROSS-FILE INVESTOR MATRIX RECONCILIATION LAYER".ljust(79) + "═")
     print("═"*80)
+    print(" │ Files to be updated:")
+    print(f" │   1. {FETCHED_INVESTORS}")
+    print(f" │   2. {UPDATED_INVESTORS}")
+    print(f" │   3. {ALL_FETCHED_INVESTORS}")
+    print(f" │   4. {ALL_UPDATED_INVESTORS}")
+    print("═"*80)
 
-    # 1. Load Primary Source (FETCHED_INVESTORS)
+    # 1. Load Primary Source (ALL_FETCHED_INVESTORS)
     fetched_data = {}
     if os.path.exists(FETCHED_INVESTORS):
         try:
             with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
                 fetched_data = json.load(f)
-            print(f" │ Loaded {len(fetched_data)} raw profiles from upstream source matrix.")
+            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
         except Exception as e:
             print(f" │ Error loading FETCHED_INVESTORS: {e}")
     else:
-        print(f" │ ⚠️ Warning: Upstream source file missing at configured path: {FETCHED_INVESTORS}")
+        print(f" │ ⚠️ Warning: FETCHED_INVESTORS not found at: {FETCHED_INVESTORS}")
 
     # 2. Load Destination Storage Matrix (UPDATED_INVESTORS)
     updated_data = {}
@@ -26684,13 +26593,36 @@ def trades_analytics(inv_id=None):
         try:
             with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
                 updated_data = json.load(f)
-            print(f" │ Loaded {len(updated_data)} profiles from active destination database.")
+            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
         except Exception as e:
             print(f" │ Error parsing UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
             updated_data = {}
 
+    # 3. Load ALL_FETCHED_INVESTORS
+    all_fetched_data = {}
+    if os.path.exists(ALL_FETCHED_INVESTORS):
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ ALL_FETCHED_INVESTORS not found at: {ALL_FETCHED_INVESTORS}")
+
+    # 4. Load ALL_UPDATED_INVESTORS
+    all_updated_data = {}
+    if os.path.exists(ALL_UPDATED_INVESTORS):
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_updated_data = json.load(f)
+            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error parsing ALL_UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
+            all_updated_data = {}
+
     # =========================================================================
-    # UPDATE ONLY SPECIFIC FIELDS - DON'T REARRANGE OR OVERWRITE STRUCTURE
+    # UPDATE ALL FILES WITH NEW DATA
     # =========================================================================
     has_mutated_database = False
 
@@ -26723,18 +26655,20 @@ def trades_analytics(inv_id=None):
         except Exception as e:
             print(f" │   ⚠️ Could not check unauthorized for {current_id}: {e}")
         
+        print(f"\n │ Updating records for investor: {current_id}")
+        print(f" │   Total P&L: ${total_pnl:.2f}")
+        print(f" │   Unauthorized detected: {unauthorized_detected}")
+        
         # ============================================================
-        # UPDATE FETCHED_INVESTORS - ONLY SPECIFIC FIELDS
+        # UPDATE FETCHED_INVESTORS (Legacy)
         # ============================================================
         if current_id in fetched_data:
-            # Only update specific fields, preserve everything else
             fetched_data[current_id]['analytics'] = analytics_data
             fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
             fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
             has_mutated_database = True
-            print(f" │   📦 Updated analytics for {current_id} in FETCHED_INVESTORS")
+            print(f" │   ✅ Updated FETCHED_INVESTORS for {current_id}")
         else:
-            # Record doesn't exist, create minimal entry
             fetched_data[current_id] = {
                 'id': str(current_id),
                 'analytics': analytics_data,
@@ -26742,20 +26676,18 @@ def trades_analytics(inv_id=None):
                 'unauthorized_action_detected': unauthorized_detected
             }
             has_mutated_database = True
-            print(f" │   ➕ Created minimal entry for {current_id} in FETCHED_INVESTORS")
+            print(f" │   ➕ Created entry in FETCHED_INVESTORS for {current_id}")
         
         # ============================================================
-        # UPDATE UPDATED_INVESTORS - ONLY SPECIFIC FIELDS
+        # UPDATE UPDATED_INVESTORS (Legacy)
         # ============================================================
         if current_id in updated_data:
-            # Only update specific fields, preserve everything else
             updated_data[current_id]['analytics'] = analytics_data
             updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
             updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
             has_mutated_database = True
-            print(f" │   📦 Updated analytics for {current_id} in UPDATED_INVESTORS")
+            print(f" │   ✅ Updated UPDATED_INVESTORS for {current_id}")
         else:
-            # Record doesn't exist, create minimal entry
             updated_data[current_id] = {
                 'id': str(current_id),
                 'analytics': analytics_data,
@@ -26763,27 +26695,89 @@ def trades_analytics(inv_id=None):
                 'unauthorized_action_detected': unauthorized_detected
             }
             has_mutated_database = True
-            print(f" │   ➕ Created minimal entry for {current_id} in UPDATED_INVESTORS")
+            print(f" │   ➕ Created entry in UPDATED_INVESTORS for {current_id}")
+        
+        # ============================================================
+        # UPDATE ALL_FETCHED_INVESTORS
+        # ============================================================
+        if current_id in all_fetched_data:
+            all_fetched_data[current_id]['analytics'] = analytics_data
+            all_fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            all_fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+            has_mutated_database = True
+            print(f" │   ✅ Updated ALL_FETCHED_INVESTORS for {current_id}")
+        else:
+            all_fetched_data[current_id] = {
+                'id': str(current_id),
+                'analytics': analytics_data,
+                'profitandloss': str(round(total_pnl, 2)),
+                'unauthorized_action_detected': unauthorized_detected
+            }
+            has_mutated_database = True
+            print(f" │   ➕ Created entry in ALL_FETCHED_INVESTORS for {current_id}")
+        
+        # ============================================================
+        # UPDATE ALL_UPDATED_INVESTORS
+        # ============================================================
+        if current_id in all_updated_data:
+            all_updated_data[current_id]['analytics'] = analytics_data
+            all_updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+            all_updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+            has_mutated_database = True
+            print(f" │   ✅ Updated ALL_UPDATED_INVESTORS for {current_id}")
+        else:
+            all_updated_data[current_id] = {
+                'id': str(current_id),
+                'analytics': analytics_data,
+                'profitandloss': str(round(total_pnl, 2)),
+                'unauthorized_action_detected': unauthorized_detected
+            }
+            has_mutated_database = True
+            print(f" │   ➕ Created entry in ALL_UPDATED_INVESTORS for {current_id}")
 
     # =========================================================================
-    # SAVE UPDATES BACK TO DISK
+    # SAVE ALL UPDATES BACK TO DISK
     # =========================================================================
     if has_mutated_database:
+        print("\n" + "─"*80)
+        print(" 💾 SAVING ALL UPDATED FILES")
+        print("─"*80)
+        
         try:
-            # Save UPDATED_INVESTORS
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(updated_data, f, indent=4)
-            print(f" │\n │ ✅ Synchronization transaction committed to: {UPDATED_INVESTORS}")
-            
-            # Save FETCHED_INVESTORS with the same data
+            # Save FETCHED_INVESTORS (Legacy)
             with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(fetched_data, f, indent=4)
-            print(f" │ ✅ Synchronization transaction committed to: {FETCHED_INVESTORS}")
-            
+            print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
         except Exception as e:
-            print(f" │ Critical failure saving database matrix to storage path: {e}")
+            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
+        
+        try:
+            # Save UPDATED_INVESTORS (Legacy)
+            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(updated_data, f, indent=4)
+            print(f" │ ✅ Updated: {UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
+        
+        try:
+            # Save ALL_FETCHED_INVESTORS
+            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_fetched_data, f, indent=4)
+            print(f" │ ✅ Updated: {ALL_FETCHED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
+        
+        try:
+            # Save ALL_UPDATED_INVESTORS
+            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_updated_data, f, indent=4)
+            print(f" │ ✅ Updated: {ALL_UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
+        
+        print(f"\n │ ✅ Synchronization transaction committed to all files.")
     else:
-        print(" │ ℹ️ Storage verification completed. Destination schema is perfectly synchronized.")
+        print(" │ ℹ️ No changes detected. All files are already synchronized.")
 
     stats["processing_success"] = True
     print("\n" + "="*80)
@@ -27773,7 +27767,7 @@ def main_loop():
             time.sleep(loop_interval)
 
 if __name__ == "__main__":
-   repair_json_files()
+   main_loop()
 
 
  

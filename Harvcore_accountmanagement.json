@@ -339,7 +339,7 @@
     "contract_duration": "30",
     "min_broker_balance": "50.00"
   },
-  "working_hours": [
+  "working_hours_": [
     {
       "from": "12:00 am",
       "to": "12:05 am"
@@ -431,6 +431,12 @@
     {
       "from": "10:00 pm",
       "to": "10:05 pm"
+    }
+  ],
+  "working_hours": [
+    {
+      "from": "08:00 am",
+      "to": "12:05 am"
     }
   ],
   "accountmanagement":{

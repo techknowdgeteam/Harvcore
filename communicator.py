@@ -1219,6 +1219,7 @@ def update_tables_streaming(batch_size=5000):
     - Merges data from both files
     - Does NOT delete files after updating
     """
+    combine_investors_to_all_files()
     
     print("\n" + "="*70)
     print(f"  UPDATING TABLES")
@@ -3338,11 +3339,7 @@ def process_single_investor_(inv_id):
     }
     
     # Just call the folder creation function
-    try:
-        verify_investors_balance(inv_id=inv_id)
-    except Exception as e:
-        account_stats["error"] = str(e)
-        print(f"Error for {inv_id}: {e}")
+    update_tables_streaming()
     
     return account_stats
 
