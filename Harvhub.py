@@ -27041,7 +27041,7 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -27340,7 +27340,7 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -27783,51 +27783,7 @@ def process_single_investor_(inv_folder):
             pass
     
     return account_stats
-
-def place_orders_parallel():
-    """
-    ORCHESTRATOR (Unlimited One-Shot): Processes all investor folders
-    regardless of system capacity or active MT5 instances.
-    """
-    inv_base_path = Path(INV_PATH)
-    investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
     
-    if not investor_folders:
-        print(" └─ 🔘 No investor directories found. Calling move_fetched_investors()...")
-        try:
-            move_fetched_investors()
-        except Exception as err:
-            print(f"[CRITICAL ERROR] move_fetched_investors crashed: {err}")
-
-        investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-
-        if not investor_folders:
-            print(" └─  No investor directories found to process. Aborting execution safely.")
-            return
-
-    # Display system info for awareness only (no limiting)
-    cpu_cores = os.cpu_count() or 1
-    available_ram_bytes = psutil.virtual_memory().available
-    available_ram_mb = available_ram_bytes / (1024 * 1024)
-    
-    print(f"🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-    print(f"📊 Processing all {len(investor_folders)} investor folders without capacity restrictions...")
-
-    # Process ALL investor folders regardless of capacity
-    active_batch = investor_folders
-
-    if not active_batch:
-        print(" └─  No investors to process.")
-        return
-
-    # Executing pool with all investors
-    try:
-        with mp.Pool(processes=len(active_batch)) as pool:
-            results = pool.map(process_single_investor, active_batch)
-        print(f"✅ Completed processing all {len(active_batch)} investors.")
-    except Exception as pool_err:
-        print(f"[CRITICAL] Error executing multiprocessing pool: {pool_err}")
-        
 def main_once():
     """
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
@@ -28065,7 +28021,7 @@ def main_loop():
             time.sleep(loop_interval)
 
 if __name__ == "__main__":
-   main_once()
+   main_loop()
 
 
  

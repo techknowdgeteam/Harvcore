@@ -3016,7 +3016,7 @@ def merge_verify_results():
         print(f"ℹ️ No verification updates to merge")
         return False
 
-def process_all_fetched_investors(inv_id):
+def process_all_fetched_investors_(inv_id):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials from ALL_FETCHED_INVESTORS.
@@ -3284,7 +3284,7 @@ def process_all_fetched_investors(inv_id):
 
     return account_stats
 
-def process_all_fetched_investors_(inv_id):
+def process_all_fetched_investors(inv_id):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials from ALL_FETCHED_INVESTORS.
@@ -3357,24 +3357,11 @@ def process_all_fetched_investors_(inv_id):
         print(f"✅ Investor {inv_id} is WITHIN allowed work time range - Full execution permitted")
     
         # =====================================================================
-        # SECTION: CALL FUNCTIONS OUTSIDE TIME RANGE
-        # =====================================================================
-        print(f"\n{'='*10} 🔧 SECTION: OUTSIDE TIME RANGE FUNCTIONS FOR {inv_id} {'='*10}")
-        fetch_tables_streaming()
-        
-        # If outside time range, skip MT5 connection entirely
-        if not within_time_range:
-            print(f"\n⏰ Investor {inv_id} is outside time range - Skipping MT5 connection and trading operations")
-            account_stats["outside_time_range"] = True
-            account_stats["success"] = True
-            account_stats["skip_reason"] = "Outside allowed work time range"
-            return account_stats
-        
-        # =====================================================================
         # SECTION: WITHIN TIME RANGE - Continue with MT5 operations
         # =====================================================================
         print(f"\n{'='*10} ✅ WITHIN TIME RANGE - PROCEEDING WITH FULL OPERATIONS {'='*10}")
-        create_investor_mt5_files(inv_id=inv_id)
+        fetch_tables_streaming()
+        
         
         # 1. Load investor data from ALL_FETCHED_INVESTORS
         investor_data = None
@@ -3876,7 +3863,7 @@ def main_loop():
 
 
 if __name__ == "__main__":
-   main_once()
+   main_loop()
 
 
     
