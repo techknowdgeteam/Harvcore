@@ -17,6 +17,7 @@ import re
 from typing import Any, Dict, List, Union
 import socket
 import sys
+import random
 
 
 DEFAULT_MT5_PATH = r"C:\xampp\htdocs\harvcore\mt5\MetaTrader 5"
@@ -321,7 +322,372 @@ def work_only_in_specific_timerange():
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
     return stats
-
+      
+def combine_investors_to_all_files():
+    """
+    Intelligently merges investor data from invharv and harvhub into all files.
+    ONE-WAY SYNC ONLY: INVHARV + HARVHUB → ALL_FETCHED / ALL_UPDATED
+    
+    This function performs a one-way merge:
+    1. Loads data from INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
+    2. Merges them into ALL_FETCHED_INVESTORS (invharv takes precedence)
+    3. Loads data from INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS
+    4. Merges them into ALL_UPDATED_INVESTORS (invharv takes precedence)
+    5. NO distribution back to invharv or harvhub files
+    
+    Reads:
+        - INVHARV_FETCHED_INVESTORS
+        - HARVHUB_FETCHED_INVESTORS
+        - INVHARV_UPDATED_INVESTORS
+        - HARVHUB_UPDATED_INVESTORS
+    
+    Writes:
+        - ALL_FETCHED_INVESTORS (merged fetched data)
+        - ALL_UPDATED_INVESTORS (merged updated data)
+    
+    Returns:
+        dict: Statistics about the combination process
+    """
+    print("\n" + "="*70)
+    print(f"  INTELLIGENT INVESTOR MERGE (ONE-WAY SYNC)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    print("  Direction: INVHARV + HARVHUB → ALL FILES")
+    print("="*70)
+    
+    stats = {
+        "processing_success": False,
+        "fetched": {
+            "invharv": {"loaded": False, "count": 0, "path": INVHARV_FETCHED_INVESTORS},
+            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_FETCHED_INVESTORS},
+            "combined_count": 0,
+            "output_path": ALL_FETCHED_INVESTORS,
+            "fields_merged": 0,
+            "investors_added": 0,
+            "investors_updated": 0
+        },
+        "updated": {
+            "invharv": {"loaded": False, "count": 0, "path": INVHARV_UPDATED_INVESTORS},
+            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_UPDATED_INVESTORS},
+            "combined_count": 0,
+            "output_path": ALL_UPDATED_INVESTORS,
+            "fields_merged": 0,
+            "investors_added": 0,
+            "investors_updated": 0
+        },
+        "errors": [],
+        "warnings": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    def deep_merge(base_dict, override_dict):
+        """
+        Deep merge two dictionaries. override_dict takes precedence.
+        
+        Args:
+            base_dict: The base dictionary to merge into
+            override_dict: The dictionary with updates (takes precedence)
+        
+        Returns:
+            dict: Merged dictionary
+        """
+        result = base_dict.copy() if base_dict else {}
+        
+        for key, value in override_dict.items():
+            if key in result:
+                # If both are dicts, recursively merge
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value)
+                # Otherwise, override with new value
+                else:
+                    result[key] = value
+            else:
+                # Key doesn't exist in base, add it
+                result[key] = value
+        
+        return result
+    
+    def count_non_empty_fields(obj, ignore_keys=[]):
+        """Count non-empty fields in an object."""
+        if not isinstance(obj, dict):
+            return 0
+        
+        count = 0
+        for key, value in obj.items():
+            if key in ignore_keys:
+                continue
+            if value is not None and value != "" and value != "NULL":
+                if isinstance(value, dict):
+                    # Recursively count nested dict fields
+                    count += count_non_empty_fields(value, ignore_keys)
+                elif isinstance(value, list) and len(value) > 0:
+                    count += 1
+                elif not isinstance(value, list):
+                    count += 1
+        return count
+    
+    def merge_investors(source_data, target_data, source_name):
+        """
+        Merge source_data into target_data. Source takes precedence.
+        
+        Args:
+            source_data: Dictionary with investor data (takes precedence)
+            target_data: Target dictionary to merge into
+            source_name: Name for logging
+        
+        Returns:
+            tuple: (merged_data, investors_added, investors_updated, fields_merged)
+        """
+        merged = target_data.copy() if target_data else {}
+        investors_added = 0
+        investors_updated = 0
+        total_fields_merged = 0
+        
+        if not source_data:
+            return merged, 0, 0, 0
+        
+        for investor_id, source_record in source_data.items():
+            if not isinstance(source_record, dict):
+                continue
+            
+            # Check if investor exists in target
+            if investor_id not in merged:
+                # New investor - add entire record
+                merged[investor_id] = source_record.copy()
+                investors_added += 1
+                total_fields_merged += count_non_empty_fields(source_record)
+                continue
+            
+            # Investor exists - merge fields (source takes precedence)
+            target_record = merged[investor_id]
+            
+            # Count fields before merge
+            before_fields = count_non_empty_fields(target_record)
+            
+            # Deep merge: source overrides target
+            merged_record = deep_merge(target_record, source_record)
+            
+            # Count fields after merge
+            after_fields = count_non_empty_fields(merged_record)
+            
+            # Track changes
+            if before_fields < after_fields:
+                total_fields_merged += (after_fields - before_fields)
+                investors_updated += 1
+            
+            merged[investor_id] = merged_record
+        
+        return merged, investors_added, investors_updated, total_fields_merged
+    
+    def load_json_file(filepath, stats_section, name):
+        """Load a JSON file safely."""
+        if not os.path.exists(filepath):
+            stats["warnings"].append(f"{name} file not found: {filepath}")
+            return None, False
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    stats_section["loaded"] = True
+                    stats_section["count"] = len(data)
+                    print(f"   ✅ Loaded {name}: {len(data):,} records")
+                    return data, True
+                else:
+                    stats["errors"].append(f"{name} has invalid format (expected dict)")
+                    return None, False
+        except Exception as e:
+            error_msg = f"Error loading {name}: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            stats["errors"].append(error_msg)
+            return None, False
+    
+    def save_json_file(filepath, data, name):
+        """Save JSON data to file safely."""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            error_msg = f"Error saving {name}: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            stats["errors"].append(error_msg)
+            return False
+    
+    try:
+        # ============================================================
+        # 1. PROCESS FETCHED INVESTORS
+        # ============================================================
+        print("\n📥 [1/2] Processing FETCHED investors...")
+        print("-"*40)
+        print(f"   Source 1: {INVHARV_FETCHED_INVESTORS}")
+        print(f"   Source 2: {HARVHUB_FETCHED_INVESTORS}")
+        print(f"   Output : {ALL_FETCHED_INVESTORS}")
+        print()
+        
+        # Load invharv fetched
+        invharv_fetched, invharv_loaded = load_json_file(
+            INVHARV_FETCHED_INVESTORS, 
+            stats["fetched"]["invharv"], 
+            "INVHARV fetched"
+        )
+        
+        # Load harvhub fetched
+        harvhub_fetched, harvhub_loaded = load_json_file(
+            HARVHUB_FETCHED_INVESTORS, 
+            stats["fetched"]["harvhub"], 
+            "HARVHUB fetched"
+        )
+        
+        # Initialize combined with invharv data (priority source)
+        combined_fetched = {}
+        
+        if invharv_fetched:
+            combined_fetched = invharv_fetched.copy()
+            print(f"   📋 Starting with INVHARV: {len(combined_fetched):,} investors")
+        
+        # Merge harvhub into combined (invharv takes precedence)
+        if harvhub_fetched and combined_fetched:
+            combined_fetched, added, updated, fields = merge_investors(
+                harvhub_fetched, 
+                combined_fetched, 
+                "HARVHUB -> ALL"
+            )
+            stats["fetched"]["investors_added"] = added
+            stats["fetched"]["investors_updated"] = updated
+            stats["fetched"]["fields_merged"] = fields
+            print(f"   🔄 HARVHUB merged: {added} investors added, {updated} investors updated, {fields} fields merged")
+        
+        elif harvhub_fetched and not combined_fetched:
+            # Only harvhub data available
+            combined_fetched = harvhub_fetched.copy()
+            stats["fetched"]["investors_added"] = len(harvhub_fetched)
+            print(f"   📋 Using HARVHUB only: {len(combined_fetched):,} investors")
+        
+        # Save combined fetched
+        if combined_fetched:
+            stats["fetched"]["combined_count"] = len(combined_fetched)
+            if save_json_file(ALL_FETCHED_INVESTORS, combined_fetched, "ALL fetched combined"):
+                print(f"\n   💾 Saved combined fetched: {len(combined_fetched):,} records")
+        else:
+            print(f"\n   ⚠️ No fetched data to combine")
+            stats["errors"].append("No fetched data available")
+        
+        # ============================================================
+        # 2. PROCESS UPDATED INVESTORS
+        # ============================================================
+        print("\n📤 [2/2] Processing UPDATED investors...")
+        print("-"*40)
+        print(f"   Source 1: {INVHARV_UPDATED_INVESTORS}")
+        print(f"   Source 2: {HARVHUB_UPDATED_INVESTORS}")
+        print(f"   Output : {ALL_UPDATED_INVESTORS}")
+        print()
+        
+        # Load invharv updated
+        invharv_updated, invharv_loaded = load_json_file(
+            INVHARV_UPDATED_INVESTORS, 
+            stats["updated"]["invharv"], 
+            "INVHARV updated"
+        )
+        
+        # Load harvhub updated
+        harvhub_updated, harvhub_loaded = load_json_file(
+            HARVHUB_UPDATED_INVESTORS, 
+            stats["updated"]["harvhub"], 
+            "HARVHUB updated"
+        )
+        
+        # Initialize combined with invharv data (priority source)
+        combined_updated = {}
+        
+        if invharv_updated:
+            combined_updated = invharv_updated.copy()
+            print(f"   📋 Starting with INVHARV: {len(combined_updated):,} investors")
+        
+        # Merge harvhub into combined (invharv takes precedence)
+        if harvhub_updated and combined_updated:
+            combined_updated, added, updated, fields = merge_investors(
+                harvhub_updated, 
+                combined_updated, 
+                "HARVHUB -> ALL"
+            )
+            stats["updated"]["investors_added"] = added
+            stats["updated"]["investors_updated"] = updated
+            stats["updated"]["fields_merged"] = fields
+            print(f"   🔄 HARVHUB merged: {added} investors added, {updated} investors updated, {fields} fields merged")
+        
+        elif harvhub_updated and not combined_updated:
+            # Only harvhub data available
+            combined_updated = harvhub_updated.copy()
+            stats["updated"]["investors_added"] = len(harvhub_updated)
+            print(f"   📋 Using HARVHUB only: {len(combined_updated):,} investors")
+        
+        # Save combined updated
+        if combined_updated:
+            stats["updated"]["combined_count"] = len(combined_updated)
+            if save_json_file(ALL_UPDATED_INVESTORS, combined_updated, "ALL updated combined"):
+                print(f"\n   💾 Saved combined updated: {len(combined_updated):,} records")
+        else:
+            print(f"\n   ⚠️ No updated data to combine")
+            stats["errors"].append("No updated data available")
+        
+        # ============================================================
+        # 3. FINAL SUMMARY
+        # ============================================================
+        stats["processing_success"] = True
+        
+        print("\n" + "="*70)
+        print(f"  MERGE SUMMARY (ONE-WAY: INVHARV + HARVHUB → ALL)")
+        print("="*70)
+        
+        print(f"\n  📥 FETCHED FILES (Source → Target):")
+        print(f"     INVHARV  : {'✅' if stats['fetched']['invharv']['loaded'] else '❌'} {stats['fetched']['invharv']['count']:,} records")
+        print(f"     HARVHUB  : {'✅' if stats['fetched']['harvhub']['loaded'] else '❌'} {stats['fetched']['harvhub']['count']:,} records")
+        print(f"     → Combined : {stats['fetched']['combined_count']:,} records")
+        print(f"       (Added: {stats['fetched']['investors_added']:,} | Updated: {stats['fetched']['investors_updated']:,} | Fields: {stats['fetched']['fields_merged']:,})")
+        print(f"     Output   : {ALL_FETCHED_INVESTORS}")
+        
+        print(f"\n  📤 UPDATED FILES (Source → Target):")
+        print(f"     INVHARV  : {'✅' if stats['updated']['invharv']['loaded'] else '❌'} {stats['updated']['invharv']['count']:,} records")
+        print(f"     HARVHUB  : {'✅' if stats['updated']['harvhub']['loaded'] else '❌'} {stats['updated']['harvhub']['count']:,} records")
+        print(f"     → Combined : {stats['updated']['combined_count']:,} records")
+        print(f"       (Added: {stats['updated']['investors_added']:,} | Updated: {stats['updated']['investors_updated']:,} | Fields: {stats['updated']['fields_merged']:,})")
+        print(f"     Output   : {ALL_UPDATED_INVESTORS}")
+        
+        if stats["warnings"]:
+            print(f"\n  ⚠️ WARNINGS ({len(stats['warnings'])}):")
+            for warning in stats["warnings"]:
+                print(f"     - {warning}")
+        
+        if stats["errors"]:
+            print(f"\n  ❌ ERRORS ({len(stats['errors'])}):")
+            for error in stats["errors"]:
+                print(f"     - {error}")
+        
+        print(f"\n  ✅ Status : {'SUCCESS' if stats['processing_success'] else 'FAILED'}")
+        print(f"  🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*70)
+        
+        return stats
+        
+    except Exception as e:
+        print(f"\n{'='*70}")
+        print(f"   CRITICAL ERROR")
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n  📜 Full Traceback:")
+        traceback.print_exc()
+        
+        stats["processing_success"] = False
+        stats["errors"].append(f"Critical error: {str(e)}")
+        return stats
+    
 def fetch_tables_streaming(batch_size=5000):
     """Stream results directly to file without holding all in memory - Hybrid mode: IP first, then VS Code ID fallback"""
     
@@ -1674,8 +2040,8 @@ def create_investor_mt5_files(inv_id=None):
         return result
     
     # Check if fetched investors file exists
-    if not os.path.exists(FETCHED_INVESTORS):
-        msg = f"Fetched investors file not found: {FETCHED_INVESTORS}"
+    if not os.path.exists(ALL_FETCHED_INVESTORS):
+        msg = f"Fetched investors file not found: {ALL_FETCHED_INVESTORS}"
         print(f" {msg}")
         result['message'] = msg
         return result
@@ -1702,7 +2068,7 @@ def create_investor_mt5_files(inv_id=None):
     
     # Load fetched investors data (read-only)
     try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
         print(f"📋 Loaded investors data")
     except Exception as e:
@@ -1914,12 +2280,12 @@ def merge_create_results():
     print(f"{'='*60}")
     
     # Load current investors data
-    if not os.path.exists(FETCHED_INVESTORS):
+    if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
         return {'total_processed': 0, 'created': 0, 'deleted': 0, 'updated': 0, 'errors': 0}
     
     try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
         print(f"📋 Loaded current investors data")
     except Exception as e:
@@ -1982,15 +2348,15 @@ def merge_create_results():
     # Save merged data if there were changes
     if stats['total_processed'] > 0 and stats['errors'] < stats['total_processed']:
         # Create backup
-        backup_path = FETCHED_INVESTORS.replace('.json', '_backup.json')
+        backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
-            shutil.copy2(FETCHED_INVESTORS, backup_path)
+            shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
             print(f"\n📦 Created backup: {backup_path}")
         
-        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
         
-        print(f"\n💾 Saved merged data to {FETCHED_INVESTORS}")
+        print(f"\n💾 Saved merged data to {ALL_FETCHED_INVESTORS}")
     else:
         print(f"\n⚠️ No valid updates to save")
     
@@ -2009,7 +2375,7 @@ def merge_create_results():
 
 def get_investors_balance(inv_id=None):
     """
-    Get account balance for investors by initializing MT5 and logging in.
+    Get account balance for investors by directly reading from already initialized MT5.
     
     Args:
         inv_id: Required - specific investor ID to process.
@@ -2056,30 +2422,52 @@ def get_investors_balance(inv_id=None):
     print(f"{'='*60}")
     
     # Check if fetched investors file exists
-    if not os.path.exists(FETCHED_INVESTORS):
-        msg = f"Fetched investors file not found: {FETCHED_INVESTORS}"
-        print(msg)
+    if not os.path.exists(ALL_FETCHED_INVESTORS):
+        msg = f"Fetched investors file not found: {ALL_FETCHED_INVESTORS}"
+        print(f"❌ {msg}")
         result['message'] = msg
         return result
     
     # Load investors data (read-only, no lock needed for reading)
     try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
-        print(f"📋 Loaded investors data")
+        print(f"📋 Loaded investors data with {len(investors_data)} investors")
     except Exception as e:
-        print(f"Error loading investors: {e}")
+        print(f"❌ Error loading investors: {e}")
         result['message'] = f"Error loading investors: {e}"
         return result
     
     inv_id_str = str(inv_id)
-    if inv_id_str not in investors_data:
+    
+    # Find investor - try both string and integer keys
+    investor_data = None
+    actual_key = None
+    
+    if inv_id_str in investors_data:
+        investor_data = investors_data[inv_id_str]
+        actual_key = inv_id_str
+    elif inv_id in investors_data:
+        investor_data = investors_data[inv_id]
+        actual_key = inv_id
+    else:
+        # Try to find by converting keys to int
+        for key in investors_data.keys():
+            try:
+                if int(key) == int(inv_id):
+                    investor_data = investors_data[key]
+                    actual_key = key
+                    break
+            except (ValueError, TypeError):
+                continue
+    
+    if investor_data is None:
         msg = f"Investor {inv_id} not found in data"
-        print(msg)
+        print(f"❌ {msg}")
         result['message'] = msg
         return result
     
-    investor_data = investors_data[inv_id_str].copy()  # Work on a copy
+    investor_data = investor_data.copy()  # Work on a copy
     app_status = investor_data.get('application_status', '').strip()
     
     # STRICT SKIP - Only proceed if status is EXACTLY 'just-joined'
@@ -2092,207 +2480,153 @@ def get_investors_balance(inv_id=None):
     account_mode = investor_data.get('account_mode', '').strip().lower()
     demo_account = investor_data.get('demo_account', '').strip()
     
+    print(f"📊 Account mode: {account_mode}, Demo account: {demo_account}")
+    
     if account_mode == 'demo':
         if demo_account == '0':
-            print(f"⏭️ ID:{inv_id} → DEMO account but demo_account=0 (DISABLED) - Skipping")
-            result['message'] = "DEMO account disabled (demo_account=0)"
+            msg = "DEMO account disabled (demo_account=0)"
+            print(f"⏭️ ID:{inv_id} → {msg} - Skipping")
+            result['message'] = msg
             return result
         elif demo_account == '1':
             print(f"✅ ID:{inv_id} → DEMO account with demo_account=1 (ENABLED) - Proceeding")
         else:
-            print(f"⚠️ ID:{inv_id} → DEMO account but demo_account not set to '1' - Skipping")
-            result['message'] = f"DEMO account but demo_account not set to '1'"
+            msg = f"DEMO account but demo_account not set to '1'"
+            print(f"⏭️ ID:{inv_id} → {msg} - Skipping")
+            result['message'] = msg
             return result
     elif account_mode == 'real':
         print(f"✅ ID:{inv_id} → REAL account - Proceeding")
+    else:
+        msg = f"Unknown account mode: {account_mode}"
+        print(f"⏭️ ID:{inv_id} → {msg} - Skipping")
+        result['message'] = msg
+        return result
     
-    # Extract credentials
+    # Extract credentials (only needed for validation, not for login)
     login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
     password = investor_data.get('password', '') or investor_data.get('PASSWORD', '')
     server = investor_data.get('server', '') or investor_data.get('SERVER', '')
     Terminal_path = investor_data.get('Terminal_path', '')
     email = investor_data.get('email', 'No Email')
     
+    print(f"📊 Credentials: Login={login_id}, Server={server}")
+    
     if not all([login_id, password, server, Terminal_path]):
-        print(f" ID:{inv_id} ({email}) → Missing credentials")
-        result['message'] = "Missing credentials"
+        missing = []
+        if not login_id: missing.append('login')
+        if not password: missing.append('password')
+        if not server: missing.append('server')
+        if not Terminal_path: missing.append('Terminal_path')
+        msg = f"Missing credentials: {', '.join(missing)}"
+        print(f"❌ ID:{inv_id} → {msg}")
+        result['message'] = msg
         return result
     
     try:
         login_id_int = int(login_id)
     except (ValueError, TypeError):
-        print(f" ID:{inv_id} ({email}) → Invalid LOGIN_ID: {login_id}")
-        result['message'] = f"Invalid LOGIN_ID: {login_id}"
+        msg = f"Invalid LOGIN_ID: {login_id}"
+        print(f"❌ ID:{inv_id} → {msg}")
+        result['message'] = msg
+        return result
+    
+    # TERMINAL PATH VALIDATION
+    if not Terminal_path:
+        msg = "Terminal_path is missing"
+        print(f"❌ ID:{inv_id} → {msg}")
+        result['message'] = msg
         return result
     
     if not os.path.exists(Terminal_path):
-        print(f"ID:{inv_id} ({email}) → Terminal not found at: {Terminal_path}")
-        result['message'] = f"Terminal not found: {Terminal_path}"
+        msg = f"Terminal not found: {Terminal_path}"
+        print(f"❌ ID:{inv_id} → {msg}")
+        result['message'] = msg
         return result
     
-    print(f"\n ID:{inv_id} ({email}) (Login:{login_id_int}) - Processing...")
+    print(f"✅ Terminal path exists: {Terminal_path}")
     
-    # Check MT5 status and login
-    already_logged_in_account = None
-    actual_account_mode = None
+    print(f"\n✅ ID:{inv_id} ({email}) (Login:{login_id_int}) - Getting balance...")
+    
+    # DIRECT BALANCE RETRIEVAL - NO INITIALIZATION OR LOGIN NEEDED
     balance = None
     currency = None
     success = False
     
     try:
-        # Try to initialize without path first
-        if mt5.initialize():
-            account_info = mt5.account_info()
-            if account_info is not None:
-                already_logged_in_account = account_info.login
-                
-                if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
-                    actual_account_mode = 'real'
-                elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
-                    actual_account_mode = 'demo'
-                elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
-                    actual_account_mode = 'demo'
-                else:
-                    actual_account_mode = 'unknown'
-                
-                if account_info.login == login_id_int:
-                    print(f"    ALREADY LOGGED IN: {login_id_int} ({email})")
-                    print(f"      → Account type: {actual_account_mode.upper()}")
-                    
-                    if actual_account_mode == 'demo':
-                        if demo_account == '0':
-                            print(f"      → SKIPPING: DEMO account disabled")
-                            mt5.shutdown()
-                            result['message'] = "DEMO account disabled"
-                            return result
-                        elif demo_account != '1':
-                            print(f"      → SKIPPING: DEMO account not enabled")
-                            mt5.shutdown()
-                            result['message'] = "DEMO account not enabled"
-                            return result
-                    
-                    balance = account_info.balance
-                    currency = account_info.currency
-                    
-                    balance_str = f"{balance:.2f}"
-                    
-                    # Update the copy
-                    investor_data['broker_balance'] = balance_str
-                    investor_data['application_status'] = 'just-joined-and-valid_credentials'
-                    
-                    if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
-                        investor_data['account_mode'] = actual_account_mode
-                    
-                    success = True
-                    result['success'] = True
-                    result['status'] = 'just-joined-and-valid_credentials'
-                    result['balance'] = balance
-                    result['message'] = f"Already logged in. Balance: {currency} {balance:,.2f}"
-                    result['updated_data'] = {inv_id_str: investor_data}
-                    
-                    mt5.shutdown()
-                    print(f"    ✅ Balance obtained: {currency} {balance:,.2f}")
-                    
-                    # Save individual result to temp file
-                    temp_result_file = os.path.join(tempfile.gettempdir(), f"balance_result_{inv_id}.json")
-                    with open(temp_result_file, 'w', encoding='utf-8') as f:
-                        json.dump(result, f, indent=2)
-                    
-                    return result
-            mt5.shutdown()
-    except Exception as e:
-        print(f"    Could not check MT5 status: {e}")
-    
-    # Fresh login attempt
-    if not success:
-        print(f"   🔐 FRESH LOGIN: {login_id_int} ({email})")
+        # Get account info directly from already initialized MT5
+        account_info = mt5.account_info()
         
-        try:
-            if mt5.terminal_info() is not None:
-                mt5.shutdown()
-            
-            if not mt5.initialize(path=Terminal_path, timeout=60000):
-                error_msg = mt5.last_error()
-                print(f"   INITIALIZATION FAILED: {error_msg}")
-                result['message'] = f"MT5 initialization failed: {error_msg}"
-                return result
-            
-            if not mt5.login(login_id_int, password=password, server=server):
-                error_msg = mt5.last_error()
-                print(f"   LOGIN FAILED: {error_msg}")
-                mt5.shutdown()
-                result['message'] = f"Login failed: {error_msg}"
-                return result
-            
-            print(f"    FRESH LOGIN SUCCESS: {login_id_int} ({email})")
-            
-            account_info = mt5.account_info()
-            if account_info is None:
-                print(f"   No account info after login")
-                mt5.shutdown()
-                result['message'] = "No account info after login"
-                return result
-            
-            if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
-                actual_account_mode = 'real'
-            elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
-                actual_account_mode = 'demo'
-            elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
-                actual_account_mode = 'demo'
-            else:
-                actual_account_mode = 'unknown'
-            
-            print(f"      → Account type: {actual_account_mode.upper()}")
-            
-            if actual_account_mode == 'demo':
-                if demo_account == '0':
-                    print(f"      → SKIPPING: DEMO account disabled")
-                    mt5.shutdown()
-                    result['message'] = "DEMO account disabled"
-                    return result
-                elif demo_account != '1':
-                    print(f"      → SKIPPING: DEMO account not enabled")
-                    mt5.shutdown()
-                    result['message'] = "DEMO account not enabled"
-                    return result
-            
-            balance = account_info.balance
-            currency = account_info.currency
-            
-            balance_str = f"{balance:.2f}"
-            investor_data['broker_balance'] = balance_str
-            investor_data['application_status'] = 'just-joined-and-valid_credentials'
-            
-            if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
-                investor_data['account_mode'] = actual_account_mode
-            
-            result['success'] = True
-            result['status'] = 'just-joined-and-valid_credentials'
-            result['balance'] = balance
-            result['message'] = f"Fresh login successful. Balance: {currency} {balance:,.2f}"
-            result['updated_data'] = {inv_id_str: investor_data}
-            
-            mt5.shutdown()
-            print(f"    ✅ Balance obtained: {currency} {balance:,.2f}")
-            
-            # Save individual result to temp file
-            temp_result_file = os.path.join(tempfile.gettempdir(), f"balance_result_{inv_id}.json")
-            with open(temp_result_file, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2)
-            
+        if account_info is None:
+            print(f"   ❌ No account info available - MT5 may not be initialized")
+            result['message'] = "MT5 not initialized or no account info"
             return result
-            
-        except Exception as e:
-            print(f"   ERROR: {str(e)[:100]}")
-            result['message'] = f"Error: {str(e)[:100]}"
-            try:
-                mt5.shutdown()
-            except:
-                pass
+        
+        # Verify this is the correct account
+        if account_info.login != login_id_int:
+            print(f"   ⚠️ Account mismatch: Connected to {account_info.login}, expected {login_id_int}")
+            result['message'] = f"Account mismatch: Connected to {account_info.login}, expected {login_id_int}"
             return result
-    
-    return result
-
+        
+        # Determine account mode
+        if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            actual_account_mode = 'real'
+        elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            actual_account_mode = 'demo'
+        elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            actual_account_mode = 'demo'
+        else:
+            actual_account_mode = 'unknown'
+        
+        print(f"   ✅ Connected to account: {account_info.login} ({email})")
+        print(f"      → Account type: {actual_account_mode.upper()}")
+        
+        # Check demo permissions
+        if actual_account_mode == 'demo':
+            if demo_account == '0':
+                print(f"      → ⏭️ SKIPPING: DEMO account disabled")
+                result['message'] = "DEMO account disabled"
+                return result
+            elif demo_account != '1':
+                print(f"      → ⏭️ SKIPPING: DEMO account not enabled")
+                result['message'] = "DEMO account not enabled"
+                return result
+        
+        # Get balance
+        balance = account_info.balance
+        currency = account_info.currency
+        
+        balance_str = f"{balance:.2f}"
+        investor_data['broker_balance'] = balance_str
+        investor_data['application_status'] = 'just-joined-and-valid_credentials'
+        investor_data['verified_at'] = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
+            investor_data['account_mode'] = actual_account_mode
+        
+        success = True
+        result['success'] = True
+        result['status'] = 'just-joined-and-valid_credentials'
+        result['balance'] = balance
+        result['message'] = f"Balance obtained: {currency} {balance:,.2f}"
+        result['updated_data'] = {actual_key: investor_data}
+        
+        print(f"   ✅ Balance obtained: {currency} {balance:,.2f}")
+        
+        # Save individual result to temp file
+        temp_result_file = os.path.join(tempfile.gettempdir(), f"balance_result_{inv_id}.json")
+        with open(temp_result_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2)
+        print(f"   💾 Saved result to: {temp_result_file}")
+        
+        return result
+        
+    except Exception as e:
+        error_msg = f"Error: {str(e)[:100]}"
+        print(f"   ❌ {error_msg}")
+        result['message'] = error_msg
+        return result
+      
 def merge_balance_results():
     """
     Merge all individual balance results from temp files back to the main JSON file.
@@ -2308,12 +2642,12 @@ def merge_balance_results():
     print(f"{'='*60}")
     
     # Load current investors data
-    if not os.path.exists(FETCHED_INVESTORS):
+    if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
         return False
     
     try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
     except Exception as e:
         print(f" Error loading investors: {e}")
@@ -2352,15 +2686,15 @@ def merge_balance_results():
     # Save merged data
     if updated_count > 0:
         # Create backup
-        backup_path = FETCHED_INVESTORS.replace('.json', '_backup.json')
+        backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
-            shutil.copy2(FETCHED_INVESTORS, backup_path)
+            shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
             print(f"📦 Created backup: {backup_path}")
         
-        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
         
-        print(f"\n💾 Saved {updated_count} updates to {FETCHED_INVESTORS}")
+        print(f"\n💾 Saved {updated_count} updates to {ALL_FETCHED_INVESTORS}")
         
         # Also update updated_investors.json with valid credentials
         updated_investors_data = {}
@@ -2382,7 +2716,7 @@ def merge_balance_results():
         print(f"ℹ️ No updates to merge")
         return False
 
-def verify_investors_balance_old(inv_id=None):
+def verify_investors_balance(inv_id=None):
     """
     Verify balance for investors who have applied for verification.
     
@@ -2430,139 +2764,175 @@ def verify_investors_balance_old(inv_id=None):
     print(f"🔐 BALANCE VERIFICATION - ID: {inv_id}")
     print(f"{'='*60}")
     
-    if not os.path.exists(FETCHED_INVESTORS):
-        msg = f"Fetched investors file not found: {FETCHED_INVESTORS}"
-        print(msg)
+    if not os.path.exists(ALL_FETCHED_INVESTORS):
+        msg = f"Fetched investors file not found: {ALL_FETCHED_INVESTORS}"
+        print(f"❌ {msg}")
         result['message'] = msg
         return result
     
-    # Load investors data (read-only)
+    # Load investors data
     try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
-        print(f"📋 Loaded investors data")
+        print(f"📋 Loaded investors data with {len(investors_data)} investors")
     except Exception as e:
-        print(f"Error loading investors: {e}")
+        print(f"❌ Error loading investors: {e}")
         result['message'] = f"Error loading investors: {e}"
         return result
     
     inv_id_str = str(inv_id)
-    if inv_id_str not in investors_data:
+    
+    # Find investor - try both string and integer keys
+    investor_data = None
+    actual_key = None
+    
+    if inv_id_str in investors_data:
+        investor_data = investors_data[inv_id_str]
+        actual_key = inv_id_str
+    elif inv_id in investors_data:
+        investor_data = investors_data[inv_id]
+        actual_key = inv_id
+    else:
+        # Try to find by converting keys to int
+        for key in investors_data.keys():
+            try:
+                if int(key) == int(inv_id):
+                    investor_data = investors_data[key]
+                    actual_key = key
+                    break
+            except (ValueError, TypeError):
+                continue
+    
+    if investor_data is None:
         msg = f"Investor {inv_id} not found"
-        print(msg)
+        print(f"❌ {msg}")
         result['message'] = msg
         return result
     
-    investor_data = investors_data[inv_id_str].copy()
-    balance_verification_status = investor_data.get('balance_verification', '').strip().lower()
+    print(f"✅ Found investor with key: {actual_key}")
+    investor_data = investor_data.copy()
     
-    verification_statuses = ['applied-for-verification', 'applied_for_verification']
+    # Check if applied for verification
+    balance_verification_status = investor_data.get('balance_verification', '').strip().lower()
+    verification_statuses = ['applied-for-verification', 'applied_for_verification', 'applied']
+    
     if balance_verification_status not in verification_statuses:
-        result['message'] = f"Not applied for verification (status: {balance_verification_status})"
+        msg = f"Not applied for verification (status: {balance_verification_status})"
+        print(f"⏭️ {msg}")
+        result['message'] = msg
+        result['status'] = 'not_applied'
         return result
     
+    # CHECK DEMO ACCOUNT SETTINGS
     account_mode = investor_data.get('account_mode', '').strip().lower()
     demo_account = investor_data.get('demo_account', '').strip()
     
+    print(f"📊 Account mode: {account_mode}, Demo account: {demo_account}")
+    
     if account_mode == 'demo':
         if demo_account == '0':
-            result['message'] = "DEMO account disabled (demo_account=0)"
+            msg = "DEMO account disabled (demo_account=0)"
+            print(f"⏭️ {msg}")
+            result['message'] = msg
+            result['status'] = 'demo_disabled'
             return result
         elif demo_account != '1':
-            result['message'] = "DEMO account not enabled"
+            msg = "DEMO account not enabled"
+            print(f"⏭️ {msg}")
+            result['message'] = msg
+            result['status'] = 'demo_not_enabled'
             return result
     
-    login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
-    password = investor_data.get('password', '') or investor_data.get('PASSWORD', '')
-    server = investor_data.get('server', '') or investor_data.get('SERVER', '')
+    # CHECK TERMINAL PATH
     Terminal_path = investor_data.get('Terminal_path', '')
-    email = investor_data.get('email', 'No Email')
     
-    if not all([login_id, password, server, Terminal_path]):
-        result['message'] = "Missing credentials"
-        return result
-    
-    try:
-        login_id_int = int(login_id)
-    except (ValueError, TypeError):
-        result['message'] = f"Invalid LOGIN_ID: {login_id}"
+    if not Terminal_path:
+        msg = "Terminal_path is missing"
+        print(f"❌ {msg}")
+        result['message'] = msg
         return result
     
     if not os.path.exists(Terminal_path):
-        result['message'] = f"Terminal not found: {Terminal_path}"
+        msg = f"Terminal not found: {Terminal_path}"
+        print(f"❌ {msg}")
+        result['message'] = msg
         return result
     
-    print(f"\n✅ ID:{inv_id} ({email}) - Verifying...")
+    print(f"✅ Terminal path exists: {Terminal_path}")
     
+    # GET BALANCE DIRECTLY - NO LOGIN NEEDED
     try:
-        # Try already logged in first
-        if mt5.initialize():
-            account_info = mt5.account_info()
-            if account_info and account_info.login == login_id_int:
-                balance = account_info.balance
-                currency = account_info.currency
-                
-                investor_data['broker_balance'] = f"{balance:.2f}"
-                investor_data['balance_verification'] = 'verified'
-                
-                result['success'] = True
-                result['status'] = 'verified'
-                result['balance'] = balance
-                result['message'] = f"Verified (already logged in): {currency} {balance:,.2f}"
-                result['updated_data'] = {inv_id_str: investor_data}
-                
-                mt5.shutdown()
-                print(f"    ✅ Verified: {currency} {balance:,.2f}")
-                
-                # Save individual result to temp file
-                temp_result_file = os.path.join(tempfile.gettempdir(), f"verify_result_{inv_id}.json")
-                with open(temp_result_file, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2)
-                
+        # Just get account info - MT5 is already initialized globally
+        account_info = mt5.account_info()
+        
+        if account_info is None:
+            print(f"   ❌ MT5 not initialized or no account info")
+            result['message'] = "MT5 not initialized or no account info"
+            return result
+        
+        # Get the balance directly
+        balance = account_info.balance
+        currency = account_info.currency
+        
+        # CHECK ACCOUNT MODE FROM MT5
+        if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            actual_account_mode = 'real'
+        elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            actual_account_mode = 'demo'
+        elif account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            actual_account_mode = 'demo'
+        else:
+            actual_account_mode = 'unknown'
+        
+        print(f"   ✅ Connected to account: {account_info.login}")
+        print(f"      → Account type: {actual_account_mode.upper()}")
+        print(f"      → Balance: {currency} {balance:,.2f}")
+        
+        # Verify demo account matches
+        if actual_account_mode == 'demo':
+            if demo_account == '0':
+                msg = "DEMO account disabled in settings"
+                print(f"      → ⏭️ SKIPPING: {msg}")
+                result['message'] = msg
+                result['status'] = 'demo_disabled'
                 return result
-            mt5.shutdown()
+            elif demo_account != '1':
+                msg = "DEMO account not enabled in settings"
+                print(f"      → ⏭️ SKIPPING: {msg}")
+                result['message'] = msg
+                result['status'] = 'demo_not_enabled'
+                return result
         
-        # Fresh login
-        if mt5.terminal_info() is not None:
-            mt5.shutdown()
+        # Update investor data
+        investor_data['broker_balance'] = f"{balance:.2f}"
+        investor_data['balance_verification'] = 'verified'
+        investor_data['verified_at'] = time.strftime("%Y-%m-%d %H:%M:%S")
         
-        if mt5.initialize(path=Terminal_path, timeout=60000):
-            if mt5.login(login_id_int, password=password, server=server):
-                account_info = mt5.account_info()
-                if account_info:
-                    balance = account_info.balance
-                    currency = account_info.currency
-                    
-                    investor_data['broker_balance'] = f"{balance:.2f}"
-                    investor_data['balance_verification'] = 'verified'
-                    
-                    result['success'] = True
-                    result['status'] = 'verified'
-                    result['balance'] = balance
-                    result['message'] = f"Verified (fresh login): {currency} {balance:,.2f}"
-                    result['updated_data'] = {inv_id_str: investor_data}
-                    
-                    mt5.shutdown()
-                    print(f"    ✅ Verified: {currency} {balance:,.2f}")
-                    
-                    # Save individual result to temp file
-                    temp_result_file = os.path.join(tempfile.gettempdir(), f"verify_result_{inv_id}.json")
-                    with open(temp_result_file, 'w', encoding='utf-8') as f:
-                        json.dump(result, f, indent=2)
-                    
-                    return result
-            mt5.shutdown()
-            
+        # Update account mode if different
+        if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
+            investor_data['account_mode'] = actual_account_mode
+        
+        result['success'] = True
+        result['status'] = 'verified'
+        result['balance'] = balance
+        result['message'] = f"Verified: {currency} {balance:,.2f}"
+        result['updated_data'] = {actual_key: investor_data}
+        
+        print(f"   ✅ VERIFIED: {currency} {balance:,.2f}")
+        
+        # Save individual result to temp file
+        temp_result_file = os.path.join(tempfile.gettempdir(), f"verify_result_{inv_id}.json")
+        with open(temp_result_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2)
+        
+        return result
+        
     except Exception as e:
-        print(f"    Error: {str(e)[:100]}")
-        result['message'] = f"Error: {str(e)[:100]}"
-        try:
-            mt5.shutdown()
-        except:
-            pass
-    
-    return result
-  
+        error_msg = f"Error getting balance: {str(e)[:100]}"
+        print(f"   ❌ {error_msg}")
+        result['message'] = error_msg
+        return result
+      
 def merge_verify_results():
     """
     Merge all individual verification results from temp files back to the main JSON file.
@@ -2578,12 +2948,12 @@ def merge_verify_results():
     print(f"📦 MERGING VERIFICATION RESULTS")
     print(f"{'='*60}")
     
-    if not os.path.exists(FETCHED_INVESTORS):
+    if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
         return False
     
     try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
     except Exception as e:
         print(f" Error loading investors: {e}")
@@ -2616,15 +2986,15 @@ def merge_verify_results():
             errors += 1
     
     if updated_count > 0:
-        backup_path = FETCHED_INVESTORS.replace('.json', '_backup.json')
+        backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
-            shutil.copy2(FETCHED_INVESTORS, backup_path)
+            shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
             print(f"📦 Created backup: {backup_path}")
         
-        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+        with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
         
-        print(f"\n💾 Saved {updated_count} verification updates to {FETCHED_INVESTORS}")
+        print(f"\n💾 Saved {updated_count} verification updates to {ALL_FETCHED_INVESTORS}")
         
         # Update updated_investors.json with verified investors
         updated_investors_data = {}
@@ -2646,810 +3016,571 @@ def merge_verify_results():
         print(f"ℹ️ No verification updates to merge")
         return False
 
-def verify_investors_balance():
+def process_all_fetched_investors(inv_id):
     """
-    Verify balance for investors who have applied for verification.
-    Processes all investors in the FETCHED_INVESTORS file and updates their balance status.
-    
-    Returns:
-        dict: {
-            'success': bool,
-            'status': str,
-            'message': str,
-            'verified_count': int,
-            'error_count': int,
-            'skipped_count': int,
-            'updated_data': dict
-        }
-    """
-    
-    import os
-    import json
-    import tempfile
-    import shutil
-    import MetaTrader5 as mt5
-    from datetime import datetime
-    
-    result = {
-        'success': False,
-        'status': 'not_processed',
-        'message': '',
-        'verified_count': 0,
-        'error_count': 0,
-        'skipped_count': 0,
-        'updated_data': {}
-    }
-    
-    # ============ STEP 1: LOAD INVESTORS DATA ============
-    if not os.path.exists(FETCHED_INVESTORS):
-        msg = f"Fetched investors file not found: {FETCHED_INVESTORS}"
-        print(f"❌ {msg}")
-        result['message'] = msg
-        return result
-    
-    try:
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-            investors_data = json.load(f)
-        print(f"📋 Loaded investors data - Total: {len(investors_data)} investors")
-    except Exception as e:
-        msg = f"Error loading investors: {e}"
-        print(f"❌ {msg}")
-        result['message'] = msg
-        return result
-    
-    # ============ STEP 2: PROCESS EACH INVESTOR ============
-    print(f"\n{'='*60}")
-    print(f"🔐 BALANCE VERIFICATION - Processing all investors")
-    print(f"{'='*60}")
-    
-    verified_count = 0
-    error_count = 0
-    skipped_count = 0
-    processed_results = {}
-    
-    for inv_id_str, investor_data in investors_data.items():
-        inv_result = {
-            'investor_id': inv_id_str,
-            'success': False,
-            'status': 'not_processed',
-            'balance': None,
-            'message': '',
-            'updated_data': None
-        }
-        
-        # Check if investor has applied for verification
-        balance_verification_status = investor_data.get('balance_verification', '').strip().lower()
-        verification_statuses = ['applied-for-verification', 'applied_for_verification']
-        
-        if balance_verification_status not in verification_statuses:
-            inv_result['message'] = f"Not applied for verification (status: {balance_verification_status})"
-            inv_result['status'] = 'skipped'
-            processed_results[inv_id_str] = inv_result
-            skipped_count += 1
-            continue
-        
-        # Check demo account status
-        account_mode = investor_data.get('account_mode', '').strip().lower()
-        demo_account = investor_data.get('demo_account', '').strip()
-        
-        if account_mode == 'demo':
-            if demo_account == '0':
-                inv_result['message'] = "DEMO account disabled (demo_account=0)"
-                inv_result['status'] = 'skipped'
-                processed_results[inv_id_str] = inv_result
-                skipped_count += 1
-                continue
-            elif demo_account != '1':
-                inv_result['message'] = "DEMO account not enabled"
-                inv_result['status'] = 'skipped'
-                processed_results[inv_id_str] = inv_result
-                skipped_count += 1
-                continue
-        
-        # Get credentials
-        login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
-        password = investor_data.get('password', '') or investor_data.get('PASSWORD', '')
-        server = investor_data.get('server', '') or investor_data.get('SERVER', '')
-        Terminal_path = investor_data.get('Terminal_path', '')
-        email = investor_data.get('email', 'No Email')
-        
-        if not all([login_id, password, server, Terminal_path]):
-            inv_result['message'] = "Missing credentials"
-            inv_result['status'] = 'error'
-            processed_results[inv_id_str] = inv_result
-            error_count += 1
-            continue
-        
-        try:
-            login_id_int = int(login_id)
-        except (ValueError, TypeError):
-            inv_result['message'] = f"Invalid LOGIN_ID: {login_id}"
-            inv_result['status'] = 'error'
-            processed_results[inv_id_str] = inv_result
-            error_count += 1
-            continue
-        
-        if not os.path.exists(Terminal_path):
-            inv_result['message'] = f"Terminal not found: {Terminal_path}"
-            inv_result['status'] = 'error'
-            processed_results[inv_id_str] = inv_result
-            error_count += 1
-            continue
-        
-        print(f"\n✅ ID:{inv_id_str} ({email}) - Verifying...")
-        
-        try:
-            # Try already logged in first
-            if mt5.initialize():
-                account_info = mt5.account_info()
-                if account_info and account_info.login == login_id_int:
-                    balance = account_info.balance
-                    currency = account_info.currency
-                    
-                    investor_data['broker_balance'] = f"{balance:.2f}"
-                    investor_data['balance_verification'] = 'verified'
-                    investor_data['verified_at'] = datetime.now().isoformat()
-                    
-                    inv_result['success'] = True
-                    inv_result['status'] = 'verified'
-                    inv_result['balance'] = balance
-                    inv_result['message'] = f"Verified (already logged in): {currency} {balance:,.2f}"
-                    inv_result['updated_data'] = {inv_id_str: investor_data}
-                    
-                    mt5.shutdown()
-                    print(f"    ✅ Verified: {currency} {balance:,.2f}")
-                    
-                    processed_results[inv_id_str] = inv_result
-                    verified_count += 1
-                    continue
-                mt5.shutdown()
-            
-            # Fresh login
-            if mt5.terminal_info() is not None:
-                mt5.shutdown()
-            
-            if mt5.initialize(path=Terminal_path, timeout=60000):
-                if mt5.login(login_id_int, password=password, server=server):
-                    account_info = mt5.account_info()
-                    if account_info:
-                        balance = account_info.balance
-                        currency = account_info.currency
-                        
-                        investor_data['broker_balance'] = f"{balance:.2f}"
-                        investor_data['balance_verification'] = 'verified'
-                        investor_data['verified_at'] = datetime.now().isoformat()
-                        
-                        inv_result['success'] = True
-                        inv_result['status'] = 'verified'
-                        inv_result['balance'] = balance
-                        inv_result['message'] = f"Verified (fresh login): {currency} {balance:,.2f}"
-                        inv_result['updated_data'] = {inv_id_str: investor_data}
-                        
-                        mt5.shutdown()
-                        print(f"    ✅ Verified: {currency} {balance:,.2f}")
-                        
-                        processed_results[inv_id_str] = inv_result
-                        verified_count += 1
-                        continue
-                mt5.shutdown()
-                
-        except Exception as e:
-            print(f"    ❌ Error: {str(e)[:100]}")
-            inv_result['message'] = f"Error: {str(e)[:100]}"
-            inv_result['status'] = 'error'
-            processed_results[inv_id_str] = inv_result
-            error_count += 1
-            try:
-                mt5.shutdown()
-            except:
-                pass
-            continue
-        
-        # If we get here, something went wrong
-        if inv_result['status'] == 'not_processed':
-            inv_result['message'] = "Failed to verify balance"
-            inv_result['status'] = 'error'
-            processed_results[inv_id_str] = inv_result
-            error_count += 1
-    
-    # ============ STEP 3: SAVE TO TEMP FILE ============
-    temp_result_file = os.path.join(tempfile.gettempdir(), f"verify_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    with open(temp_result_file, 'w', encoding='utf-8') as f:
-        json.dump(processed_results, f, indent=2)
-    print(f"\n💾 Results saved to: {temp_result_file}")
-    
-    # ============ STEP 4: MERGE UPDATES BACK TO MAIN FILE ============
-    print(f"\n{'='*60}")
-    print(f"📦 MERGING VERIFICATION RESULTS")
-    print(f"{'='*60}")
-    
-    try:
-        # Reload the current data (in case it was modified during processing)
-        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-            current_data = json.load(f)
-        
-        # Create backup before merging
-        
-        # Merge verified results
-        merge_count = 0
-        for inv_id, result_data in processed_results.items():
-            if result_data.get('success') and result_data.get('updated_data'):
-                if inv_id in result_data['updated_data']:
-                    current_data[inv_id] = result_data['updated_data'][inv_id]
-                    merge_count += 1
-        
-        # Save merged data back to main file
-        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-            json.dump(current_data, f, indent=2)
-        
-        print(f"💾 Merged {merge_count} verification updates to {FETCHED_INVESTORS}")
-        
-        # ============ STEP 5: UPDATE VERIFIED INVESTORS FILE ============
-        updated_investors_data = {}
-        for investor_id, investor_data in current_data.items():
-            verification_status = investor_data.get('balance_verification', '').strip().lower()
-            if verification_status == 'verified':
-                updated_investors_data[investor_id] = investor_data
-        
-        if updated_investors_data:
-            
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(updated_investors_data, f, indent=2)
-            print(f"💾 Updated {len(updated_investors_data)} verified investors to {UPDATED_INVESTORS}")
-        
-        # ============ STEP 6: SUMMARY ============
-        print(f"\n{'='*60}")
-        print(f"📊 VERIFICATION SUMMARY")
-        print(f"{'='*60}")
-        print(f"✅ Verified: {verified_count}")
-        print(f"❌ Errors: {error_count}")
-        print(f"⏭️  Skipped: {skipped_count}")
-        print(f"📁 Results saved to: {temp_result_file}")
-        print(f"💾 Main file updated: {FETCHED_INVESTORS}")
-        print(f"{'='*60}\n")
-        
-        # Final result
-        result = {
-            'success': verified_count > 0,
-            'status': 'completed',
-            'message': f"Processed {len(processed_results)} investors: {verified_count} verified, {error_count} errors, {skipped_count} skipped",
-            'verified_count': verified_count,
-            'error_count': error_count,
-            'skipped_count': skipped_count,
-            'updated_data': processed_results
-        }
-        
-        return result
-        
-    except Exception as e:
-        msg = f"Error during merge: {e}"
-        print(f"❌ {msg}")
-        result['message'] = msg
-        result['verified_count'] = verified_count
-        result['error_count'] = error_count
-        result['skipped_count'] = skipped_count
-        result['updated_data'] = processed_results
-        return result
-       
-def combine_investors_to_all_files():
-    """
-    Intelligently merges investor data between invharv, harvhub, and all files.
-    
-    This function performs a bidirectional sync:
-    1. For each investor ID in all files, it checks invharv and harvhub
-    2. If invharv/harvhub have missing fields, it copies from all files
-    3. If invharv/harvhub have updated field values, it updates all files
-    4. Then saves all updated files
-    
-    Reads:
-        - INVHARV_FETCHED_INVESTORS
-        - HARVHUB_FETCHED_INVESTORS
-        - INVHARV_UPDATED_INVESTORS
-        - HARVHUB_UPDATED_INVESTORS
-        - ALL_FETCHED_INVESTORS (if exists)
-        - ALL_UPDATED_INVESTORS (if exists)
-    
-    Writes:
-        - ALL_FETCHED_INVESTORS (merged fetched data)
-        - ALL_UPDATED_INVESTORS (merged updated data)
-        - INVHARV_FETCHED_INVESTORS (updated with missing fields)
-        - HARVHUB_FETCHED_INVESTORS (updated with missing fields)
-        - INVHARV_UPDATED_INVESTORS (updated with missing fields)
-        - HARVHUB_UPDATED_INVESTORS (updated with missing fields)
-    
-    Returns:
-        dict: Statistics about the combination process
-    """
-    print("\n" + "="*70)
-    print(f"  INTELLIGENT INVESTOR MERGE")
-    print("="*70)
-    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-"*70)
-    
-    stats = {
-        "processing_success": False,
-        "fetched": {
-            "invharv": {"loaded": False, "count": 0, "path": INVHARV_FETCHED_INVESTORS, "updated_count": 0, "filled_fields": 0},
-            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_FETCHED_INVESTORS, "updated_count": 0, "filled_fields": 0},
-            "all": {"loaded": False, "count": 0, "path": ALL_FETCHED_INVESTORS, "updated_count": 0, "filled_fields": 0},
-            "combined_count": 0,
-            "output_path": ALL_FETCHED_INVESTORS
-        },
-        "updated": {
-            "invharv": {"loaded": False, "count": 0, "path": INVHARV_UPDATED_INVESTORS, "updated_count": 0, "filled_fields": 0},
-            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_UPDATED_INVESTORS, "updated_count": 0, "filled_fields": 0},
-            "all": {"loaded": False, "count": 0, "path": ALL_UPDATED_INVESTORS, "updated_count": 0, "filled_fields": 0},
-            "combined_count": 0,
-            "output_path": ALL_UPDATED_INVESTORS
-        },
-        "errors": [],
-        "warnings": [],
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    def deep_merge(base_dict, override_dict, prefer_override=True):
-        """
-        Deep merge two dictionaries.
-        
-        Args:
-            base_dict: The base dictionary to merge into
-            override_dict: The dictionary with potential updates
-            prefer_override: If True, override_dict values take precedence
-        
-        Returns:
-            dict: Merged dictionary
-        """
-        result = base_dict.copy()
-        
-        for key, value in override_dict.items():
-            if key in result:
-                # If both are dicts, recursively merge
-                if isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = deep_merge(result[key], value, prefer_override)
-                # If value is not None or empty, update based on preference
-                elif value is not None and value != "NULL" and value != "":
-                    if prefer_override:
-                        result[key] = value
-                    # If we prefer base, only update if base value is empty/missing
-                    elif result.get(key) is None or result.get(key) == "NULL" or result.get(key) == "":
-                        result[key] = value
-            else:
-                # Key doesn't exist in base, add it
-                result[key] = value
-        
-        return result
-    
-    def count_non_empty_fields(obj, ignore_keys=[]):
-        """Count non-empty fields in an object."""
-        if not isinstance(obj, dict):
-            return 0
-        
-        count = 0
-        for key, value in obj.items():
-            if key in ignore_keys:
-                continue
-            if value is not None and value != "" and value != "NULL":
-                if isinstance(value, dict):
-                    # Recursively count nested dict fields
-                    count += count_non_empty_fields(value, ignore_keys)
-                elif isinstance(value, list) and len(value) > 0:
-                    count += 1
-                elif not isinstance(value, list):
-                    count += 1
-        return count
-    
-    def merge_investor_records(source_data, target_data, source_name):
-        """
-        Merge source_data into target_data at the field level.
-        
-        Returns:
-            tuple: (updated_target, missing_fields_count, updated_fields_count)
-        """
-        updated_target = target_data.copy() if target_data else {}
-        total_missing_fields = 0
-        total_updated_fields = 0
-        
-        # For each investor in source_data
-        for investor_id, source_record in source_data.items():
-            if not isinstance(source_record, dict):
-                continue
-                
-            # If investor doesn't exist in target, add the entire record
-            if investor_id not in updated_target:
-                updated_target[investor_id] = source_record.copy()
-                # Count fields added
-                total_missing_fields += count_non_empty_fields(source_record)
-                continue
-            
-            # Investor exists, merge fields
-            target_record = updated_target[investor_id]
-            
-            # Count fields before merge
-            before_fields = count_non_empty_fields(target_record)
-            
-            # Deep merge: source updates take precedence for existing fields,
-            # but we also fill missing fields from target if source has them
-            merged_record = deep_merge(target_record, source_record, prefer_override=True)
-            
-            # Now fill any fields that exist in target but missing in source
-            # This ensures bidirectionality
-            merged_record = deep_merge(merged_record, target_record, prefer_override=False)
-            
-            after_fields = count_non_empty_fields(merged_record)
-            
-            # Count changes
-            if before_fields < after_fields:
-                total_missing_fields += (after_fields - before_fields)
-            elif before_fields > after_fields:
-                total_updated_fields += (before_fields - after_fields)
-            
-            updated_target[investor_id] = merged_record
-        
-        return updated_target, total_missing_fields, total_updated_fields
-    
-    def load_json_file(filepath, stats_section, name):
-        """Load a JSON file safely."""
-        if not os.path.exists(filepath):
-            stats["warnings"].append(f"{name} file not found: {filepath}")
-            return None, False
-        
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    stats_section["loaded"] = True
-                    stats_section["count"] = len(data)
-                    print(f"   ✅ Loaded {name}: {len(data):,} records")
-                    return data, True
-                else:
-                    stats["errors"].append(f"{name} has invalid format (expected dict)")
-                    return None, False
-        except Exception as e:
-            error_msg = f"Error loading {name}: {str(e)}"
-            print(f"   ❌ {error_msg}")
-            stats["errors"].append(error_msg)
-            return None, False
-    
-    def save_json_file(filepath, data, name):
-        """Save JSON data to file safely."""
-        try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            return True
-        except Exception as e:
-            error_msg = f"Error saving {name}: {str(e)}"
-            print(f"   ❌ {error_msg}")
-            stats["errors"].append(error_msg)
-            return False
-    
-    try:
-        # ============================================================
-        # 1. PROCESS FETCHED INVESTORS
-        # ============================================================
-        print("\n📥 [1/2] Processing FETCHED investors...")
-        print("-"*40)
-        
-        # Load all fetched files
-        invharv_fetched, _ = load_json_file(INVHARV_FETCHED_INVESTORS, stats["fetched"]["invharv"], "INVHARV fetched")
-        harvhub_fetched, _ = load_json_file(HARVHUB_FETCHED_INVESTORS, stats["fetched"]["harvhub"], "HARVHUB fetched")
-        all_fetched, _ = load_json_file(ALL_FETCHED_INVESTORS, stats["fetched"]["all"], "ALL fetched")
-        
-        # Initialize combined
-        combined_fetched = {}
-        
-        # If ALL fetched exists, start with it
-        if all_fetched:
-            combined_fetched = all_fetched.copy()
-        
-        # Merge invharv into combined
-        if invharv_fetched:
-            combined_fetched, missing_fields, updated_fields = merge_investor_records(
-                invharv_fetched, combined_fetched, "INVHARV"
-            )
-            stats["fetched"]["invharv"]["filled_fields"] = missing_fields
-            stats["fetched"]["invharv"]["updated_count"] = updated_fields
-            print(f"   🔄 INVHARV filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
-        
-        # Merge harvhub into combined
-        if harvhub_fetched:
-            combined_fetched, missing_fields, updated_fields = merge_investor_records(
-                harvhub_fetched, combined_fetched, "HARVHUB"
-            )
-            stats["fetched"]["harvhub"]["filled_fields"] = missing_fields
-            stats["fetched"]["harvhub"]["updated_count"] = updated_fields
-            print(f"   🔄 HARVHUB filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
-        
-        # Now update invharv and harvhub files with combined data (bidirectional sync)
-        if invharv_fetched and combined_fetched:
-            updated_invharv, inv_missing, inv_updated = merge_investor_records(
-                combined_fetched, invharv_fetched, "Combined -> INVHARV"
-            )
-            if inv_missing > 0 or inv_updated > 0:
-                if save_json_file(INVHARV_FETCHED_INVESTORS, updated_invharv, "INVHARV fetched (updated)"):
-                    print(f"   📝 Updated INVHARV fetched: added {inv_missing:,} missing fields, updated {inv_updated:,} fields")
-                    stats["fetched"]["invharv"]["filled_fields"] += inv_missing
-                    stats["fetched"]["invharv"]["updated_count"] += inv_updated
-        
-        if harvhub_fetched and combined_fetched:
-            updated_harvhub, hub_missing, hub_updated = merge_investor_records(
-                combined_fetched, harvhub_fetched, "Combined -> HARVHUB"
-            )
-            if hub_missing > 0 or hub_updated > 0:
-                if save_json_file(HARVHUB_FETCHED_INVESTORS, updated_harvhub, "HARVHUB fetched (updated)"):
-                    print(f"   📝 Updated HARVHUB fetched: added {hub_missing:,} missing fields, updated {hub_updated:,} fields")
-                    stats["fetched"]["harvhub"]["filled_fields"] += hub_missing
-                    stats["fetched"]["harvhub"]["updated_count"] += hub_updated
-        
-        # Save combined fetched
-        if combined_fetched:
-            stats["fetched"]["combined_count"] = len(combined_fetched)
-            if save_json_file(ALL_FETCHED_INVESTORS, combined_fetched, "ALL fetched combined"):
-                print(f"\n   💾 Saved combined fetched: {len(combined_fetched):,} records")
-        else:
-            print(f"\n   ⚠️ No fetched data to combine")
-            stats["errors"].append("No fetched data available")
-        
-        # ============================================================
-        # 2. PROCESS UPDATED INVESTORS
-        # ============================================================
-        print("\n📤 [2/2] Processing UPDATED investors...")
-        print("-"*40)
-        
-        # Load all updated files
-        invharv_updated, _ = load_json_file(INVHARV_UPDATED_INVESTORS, stats["updated"]["invharv"], "INVHARV updated")
-        harvhub_updated, _ = load_json_file(HARVHUB_UPDATED_INVESTORS, stats["updated"]["harvhub"], "HARVHUB updated")
-        all_updated, _ = load_json_file(ALL_UPDATED_INVESTORS, stats["updated"]["all"], "ALL updated")
-        
-        # Initialize combined
-        combined_updated = {}
-        
-        # If ALL updated exists, start with it
-        if all_updated:
-            combined_updated = all_updated.copy()
-        
-        # Merge invharv into combined
-        if invharv_updated:
-            combined_updated, missing_fields, updated_fields = merge_investor_records(
-                invharv_updated, combined_updated, "INVHARV"
-            )
-            stats["updated"]["invharv"]["filled_fields"] = missing_fields
-            stats["updated"]["invharv"]["updated_count"] = updated_fields
-            print(f"   🔄 INVHARV filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
-        
-        # Merge harvhub into combined
-        if harvhub_updated:
-            combined_updated, missing_fields, updated_fields = merge_investor_records(
-                harvhub_updated, combined_updated, "HARVHUB"
-            )
-            stats["updated"]["harvhub"]["filled_fields"] = missing_fields
-            stats["updated"]["harvhub"]["updated_count"] = updated_fields
-            print(f"   🔄 HARVHUB filled {missing_fields:,} missing fields, updated {updated_fields:,} fields")
-        
-        # Now update invharv and harvhub files with combined data (bidirectional sync)
-        if invharv_updated and combined_updated:
-            updated_invharv, inv_missing, inv_updated = merge_investor_records(
-                combined_updated, invharv_updated, "Combined -> INVHARV"
-            )
-            if inv_missing > 0 or inv_updated > 0:
-                if save_json_file(INVHARV_UPDATED_INVESTORS, updated_invharv, "INVHARV updated (updated)"):
-                    print(f"   📝 Updated INVHARV updated: added {inv_missing:,} missing fields, updated {inv_updated:,} fields")
-                    stats["updated"]["invharv"]["filled_fields"] += inv_missing
-                    stats["updated"]["invharv"]["updated_count"] += inv_updated
-        
-        if harvhub_updated and combined_updated:
-            updated_harvhub, hub_missing, hub_updated = merge_investor_records(
-                combined_updated, harvhub_updated, "Combined -> HARVHUB"
-            )
-            if hub_missing > 0 or hub_updated > 0:
-                if save_json_file(HARVHUB_UPDATED_INVESTORS, updated_harvhub, "HARVHUB updated (updated)"):
-                    print(f"   📝 Updated HARVHUB updated: added {hub_missing:,} missing fields, updated {hub_updated:,} fields")
-                    stats["updated"]["harvhub"]["filled_fields"] += hub_missing
-                    stats["updated"]["harvhub"]["updated_count"] += hub_updated
-        
-        # Save combined updated
-        if combined_updated:
-            stats["updated"]["combined_count"] = len(combined_updated)
-            if save_json_file(ALL_UPDATED_INVESTORS, combined_updated, "ALL updated combined"):
-                print(f"\n   💾 Saved combined updated: {len(combined_updated):,} records")
-        else:
-            print(f"\n   ⚠️ No updated data to combine")
-            stats["errors"].append("No updated data available")
-        
-        # ============================================================
-        # 3. FINAL SUMMARY
-        # ============================================================
-        stats["processing_success"] = True
-        
-        print("\n" + "="*70)
-        print(f"  MERGE SUMMARY")
-        print("="*70)
-        
-        print(f"\n  📥 FETCHED FILES:")
-        print(f"     INVHARV  : {'✅' if stats['fetched']['invharv']['loaded'] else '❌'} {stats['fetched']['invharv']['count']:,} records")
-        print(f"                Filled: {stats['fetched']['invharv']['filled_fields']:,} missing fields")
-        print(f"                Updated: {stats['fetched']['invharv']['updated_count']:,} fields")
-        print(f"     HARVHUB  : {'✅' if stats['fetched']['harvhub']['loaded'] else '❌'} {stats['fetched']['harvhub']['count']:,} records")
-        print(f"                Filled: {stats['fetched']['harvhub']['filled_fields']:,} missing fields")
-        print(f"                Updated: {stats['fetched']['harvhub']['updated_count']:,} fields")
-        print(f"     Combined : {stats['fetched']['combined_count']:,} records")
-        print(f"     Output   : {ALL_FETCHED_INVESTORS}")
-        
-        print(f"\n  📤 UPDATED FILES:")
-        print(f"     INVHARV  : {'✅' if stats['updated']['invharv']['loaded'] else '❌'} {stats['updated']['invharv']['count']:,} records")
-        print(f"                Filled: {stats['updated']['invharv']['filled_fields']:,} missing fields")
-        print(f"                Updated: {stats['updated']['invharv']['updated_count']:,} fields")
-        print(f"     HARVHUB  : {'✅' if stats['updated']['harvhub']['loaded'] else '❌'} {stats['updated']['harvhub']['count']:,} records")
-        print(f"                Filled: {stats['updated']['harvhub']['filled_fields']:,} missing fields")
-        print(f"                Updated: {stats['updated']['harvhub']['updated_count']:,} fields")
-        print(f"     Combined : {stats['updated']['combined_count']:,} records")
-        print(f"     Output   : {ALL_UPDATED_INVESTORS}")
-        
-        if stats["warnings"]:
-            print(f"\n  ⚠️ WARNINGS ({len(stats['warnings'])}):")
-            for warning in stats["warnings"]:
-                print(f"     - {warning}")
-        
-        if stats["errors"]:
-            print(f"\n  ❌ ERRORS ({len(stats['errors'])}):")
-            for error in stats["errors"]:
-                print(f"     - {error}")
-        
-        print(f"\n  ✅ Status : {'SUCCESS' if stats['processing_success'] else 'FAILED'}")
-        print(f"  🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*70)
-        
-        return stats
-        
-    except Exception as e:
-        print(f"\n{'='*70}")
-        print(f"   CRITICAL ERROR")
-        print(f"{'='*70}")
-        print(f"  Error Type : {type(e).__name__}")
-        print(f"  Message    : {str(e)}")
-        print(f"{'='*70}")
-        
-        import traceback
-        print(f"\n  📜 Full Traceback:")
-        traceback.print_exc()
-        
-        stats["processing_success"] = False
-        stats["errors"].append(f"Critical error: {str(e)}")
-        return stats
-      
-def process_single_investor_(inv_id):
-    """
-    WORKER FUNCTION: Only creates MT5 folders if they don't exist
-    NO MT5 INITIALIZATION OR LOGIN
-    Takes investor ID directly, not folder path
+    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
+    Connects directly to MT5 using the investor's credentials from ALL_FETCHED_INVESTORS.
     
     Args:
-        inv_id: Investor ID string
-        
-    Returns:
-        dict: Statistics about the operation
+        inv_id: String investor ID (e.g., "1", "5", etc.)
     """
+    global restricted_timerange_alert
+    
+    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
     
     account_stats = {
         "inv_id": inv_id, 
-        "success": False,
-        "folder_created": False,
-        "folder_existed": False,
-        "error": None
-    }
-    
-    # Just call the folder creation function
-    update_tables_streaming()
-    
-    return account_stats
-
-def process_single_investor(inv_id):
-    """
-    WORKER FUNCTION: Processes investor data without MT5 initialization.
-    Executes operations ONLY if within allowed time range.
-    
-    This function processes investors from the FETCHED_INVESTORS file.
-    
-    Args:
-        inv_id: Investor ID string (e.g., "1", "5", etc.)
-        
-    Returns:
-        dict: Statistics about the operation
-    """
-    import os
-    import time
-    import json
-    from pathlib import Path
-    
-    account_stats = {
-        "inv_id": inv_id, 
-        "success": False,
-        "within_time_range": False,
+        "success": False, 
+        "price_collection_stats": {},
+        "candle_fetch_stats": {},
+        "crosser_analysis_stats": {},
+        "trapped_analysis_stats": {},
+        "liquidator_analysis_stats": {},
+        "ranging_analysis_stats": {},
+        "order_placement_stats": {},
+        "risk_correction_stats": {},
+        "risk_audit_stats": {},
+        "symbols_filtered": 0,
+        "orders_filtered": 0,
+        "symbols_processed": 0,
+        "symbols_successful": 0,
+        "orders_placed": 0,
+        "counter_orders_placed": 0,
+        "total_active_orders": 0,
+        "orders_adjusted": 0,
+        "orders_removed": 0,
+        "current_candle_forming": False,
+        "bid_wins": 0,
+        "ask_wins": 0,
+        "trapped_candles_found": 0,
+        "symbols_with_trapped": 0,
+        "symbols_with_liquidator": 0,
+        "liquidator_candles_found": 0,
+        "bullish_liquidators": 0,
+        "bearish_liquidators": 0,
+        "symbols_ranging": 0,
+        "avg_ranging_cycles": 0,
+        "spread_check_skipped": False,
+        "spread_warning_details": None,
+        "restricted_timerange_purge": False,
         "execution_skipped": False,
-        "error": None
+        "skip_reason": None,
+        "account_type": "UNKNOWN",
+        "account_mode": "UNKNOWN",  
+        "is_real_account": False,
+        "grid_strategy_enabled": False,
+        "ohlc_strategy_enabled": False,
+        "within_time_range": True,  # Always True since check is removed
+        "outside_time_range": False
     }
     
-    # Check if we're allowed to work within current time range
-    time_check_result = work_only_in_specific_timerange()
+    # =====================================================================
+    # SECTION: CALL FUNCTIONS
+    # =====================================================================
     
-    if not time_check_result.get("should_work", False):
-        print(f"⏰ Skipping operations for {inv_id} - outside allowed work time range")
-        account_stats["execution_skipped"] = True
-        account_stats["within_time_range"] = False
-        account_stats["success"] = True
+    # =====================================================================
+    # SECTION: CONTINUE WITH MT5 OPERATIONS
+    # =====================================================================
+    print(f"\n{'='*10} ✅ PROCEEDING WITH FULL OPERATIONS {'='*10}")
+    
+    # 1. Load investor data from ALL_FETCHED_INVESTORS
+    investor_data = None
+    broker_cfg = None
+    
+    try:
+        if not os.path.exists(ALL_FETCHED_INVESTORS):
+            print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
+            account_stats["skip_reason"] = "Fetched investors file not found"
+            return account_stats
+        
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+            all_investors = json.load(f)
+        
+        inv_str_id = str(inv_id)
+        investor_data = all_investors.get(inv_str_id)
+        
+        if not investor_data:
+            print(f"[ERROR] Investor ID {inv_id} not found in ALL_FETCHED_INVESTORS")
+            account_stats["skip_reason"] = "Investor not found in fetched data"
+            return account_stats
+        
+        print(f"✅ Found investor {inv_id} in ALL_FETCHED_INVESTORS")
+        
+        # Build broker config from investor data
+        broker_cfg = {
+            'LOGIN_ID': investor_data.get('login'),
+            'PASSWORD': investor_data.get('password'),
+            'SERVER': investor_data.get('server'),
+            'Terminal_path': investor_data.get('Terminal_path', '')
+        }
+        
+        print(f"   Login: {broker_cfg['LOGIN_ID']}")
+        print(f"   Server: {broker_cfg['SERVER']}")
+        print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to load investor data: {str(e)}")
+        account_stats["skip_reason"] = f"Data loading error: {str(e)}"
         return account_stats
     
-    # Within time range - proceed with operations
-    account_stats["within_time_range"] = True
-    
+    # 2. Extract structural demo permission policies from investor data
+    allow_demo_processing = True
     try:
-        # ============ LOAD INVESTOR DATA FROM FETCHED_INVESTORS ============
-        if not os.path.exists(FETCHED_INVESTORS):
-            print(f"[ERROR] Fetched investors file not found: {FETCHED_INVESTORS}")
-            account_stats["error"] = "Fetched investors file not found"
-            return account_stats
+        demo_flag = investor_data.get("demo_account", "1")
+        if str(demo_flag).strip().lower() in ["0", "false"]:
+            allow_demo_processing = False
+            print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+        else:
+            print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+            
+        account_mode = investor_data.get("account_mode", "demo")
+        print(f"[{inv_id}] Account Mode from data: {account_mode}")
         
-        try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                investors_data = json.load(f)
-        except Exception as e:
-            print(f"[ERROR] Could not load fetched investors: {e}")
-            account_stats["error"] = f"Failed to load investors data: {e}"
-            return account_stats
-        
-        # Get investor data from fetched investors
-        # inv_id is now a string like "1" or "5"
-        investor_data = investors_data.get(str(inv_id))  # Ensure it's a string
-        if not investor_data:
-            print(f"[ERROR] Investor {inv_id} not found in fetched investors")
-            account_stats["error"] = "Investor not found in fetched data"
-            return account_stats
-        
-        # =====================================================================
-        # EXECUTE OPERATIONS
-        # =====================================================================
-        print(f"🔄 Processing investor: {inv_id}")
-        
-        # Execute the operations only if within time range
-        print(f"📊 Fetching tables for investor: {inv_id}")
-        fetch_tables_streaming()
-        
-        # Uncomment these if you want them to run
-        # print(f"📁 Creating MT5 files for investor: {inv_id}")
-        # create_investor_mt5_files(inv_id=inv_id)
-        # 
-        # print(f"💰 Getting balance for investor: {inv_id}")
-        # get_investors_balance(inv_id=inv_id)
-        # 
-        # print(f"✅ Verifying balance for investor: {inv_id}")
-        # verify_investors_balance(inv_id=inv_id)
-        
-        print(f"🔒 Closing database browser for investor: {inv_id}")
-        close_db_browser()
-        
-        print(f"🌐 Initializing browser for investor: {inv_id}")
-        initialize_browser(force_new=True)
-        
-        print(f"🔄 Updating tables for investor: {inv_id}")
-        update_tables_streaming()
-        
-        account_stats["success"] = True
-        print(f"✅ Successfully processed investor: {inv_id}")
-        
-    except Exception as e:
-        account_stats["error"] = str(e)
-        print(f"❌ Error for {inv_id}: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception as json_err:
+        print(f"[ERROR] Failed to parse investor configuration: {str(json_err)}")
     
+    # =====================================================================
+    # SECTION: MT5 INITIALIZATION (Single attempt, no login)
+    # =====================================================================
+    print(f"\n{'='*10} 🔗 MT5 INITIALIZATION FOR {inv_id} {'='*10}")
+    
+    if not broker_cfg:
+        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+        return account_stats
+    
+    configured_path = broker_cfg.get("Terminal_path", "")
+    
+    # SINGLE INITIALIZATION ATTEMPT - NO LOGIN NEEDED
+    init_successful = False
+    
+    if configured_path and str(configured_path).strip():
+        terminal_path = os.path.abspath(configured_path)
+        if os.path.exists(terminal_path):
+            print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
+            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
+                init_successful = True
+                print(f"✅ MT5 initialized successfully with terminal path")
+            else:
+                print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
+        else:
+            print(f"⚠️ Terminal path does not exist: {terminal_path}")
+    
+    # Fallback to default initialization without path
+    if not init_successful:
+        print(f"🔗 Attempting default MT5 initialization...")
+        if mt5.initialize(timeout=30000):
+            init_successful = True
+            print(f"✅ MT5 initialized successfully with default settings")
+        else:
+            print(f"⚠️ Failed default initialization: {mt5.last_error()}")
+    
+    if not init_successful:
+        print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
+        print(f"   Last Error: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Initialization Failure"
+        return account_stats
+    
+    # =====================================================================
+    # GET ACCOUNT INFO DIRECTLY (No login required - already connected)
+    # =====================================================================
+    print(f"\n{'='*10} 📊 GETTING ACCOUNT INFO FOR {inv_id} {'='*10}")
+    
+    # Verify account info directly - already connected via terminal path
+    acc = mt5.account_info()
+    
+    if acc is None:
+        print(f"[FAIL] Could not retrieve account information after initialization")
+        print(f"       Error: {mt5.last_error()}")
+        mt5.shutdown()
+        return account_stats
+    
+    # =================================================================
+    # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+    # =================================================================
+    is_real = False
+    type_label = "UNKNOWN"
+    mode_label = "demo"
+    
+    if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+        is_real = True
+        type_label = "REAL"
+    elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+        is_real = False
+        type_label = "DEMO"
+    elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+        is_real = False
+        type_label = "CONTEST"
+    elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+        is_real = False
+        type_label = "DEMO (MONETARY SO FOOTPRINT)"
+    else:
+        server_upper = acc.server.upper() if acc.server else ""
+        if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+            is_real = False
+            type_label = "DEMO (SERVER STR MATCH)"
+        else:
+            is_real = True
+            type_label = "REAL (FALLBACK)"
+    
+    if is_real:
+        mode_label = "real"
+    
+    account_stats["account_type"] = type_label
+    account_stats["account_mode"] = mode_label
+    account_stats["is_real_account"] = is_real
+    
+    print(f"[{inv_id}] Account ID: {acc.login}")
+    print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+    print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
+    print(f"[{inv_id}] Account Leverage: {acc.leverage}")
+    
+    # Update ALL_FETCHED_INVESTORS with MT5 account info
+    try:
+        if os.path.exists(ALL_FETCHED_INVESTORS):
+            with open(ALL_FETCHED_INVESTORS, 'r') as f_inv:
+                investors_data = json.load(f_inv)
+            
+            if inv_str_id in investors_data:
+                investors_data[inv_str_id]["account_mode"] = mode_label
+                investors_data[inv_str_id]["account_balance"] = acc.balance
+                investors_data[inv_str_id]["account_currency"] = acc.currency
+                investors_data[inv_str_id]["account_leverage"] = acc.leverage
+                investors_data[inv_str_id]["account_id"] = acc.login
+                
+                with open(ALL_FETCHED_INVESTORS, 'w') as f_inv:
+                    json.dump(investors_data, f_inv, indent=2)
+                    print(f"✅ Updated ALL_FETCHED_INVESTORS with MT5 account data")
+    except Exception as update_err:
+        print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
+    
+    # Safety policy gate check
+    if not is_real and not allow_demo_processing:
+        print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+        account_stats["execution_skipped"] = True
+        account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+        mt5.shutdown()
+        return account_stats
+    
+    # =====================================================================
+    # SUCCESS - MT5 CONNECTED
+    # =====================================================================
+    print(f"\n{'='*10} ✅ MT5 CONNECTION SUCCESSFUL FOR {inv_id} {'='*10}")
+    print(f"   Account ID: {acc.login}")
+    print(f"   Balance: {acc.balance} {acc.currency}")
+    print(f"   Leverage: {acc.leverage}")
+    
+    # Your trading functions here if needed
+    create_investor_mt5_files(inv_id=inv_id)
+    get_investors_balance(inv_id=inv_id)
+    verify_investors_balance(inv_id=inv_id)
+    
+    # Merge results and then shutdown
+    merge_create_results()
+    merge_balance_results()
+    merge_verify_results()
+    mt5.shutdown()
+    account_stats["success"] = True
+    print(f"[SUCCESS] Finished pipeline for Investor: {inv_id} ({mode_label})")
+
     return account_stats
 
+def process_all_fetched_investors_(inv_id):
+    """
+    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
+    Connects directly to MT5 using the investor's credentials from ALL_FETCHED_INVESTORS.
+    
+    Args:
+        inv_id: String investor ID (e.g., "1", "5", etc.)
+    """
+    global restricted_timerange_alert
+    # =====================================================================
+    # SECTION: WORK IN TIME RANGE CHECK
+    # =====================================================================
+    print(f"\n{'='*60}")
+    print(f"⏰ TIME RANGE CHECK FOR INVESTOR: {inv_id}")
+    print(f"{'='*60}")
+    
+    time_check_result = work_only_in_specific_timerange()
+    within_time_range = time_check_result.get("should_work", False)
+    
+    
+    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
+    
+    account_stats = {
+        "inv_id": inv_id, 
+        "success": False, 
+        "price_collection_stats": {},
+        "candle_fetch_stats": {},
+        "crosser_analysis_stats": {},
+        "trapped_analysis_stats": {},
+        "liquidator_analysis_stats": {},
+        "ranging_analysis_stats": {},
+        "order_placement_stats": {},
+        "risk_correction_stats": {},
+        "risk_audit_stats": {},
+        "symbols_filtered": 0,
+        "orders_filtered": 0,
+        "symbols_processed": 0,
+        "symbols_successful": 0,
+        "orders_placed": 0,
+        "counter_orders_placed": 0,
+        "total_active_orders": 0,
+        "orders_adjusted": 0,
+        "orders_removed": 0,
+        "current_candle_forming": False,
+        "bid_wins": 0,
+        "ask_wins": 0,
+        "trapped_candles_found": 0,
+        "symbols_with_trapped": 0,
+        "symbols_with_liquidator": 0,
+        "liquidator_candles_found": 0,
+        "bullish_liquidators": 0,
+        "bearish_liquidators": 0,
+        "symbols_ranging": 0,
+        "avg_ranging_cycles": 0,
+        "spread_check_skipped": False,
+        "spread_warning_details": None,
+        "restricted_timerange_purge": False,
+        "execution_skipped": False,
+        "skip_reason": None,
+        "account_type": "UNKNOWN",
+        "account_mode": "UNKNOWN",  
+        "is_real_account": False,
+        "grid_strategy_enabled": False,
+        "ohlc_strategy_enabled": False,
+        "within_time_range": False,
+        "outside_time_range": False
+    }
+    
+    if within_time_range:
+        account_stats["within_time_range"] = True
+        print(f"✅ Investor {inv_id} is WITHIN allowed work time range - Full execution permitted")
+    
+        # =====================================================================
+        # SECTION: CALL FUNCTIONS OUTSIDE TIME RANGE
+        # =====================================================================
+        print(f"\n{'='*10} 🔧 SECTION: OUTSIDE TIME RANGE FUNCTIONS FOR {inv_id} {'='*10}")
+        fetch_tables_streaming()
+        
+        # If outside time range, skip MT5 connection entirely
+        if not within_time_range:
+            print(f"\n⏰ Investor {inv_id} is outside time range - Skipping MT5 connection and trading operations")
+            account_stats["outside_time_range"] = True
+            account_stats["success"] = True
+            account_stats["skip_reason"] = "Outside allowed work time range"
+            return account_stats
+        
+        # =====================================================================
+        # SECTION: WITHIN TIME RANGE - Continue with MT5 operations
+        # =====================================================================
+        print(f"\n{'='*10} ✅ WITHIN TIME RANGE - PROCEEDING WITH FULL OPERATIONS {'='*10}")
+        create_investor_mt5_files(inv_id=inv_id)
+        
+        # 1. Load investor data from ALL_FETCHED_INVESTORS
+        investor_data = None
+        broker_cfg = None
+        
+        try:
+            if not os.path.exists(ALL_FETCHED_INVESTORS):
+                print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
+                account_stats["skip_reason"] = "Fetched investors file not found"
+                return account_stats
+            
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_investors = json.load(f)
+            
+            inv_str_id = str(inv_id)
+            investor_data = all_investors.get(inv_str_id)
+            
+            if not investor_data:
+                print(f"[ERROR] Investor ID {inv_id} not found in ALL_FETCHED_INVESTORS")
+                account_stats["skip_reason"] = "Investor not found in fetched data"
+                return account_stats
+            
+            print(f"✅ Found investor {inv_id} in ALL_FETCHED_INVESTORS")
+            
+            # Build broker config from investor data
+            broker_cfg = {
+                'LOGIN_ID': investor_data.get('login'),
+                'PASSWORD': investor_data.get('password'),
+                'SERVER': investor_data.get('server'),
+                'Terminal_path': investor_data.get('Terminal_path', '')
+            }
+            
+            print(f"   Login: {broker_cfg['LOGIN_ID']}")
+            print(f"   Server: {broker_cfg['SERVER']}")
+            print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to load investor data: {str(e)}")
+            account_stats["skip_reason"] = f"Data loading error: {str(e)}"
+            return account_stats
+        
+        # 2. Extract structural demo permission policies from investor data
+        allow_demo_processing = True
+        try:
+            demo_flag = investor_data.get("demo_account", "1")
+            if str(demo_flag).strip().lower() in ["0", "false"]:
+                allow_demo_processing = False
+                print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+            else:
+                print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+                
+            account_mode = investor_data.get("account_mode", "demo")
+            print(f"[{inv_id}] Account Mode from data: {account_mode}")
+            
+        except Exception as json_err:
+            print(f"[ERROR] Failed to parse investor configuration: {str(json_err)}")
+        
+        # =====================================================================
+        # SECTION: MT5 INITIALIZATION (Single attempt, no login)
+        # =====================================================================
+        print(f"\n{'='*10} 🔗 MT5 INITIALIZATION FOR {inv_id} {'='*10}")
+        
+        if not broker_cfg:
+            print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+            return account_stats
+        
+        configured_path = broker_cfg.get("Terminal_path", "")
+        
+        # SINGLE INITIALIZATION ATTEMPT - NO LOGIN NEEDED
+        init_successful = False
+        
+        if configured_path and str(configured_path).strip():
+            terminal_path = os.path.abspath(configured_path)
+            if os.path.exists(terminal_path):
+                print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
+                if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
+                    init_successful = True
+                    print(f"✅ MT5 initialized successfully with terminal path")
+                else:
+                    print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
+            else:
+                print(f"⚠️ Terminal path does not exist: {terminal_path}")
+
+        if not init_successful:
+            print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
+            print(f"   Last Error: {mt5.last_error()}")
+            account_stats["skip_reason"] = "MT5 Initialization Failure"
+            return account_stats
+        
+        # =====================================================================
+        # GET ACCOUNT INFO DIRECTLY (No login required - already connected)
+        # =====================================================================
+        print(f"\n{'='*10} 📊 GETTING ACCOUNT INFO FOR {inv_id} {'='*10}")
+        
+        # Verify account info directly - already connected via terminal path
+        acc = mt5.account_info()
+        
+        if acc is None:
+            print(f"[FAIL] Could not retrieve account information after initialization")
+            print(f"       Error: {mt5.last_error()}")
+            mt5.shutdown()
+            return account_stats
+        
+        # =================================================================
+        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+        # =================================================================
+        is_real = False
+        type_label = "UNKNOWN"
+        mode_label = "demo"
+        
+        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            is_real = True
+            type_label = "REAL"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            is_real = False
+            type_label = "DEMO"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            is_real = False
+            type_label = "CONTEST"
+        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+            is_real = False
+            type_label = "DEMO (MONETARY SO FOOTPRINT)"
+        else:
+            server_upper = acc.server.upper() if acc.server else ""
+            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+                is_real = False
+                type_label = "DEMO (SERVER STR MATCH)"
+            else:
+                is_real = True
+                type_label = "REAL (FALLBACK)"
+        
+        if is_real:
+            mode_label = "real"
+        
+        account_stats["account_type"] = type_label
+        account_stats["account_mode"] = mode_label
+        account_stats["is_real_account"] = is_real
+        
+        print(f"[{inv_id}] Account ID: {acc.login}")
+        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+        print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
+        print(f"[{inv_id}] Account Leverage: {acc.leverage}")
+        
+        # Update ALL_FETCHED_INVESTORS with MT5 account info
+        try:
+            if os.path.exists(ALL_FETCHED_INVESTORS):
+                with open(ALL_FETCHED_INVESTORS, 'r') as f_inv:
+                    investors_data = json.load(f_inv)
+                
+                if inv_str_id in investors_data:
+                    investors_data[inv_str_id]["account_mode"] = mode_label
+                    investors_data[inv_str_id]["account_balance"] = acc.balance
+                    investors_data[inv_str_id]["account_currency"] = acc.currency
+                    investors_data[inv_str_id]["account_leverage"] = acc.leverage
+                    investors_data[inv_str_id]["account_id"] = acc.login
+                    
+                    with open(ALL_FETCHED_INVESTORS, 'w') as f_inv:
+                        json.dump(investors_data, f_inv, indent=2)
+                        print(f"✅ Updated ALL_FETCHED_INVESTORS with MT5 account data")
+        except Exception as update_err:
+            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
+        
+        # Safety policy gate check
+        if not is_real and not allow_demo_processing:
+            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+            account_stats["execution_skipped"] = True
+            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+            mt5.shutdown()
+            return account_stats
+        
+        # =====================================================================
+        # SUCCESS - MT5 CONNECTED
+        # =====================================================================
+        print(f"\n{'='*10} ✅ MT5 CONNECTION SUCCESSFUL FOR {inv_id} {'='*10}")
+        print(f"   Account ID: {acc.login}")
+        print(f"   Balance: {acc.balance} {acc.currency}")
+        print(f"   Leverage: {acc.leverage}")
+        # Your trading functions here if needed
+        create_investor_mt5_files(inv_id=inv_id)
+        get_investors_balance(inv_id=inv_id)
+        verify_investors_balance(inv_id=inv_id)
+
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
+        mt5.shutdown()
+        close_db_browser()
+        update_tables_streaming()
+        
+    else: 
+        create_investor_mt5_files(inv_id=inv_id)
+        get_investors_balance(inv_id=inv_id)
+        verify_investors_balance(inv_id=inv_id)
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
+    mt5.shutdown()
+    account_stats["success"] = True
+    print(f"[SUCCESS] Finished pipeline for Investor: {inv_id} ({mode_label})")
+    return account_stats
+      
 def main_once():
     """
-    ORCHESTRATOR (Single Execution): Processes ALL investor folders
-    once without any capacity limitations or restrictions.
+    ORCHESTRATOR (Single Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
+    without any capacity limitations or restrictions.
     """
-    combine_investors_to_all_files()
     # Parse command line arguments for control flags
     run_as_loop = False 
     loop_interval = 1  # Default 1 second between loops (matching original)
@@ -3484,8 +3615,7 @@ def main_once():
     print("="*60 + "\n")
     
     loop_count = 0
-        
-    inv_base_path = Path(INV_PATH)
+    
     print(f"🚀 Initializing Trading Engine Pool...")
     print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
@@ -3498,14 +3628,35 @@ def main_once():
             print("="*60)
         
         try:
-            # ============ FIX: Get only the folder names (investor IDs) ============
-            all_investor_folders = [f.name for f in inv_base_path.iterdir() if f.is_dir()]
-            # all_investor_folders now contains string IDs like ['1', '5', ...]
-            # =========================================================================
+            # ============ LOAD INVESTOR IDs FROM ALL_FETCHED_INVESTORS ============
+            investor_ids = []
             
-            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
-            if not all_investor_folders:
-                print(" ⏳ No investor directories found. Sleeping for 10 seconds before next scan...")
+            if not os.path.exists(ALL_FETCHED_INVESTORS):
+                print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
+                if not run_as_loop:
+                    print("Single execution completed with error. Exiting...")
+                    break
+                time.sleep(10)
+                continue
+            
+            try:
+                with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                    investors_data = json.load(f)
+                
+                # Extract investor IDs from the fetched investors file
+                investor_ids = list(investors_data.keys())
+                print(f"✅ Loaded {len(investor_ids)} investors from ALL_FETCHED_INVESTORS")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to load ALL_FETCHED_INVESTORS: {str(e)}")
+                if not run_as_loop:
+                    break
+                time.sleep(10)
+                continue
+            
+            # --- MAIN LOOP EMPTY DATA GUARD ---
+            if not investor_ids:
+                print(" ⏳ No investors found in ALL_FETCHED_INVESTORS. Sleeping for 10 seconds before next scan...")
                 time.sleep(10)
                 if not run_as_loop:
                     print("Single execution completed. Exiting...")
@@ -3517,11 +3668,11 @@ def main_once():
             available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
             
             print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
-            print(f"📋 Investor IDs found: {all_investor_folders}")
+            print(f"📊 Processing ALL {len(investor_ids)} investors from ALL_FETCHED_INVESTORS without capacity restrictions...")
+            print(f"📋 Investor IDs: {investor_ids}")
 
-            # Process ALL investor folders - NO CAPACITY LIMITS
-            active_batch = all_investor_folders
+            # Process ALL investor IDs - NO CAPACITY LIMITS
+            active_batch = investor_ids
 
             print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
             
@@ -3529,8 +3680,8 @@ def main_once():
             with mp.Pool(processes=len(active_batch)) as pool:
                 jobs = []
                 for investor_id in active_batch:
-                    # Now passing string ID instead of Path object
-                    job = pool.apply_async(process_single_investor, args=(investor_id,))
+                    # Pass the investor ID string directly
+                    job = pool.apply_async(process_all_fetched_investors, args=(investor_id,))
                     jobs.append(job)
                 
                 # Force synchronization bar before closing the pool step block
@@ -3547,6 +3698,8 @@ def main_once():
             for r in results:
                 if r.get("error"):
                     print(f"  ❌ Investor {r.get('inv_id')}: {r.get('error')}")
+                if r.get("skip_reason"):
+                    print(f"  ⏭️  Investor {r.get('inv_id')}: {r.get('skip_reason')}")
             
         except Exception as e:
             print(f"Critical Error in Orchestrator Loop: {e}")
@@ -3564,7 +3717,9 @@ def main_once():
         if max_loops and loop_count >= max_loops:
             print(f"Maximum loops ({max_loops}) reached. Exiting...")
             break
-        
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
         # Wait before next iteration
         if run_as_loop and loop_interval > 0:
             print(f"Waiting {loop_interval} seconds before next loop...")
@@ -3572,10 +3727,9 @@ def main_once():
 
 def main_loop():
     """
-    ORCHESTRATOR (Single Execution): Processes ALL investor folders
-    once without any capacity limitations or restrictions.
+    ORCHESTRATOR (Single Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
+    without any capacity limitations or restrictions.
     """
-    combine_investors_to_all_files()
     # Parse command line arguments for control flags
     run_as_loop = True
     loop_interval = 1  # Default 1 second between loops (matching original)
@@ -3610,8 +3764,7 @@ def main_loop():
     print("="*60 + "\n")
     
     loop_count = 0
-        
-    inv_base_path = Path(INV_PATH)
+    
     print(f"🚀 Initializing Trading Engine Pool...")
     print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
@@ -3624,14 +3777,35 @@ def main_loop():
             print("="*60)
         
         try:
-            # ============ FIX: Get only the folder names (investor IDs) ============
-            all_investor_folders = [f.name for f in inv_base_path.iterdir() if f.is_dir()]
-            # all_investor_folders now contains string IDs like ['1', '5', ...]
-            # =========================================================================
+            # ============ LOAD INVESTOR IDs FROM ALL_FETCHED_INVESTORS ============
+            investor_ids = []
             
-            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
-            if not all_investor_folders:
-                print(" ⏳ No investor directories found. Sleeping for 10 seconds before next scan...")
+            if not os.path.exists(ALL_FETCHED_INVESTORS):
+                print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
+                if not run_as_loop:
+                    print("Single execution completed with error. Exiting...")
+                    break
+                time.sleep(10)
+                continue
+            
+            try:
+                with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                    investors_data = json.load(f)
+                
+                # Extract investor IDs from the fetched investors file
+                investor_ids = list(investors_data.keys())
+                print(f"✅ Loaded {len(investor_ids)} investors from ALL_FETCHED_INVESTORS")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to load ALL_FETCHED_INVESTORS: {str(e)}")
+                if not run_as_loop:
+                    break
+                time.sleep(10)
+                continue
+            
+            # --- MAIN LOOP EMPTY DATA GUARD ---
+            if not investor_ids:
+                print(" ⏳ No investors found in ALL_FETCHED_INVESTORS. Sleeping for 10 seconds before next scan...")
                 time.sleep(10)
                 if not run_as_loop:
                     print("Single execution completed. Exiting...")
@@ -3643,11 +3817,11 @@ def main_loop():
             available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
             
             print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
-            print(f"📋 Investor IDs found: {all_investor_folders}")
+            print(f"📊 Processing ALL {len(investor_ids)} investors from ALL_FETCHED_INVESTORS without capacity restrictions...")
+            print(f"📋 Investor IDs: {investor_ids}")
 
-            # Process ALL investor folders - NO CAPACITY LIMITS
-            active_batch = all_investor_folders
+            # Process ALL investor IDs - NO CAPACITY LIMITS
+            active_batch = investor_ids
 
             print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
             
@@ -3655,8 +3829,8 @@ def main_loop():
             with mp.Pool(processes=len(active_batch)) as pool:
                 jobs = []
                 for investor_id in active_batch:
-                    # Now passing string ID instead of Path object
-                    job = pool.apply_async(process_single_investor, args=(investor_id,))
+                    # Pass the investor ID string directly
+                    job = pool.apply_async(process_all_fetched_investors, args=(investor_id,))
                     jobs.append(job)
                 
                 # Force synchronization bar before closing the pool step block
@@ -3673,6 +3847,8 @@ def main_loop():
             for r in results:
                 if r.get("error"):
                     print(f"  ❌ Investor {r.get('inv_id')}: {r.get('error')}")
+                if r.get("skip_reason"):
+                    print(f"  ⏭️  Investor {r.get('inv_id')}: {r.get('skip_reason')}")
             
         except Exception as e:
             print(f"Critical Error in Orchestrator Loop: {e}")
@@ -3690,7 +3866,9 @@ def main_loop():
         if max_loops and loop_count >= max_loops:
             print(f"Maximum loops ({max_loops}) reached. Exiting...")
             break
-        
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
         # Wait before next iteration
         if run_as_loop and loop_interval > 0:
             print(f"Waiting {loop_interval} seconds before next loop...")
@@ -3698,7 +3876,7 @@ def main_loop():
 
 
 if __name__ == "__main__":
-   update_tables_streaming()
+   main_once()
 
 
     
