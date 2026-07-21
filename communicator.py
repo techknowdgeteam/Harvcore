@@ -688,7 +688,7 @@ def combine_investors_to_all_files():
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
     
-def fetch_tables_streaming(batch_size=5000):
+def fetch_database(batch_size=5000):
     """Stream results directly to file without holding all in memory - Hybrid mode: IP first, then VS Code ID fallback"""
     
     def get_local_ip():
@@ -1579,7 +1579,7 @@ def fetch_tables_streaming(batch_size=5000):
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
 
-def update_tables_streaming(batch_size=5000):
+def update_database(batch_size=5000):
     """Stream updates from JSON to database without holding all in memory
     - Reads from BOTH ALL_UPDATED_INVESTORS and ALL_FETCHED_INVESTORS
     - Merges data from both files
@@ -1640,7 +1640,7 @@ def update_tables_streaming(batch_size=5000):
         
         if not merged_data:
             print(f"\n   ❌ No data loaded from any source file")
-            print(f"   ℹ️ Please run fetch_tables_streaming() first to create the fetched file")
+            print(f"   ℹ️ Please run fetch_database() first to create the fetched file")
             return
         
         total_investors = len(merged_data)
@@ -1984,13 +1984,6 @@ def create_investor_mt5_files(inv_id=None):
     Args:
         inv_id: Required - specific investor ID to process (for multiprocessing)
     
-    Logic:
-        1. If user is suspended/blacklisted -> IGNORE completely (skip immediately)
-        2. If folder doesn't exist and user NOT suspended -> CREATE folder, update Terminal_path,
-           and if application_status is 'pending', change it to 'just-joined'.
-        3. If folder exists and user NOT suspended -> ENSURE Terminal_path is set in record,
-           and if application_status is 'pending', change it to 'just-joined'.
-    
     Returns:
         dict: {
             'investor_id': str,
@@ -2062,7 +2055,7 @@ def create_investor_mt5_files(inv_id=None):
             if suspended_ids:
                 print(f"🚫 Loaded {len(suspended_ids)} suspended/blacklisted accounts")
         except Exception as e:
-            print(f"⚠️ Error loading suspended accounts: {e}")
+            print(f"🛑 Error loading suspended accounts: {e}")
     else:
         print(f"ℹ️ No suspended accounts file found - all users will be processed normally")
     
@@ -2117,7 +2110,13 @@ def create_investor_mt5_files(inv_id=None):
                 if 'Terminal_path' in investor_data:
                     investor_data['Terminal_path'] = ''
                 
-                result['updated_data'] = {inv_id_str: investor_data}
+                # Only store the fields that changed
+                result['updated_data'] = {
+                    inv_id_str: {
+                        'Terminal_path': '',
+                        'mt5_folder_name': ''
+                    }
+                }
                 result['success'] = True
                 
                 # Save individual result to temp file
@@ -2144,7 +2143,7 @@ def create_investor_mt5_files(inv_id=None):
     
     if not broker or not investor_id_value:
         msg = f"Investor {inv_id} missing broker or id, skipping"
-        print(f"⚠️ {msg}")
+        print(f"🛑 {msg}")
         result['message'] = msg
         return result
     
@@ -2155,7 +2154,7 @@ def create_investor_mt5_files(inv_id=None):
         print(f"📧 Email: {email} -> {safe_email}")
     else:
         safe_email = "no_email"
-        print(f"⚠️ ID:{inv_id} has no email address - using 'no_email' in folder name")
+        print(f"🛑 ID:{inv_id} has no email address - using 'no_email' in folder name")
     
     # Create target paths with email format
     folder_name = f"MetaTrader 5 {safe_email} {investor_id_value} {broker}"
@@ -2166,6 +2165,9 @@ def create_investor_mt5_files(inv_id=None):
     folder_exists = os.path.exists(target_folder)
     current_status = investor_data.get('application_status', '')
     
+    # Prepare update data (only fields that might change)
+    update_data = {}
+    
     # RULE 2: If folder exists and user is NOT suspended
     if folder_exists:
         print(f"✓ Folder exists: {folder_name}")
@@ -2173,7 +2175,7 @@ def create_investor_mt5_files(inv_id=None):
         
         # Ensure Terminal_path is set correctly
         if not current_path or current_path != normalized_path:
-            investor_data['Terminal_path'] = normalized_path
+            update_data['Terminal_path'] = normalized_path
             result['message'] = "Terminal_path updated"
             print(f"   🔧 Terminal_path updated")
         else:
@@ -2182,16 +2184,18 @@ def create_investor_mt5_files(inv_id=None):
         
         # Check application_status: only change if it is exactly "pending"
         if current_status == "pending":
-            investor_data['application_status'] = 'just-joined'
+            update_data['application_status'] = 'just-joined'
             result['message'] += " | Status: pending → just-joined"
             print(f"   🔄 Status: pending → just-joined")
         else:
             print(f"   ℹ️ Status: {current_status} (unchanged)")
         
-        investor_data['mt5_folder_name'] = folder_name
+        # Always include mt5_folder_name
+        update_data['mt5_folder_name'] = folder_name
+        
         result['success'] = True
         result['created'] = False
-        result['updated_data'] = {inv_id_str: investor_data}
+        result['updated_data'] = {inv_id_str: update_data}
         
         # Save individual result to temp file
         temp_result_file = os.path.join(tempfile.gettempdir(), f"create_result_{inv_id}.json")
@@ -2213,13 +2217,15 @@ def create_investor_mt5_files(inv_id=None):
                         ignore_dangling_symlinks=True,
                         ignore=shutil.ignore_patterns('*.lock', '*.log'))
         
-        # Assign structural data
-        investor_data['Terminal_path'] = normalized_path
-        investor_data['mt5_folder_name'] = folder_name
+        # Prepare update data
+        update_data = {
+            'Terminal_path': normalized_path,
+            'mt5_folder_name': folder_name
+        }
         
         # Handle application status condition
         if current_status == "pending":
-            investor_data['application_status'] = 'just-joined'
+            update_data['application_status'] = 'just-joined'
             result['message'] = "Folder created | Status: pending → just-joined"
             print(f"   🔄 Status: pending → just-joined")
         else:
@@ -2228,7 +2234,7 @@ def create_investor_mt5_files(inv_id=None):
         
         result['success'] = True
         result['created'] = True
-        result['updated_data'] = {inv_id_str: investor_data}
+        result['updated_data'] = {inv_id_str: update_data}
         
         print(f"   ✅ Folder created successfully!")
         print(f"   📍 Path: {normalized_path[:100]}...")
@@ -2259,15 +2265,6 @@ def merge_create_results():
     """
     Merge all individual MT5 folder creation results from temp files back to the main JSON file.
     Call this after all multiprocessing tasks are complete.
-    
-    Returns:
-        dict: {
-            'total_processed': int,
-            'created': int,
-            'deleted': int,
-            'updated': int,
-            'errors': int
-        }
     """
     import os
     import json
@@ -2315,35 +2312,52 @@ def merge_create_results():
                 investor_id = result['investor_id']
                 updated_data = result['updated_data']
                 
-                if investor_id in updated_data and investor_id in investors_data:
+                # Check if investor exists in current data
+                if investor_id in investors_data:
+                    # Get the new data (only fields that changed)
+                    new_data = updated_data.get(investor_id, {})
+                    old_data = investors_data[investor_id]
+                    
+                    # Update only the fields that were changed
+                    updated = False
+                    for field, value in new_data.items():
+                        if field in old_data and value != old_data.get(field):
+                            investors_data[investor_id][field] = value
+                            updated = True
+                            print(f"   🔄 Updated {field} for investor {investor_id}")
+                        elif field not in old_data:
+                            investors_data[investor_id][field] = value
+                            updated = True
+                            print(f"   ➕ Added {field} for investor {investor_id}")
+                    
                     # Track statistics
                     if result.get('created'):
                         stats['created'] += 1
-                    if result.get('deleted'):
+                    elif result.get('deleted'):
                         stats['deleted'] += 1
-                    if not result.get('created') and not result.get('deleted'):
+                    elif updated:
                         stats['updated'] += 1
                     
-                    # Update the main data
-                    old_data = investors_data[investor_id]
-                    new_data = updated_data[investor_id]
-                    
-                    # Merge only specific fields (preserve other data)
-                    for key, value in new_data.items():
-                        if value != old_data.get(key):
-                            investors_data[investor_id][key] = value
-                    
-                    print(f"✅ Merged update for investor {investor_id}: {result.get('message', '')[:60]}")
+                    if updated or result.get('created') or result.get('deleted'):
+                        print(f"✅ Merged update for investor {investor_id}: {result.get('message', '')[:60]}")
+                else:
+                    # If investor doesn't exist, add them
+                    investors_data[investor_id] = updated_data.get(investor_id, {})
+                    stats['created'] += 1
+                    print(f"➕ Added new investor {investor_id}")
             else:
                 stats['errors'] += 1
-                print(f"⚠️ Failed result for investor {result.get('investor_id', 'unknown')}: {result.get('message', 'No message')}")
+                print(f"🛑 Failed result for investor {result.get('investor_id', 'unknown')}: {result.get('message', 'No message')}")
             
             # Delete temp file after processing
-            os.remove(result_file)
+            try:
+                os.remove(result_file)
+            except:
+                pass
             
         except Exception as e:
             stats['errors'] += 1
-            print(f"⚠️ Error processing {result_file}: {e}")
+            print(f"🛑 Error processing {result_file}: {e}")
     
     # Save merged data if there were changes
     if stats['total_processed'] > 0 and stats['errors'] < stats['total_processed']:
@@ -2358,7 +2372,7 @@ def merge_create_results():
         
         print(f"\n💾 Saved merged data to {ALL_FETCHED_INVESTORS}")
     else:
-        print(f"\n⚠️ No valid updates to save")
+        print(f"\n🛑 No valid updates to save")
     
     # Print summary
     print(f"\n{'='*60}")
@@ -2564,7 +2578,7 @@ def get_investors_balance(inv_id=None):
         
         # Verify this is the correct account
         if account_info.login != login_id_int:
-            print(f"   ⚠️ Account mismatch: Connected to {account_info.login}, expected {login_id_int}")
+            print(f"   🛑 Account mismatch: Connected to {account_info.login}, expected {login_id_int}")
             result['message'] = f"Account mismatch: Connected to {account_info.login}, expected {login_id_int}"
             return result
         
@@ -2597,19 +2611,23 @@ def get_investors_balance(inv_id=None):
         currency = account_info.currency
         
         balance_str = f"{balance:.2f}"
-        investor_data['broker_balance'] = balance_str
-        investor_data['application_status'] = 'just-joined-and-valid_credentials'
-        investor_data['verified_at'] = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Prepare update data (only fields that changed)
+        update_data = {
+            'broker_balance': balance_str,
+            'application_status': 'just-joined-and-valid_credentials',
+            'verified_at': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
         
         if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
-            investor_data['account_mode'] = actual_account_mode
+            update_data['account_mode'] = actual_account_mode
         
         success = True
         result['success'] = True
         result['status'] = 'just-joined-and-valid_credentials'
         result['balance'] = balance
         result['message'] = f"Balance obtained: {currency} {balance:,.2f}"
-        result['updated_data'] = {actual_key: investor_data}
+        result['updated_data'] = {actual_key: update_data}
         
         print(f"   ✅ Balance obtained: {currency} {balance:,.2f}")
         
@@ -2636,6 +2654,7 @@ def merge_balance_results():
     import json
     import tempfile
     import shutil
+    import glob
     
     print(f"\n{'='*60}")
     print(f"📦 MERGING BALANCE RESULTS")
@@ -2644,22 +2663,26 @@ def merge_balance_results():
     # Load current investors data
     if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
-        return False
+        return {'total_processed': 0, 'updated': 0, 'errors': 0}
     
     try:
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
     except Exception as e:
         print(f" Error loading investors: {e}")
-        return False
+        return {'total_processed': 0, 'updated': 0, 'errors': 0}
     
     # Find all temp result files
     temp_dir = tempfile.gettempdir()
-    import glob
     result_files = glob.glob(os.path.join(temp_dir, "balance_result_*.json"))
     
-    updated_count = 0
-    errors = 0
+    stats = {
+        'total_processed': len(result_files),
+        'updated': 0,
+        'errors': 0
+    }
+    
+    print(f"\n📁 Found {len(result_files)} balance result files to merge")
     
     for result_file in result_files:
         try:
@@ -2670,21 +2693,45 @@ def merge_balance_results():
                 investor_id = result['investor_id']
                 updated_data = result['updated_data']
                 
-                if investor_id in updated_data:
-                    # Update the main data
-                    investors_data[investor_id] = updated_data[investor_id]
-                    updated_count += 1
-                    print(f"✅ Merged update for investor {investor_id}: {result.get('message', '')[:50]}")
+                # Check if investor exists in current data
+                if investor_id in investors_data:
+                    # Get the new data (only fields that changed)
+                    new_data = updated_data.get(investor_id, {})
+                    old_data = investors_data[investor_id]
+                    
+                    # Update only the fields that were changed
+                    updated = False
+                    for field, value in new_data.items():
+                        if field in old_data and value != old_data.get(field):
+                            investors_data[investor_id][field] = value
+                            updated = True
+                            print(f"   🔄 Updated {field} for investor {investor_id}")
+                        elif field not in old_data:
+                            investors_data[investor_id][field] = value
+                            updated = True
+                            print(f"   ➕ Added {field} for investor {investor_id}")
+                    
+                    if updated:
+                        stats['updated'] += 1
+                        print(f"✅ Merged balance update for investor {investor_id}: {result.get('message', '')[:50]}")
+                else:
+                    # If investor doesn't exist, add them
+                    investors_data[investor_id] = updated_data.get(investor_id, {})
+                    stats['updated'] += 1
+                    print(f"➕ Added new investor {investor_id}")
             
             # Delete temp file after processing
-            os.remove(result_file)
+            try:
+                os.remove(result_file)
+            except:
+                pass
             
         except Exception as e:
-            print(f"⚠️ Error processing {result_file}: {e}")
-            errors += 1
+            stats['errors'] += 1
+            print(f"🛑 Error processing {result_file}: {e}")
     
     # Save merged data
-    if updated_count > 0:
+    if stats['updated'] > 0:
         # Create backup
         backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
@@ -2694,7 +2741,7 @@ def merge_balance_results():
         with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
         
-        print(f"\n💾 Saved {updated_count} updates to {ALL_FETCHED_INVESTORS}")
+        print(f"\n💾 Saved {stats['updated']} updates to {ALL_FETCHED_INVESTORS}")
         
         # Also update updated_investors.json with valid credentials
         updated_investors_data = {}
@@ -2709,13 +2756,13 @@ def merge_balance_results():
             print(f"💾 Updated {len(updated_investors_data)} investors to {UPDATED_INVESTORS}")
         
         print(f"\n📊 Merge Summary:")
-        print(f"   ✅ Updated: {updated_count}")
-        print(f"   ⚠️ Errors: {errors}")
-        return True
+        print(f"   ✅ Updated: {stats['updated']}")
+        print(f"   🛑 Errors: {stats['errors']}")
+        return stats
     else:
         print(f"ℹ️ No updates to merge")
-        return False
-
+        return stats
+    
 def verify_investors_balance(inv_id=None):
     """
     Verify balance for investors who have applied for verification.
@@ -2903,20 +2950,21 @@ def verify_investors_balance(inv_id=None):
                 result['status'] = 'demo_not_enabled'
                 return result
         
-        # Update investor data
-        investor_data['broker_balance'] = f"{balance:.2f}"
-        investor_data['balance_verification'] = 'verified'
-        investor_data['verified_at'] = time.strftime("%Y-%m-%d %H:%M:%S")
+        # Prepare update data (only fields that changed)
+        update_data = {
+            'broker_balance': f"{balance:.2f}",
+            'balance_verification': 'verified',
+            'verified_at': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
         
-        # Update account mode if different
         if investor_data.get('account_mode', '').strip().lower() != actual_account_mode:
-            investor_data['account_mode'] = actual_account_mode
+            update_data['account_mode'] = actual_account_mode
         
         result['success'] = True
         result['status'] = 'verified'
         result['balance'] = balance
         result['message'] = f"Verified: {currency} {balance:,.2f}"
-        result['updated_data'] = {actual_key: investor_data}
+        result['updated_data'] = {actual_key: update_data}
         
         print(f"   ✅ VERIFIED: {currency} {balance:,.2f}")
         
@@ -2950,42 +2998,74 @@ def merge_verify_results():
     
     if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
-        return False
+        return {'total_processed': 0, 'verified': 0, 'errors': 0}
     
     try:
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
     except Exception as e:
         print(f" Error loading investors: {e}")
-        return False
+        return {'total_processed': 0, 'verified': 0, 'errors': 0}
     
     temp_dir = tempfile.gettempdir()
     result_files = glob.glob(os.path.join(temp_dir, "verify_result_*.json"))
     
-    updated_count = 0
-    errors = 0
+    stats = {
+        'total_processed': len(result_files),
+        'verified': 0,
+        'errors': 0
+    }
+    
+    print(f"\n📁 Found {len(result_files)} verification result files to merge")
     
     for result_file in result_files:
         try:
             with open(result_file, 'r', encoding='utf-8') as f:
                 result = json.load(f)
             
-            if result.get('success') and result.get('updated_data'):
+            # Only merge if verification was successful and status is 'verified'
+            if result.get('success') and result.get('status') == 'verified' and result.get('updated_data'):
                 investor_id = result['investor_id']
                 updated_data = result['updated_data']
                 
-                if investor_id in updated_data:
-                    investors_data[investor_id] = updated_data[investor_id]
-                    updated_count += 1
-                    print(f"✅ Merged verification for investor {investor_id}: {result.get('message', '')[:50]}")
+                # Check if investor exists in current data
+                if investor_id in investors_data:
+                    # Get the new data (only fields that changed)
+                    new_data = updated_data.get(investor_id, {})
+                    old_data = investors_data[investor_id]
+                    
+                    # Update only the fields that were changed
+                    updated = False
+                    for field, value in new_data.items():
+                        if field in old_data and value != old_data.get(field):
+                            investors_data[investor_id][field] = value
+                            updated = True
+                            print(f"   🔄 Updated {field} for investor {investor_id}")
+                        elif field not in old_data:
+                            investors_data[investor_id][field] = value
+                            updated = True
+                            print(f"   ➕ Added {field} for investor {investor_id}")
+                    
+                    if updated:
+                        stats['verified'] += 1
+                        print(f"✅ Merged verification for investor {investor_id}: {result.get('message', '')[:50]}")
+                else:
+                    # If investor doesn't exist, add them
+                    investors_data[investor_id] = updated_data.get(investor_id, {})
+                    stats['verified'] += 1
+                    print(f"➕ Added new investor {investor_id}")
             
-            os.remove(result_file)
+            # Delete temp file after processing
+            try:
+                os.remove(result_file)
+            except:
+                pass
             
         except Exception as e:
-            print(f"⚠️ Error processing {result_file}: {e}")
-            errors += 1
+            stats['errors'] += 1
+            print(f"🛑 Error processing {result_file}: {e}")
     
-    if updated_count > 0:
+    if stats['verified'] > 0:
         backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
             shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
@@ -2994,7 +3074,7 @@ def merge_verify_results():
         with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
         
-        print(f"\n💾 Saved {updated_count} verification updates to {ALL_FETCHED_INVESTORS}")
+        print(f"\n💾 Saved {stats['verified']} verification updates to {ALL_FETCHED_INVESTORS}")
         
         # Update updated_investors.json with verified investors
         updated_investors_data = {}
@@ -3009,281 +3089,13 @@ def merge_verify_results():
             print(f"💾 Updated {len(updated_investors_data)} verified investors to {UPDATED_INVESTORS}")
         
         print(f"\n📊 Merge Summary:")
-        print(f"   ✅ Verified: {updated_count}")
-        print(f"   ⚠️ Errors: {errors}")
-        return True
+        print(f"   ✅ Verified: {stats['verified']}")
+        print(f"   🛑 Errors: {stats['errors']}")
+        return stats
     else:
         print(f"ℹ️ No verification updates to merge")
-        return False
-
-def process_all_fetched_investors_(inv_id):
-    """
-    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Connects directly to MT5 using the investor's credentials from ALL_FETCHED_INVESTORS.
+        return stats
     
-    Args:
-        inv_id: String investor ID (e.g., "1", "5", etc.)
-    """
-    global restricted_timerange_alert
-    
-    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
-    
-    account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
-        "price_collection_stats": {},
-        "candle_fetch_stats": {},
-        "crosser_analysis_stats": {},
-        "trapped_analysis_stats": {},
-        "liquidator_analysis_stats": {},
-        "ranging_analysis_stats": {},
-        "order_placement_stats": {},
-        "risk_correction_stats": {},
-        "risk_audit_stats": {},
-        "symbols_filtered": 0,
-        "orders_filtered": 0,
-        "symbols_processed": 0,
-        "symbols_successful": 0,
-        "orders_placed": 0,
-        "counter_orders_placed": 0,
-        "total_active_orders": 0,
-        "orders_adjusted": 0,
-        "orders_removed": 0,
-        "current_candle_forming": False,
-        "bid_wins": 0,
-        "ask_wins": 0,
-        "trapped_candles_found": 0,
-        "symbols_with_trapped": 0,
-        "symbols_with_liquidator": 0,
-        "liquidator_candles_found": 0,
-        "bullish_liquidators": 0,
-        "bearish_liquidators": 0,
-        "symbols_ranging": 0,
-        "avg_ranging_cycles": 0,
-        "spread_check_skipped": False,
-        "spread_warning_details": None,
-        "restricted_timerange_purge": False,
-        "execution_skipped": False,
-        "skip_reason": None,
-        "account_type": "UNKNOWN",
-        "account_mode": "UNKNOWN",  
-        "is_real_account": False,
-        "grid_strategy_enabled": False,
-        "ohlc_strategy_enabled": False,
-        "within_time_range": True,  # Always True since check is removed
-        "outside_time_range": False
-    }
-    
-    # =====================================================================
-    # SECTION: CALL FUNCTIONS
-    # =====================================================================
-    
-    # =====================================================================
-    # SECTION: CONTINUE WITH MT5 OPERATIONS
-    # =====================================================================
-    print(f"\n{'='*10} ✅ PROCEEDING WITH FULL OPERATIONS {'='*10}")
-    
-    # 1. Load investor data from ALL_FETCHED_INVESTORS
-    investor_data = None
-    broker_cfg = None
-    
-    try:
-        if not os.path.exists(ALL_FETCHED_INVESTORS):
-            print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
-            account_stats["skip_reason"] = "Fetched investors file not found"
-            return account_stats
-        
-        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-            all_investors = json.load(f)
-        
-        inv_str_id = str(inv_id)
-        investor_data = all_investors.get(inv_str_id)
-        
-        if not investor_data:
-            print(f"[ERROR] Investor ID {inv_id} not found in ALL_FETCHED_INVESTORS")
-            account_stats["skip_reason"] = "Investor not found in fetched data"
-            return account_stats
-        
-        print(f"✅ Found investor {inv_id} in ALL_FETCHED_INVESTORS")
-        
-        # Build broker config from investor data
-        broker_cfg = {
-            'LOGIN_ID': investor_data.get('login'),
-            'PASSWORD': investor_data.get('password'),
-            'SERVER': investor_data.get('server'),
-            'Terminal_path': investor_data.get('Terminal_path', '')
-        }
-        
-        print(f"   Login: {broker_cfg['LOGIN_ID']}")
-        print(f"   Server: {broker_cfg['SERVER']}")
-        print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
-        
-    except Exception as e:
-        print(f"[ERROR] Failed to load investor data: {str(e)}")
-        account_stats["skip_reason"] = f"Data loading error: {str(e)}"
-        return account_stats
-    
-    # 2. Extract structural demo permission policies from investor data
-    allow_demo_processing = True
-    try:
-        demo_flag = investor_data.get("demo_account", "1")
-        if str(demo_flag).strip().lower() in ["0", "false"]:
-            allow_demo_processing = False
-            print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
-        else:
-            print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
-            
-        account_mode = investor_data.get("account_mode", "demo")
-        print(f"[{inv_id}] Account Mode from data: {account_mode}")
-        
-    except Exception as json_err:
-        print(f"[ERROR] Failed to parse investor configuration: {str(json_err)}")
-    
-    # =====================================================================
-    # SECTION: MT5 INITIALIZATION (Single attempt, no login)
-    # =====================================================================
-    print(f"\n{'='*10} 🔗 MT5 INITIALIZATION FOR {inv_id} {'='*10}")
-    
-    if not broker_cfg:
-        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
-        return account_stats
-    
-    configured_path = broker_cfg.get("Terminal_path", "")
-    
-    # SINGLE INITIALIZATION ATTEMPT - NO LOGIN NEEDED
-    init_successful = False
-    
-    if configured_path and str(configured_path).strip():
-        terminal_path = os.path.abspath(configured_path)
-        if os.path.exists(terminal_path):
-            print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
-            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
-                init_successful = True
-                print(f"✅ MT5 initialized successfully with terminal path")
-            else:
-                print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
-        else:
-            print(f"⚠️ Terminal path does not exist: {terminal_path}")
-    
-    # Fallback to default initialization without path
-    if not init_successful:
-        print(f"🔗 Attempting default MT5 initialization...")
-        if mt5.initialize(timeout=30000):
-            init_successful = True
-            print(f"✅ MT5 initialized successfully with default settings")
-        else:
-            print(f"⚠️ Failed default initialization: {mt5.last_error()}")
-    
-    if not init_successful:
-        print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
-        print(f"   Last Error: {mt5.last_error()}")
-        account_stats["skip_reason"] = "MT5 Initialization Failure"
-        return account_stats
-    
-    # =====================================================================
-    # GET ACCOUNT INFO DIRECTLY (No login required - already connected)
-    # =====================================================================
-    print(f"\n{'='*10} 📊 GETTING ACCOUNT INFO FOR {inv_id} {'='*10}")
-    
-    # Verify account info directly - already connected via terminal path
-    acc = mt5.account_info()
-    
-    if acc is None:
-        print(f"[FAIL] Could not retrieve account information after initialization")
-        print(f"       Error: {mt5.last_error()}")
-        mt5.shutdown()
-        return account_stats
-    
-    # =================================================================
-    # ACCOUNT TYPE IDENTIFICATION HIERARCHY
-    # =================================================================
-    is_real = False
-    type_label = "UNKNOWN"
-    mode_label = "demo"
-    
-    if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
-        is_real = True
-        type_label = "REAL"
-    elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
-        is_real = False
-        type_label = "DEMO"
-    elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
-        is_real = False
-        type_label = "CONTEST"
-    elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
-        is_real = False
-        type_label = "DEMO (MONETARY SO FOOTPRINT)"
-    else:
-        server_upper = acc.server.upper() if acc.server else ""
-        if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
-            is_real = False
-            type_label = "DEMO (SERVER STR MATCH)"
-        else:
-            is_real = True
-            type_label = "REAL (FALLBACK)"
-    
-    if is_real:
-        mode_label = "real"
-    
-    account_stats["account_type"] = type_label
-    account_stats["account_mode"] = mode_label
-    account_stats["is_real_account"] = is_real
-    
-    print(f"[{inv_id}] Account ID: {acc.login}")
-    print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
-    print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
-    print(f"[{inv_id}] Account Leverage: {acc.leverage}")
-    
-    # Update ALL_FETCHED_INVESTORS with MT5 account info
-    try:
-        if os.path.exists(ALL_FETCHED_INVESTORS):
-            with open(ALL_FETCHED_INVESTORS, 'r') as f_inv:
-                investors_data = json.load(f_inv)
-            
-            if inv_str_id in investors_data:
-                investors_data[inv_str_id]["account_mode"] = mode_label
-                investors_data[inv_str_id]["account_balance"] = acc.balance
-                investors_data[inv_str_id]["account_currency"] = acc.currency
-                investors_data[inv_str_id]["account_leverage"] = acc.leverage
-                investors_data[inv_str_id]["account_id"] = acc.login
-                
-                with open(ALL_FETCHED_INVESTORS, 'w') as f_inv:
-                    json.dump(investors_data, f_inv, indent=2)
-                    print(f"✅ Updated ALL_FETCHED_INVESTORS with MT5 account data")
-    except Exception as update_err:
-        print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
-    
-    # Safety policy gate check
-    if not is_real and not allow_demo_processing:
-        print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
-        account_stats["execution_skipped"] = True
-        account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
-        mt5.shutdown()
-        return account_stats
-    
-    # =====================================================================
-    # SUCCESS - MT5 CONNECTED
-    # =====================================================================
-    print(f"\n{'='*10} ✅ MT5 CONNECTION SUCCESSFUL FOR {inv_id} {'='*10}")
-    print(f"   Account ID: {acc.login}")
-    print(f"   Balance: {acc.balance} {acc.currency}")
-    print(f"   Leverage: {acc.leverage}")
-    
-    # Your trading functions here if needed
-    create_investor_mt5_files(inv_id=inv_id)
-    get_investors_balance(inv_id=inv_id)
-    verify_investors_balance(inv_id=inv_id)
-    
-    # Merge results and then shutdown
-    merge_create_results()
-    merge_balance_results()
-    merge_verify_results()
-    mt5.shutdown()
-    account_stats["success"] = True
-    print(f"[SUCCESS] Finished pipeline for Investor: {inv_id} ({mode_label})")
-
-    return account_stats
-
 def process_all_fetched_investors(inv_id):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
@@ -3292,17 +3104,13 @@ def process_all_fetched_investors(inv_id):
     Args:
         inv_id: String investor ID (e.g., "1", "5", etc.)
     """
-    global restricted_timerange_alert
     # =====================================================================
     # SECTION: WORK IN TIME RANGE CHECK
     # =====================================================================
-    print(f"\n{'='*60}")
-    print(f"⏰ TIME RANGE CHECK FOR INVESTOR: {inv_id}")
-    print(f"{'='*60}")
     
-    time_check_result = work_only_in_specific_timerange()
-    within_time_range = time_check_result.get("should_work", False)
-    
+    # Initialize mode_label with default value at the start
+    mode_label = "unknown"
+    account_mode = "unknown"
     
     print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
     
@@ -3352,224 +3160,210 @@ def process_all_fetched_investors(inv_id):
         "outside_time_range": False
     }
     
-    if within_time_range:
-        account_stats["within_time_range"] = True
-        print(f"✅ Investor {inv_id} is WITHIN allowed work time range - Full execution permitted")
+    # =====================================================================
+    # SECTION: LOAD INVESTOR DATA FIRST (Always needed)
+    # =====================================================================
+    investor_data = None
+    broker_cfg = None
+    inv_str_id = str(inv_id)
     
-        # =====================================================================
-        # SECTION: WITHIN TIME RANGE - Continue with MT5 operations
-        # =====================================================================
-        print(f"\n{'='*10} ✅ WITHIN TIME RANGE - PROCEEDING WITH FULL OPERATIONS {'='*10}")
-        fetch_tables_streaming()
-        
-        
-        # 1. Load investor data from ALL_FETCHED_INVESTORS
-        investor_data = None
-        broker_cfg = None
-        
-        try:
-            if not os.path.exists(ALL_FETCHED_INVESTORS):
-                print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
-                account_stats["skip_reason"] = "Fetched investors file not found"
-                return account_stats
-            
-            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_investors = json.load(f)
-            
-            inv_str_id = str(inv_id)
-            investor_data = all_investors.get(inv_str_id)
-            
-            if not investor_data:
-                print(f"[ERROR] Investor ID {inv_id} not found in ALL_FETCHED_INVESTORS")
-                account_stats["skip_reason"] = "Investor not found in fetched data"
-                return account_stats
-            
-            print(f"✅ Found investor {inv_id} in ALL_FETCHED_INVESTORS")
-            
-            # Build broker config from investor data
-            broker_cfg = {
-                'LOGIN_ID': investor_data.get('login'),
-                'PASSWORD': investor_data.get('password'),
-                'SERVER': investor_data.get('server'),
-                'Terminal_path': investor_data.get('Terminal_path', '')
-            }
-            
-            print(f"   Login: {broker_cfg['LOGIN_ID']}")
-            print(f"   Server: {broker_cfg['SERVER']}")
-            print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to load investor data: {str(e)}")
-            account_stats["skip_reason"] = f"Data loading error: {str(e)}"
+    try:
+        if not os.path.exists(ALL_FETCHED_INVESTORS):
+            print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
+            account_stats["skip_reason"] = "Fetched investors file not found"
             return account_stats
         
-        # 2. Extract structural demo permission policies from investor data
-        allow_demo_processing = True
-        try:
-            demo_flag = investor_data.get("demo_account", "1")
-            if str(demo_flag).strip().lower() in ["0", "false"]:
-                allow_demo_processing = False
-                print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
-            else:
-                print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
-                
-            account_mode = investor_data.get("account_mode", "demo")
-            print(f"[{inv_id}] Account Mode from data: {account_mode}")
-            
-        except Exception as json_err:
-            print(f"[ERROR] Failed to parse investor configuration: {str(json_err)}")
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+            all_investors = json.load(f)
         
-        # =====================================================================
-        # SECTION: MT5 INITIALIZATION (Single attempt, no login)
-        # =====================================================================
-        print(f"\n{'='*10} 🔗 MT5 INITIALIZATION FOR {inv_id} {'='*10}")
+        investor_data = all_investors.get(inv_str_id)
         
-        if not broker_cfg:
-            print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+        if not investor_data:
+            print(f"[ERROR] Investor ID {inv_id} not found in ALL_FETCHED_INVESTORS")
+            account_stats["skip_reason"] = "Investor not found in fetched data"
             return account_stats
         
-        configured_path = broker_cfg.get("Terminal_path", "")
+        print(f"✅ Found investor {inv_id} in ALL_FETCHED_INVESTORS")
         
-        # SINGLE INITIALIZATION ATTEMPT - NO LOGIN NEEDED
-        init_successful = False
+        # Build broker config from investor data
+        broker_cfg = {
+            'LOGIN_ID': investor_data.get('login'),
+            'PASSWORD': investor_data.get('password'),
+            'SERVER': investor_data.get('server'),
+            'Terminal_path': investor_data.get('Terminal_path', '')
+        }
         
-        if configured_path and str(configured_path).strip():
-            terminal_path = os.path.abspath(configured_path)
-            if os.path.exists(terminal_path):
-                print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
-                if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
-                    init_successful = True
-                    print(f"✅ MT5 initialized successfully with terminal path")
-                else:
-                    print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
-            else:
-                print(f"⚠️ Terminal path does not exist: {terminal_path}")
-
-        if not init_successful:
-            print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
-            print(f"   Last Error: {mt5.last_error()}")
-            account_stats["skip_reason"] = "MT5 Initialization Failure"
-            return account_stats
+        print(f"   Login: {broker_cfg['LOGIN_ID']}")
+        print(f"   Server: {broker_cfg['SERVER']}")
+        print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
         
-        # =====================================================================
-        # GET ACCOUNT INFO DIRECTLY (No login required - already connected)
-        # =====================================================================
-        print(f"\n{'='*10} 📊 GETTING ACCOUNT INFO FOR {inv_id} {'='*10}")
-        
-        # Verify account info directly - already connected via terminal path
-        acc = mt5.account_info()
-        
-        if acc is None:
-            print(f"[FAIL] Could not retrieve account information after initialization")
-            print(f"       Error: {mt5.last_error()}")
-            mt5.shutdown()
-            return account_stats
-        
-        # =================================================================
-        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
-        # =================================================================
-        is_real = False
-        type_label = "UNKNOWN"
-        mode_label = "demo"
-        
-        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
-            is_real = True
-            type_label = "REAL"
-        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
-            is_real = False
-            type_label = "DEMO"
-        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
-            is_real = False
-            type_label = "CONTEST"
-        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
-            is_real = False
-            type_label = "DEMO (MONETARY SO FOOTPRINT)"
-        else:
-            server_upper = acc.server.upper() if acc.server else ""
-            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
-                is_real = False
-                type_label = "DEMO (SERVER STR MATCH)"
-            else:
-                is_real = True
-                type_label = "REAL (FALLBACK)"
-        
-        if is_real:
-            mode_label = "real"
-        
-        account_stats["account_type"] = type_label
-        account_stats["account_mode"] = mode_label
-        account_stats["is_real_account"] = is_real
-        
-        print(f"[{inv_id}] Account ID: {acc.login}")
-        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
-        print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
-        print(f"[{inv_id}] Account Leverage: {acc.leverage}")
-        
-        # Update ALL_FETCHED_INVESTORS with MT5 account info
-        try:
-            if os.path.exists(ALL_FETCHED_INVESTORS):
-                with open(ALL_FETCHED_INVESTORS, 'r') as f_inv:
-                    investors_data = json.load(f_inv)
-                
-                if inv_str_id in investors_data:
-                    investors_data[inv_str_id]["account_mode"] = mode_label
-                    investors_data[inv_str_id]["account_balance"] = acc.balance
-                    investors_data[inv_str_id]["account_currency"] = acc.currency
-                    investors_data[inv_str_id]["account_leverage"] = acc.leverage
-                    investors_data[inv_str_id]["account_id"] = acc.login
-                    
-                    with open(ALL_FETCHED_INVESTORS, 'w') as f_inv:
-                        json.dump(investors_data, f_inv, indent=2)
-                        print(f"✅ Updated ALL_FETCHED_INVESTORS with MT5 account data")
-        except Exception as update_err:
-            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
-        
-        # Safety policy gate check
-        if not is_real and not allow_demo_processing:
-            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
-            account_stats["execution_skipped"] = True
-            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
-            mt5.shutdown()
-            return account_stats
-        
-        # =====================================================================
-        # SUCCESS - MT5 CONNECTED
-        # =====================================================================
-        print(f"\n{'='*10} ✅ MT5 CONNECTION SUCCESSFUL FOR {inv_id} {'='*10}")
-        print(f"   Account ID: {acc.login}")
-        print(f"   Balance: {acc.balance} {acc.currency}")
-        print(f"   Leverage: {acc.leverage}")
-        # Your trading functions here if needed
-        create_investor_mt5_files(inv_id=inv_id)
-        get_investors_balance(inv_id=inv_id)
-        verify_investors_balance(inv_id=inv_id)
-
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
+    except Exception as e:
+        print(f"[ERROR] Failed to load investor data: {str(e)}")
+        account_stats["skip_reason"] = f"Data loading error: {str(e)}"
+        return account_stats
+    
+    # =====================================================================
+    # SECTION: MT5 INITIALIZATION (ALWAYS do this first, before any MT5 calls)
+    # =====================================================================
+    print(f"\n{'='*10} 🔗 MT5 INITIALIZATION FOR {inv_id} {'='*10}")
+    
+    if not broker_cfg:
+        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+        return account_stats
+    
+    # CRITICAL FIX: Shutdown any existing MT5 connection first
+    try:
         mt5.shutdown()
-        close_db_browser()
-        update_tables_streaming()
+    except:
+        pass
+    
+    configured_path = broker_cfg.get("Terminal_path", "")
+    
+    # SINGLE INITIALIZATION ATTEMPT - NO LOGIN NEEDED
+    init_successful = False
+    
+    if configured_path and str(configured_path).strip():
+        terminal_path = os.path.abspath(configured_path)
+        if os.path.exists(terminal_path):
+            print(f"🔗 Initializing {inv_id} MT5")
+            if mt5.initialize(path=terminal_path, timeout=10000, portable=True):
+                init_successful = True
+                print(f"✅ MT5 initialized successfully with terminal path")
+            else:
+                print(f"Unable to Initialize {inv_id} MT5")
+                print(f"🛑 Issue:")
+                print(f"{mt5.last_error()}")
+                print(f"Terminal Path:")
+                print(f"{terminal_path}")
+        else:
+            print(f"Unable to Process {inv_id} MT5")
+            print(f"🛑 Issue:")
+            print(f" Terminal path does not exist")
+            print(f"Invalid Terminal Path:")
+            print(f"{terminal_path}")
+    
+    # Fallback to default initialization without path
+    if not init_successful:
+        print(f" Not initialized, Try Login into {inv_id} {terminal_path} manually")
+    
+    if not init_successful:
+        print(f"Unable to Process {inv_id} MT5")
+        print(f"🛑 Issue:")
+        print(f" Failed to initialize MT5 connection")
+        account_stats["skip_reason"] = "MT5 Initialization Failure"
+        return account_stats
+    
+    # =====================================================================
+    # GET ACCOUNT INFO (Verify connection works)
+    # =====================================================================
+    print(f"\n{'='*10} 📊 GETTING ACCOUNT INFO FOR {inv_id} {'='*10}")
+    
+    # Verify account info directly - already connected via terminal path
+    acc = mt5.account_info()
+    
+    if acc is None:
+        print(f"[FAIL] Could not retrieve account information after initialization")
+        print(f"       Error: {mt5.last_error()}")
+        return account_stats
+    
+    # =================================================================
+    # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+    # =================================================================
+    is_real = False
+    type_label = "UNKNOWN"
+    mode_label = "demo"
+    
+    if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+        is_real = True
+        type_label = "REAL"
+        mode_label = "real"
+    elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+        is_real = False
+        type_label = "DEMO"
+        mode_label = "demo"
+    elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+        is_real = False
+        type_label = "CONTEST"
+        mode_label = "demo"
+    elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+        is_real = False
+        type_label = "DEMO (MONETARY SO FOOTPRINT)"
+        mode_label = "demo"
+    else:
+        server_upper = acc.server.upper() if acc.server else ""
+        if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+            is_real = False
+            type_label = "DEMO (SERVER STR MATCH)"
+            mode_label = "demo"
+        else:
+            is_real = True
+            type_label = "REAL (FALLBACK)"
+            mode_label = "real"
+    
+    if is_real:
+        mode_label = "real"
+    
+    account_stats["account_type"] = type_label
+    account_stats["account_mode"] = mode_label
+    account_stats["is_real_account"] = is_real
+    
+    print(f"[{inv_id}] Account ID: {acc.login}")
+    print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+    print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
+    print(f"[{inv_id}] Account Leverage: {acc.leverage}")
+    
+    # Extract structural demo permission policies from investor data
+    allow_demo_processing = True
+    try:
+        demo_flag = investor_data.get("demo_account", "1")
+        if str(demo_flag).strip().lower() in ["0", "false"]:
+            allow_demo_processing = False
+            print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+        else:
+            print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+            
+        account_mode = investor_data.get("account_mode", "demo")
+        print(f"[{inv_id}] Account Mode from data: {account_mode}")
         
-    else: 
-        create_investor_mt5_files(inv_id=inv_id)
-        get_investors_balance(inv_id=inv_id)
-        verify_investors_balance(inv_id=inv_id)
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
+    except Exception as json_err:
+        print(f"[ERROR] Failed to parse investor configuration: {str(json_err)}")
+    
+    # Safety policy gate check
+    if not is_real and not allow_demo_processing:
+        print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+        account_stats["execution_skipped"] = True
+        account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+        return account_stats
+  
+    # =====================================================================
+    # SUCCESS - MT5 CONNECTED, NOW CALL FUNCTIONS
+    # =====================================================================
+    print(f"\n{'='*10} ✅ MT5 CONNECTION SUCCESSFUL FOR {inv_id} {'='*10}")
+    print(f"   Account ID: {acc.login}")
+    print(f"   Balance: {acc.balance} {acc.currency}")
+    print(f"   Leverage: {acc.leverage}")
+    
+    create_investor_mt5_files(inv_id=inv_id)
+    get_investors_balance(inv_id=inv_id)
+    verify_investors_balance(inv_id=inv_id)
+    
+    # =====================================================================
+    # CLEANUP
+    # =====================================================================
     mt5.shutdown()
+    print(f"✅ MT5 shutdown complete for investor {inv_id}")
+    
     account_stats["success"] = True
     print(f"[SUCCESS] Finished pipeline for Investor: {inv_id} ({mode_label})")
     return account_stats
-      
+   
 def main_once():
     """
     ORCHESTRATOR (Single Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
     without any capacity limitations or restrictions.
     """
     # Parse command line arguments for control flags
-    run_as_loop = False 
+    run_as_loop = False
     loop_interval = 1  # Default 1 second between loops (matching original)
     max_loops = None  # None means infinite
     
@@ -3590,7 +3384,6 @@ def main_once():
                 print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
     
     print("\n" + "="*60)
-    print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
     print("="*60)
     print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
     if run_as_loop:
@@ -3604,7 +3397,7 @@ def main_once():
     loop_count = 0
     
     print(f"🚀 Initializing Trading Engine Pool...")
-    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
+    print(f"🛑  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
     while True:
         loop_count += 1
@@ -3613,6 +3406,15 @@ def main_once():
             print("\n" + "="*60)
             print(f"LOOP #{loop_count} STARTED")
             print("="*60)
+        
+        time_check_result = work_only_in_specific_timerange()
+        within_time_range = time_check_result.get("should_work", False)
+        
+        if within_time_range:
+            print(f"✅ System is WITHIN allowed work time range - Fetching data")
+            fetch_database()
+        else:
+            print("executing some functions")
         
         try:
             # ============ LOAD INVESTOR IDs FROM ALL_FETCHED_INVESTORS ============
@@ -3693,7 +3495,20 @@ def main_once():
             import traceback
             traceback.print_exc()
             time.sleep(5)
+
+        if within_time_range:
+            print(f"✅ System is WITHIN allowed work time range - Updating database")
+            close_db_browser()
+            update_database()
+        else:
+            print("executing some functions")
+            close_db_browser()
         
+        # Merge all results (these functions now handle the merging safely)
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
+
         # Check loop conditions
         if not run_as_loop:
             # Single execution - exit
@@ -3704,9 +3519,7 @@ def main_once():
         if max_loops and loop_count >= max_loops:
             print(f"Maximum loops ({max_loops}) reached. Exiting...")
             break
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
+        
         # Wait before next iteration
         if run_as_loop and loop_interval > 0:
             print(f"Waiting {loop_interval} seconds before next loop...")
@@ -3714,8 +3527,8 @@ def main_once():
 
 def main_loop():
     """
-    ORCHESTRATOR (Single Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
-    without any capacity limitations or restrictions.
+    ORCHESTRATOR (Loop Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
+    in a continuous loop without any capacity limitations or restrictions.
     """
     # Parse command line arguments for control flags
     run_as_loop = True
@@ -3739,7 +3552,6 @@ def main_loop():
                 print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
     
     print("\n" + "="*60)
-    print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
     print("="*60)
     print(f"  Loop Mode: {'ENABLED' if run_as_loop else 'DISABLED'}")
     if run_as_loop:
@@ -3753,7 +3565,7 @@ def main_loop():
     loop_count = 0
     
     print(f"🚀 Initializing Trading Engine Pool...")
-    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
+    print(f"🛑  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
     while True:
         loop_count += 1
@@ -3762,6 +3574,15 @@ def main_loop():
             print("\n" + "="*60)
             print(f"LOOP #{loop_count} STARTED")
             print("="*60)
+        
+        time_check_result = work_only_in_specific_timerange()
+        within_time_range = time_check_result.get("should_work", False)
+        
+        if within_time_range:
+            print(f"✅ System is WITHIN allowed work time range - Fetching data")
+            fetch_database()
+        else:
+            print("No executions")
         
         try:
             # ============ LOAD INVESTOR IDs FROM ALL_FETCHED_INVESTORS ============
@@ -3842,7 +3663,19 @@ def main_loop():
             import traceback
             traceback.print_exc()
             time.sleep(5)
+
+        if within_time_range:
+            print(f"✅ System is WITHIN allowed work time range - Updating database")
+            close_db_browser()
+            update_database()
+        else:
+            print("No executions")
         
+        # Merge all results (these functions now handle the merging safely)
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
+
         # Check loop conditions
         if not run_as_loop:
             # Single execution - exit
@@ -3853,9 +3686,7 @@ def main_loop():
         if max_loops and loop_count >= max_loops:
             print(f"Maximum loops ({max_loops}) reached. Exiting...")
             break
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
+        
         # Wait before next iteration
         if run_as_loop and loop_interval > 0:
             print(f"Waiting {loop_interval} seconds before next loop...")

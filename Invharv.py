@@ -25711,7 +25711,7 @@ def trades_analytics(inv_id=None):
         print("="*80)
         return stats
     
-    # Load both ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS for updating
+    # Load ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS for updating
     fetched_data = {}
     updated_data = {}
     all_fetched_data = {}
@@ -26754,7 +26754,7 @@ def trades_analytics(inv_id=None):
     print(f" │   4. {ALL_UPDATED_INVESTORS}")
     print("═"*80)
 
-    # 1. Load Primary Source (ALL_FETCHED_INVESTORS)
+    # 1. Load Primary Source (FETCHED_INVESTORS)
     fetched_data = {}
     if os.path.exists(FETCHED_INVESTORS):
         try:
@@ -26801,7 +26801,7 @@ def trades_analytics(inv_id=None):
             all_updated_data = {}
 
     # =========================================================================
-    # UPDATE ALL FILES WITH NEW DATA
+    # UPDATE ALL FILES WITH NEW DATA - ONLY UPDATE SPECIFIC FIELDS
     # =========================================================================
     has_mutated_database = False
 
@@ -26860,19 +26860,23 @@ def trades_analytics(inv_id=None):
         print(f" │   Unauthorized detected: {unauthorized_detected}")
         
         # ============================================================
-        # UPDATE FETCHED_INVESTORS (Legacy)
+        # UPDATE FETCHED_INVESTORS (Legacy) - ONLY TARGETED FIELDS
         # ============================================================
         if current_id in fetched_data:
-            fetched_data[current_id]['analytics'] = analytics_data
-            fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-            fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
-            fetched_data[current_id]['revenue_percentage'] = revenue_percentage
-            fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-            fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-            fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-            has_mutated_database = True
-            print(f" │   ✅ Updated FETCHED_INVESTORS for {current_id}")
+            # Only update specific fields, preserve everything else
+            if isinstance(fetched_data[current_id], dict):
+                # Preserve all existing fields, only update the ones we need
+                fetched_data[current_id]['analytics'] = analytics_data
+                fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+                fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
+                fetched_data[current_id]['revenue_percentage'] = revenue_percentage
+                fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+                fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
+                fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+                has_mutated_database = True
+                print(f" │   ✅ Updated FETCHED_INVESTORS for {current_id}")
         else:
+            # If record doesn't exist, create it with the required fields
             fetched_data[current_id] = {
                 'id': str(current_id),
                 'analytics': analytics_data,
@@ -26887,19 +26891,22 @@ def trades_analytics(inv_id=None):
             print(f" │   ➕ Created entry in FETCHED_INVESTORS for {current_id}")
         
         # ============================================================
-        # UPDATE UPDATED_INVESTORS (Legacy)
+        # UPDATE UPDATED_INVESTORS (Legacy) - ONLY TARGETED FIELDS
         # ============================================================
         if current_id in updated_data:
-            updated_data[current_id]['analytics'] = analytics_data
-            updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-            updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
-            updated_data[current_id]['revenue_percentage'] = revenue_percentage
-            updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-            updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-            updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-            has_mutated_database = True
-            print(f" │   ✅ Updated UPDATED_INVESTORS for {current_id}")
+            # Only update specific fields, preserve everything else
+            if isinstance(updated_data[current_id], dict):
+                updated_data[current_id]['analytics'] = analytics_data
+                updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+                updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
+                updated_data[current_id]['revenue_percentage'] = revenue_percentage
+                updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+                updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
+                updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+                has_mutated_database = True
+                print(f" │   ✅ Updated UPDATED_INVESTORS for {current_id}")
         else:
+            # If record doesn't exist, create it with the required fields
             updated_data[current_id] = {
                 'id': str(current_id),
                 'analytics': analytics_data,
@@ -26914,19 +26921,22 @@ def trades_analytics(inv_id=None):
             print(f" │   ➕ Created entry in UPDATED_INVESTORS for {current_id}")
         
         # ============================================================
-        # UPDATE ALL_FETCHED_INVESTORS
+        # UPDATE ALL_FETCHED_INVESTORS - ONLY TARGETED FIELDS
         # ============================================================
         if current_id in all_fetched_data:
-            all_fetched_data[current_id]['analytics'] = analytics_data
-            all_fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-            all_fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
-            all_fetched_data[current_id]['revenue_percentage'] = revenue_percentage
-            all_fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-            all_fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-            all_fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-            has_mutated_database = True
-            print(f" │   ✅ Updated ALL_FETCHED_INVESTORS for {current_id}")
+            # Only update specific fields, preserve everything else
+            if isinstance(all_fetched_data[current_id], dict):
+                all_fetched_data[current_id]['analytics'] = analytics_data
+                all_fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+                all_fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
+                all_fetched_data[current_id]['revenue_percentage'] = revenue_percentage
+                all_fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+                all_fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
+                all_fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+                has_mutated_database = True
+                print(f" │   ✅ Updated ALL_FETCHED_INVESTORS for {current_id}")
         else:
+            # If record doesn't exist, create it with the required fields
             all_fetched_data[current_id] = {
                 'id': str(current_id),
                 'analytics': analytics_data,
@@ -26941,19 +26951,22 @@ def trades_analytics(inv_id=None):
             print(f" │   ➕ Created entry in ALL_FETCHED_INVESTORS for {current_id}")
         
         # ============================================================
-        # UPDATE ALL_UPDATED_INVESTORS
+        # UPDATE ALL_UPDATED_INVESTORS - ONLY TARGETED FIELDS
         # ============================================================
         if current_id in all_updated_data:
-            all_updated_data[current_id]['analytics'] = analytics_data
-            all_updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-            all_updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
-            all_updated_data[current_id]['revenue_percentage'] = revenue_percentage
-            all_updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-            all_updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-            all_updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-            has_mutated_database = True
-            print(f" │   ✅ Updated ALL_UPDATED_INVESTORS for {current_id}")
+            # Only update specific fields, preserve everything else
+            if isinstance(all_updated_data[current_id], dict):
+                all_updated_data[current_id]['analytics'] = analytics_data
+                all_updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
+                all_updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
+                all_updated_data[current_id]['revenue_percentage'] = revenue_percentage
+                all_updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
+                all_updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
+                all_updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
+                has_mutated_database = True
+                print(f" │   ✅ Updated ALL_UPDATED_INVESTORS for {current_id}")
         else:
+            # If record doesn't exist, create it with the required fields
             all_updated_data[current_id] = {
                 'id': str(current_id),
                 'analytics': analytics_data,
