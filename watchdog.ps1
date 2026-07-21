@@ -178,10 +178,10 @@ function LaunchVSCode {
 # Main watchdog loop
 while ($true) {
     Write-Log "Starting watchdog cycle..."
-    Write-Log "Checking for investors.json, developers.json, and harvhub_investors.json files..."
+    Write-Log "Checking for investors.json, developers.json, harvhub_investors.json, and fetched_investors.json files..."
     
     # Find all JSON files
-    $files = Get-ChildItem -Path 'C:\xampp\htdocs\harvcore' -Include 'investors.json','developers.json','harvhub_investors.json' -Recurse -File
+    $files = Get-ChildItem -Path 'C:\xampp\htdocs\harvcore' -Include 'investors.json','developers.json','harvhub_investors.json','fetched_investors.json' -Recurse -File
     
     # Collect all terminal paths
     $allTerminals = @()
@@ -296,8 +296,8 @@ while ($true) {
         Write-Log "==================== FIRST RUN - NO RESET PERFORMED ===================="
         Write-Log "VS Code settings preserved - running normally"
         $firstLoop = $false
-        Write-Log "Waiting 5 seconds before launching VS Code..."
-        Start-Sleep -Seconds 5
+        Write-Log "Waiting 20 seconds before launching VS Code..."
+        Start-Sleep -Seconds 20
     } else {
         Write-Log "Waiting 3 seconds before launching VS Code (SUBSEQUENT RUNS)..."
         Start-Sleep -Seconds 3
