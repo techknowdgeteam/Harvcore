@@ -688,8 +688,8 @@ def combine_investors_to_all_files():
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
     
-def fetch_database(batch_size=5000):
-    """Stream results directly to file without holding all in memory - Hybrid mode: IP first, then VS Code ID fallback"""
+def fetch_database():
+    """Stream all results directly to file without batch division - Hybrid mode: IP first, then VS Code ID fallback"""
     
     def get_local_ip():
         """Get the local IP address of the computer"""
@@ -775,7 +775,7 @@ def fetch_database(batch_size=5000):
                 pass
             
             # If all fails, return empty dict
-            print(f"    ⚠️ Could not parse system_server_config")
+            print(f"    🛑 Could not parse system_server_config")
             return {}
         
         return {}
@@ -789,7 +789,7 @@ def fetch_database(batch_size=5000):
         
         # If it's not a list, return empty
         if not isinstance(computer_data, list):
-            print(f"    ⚠️ Data for {id_type} {target_id} is not a list: {type(computer_data)}")
+            print(f"    🛑 Data for {id_type} {target_id} is not a list: {type(computer_data)}")
             return []
         
         user_ids = []
@@ -1091,11 +1091,103 @@ def fetch_database(batch_size=5000):
         
         return cleaned
     
+    def safe_write_file(file_path, mode, content, is_first_record=False):
+        """
+        Safely write to a file with permission handling.
+        If permission denied, delete the file and retry.
+        """
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                # Try to write the file
+                if mode == 'w':
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                elif mode == 'a':
+                    with open(file_path, 'a', encoding='utf-8') as f:
+                        f.write(content)
+                elif mode == 'overwrite':
+                    # Special mode for writing the opening brace
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write('{\n')
+                
+                return True  # Success
+                
+            except PermissionError as e:
+                print(f"    ⚠️ Permission denied (attempt {attempt+1}/{max_retries})")
+                
+                if attempt < max_retries - 1:
+                    try:
+                        # Try to delete the file
+                        if os.path.exists(file_path):
+                            print(f"       🔄 Deleting file: {file_path}")
+                            os.remove(file_path)
+                            print(f"       ✅ File deleted, retrying...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    except Exception as delete_error:
+                        print(f"       ❌ Could not delete file: {delete_error}")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                else:
+                    # Last attempt failed, raise the error
+                    raise
+        
+        return False  # Should not reach here
+    
+    def write_all_to_file(file_path, data, first_record_status):
+        """Write all records to a file"""
+        if not data:
+            return first_record_status, 0
+        
+        bytes_written = 0
+        
+        # Build the content first
+        content_parts = []
+        for record in data:
+            record_id = str(record.get('id') or record.get('ID') or f"record_{hash(str(record))}")
+            
+            if not first_record_status:
+                content_parts.append(',\n')
+            
+            cleaned_row = clean_record(record)
+            
+            # Convert special types to JSON-serializable format
+            for key, value in cleaned_row.items():
+                if value is None:
+                    cleaned_row[key] = None
+                elif isinstance(value, (datetime, date)):
+                    cleaned_row[key] = value.isoformat()
+                elif isinstance(value, Decimal):
+                    cleaned_row[key] = float(value)
+            
+            json_str = json.dumps(cleaned_row, default=str, indent=2)
+            lines = json_str.split('\n')
+            indented_lines = ['    ' + line for line in lines]
+            formatted_json = '\n'.join(indented_lines)
+            
+            line = f'  "{record_id}": {formatted_json}'
+            content_parts.append(line)
+            
+            bytes_written += len(line.encode('utf-8'))
+            first_record_status = False
+        
+        # Write everything at once
+        content = ''.join(content_parts)
+        safe_write_file(file_path, 'a', content)
+        
+        return first_record_status, bytes_written
+    
     print("\n" + "="*70)
     print(f"  FETCHING TABLES (HYBRID MODE: IP → VS Code ID)")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Batch Size  : {batch_size:,} records per batch")
+    print(f"  Output Files: 2 files (ALL_FETCHED_INVESTORS & ALL_UPDATED_INVESTORS)")
     print("-"*70)
     
     try:
@@ -1148,7 +1240,7 @@ def fetch_database(batch_size=5000):
                     identification_method = 'ip_address'
                     print(f"  ✅ SUCCESS: Found {len(user_ids_to_fetch)} user(s) linked to IP address")
                 else:
-                    print(f"  ⚠️ IP address found in config but has no valid user IDs assigned")
+                    print(f"  🛑 IP address found in config but has no valid user IDs assigned")
             else:
                 print(f"   IP address NOT FOUND in system_server_config")
         else:
@@ -1168,7 +1260,7 @@ def fetch_database(batch_size=5000):
                         computer_id = vscode_id
                         print(f"  ✅ SUCCESS: Found {len(user_ids_to_fetch)} user(s) linked to VS Code ID")
                     else:
-                        print(f"  ⚠️ VS Code ID found in config but has no valid user IDs assigned")
+                        print(f"  🛑 VS Code ID found in config but has no valid user IDs assigned")
                 else:
                     print(f"   VS Code ID NOT FOUND in system_server_config")
             else:
@@ -1209,18 +1301,17 @@ def fetch_database(batch_size=5000):
                     else:
                         parsed_am = {}
                     
-                    # Write to DEFAULT_ACCOUNTMANAGEMENT file
+                    # Write to DEFAULT_ACCOUNTMANAGEMENT with permission handling
                     os.makedirs(os.path.dirname(DEFAULT_ACCOUNTMANAGEMENT), exist_ok=True)
-                    with open(DEFAULT_ACCOUNTMANAGEMENT, 'w', encoding='utf-8') as am_file:
-                        json.dump(parsed_am, am_file, default=str, indent=2)
+                    content = json.dumps(parsed_am, default=str, indent=2)
+                    safe_write_file(DEFAULT_ACCOUNTMANAGEMENT, 'w', content)
                     
                     print(f"   ✅ Account Management written to: {DEFAULT_ACCOUNTMANAGEMENT}")
-                    print(f"   📊 Data size: {len(json.dumps(parsed_am))} bytes")
+                    print(f"   📊 Data size: {len(content)} bytes")
                 else:
-                    print(f"   ⚠️ No server_account records found, writing empty dict")
+                    print(f"   🛑 No server_account records found, writing empty dict")
                     os.makedirs(os.path.dirname(DEFAULT_ACCOUNTMANAGEMENT), exist_ok=True)
-                    with open(DEFAULT_ACCOUNTMANAGEMENT, 'w', encoding='utf-8') as am_file:
-                        json.dump({}, am_file, indent=2)
+                    safe_write_file(DEFAULT_ACCOUNTMANAGEMENT, 'w', json.dumps({}, indent=2))
                     print(f"   ✅ Empty account management written to: {DEFAULT_ACCOUNTMANAGEMENT}")
             else:
                 print(f"   ❌ Failed to fetch accountmanagement: {am_result.get('message')}")
@@ -1312,10 +1403,6 @@ def fetch_database(batch_size=5000):
             print(f"    User IDs queried: {user_ids_to_fetch[:20]}{'...' if len(user_ids_to_fetch) > 20 else ''}")
             return
         
-        # Calculate batches needed
-        total_batches = (total_rows + batch_size - 1) // batch_size
-        print(f"  📦 Estimated Batches: {total_batches}")
-        
         # Step 4: Fetch Server Account Management and Requirements (READ ONLY - NO WRITING)
         print(f"\n⚙️ [4/6] Fetching Server Account Management & Requirements (Read Only)...")
         
@@ -1404,25 +1491,38 @@ def fetch_database(batch_size=5000):
         else:
             print(f"    Failed to fetch server account management: {server_result.get('message')}")
         
-        # Step 5: Prepare Output Directory and Stream Data
-        print(f"\n📁 [5/6] Preparing Output Directory for Insiders Data...")
-        os.makedirs(os.path.dirname(ALL_FETCHED_INVESTORS), exist_ok=True)
-        print(f"   Directory ready: {os.path.dirname(ALL_FETCHED_INVESTORS)}")
+        # Step 5: Prepare Output Directories and Files
+        print(f"\n📁 [5/6] Preparing Output Directories for Insiders Data...")
         
-        # Step 6: Stream Insiders Data
-        print(f"\n📥 [6/6] Streaming Insiders Records to File...")
+        # Define both output files
+        output_files = [
+            ALL_FETCHED_INVESTORS,
+            ALL_UPDATED_INVESTORS
+        ]
+        
+        # Create directories and initialize files with permission handling
+        for file_path in output_files:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            # Write opening brace to each file with permission handling
+            safe_write_file(file_path, 'overwrite', None)
+            print(f"   Initialized: {file_path}")
+        
+        print(f"   Both output directories ready")
+        
+        # Step 6: Fetch ALL Insiders Data in One Query
+        print(f"\n📥 [6/6] Fetching ALL Insiders Records in One Query...")
         print(f"  📌 Note: 'analytics' column is EXCLUDED from export")
         print(f"  🖥️ Using: {identification_method.upper()}: {computer_id if identification_method == 'ip_address' else computer_id[:32] + '...'}")
         print(f"  🎯 Filter: Only user IDs associated with this identifier")
         print(f"  🔧 AccountManagement: Existing data preserved as-is (no modification)")
         print(f"  🔧 AccountManagement: Wrapper keys extracted to 'configuration_title' field (view only)")
         print(f"  🔧 Gmail Path Normalization: Converting \\at\\gmail\\dot\\com to _at_gmail_dot_com")
-        print(f"  ⚠️  IMPORTANT: server_account.accountmanagement is NOT modified")
+        print(f"  🛑  IMPORTANT: server_account.accountmanagement is NOT modified")
+        print(f"  📁 Writing to: 2 separate files simultaneously")
         print("-"*70)
         
         start_time = datetime.now()
-        bytes_written = 0
-        current_batch = 0
+        total_bytes_written = 0
         json_repaired_count = 0
         accountmanagement_unwrapped_count = 0
         path_denormalized_count = 0
@@ -1437,111 +1537,98 @@ def fetch_database(batch_size=5000):
         
         print(f"  📋 Exporting columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
         print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs")
+        print(f"  🚀 Fetching ALL records in a single query (no batch division)...")
         
-        with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-            # Write opening brace - NO METADATA SECTION
-            f.write('{\n')
-            first_record = True
-            offset = 0
+        # Track first record status for each file
+        first_record_status = {
+            ALL_FETCHED_INVESTORS: True,
+            ALL_UPDATED_INVESTORS: True
+        }
+        
+        # Fetch ALL records in one query (no LIMIT/OFFSET)
+        query = f"""
+            SELECT {select_clause} 
+            FROM insiders 
+            WHERE id IN ({id_placeholders})
+            ORDER BY id
+        """
+        
+        print(f"  ⏳ Executing query to fetch all {total_rows:,} records...")
+        result = db.execute_query(query, params=user_ids_to_fetch)
+        
+        if result.get('status') != 'success':
+            print(f"   QUERY ERROR: {result.get('message')}")
+            return
             
-            while offset < total_rows:
-                current_batch += 1
-                batch_start = datetime.now()
-                
-                query = f"""
-                    SELECT {select_clause} 
-                    FROM insiders 
-                    WHERE id IN ({id_placeholders})
-                    ORDER BY id
-                    LIMIT {batch_size} OFFSET {offset}
-                """
-                result = db.execute_query(query, params=user_ids_to_fetch)
-                
-                if result.get('status') != 'success':
-                    print(f"\n   QUERY ERROR at batch {current_batch}: {result.get('message')}")
-                    break
-                    
-                rows = result.get('results', [])
-                if not rows:
-                    print(f"\n    No rows returned at offset {offset:,}. Stopping.")
-                    break
-                
-                batch_bytes = 0
-                for row in rows:
-                    record_id = str(row.get('id') or row.get('ID') or f"record_{offset}")
-                    
-                    if not first_record:
-                        f.write(',\n')
-                    
-                    # Track original accountmanagement state for unwrapping count
-                    original_accountmanagement = row.get('accountmanagement')
-                    
-                    cleaned_row = clean_record(row)
-                    
-                    # Check if accountmanagement was unwrapped and config title extracted
-                    if original_accountmanagement is not None:
-                        if isinstance(original_accountmanagement, dict) and len(original_accountmanagement) == 1:
-                            first_key = list(original_accountmanagement.keys())[0]
-                            if isinstance(original_accountmanagement[first_key], dict):
-                                accountmanagement_unwrapped_count += 1
-                    
-                    # Count path denormalizations
-                    for key, value in cleaned_row.items():
-                        if 'path' in key.lower() and isinstance(value, str) and '\\' in value:
-                            path_denormalized_count += 1
-                        
-                        # Count Gmail normalizations
-                        if isinstance(value, str) and '_at_gmail_dot_com' in value:
-                            gmail_normalized_count += 1
-                    
-                    # Convert special types to JSON-serializable format
-                    for key, value in cleaned_row.items():
-                        if value is None:
-                            cleaned_row[key] = None
-                        elif isinstance(value, (datetime, date)):
-                            cleaned_row[key] = value.isoformat()
-                        elif isinstance(value, Decimal):
-                            cleaned_row[key] = float(value)
-                    
-                    # Count JSON repairs
-                    for key, value in cleaned_row.items():
-                        if isinstance(value, (dict, list)) and key in row and isinstance(row[key], str):
-                            json_repaired_count += 1
-                    
-                    json_str = json.dumps(cleaned_row, default=str, indent=2)
-                    lines = json_str.split('\n')
-                    indented_lines = ['    ' + line for line in lines]
-                    formatted_json = '\n'.join(indented_lines)
-                    
-                    line = f'  "{record_id}": {formatted_json}'
-                    f.write(line)
-                    
-                    batch_bytes += len(line.encode('utf-8'))
-                    first_record = False
-                
-                offset += len(rows)
-                bytes_written += batch_bytes
-                
-                batch_time = (datetime.now() - batch_start).total_seconds()
-                records_per_sec = len(rows) / batch_time if batch_time > 0 else 0
-                
-                progress = (offset / total_rows) * 100
-                bar_length = 30
-                filled = int(bar_length * offset // total_rows) if total_rows > 0 else 0
-                bar = '█' * filled + '░' * (bar_length - filled)
-                
-                print(f"  Batch {current_batch:>3}/{total_batches:<3} [{bar}] {progress:5.1f}% | "
-                      f"Records: {offset:>{len(str(total_rows))},}/{total_rows:,} | "
-                      f"Speed: {records_per_sec:>6,.0f} rec/s | "
-                      f"Size: {bytes_written/1024:>8,.1f} KB")
+        rows = result.get('results', [])
+        if not rows:
+            print(f"    No rows returned. Stopping.")
+            return
+        
+        print(f"  ✅ Retrieved {len(rows):,} records. Processing and writing to files...")
+        
+        # Process all rows
+        all_records = []
+        for row in rows:
+            cleaned_row = clean_record(row)
             
-            f.write('\n}')
+            # Track statistics
+            original_accountmanagement = row.get('accountmanagement')
+            if original_accountmanagement is not None:
+                if isinstance(original_accountmanagement, dict) and len(original_accountmanagement) == 1:
+                    first_key = list(original_accountmanagement.keys())[0]
+                    if isinstance(original_accountmanagement[first_key], dict):
+                        accountmanagement_unwrapped_count += 1
+            
+            for key, value in cleaned_row.items():
+                if 'path' in key.lower() and isinstance(value, str) and '\\' in value:
+                    path_denormalized_count += 1
+                if isinstance(value, str) and '_at_gmail_dot_com' in value:
+                    gmail_normalized_count += 1
+                if isinstance(value, (dict, list)) and key in row and isinstance(row[key], str):
+                    json_repaired_count += 1
+            
+            # Convert special types
+            for key, value in cleaned_row.items():
+                if value is None:
+                    cleaned_row[key] = None
+                elif isinstance(value, (datetime, date)):
+                    cleaned_row[key] = value.isoformat()
+                elif isinstance(value, Decimal):
+                    cleaned_row[key] = float(value)
+            
+            all_records.append(cleaned_row)
+        
+        # Write ALL records to both files
+        print(f"  ✍️ Writing {len(all_records):,} records to both files...")
+        
+        # Write to BOTH files
+        for file_path in output_files:
+            print(f"    Writing to: {os.path.basename(file_path)}")
+            first_record_status[file_path], bytes_written = write_all_to_file(
+                file_path, all_records, first_record_status[file_path]
+            )
+            total_bytes_written += bytes_written
+        
+        # Close JSON objects in both files
+        for file_path in output_files:
+            safe_write_file(file_path, 'a', '\n}')
+            print(f"  ✅ Closed: {file_path}")
         
         # NO METADATA SAVING - READ ONLY APPROACH
         
         # Final Summary
         elapsed_time = (datetime.now() - start_time).total_seconds()
-        avg_speed = offset / elapsed_time if elapsed_time > 0 else 0
+        avg_speed = len(rows) / elapsed_time if elapsed_time > 0 else 0
+        
+        # Get final file sizes
+        final_sizes = {}
+        for file_path in output_files:
+            if os.path.exists(file_path):
+                size_bytes = os.path.getsize(file_path)
+                final_sizes[file_path] = size_bytes
+            else:
+                final_sizes[file_path] = 0
         
         print("-"*70)
         print(f"\n📋 EXPORT SUMMARY")
@@ -1550,22 +1637,43 @@ def fetch_database(batch_size=5000):
         print(f"  🖥️  Identifier      : {identification_method.upper()}")
         print(f"  🔑 Value           : {computer_id if identification_method == 'ip_address' else computer_id[:32] + '...'}")
         print(f"  👥 Valid User IDs   : {len(user_ids_to_fetch)} users")
-        print(f"  📊 Records Exported : {offset:,} / {total_rows:,}")
-        print(f"  📦 Batches Used     : {current_batch}")
+        print(f"  📊 Records Exported : {len(rows):,} / {total_rows:,}")
+        print(f"  🚀 Query Type       : Single query (no batch division)")
         print(f"  📋 Schema Columns   : {len(columns)} (excluded 'analytics')")
         print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
         print(f"  🔄 Path Denormalized: {path_denormalized_count} path fields restored")
         print(f"  🧹 Config Title Extracted: {accountmanagement_unwrapped_count} records")
         print(f"  📧 Gmail Normalized : {gmail_normalized_count} path fields normalized")
-        print(f"  💾 File Size        : {bytes_written/1024:,.1f} KB ({bytes_written/1048576:.2f} MB)")
+        print(f"  💾 File 1 Size      : {final_sizes[ALL_FETCHED_INVESTORS]/1024:,.1f} KB ({final_sizes[ALL_FETCHED_INVESTORS]/1048576:.2f} MB)")
+        print(f"  📁 File 1 Path      : {ALL_FETCHED_INVESTORS}")
+        print(f"  💾 File 2 Size      : {final_sizes[ALL_UPDATED_INVESTORS]/1024:,.1f} KB ({final_sizes[ALL_UPDATED_INVESTORS]/1048576:.2f} MB)")
+        print(f"  📁 File 2 Path      : {ALL_UPDATED_INVESTORS}")
+        print(f"  📁 Account Mgmt File: {DEFAULT_ACCOUNTMANAGEMENT}")
+        print(f"  🛑  Database         : server_account.accountmanagement NOT modified (read-only)")
         print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
         print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
-        print(f"  📁 Output File      : {ALL_FETCHED_INVESTORS}")
-        print(f"  📁 Account Mgmt File: {DEFAULT_ACCOUNTMANAGEMENT}")
-        print(f"  ⚠️  Database         : server_account.accountmanagement NOT modified (read-only)")
         print("="*70)
         print(f"  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
+        
+    except PermissionError as e:
+        print(f"\n{'='*70}")
+        print(f"   PERMISSION ERROR")
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"  File Path  : {e.filename if hasattr(e, 'filename') else 'Unknown'}")
+        print(f"{'='*70}")
+        print(f"\n  💡 TROUBLESHOOTING TIPS:")
+        print(f"  1. Close any program that might have the file open (editor, Excel, etc.)")
+        print(f"  2. Run your script as Administrator")
+        print(f"  3. Check file permissions (right-click → Properties → uncheck Read-only)")
+        print(f"  4. Try deleting the file manually: del {e.filename if hasattr(e, 'filename') else 'file'}")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n  📜 Full Traceback:")
+        traceback.print_exc()
         
     except Exception as e:
         print(f"\n{'='*70}")
@@ -1578,20 +1686,83 @@ def fetch_database(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-
-def update_database(batch_size=5000):
-    """Stream updates from JSON to database without holding all in memory
+               
+def update_database():
+    """Update database from JSON files without batch processing
     - Reads from BOTH ALL_UPDATED_INVESTORS and ALL_FETCHED_INVESTORS
     - Merges data from both files
     - Does NOT delete files after updating
+    - Processes ALL records in one go
     """
     combine_investors_to_all_files()
     
+    def safe_read_file(file_path):
+        """Safely read a JSON file with permission handling"""
+        if not os.path.exists(file_path):
+            return None
+        
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except PermissionError as e:
+                print(f"    ⚠️ Permission denied reading {file_path} (attempt {attempt+1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    raise
+            except json.JSONDecodeError as e:
+                print(f"    ❌ JSON decode error in {file_path}: {str(e)}")
+                return None
+            except Exception as e:
+                print(f"    ❌ Error reading {file_path}: {str(e)}")
+                return None
+        
+        return None
+    
+    def safe_write_file(file_path, content):
+        """Safely write to a file with permission handling"""
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                return True
+                
+            except PermissionError as e:
+                print(f"    ⚠️ Permission denied writing {file_path} (attempt {attempt+1}/{max_retries})")
+                
+                if attempt < max_retries - 1:
+                    try:
+                        if os.path.exists(file_path):
+                            print(f"       🔄 Deleting file: {file_path}")
+                            os.remove(file_path)
+                            print(f"       ✅ File deleted, retrying...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    except Exception as delete_error:
+                        print(f"       ❌ Could not delete file: {delete_error}")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                else:
+                    raise
+        
+        return False
+    
     print("\n" + "="*70)
-    print(f"  UPDATING TABLES")
+    print(f"  UPDATING TABLES (SINGLE BATCH - ALL RECORDS)")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Batch Size  : {batch_size:,} records per batch")
+    print(f"  Mode        : ALL records in one operation")
     print("-"*70)
     
     try:
@@ -1604,39 +1775,37 @@ def update_database(batch_size=5000):
         # Check and load ALL_UPDATED_INVESTORS
         if os.path.exists(ALL_UPDATED_INVESTORS):
             try:
-                with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                    updated_data = json.load(f)
-                    if isinstance(updated_data, dict):
-                        merged_data.update(updated_data)
-                        files_loaded.append('ALL_UPDATED_INVESTORS.json')
-                        print(f"   ✅ Loaded from update file: {ALL_UPDATED_INVESTORS}")
-                        print(f"      📊 Records: {len(updated_data):,}")
-                    else:
-                        print(f"   ⚠️ Update file has invalid format (expected dict): {ALL_UPDATED_INVESTORS}")
+                updated_data = safe_read_file(ALL_UPDATED_INVESTORS)
+                if updated_data and isinstance(updated_data, dict):
+                    merged_data.update(updated_data)
+                    files_loaded.append('ALL_UPDATED_INVESTORS.json')
+                    print(f"   ✅ Loaded from update file: {ALL_UPDATED_INVESTORS}")
+                    print(f"      📊 Records: {len(updated_data):,}")
+                else:
+                    print(f"   🛑 Update file has invalid format (expected dict): {ALL_UPDATED_INVESTORS}")
             except Exception as e:
-                print(f"   ⚠️ Error reading update file: {str(e)}")
+                print(f"   🛑 Error reading update file: {str(e)}")
         else:
-            print(f"   ⚠️ Update file not found: {ALL_UPDATED_INVESTORS}")
+            print(f"   🛑 Update file not found: {ALL_UPDATED_INVESTORS}")
         
         # Check and load ALL_FETCHED_INVESTORS
         if os.path.exists(ALL_FETCHED_INVESTORS):
             try:
-                with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                    fetched_data = json.load(f)
-                    if isinstance(fetched_data, dict):
-                        # Merge, but don't overwrite ALL_UPDATED_INVESTORS data if it exists
-                        for key, value in fetched_data.items():
-                            if key not in merged_data:
-                                merged_data[key] = value
-                        files_loaded.append('ALL_FETCHED_INVESTORS.json')
-                        print(f"   ✅ Loaded from fetched file: {ALL_FETCHED_INVESTORS}")
-                        print(f"      📊 Records: {len(fetched_data):,}")
-                    else:
-                        print(f"   ⚠️ Fetched file has invalid format (expected dict): {ALL_FETCHED_INVESTORS}")
+                fetched_data = safe_read_file(ALL_FETCHED_INVESTORS)
+                if fetched_data and isinstance(fetched_data, dict):
+                    # Merge, but don't overwrite ALL_UPDATED_INVESTORS data if it exists
+                    for key, value in fetched_data.items():
+                        if key not in merged_data:
+                            merged_data[key] = value
+                    files_loaded.append('ALL_FETCHED_INVESTORS.json')
+                    print(f"   ✅ Loaded from fetched file: {ALL_FETCHED_INVESTORS}")
+                    print(f"      📊 Records: {len(fetched_data):,}")
+                else:
+                    print(f"   🛑 Fetched file has invalid format (expected dict): {ALL_FETCHED_INVESTORS}")
             except Exception as e:
-                print(f"   ⚠️ Error reading fetched file: {str(e)}")
+                print(f"   🛑 Error reading fetched file: {str(e)}")
         else:
-            print(f"   ⚠️ Fetched file not found: {ALL_FETCHED_INVESTORS}")
+            print(f"   🛑 Fetched file not found: {ALL_FETCHED_INVESTORS}")
         
         if not merged_data:
             print(f"\n   ❌ No data loaded from any source file")
@@ -1680,17 +1849,7 @@ def update_database(batch_size=5000):
             print(f"    Could not fetch column information")
             existing_columns = set()
         
-        # Initialize variables for insiders update
-        investors_to_update = {}
-        investors_to_skip = []  # Records not in DB (will be skipped, not removed)
-        successfully_updated_ids = []
-        updated_count = 0
-        failed_count = 0
-        elapsed_time = 0
-        avg_speed = 0
-        unmapped_fields = set()
-        
-        # Helper function to determine if a value should be treated as JSON
+        # Helper functions
         def is_json_field(value):
             """Determine if a value should be stored as JSON in database"""
             if value is None:
@@ -1786,6 +1945,9 @@ def update_database(batch_size=5000):
         # Step 4: Identify which records exist in DB vs not
         print(f"\n📖 [4/6] Processing Records...")
         
+        investors_to_update = {}
+        investors_to_skip = []
+        
         for investor_id, investor_data in merged_data.items():
             if investor_id in existing_ids:
                 investors_to_update[investor_id] = investor_data
@@ -1793,7 +1955,7 @@ def update_database(batch_size=5000):
                 investors_to_skip.append(investor_id)
         
         print(f"  📊 Records to Update (exist in DB): {len(investors_to_update):,}")
-        print(f"  ⚠️  Records Skipped (not in DB): {len(investors_to_skip):,}")
+        print(f"  🛑  Records Skipped (not in DB): {len(investors_to_skip):,}")
         
         if investors_to_skip:
             print(f"     ℹ️ These records will be skipped (not deleted from file)")
@@ -1803,123 +1965,119 @@ def update_database(batch_size=5000):
             else:
                 print(f"     Skipped IDs (first 10): {', '.join(investors_to_skip[:10])}...")
         
-        # Step 5: Update Database in Batches
+        # Step 5: Update Database - ALL RECORDS IN ONE OPERATION
         if investors_to_update:
-            print(f"\n📤 [5/6] Updating Database Records...")
+            print(f"\n📤 [5/6] Updating ALL Database Records (Single Operation)...")
             print("-"*70)
             
             start_time = datetime.now()
             updated_count = 0
             failed_count = 0
-            current_batch = 0
+            successfully_updated_ids = []
+            unmapped_fields = set()
             
-            investor_ids = list(investors_to_update.keys())
-            total_batches = (len(investor_ids) + batch_size - 1) // batch_size
+            total_to_update = len(investors_to_update)
+            print(f"  🚀 Processing all {total_to_update:,} records in one operation...")
+            print(f"  ⏳ This may take some time for large datasets...")
+            print()
             
-            for i in range(0, len(investor_ids), batch_size):
-                current_batch += 1
-                batch_start = datetime.now()
+            # Process ALL records in one go
+            for index, (investor_id, investor) in enumerate(investors_to_update.items(), 1):
+                # Progress indicator (every 100 records)
+                if index % 100 == 0 or index == total_to_update:
+                    progress = (index / total_to_update) * 100
+                    bar_length = 30
+                    filled = int(bar_length * index // total_to_update)
+                    bar = '█' * filled + '░' * (bar_length - filled)
+                    print(f"  [{bar}] {progress:5.1f}% | {index:,}/{total_to_update:,} records processed", end='\r')
                 
-                batch_ids = investor_ids[i:i + batch_size]
-                batch_updates = 0
-                batch_failed = 0
+                # Build UPDATE query dynamically
+                update_parts = []
                 
-                for investor_id in batch_ids:
-                    investor = investors_to_update[investor_id]
-                    
-                    # Build UPDATE query dynamically
-                    update_parts = []
-                    
-                    for json_field, value in investor.items():
-                        if json_field == 'id':
-                            continue
-                        
-                        if json_field.lower() not in existing_columns:
-                            unmapped_fields.add(json_field)
-                            continue
-                        
-                        # Normalize values
-                        if json_field.lower() == 'execution_start_date':
-                            value = normalize_execution_start_date(value)
-                        
-                        if 'path' in json_field.lower():
-                            value = normalize_path_value(value, json_field)
-                        
-                        # Handle different value types
-                        if is_json_field(value):
-                            json_value = normalize_json_value(value)
-                            if json_value is None:
-                                update_parts.append(f"`{json_field}` = NULL")
-                            else:
-                                escaped_json = json_value.replace("'", "\\'")
-                                update_parts.append(f"`{json_field}` = '{escaped_json}'")
-                        elif value is None:
-                            update_parts.append(f"`{json_field}` = NULL")
-                        elif isinstance(value, bool):
-                            db_value = '1' if value else '0'
-                            update_parts.append(f"`{json_field}` = {db_value}")
-                        elif isinstance(value, (int, float)):
-                            update_parts.append(f"`{json_field}` = {value}")
-                        elif isinstance(value, str):
-                            if value.strip().upper() == 'NULL':
-                                update_parts.append(f"`{json_field}` = NULL")
-                            else:
-                                escaped_value = value.replace("'", "\\'")
-                                update_parts.append(f"`{json_field}` = '{escaped_value}'")
-                        else:
-                            str_value = str(value)
-                            escaped_value = str_value.replace("'", "\\'")
-                            update_parts.append(f"`{json_field}` = '{escaped_value}'")
-                    
-                    if not update_parts:
+                for json_field, value in investor.items():
+                    if json_field == 'id':
                         continue
                     
-                    set_clause = ", ".join(update_parts)
-                    query = f"UPDATE insiders SET {set_clause} WHERE id = {int(investor_id)}"
+                    if json_field.lower() not in existing_columns:
+                        unmapped_fields.add(json_field)
+                        continue
                     
-                    result = db.execute_query(query)
+                    # Normalize values
+                    if json_field.lower() == 'execution_start_date':
+                        value = normalize_execution_start_date(value)
                     
-                    if result.get('status') == 'success':
-                        batch_updates += 1
-                        updated_count += 1
-                        successfully_updated_ids.append(investor_id)
+                    if 'path' in json_field.lower():
+                        value = normalize_path_value(value, json_field)
+                    
+                    # Handle different value types
+                    if is_json_field(value):
+                        json_value = normalize_json_value(value)
+                        if json_value is None:
+                            update_parts.append(f"`{json_field}` = NULL")
+                        else:
+                            escaped_json = json_value.replace("'", "\\'")
+                            update_parts.append(f"`{json_field}` = '{escaped_json}'")
+                    elif value is None:
+                        update_parts.append(f"`{json_field}` = NULL")
+                    elif isinstance(value, bool):
+                        db_value = '1' if value else '0'
+                        update_parts.append(f"`{json_field}` = {db_value}")
+                    elif isinstance(value, (int, float)):
+                        update_parts.append(f"`{json_field}` = {value}")
+                    elif isinstance(value, str):
+                        if value.strip().upper() == 'NULL':
+                            update_parts.append(f"`{json_field}` = NULL")
+                        else:
+                            escaped_value = value.replace("'", "\\'")
+                            update_parts.append(f"`{json_field}` = '{escaped_value}'")
                     else:
-                        batch_failed += 1
-                        failed_count += 1
-                        print(f"      Failed to update investor {investor_id}: {result.get('message')}")
+                        str_value = str(value)
+                        escaped_value = str_value.replace("'", "\\'")
+                        update_parts.append(f"`{json_field}` = '{escaped_value}'")
                 
-                # Batch progress
-                batch_time = (datetime.now() - batch_start).total_seconds()
-                records_per_sec = len(batch_ids) / batch_time if batch_time > 0 else 0
+                if not update_parts:
+                    continue
                 
-                progress = ((i + len(batch_ids)) / len(investor_ids)) * 100
-                bar_length = 30
-                filled = int(bar_length * (i + len(batch_ids)) // len(investor_ids))
-                bar = '█' * filled + '░' * (bar_length - filled)
+                set_clause = ", ".join(update_parts)
+                query = f"UPDATE insiders SET {set_clause} WHERE id = {int(investor_id)}"
                 
-                print(f"  Batch {current_batch:>3}/{total_batches:<3} [{bar}] {progress:5.1f}% | "
-                      f"Updated: {batch_updates:>4} | Failed: {batch_failed:>3} | "
-                      f"Speed: {records_per_sec:>6,.0f} rec/s | "
-                      f"Total: {updated_count:>{len(str(len(investor_ids)))},}/{len(investor_ids):,}")
+                result = db.execute_query(query)
+                
+                if result.get('status') == 'success':
+                    updated_count += 1
+                    successfully_updated_ids.append(investor_id)
+                else:
+                    failed_count += 1
+                    print(f"\n      ❌ Failed to update investor {investor_id}: {result.get('message')}")
             
-            if unmapped_fields:
-                print(f"\n    Unmapped/Non-existent fields found (skipped):")
-                for field in sorted(unmapped_fields):
-                    print(f"     - {field}")
+            # Final progress update
+            print()  # New line after progress bar
             
             elapsed_time = (datetime.now() - start_time).total_seconds()
             avg_speed = updated_count / elapsed_time if elapsed_time > 0 else 0
+            
+            if unmapped_fields:
+                print(f"\n    Unmapped/Non-existent fields found (skipped):")
+                for field in sorted(unmapped_fields)[:10]:
+                    print(f"     - {field}")
+                if len(unmapped_fields) > 10:
+                    print(f"     ... and {len(unmapped_fields) - 10} more")
         else:
             print(f"\n📤 [5/6] No records to update - skipping insiders update")
+            elapsed_time = 0
+            avg_speed = 0
+            successfully_updated_ids = []
+            updated_count = 0
+            failed_count = 0
+            unmapped_fields = set()
         
         # Step 6: DO NOT DELETE OR MODIFY THE SOURCE FILES
         print(f"\n💾 [6/6] Preserving Source Files (No Deletion)...")
         print(f"   ℹ️ Source files preserved")
         print(f"   📊 Total records in merged data: {total_investors:,}")
         print(f"   ✅ Updated successfully: {len(successfully_updated_ids):,}")
-        print(f"   ⚠️ Skipped (not in DB): {len(investors_to_skip):,}")
+        print(f"   🛑 Skipped (not in DB): {len(investors_to_skip):,}")
         print(f"   ℹ️ No data was deleted from any file")
-        
         
         # Final Summary
         print("-"*70)
@@ -1938,6 +2096,7 @@ def update_database(batch_size=5000):
             print(f"     Time                : {elapsed_time:.1f} seconds")
             print(f"     Speed               : {avg_speed:,.0f} records/second")
             print(f"     Files Preserved     : YES (no deletion)")
+            print(f"     Update Mode         : SINGLE BATCH (all records at once)")
             
             if successfully_updated_ids:
                 print(f"     Sample Updated IDs  : {', '.join(successfully_updated_ids[:5])}{'...' if len(successfully_updated_ids) > 5 else ''}")
@@ -1961,6 +2120,24 @@ def update_database(batch_size=5000):
         print(f"  Error: {str(e)}")
         print(f"{'='*70}")
         
+    except PermissionError as e:
+        print(f"\n{'='*70}")
+        print(f"   PERMISSION ERROR")
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"  File Path  : {e.filename if hasattr(e, 'filename') else 'Unknown'}")
+        print(f"{'='*70}")
+        print(f"\n  💡 TROUBLESHOOTING TIPS:")
+        print(f"  1. Close any program that might have the file open")
+        print(f"  2. Run your script as Administrator")
+        print(f"  3. Check file permissions")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n  📜 Full Traceback:")
+        traceback.print_exc()
+        
     except Exception as e:
         print(f"\n{'='*70}")
         print(f"   CRITICAL ERROR")
@@ -1972,7 +2149,7 @@ def update_database(batch_size=5000):
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-
+  
 def close_db_browser():
     db.shutdown()
     print(f"\n🔒 Database connection closed.")

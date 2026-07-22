@@ -379,6 +379,236 @@ def repair_json_files():
     
     return stats
 
+def check_and_fix_json_files():
+    """
+    Simple function to fix ONLY locked/permission-denied JSON files by:
+    1. Reading the content
+    2. Creating a backup without timestamp
+    3. Deleting the original
+    4. Renaming backup to original
+    """
+    
+    import os
+    import json
+    import shutil
+    import time
+    from pathlib import Path
+    
+    print("\n" + "="*80)
+    print("  FIX LOCKED/PERMISSION-DENIED JSON FILES".center(80))
+    print("="*80)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*80)
+    
+    base_path = r"C:\xampp\htdocs\harvcore"
+    
+    stats = {
+        "total_files": 0,
+        "files_with_issues": 0,
+        "files_fixed": 0,
+        "files_failed": 0,
+        "fixed_files": [],
+        "failed_files": [],
+        "errors": []
+    }
+    
+    # Find all JSON files
+    json_files = []
+    for root, dirs, files in os.walk(base_path):
+        for file in files:
+            if file.endswith('.json'):
+                json_files.append(os.path.join(root, file))
+    
+    stats["total_files"] = len(json_files)
+    print(f"Found {len(json_files)} JSON files")
+    print("-"*80)
+    
+    for filepath in json_files:
+        filename = os.path.basename(filepath)
+        dirname = os.path.dirname(filepath)
+        
+        # FIRST CHECK: Does this file have permission issues?
+        has_issue = False
+        issue_type = None
+        
+        # Check if file is readable
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                f.read(1)
+        except PermissionError:
+            has_issue = True
+            issue_type = "Permission denied (read)"
+        except Exception:
+            pass
+        
+        # Check if file is writable
+        if not has_issue:
+            try:
+                with open(filepath, 'a', encoding='utf-8') as f:
+                    pass
+            except PermissionError:
+                has_issue = True
+                issue_type = "Permission denied (write)"
+            except Exception:
+                pass
+        
+        # Check if file is locked (Windows)
+        if not has_issue and sys.platform == 'win32':
+            try:
+                import msvcrt
+                with open(filepath, 'r+b') as f:
+                    try:
+                        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                    except (IOError, OSError):
+                        has_issue = True
+                        issue_type = "File is locked"
+            except:
+                pass
+        
+        # If no issues, skip this file
+        if not has_issue:
+            print(f"\n✅ SKIPPING: {filename} (no permission issues)")
+            continue
+        
+        # If we get here, the file HAS permission issues
+        stats["files_with_issues"] += 1
+        print(f"\n🔧 PROCESSING: {filename} (Issue: {issue_type})")
+        
+        try:
+            # Step 1: Try to read the file content
+            data = None
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                print(f"   ✅ Read successfully")
+            except PermissionError:
+                print(f"   ⚠️ Permission denied reading, trying with backup method...")
+                # Try reading with different method
+                try:
+                    # Try to copy the file first
+                    temp_backup = filepath + '.temp'
+                    shutil.copy2(filepath, temp_backup)
+                    with open(temp_backup, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    os.remove(temp_backup)
+                    print(f"   ✅ Read via backup method")
+                except Exception as e:
+                    print(f"   ❌ Cannot read file: {e}")
+                    stats["failed_files"].append(filename)
+                    stats["files_failed"] += 1
+                    continue
+            except Exception as e:
+                print(f"   ❌ Error reading: {e}")
+                stats["failed_files"].append(filename)
+                stats["files_failed"] += 1
+                continue
+            
+            # Step 2: Create backup without timestamp
+            backup_path = filepath.replace('.json', '_backup.json')
+            
+            # If backup already exists, remove it
+            if os.path.exists(backup_path):
+                try:
+                    os.remove(backup_path)
+                except:
+                    pass
+            
+            # Copy original to backup
+            try:
+                shutil.copy2(filepath, backup_path)
+                print(f"   📋 Created backup: {os.path.basename(backup_path)}")
+            except Exception as e:
+                print(f"   ❌ Failed to create backup: {e}")
+                stats["failed_files"].append(filename)
+                stats["files_failed"] += 1
+                continue
+            
+            # Step 3: Delete original file
+            try:
+                # Try multiple times with delay
+                for attempt in range(3):
+                    try:
+                        os.remove(filepath)
+                        print(f"   🗑️ Deleted original file")
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            print(f"   ⏳ Waiting for file lock to release...")
+                            time.sleep(0.5)
+                        else:
+                            raise
+            except Exception as e:
+                print(f"   ❌ Failed to delete original: {e}")
+                # Try to restore backup
+                try:
+                    shutil.copy2(backup_path, filepath)
+                except:
+                    pass
+                stats["failed_files"].append(filename)
+                stats["files_failed"] += 1
+                continue
+            
+            # Step 4: Rename backup to original
+            try:
+                # Small delay to ensure file is released
+                time.sleep(0.2)
+                os.rename(backup_path, filepath)
+                print(f"   ✅ Renamed backup to original")
+                stats["files_fixed"] += 1
+                stats["fixed_files"].append(filename)
+            except Exception as e:
+                print(f"   ❌ Failed to rename: {e}")
+                # Try to restore from backup
+                try:
+                    shutil.copy2(backup_path, filepath)
+                    print(f"   🔄 Restored from backup")
+                except:
+                    pass
+                stats["failed_files"].append(filename)
+                stats["files_failed"] += 1
+            
+        except Exception as e:
+            print(f"   ❌ Error processing: {e}")
+            stats["failed_files"].append(filename)
+            stats["files_failed"] += 1
+            stats["errors"].append(f"{filename}: {str(e)}")
+    
+    # Summary
+    print("\n" + "="*80)
+    print("  SUMMARY".center(80))
+    print("="*80)
+    print(f"\n  📊 Total JSON files scanned: {stats['total_files']}")
+    print(f"  🔒 Files with permission issues: {stats['files_with_issues']}")
+    print(f"  ✅ Files fixed: {stats['files_fixed']}")
+    print(f"  ❌ Files failed: {stats['files_failed']}")
+    
+    if stats["fixed_files"]:
+        print(f"\n  ✅ Fixed files:")
+        for f in stats["fixed_files"][:20]:
+            print(f"     - {f}")
+        if len(stats["fixed_files"]) > 20:
+            print(f"     ... and {len(stats['fixed_files']) - 20} more")
+    
+    if stats["failed_files"]:
+        print(f"\n  ❌ Failed files:")
+        for f in stats["failed_files"][:20]:
+            print(f"     - {f}")
+        if len(stats["failed_files"]) > 20:
+            print(f"     ... and {len(stats['failed_files']) - 20} more")
+    
+    if stats["errors"]:
+        print(f"\n  ❌ Errors:")
+        for error in stats["errors"][:10]:
+            print(f"     - {error}")
+        if len(stats["errors"]) > 10:
+            print(f"     ... and {len(stats['errors']) - 10} more")
+    
+    print(f"\n  🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*80)
+    
+    return stats
+
 def restore_empty_investor_files():
     """
     Checks and synchronizes investor files between main and backup.
@@ -1515,6 +1745,360 @@ def sync_and_distribute_investors():
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
          
+def manage_accountmanagement_and_activities_jsons():
+    """
+    Updates accountmanagement.json and activities.json for each investor using data from FETCHED_INVESTORS.
+    
+    This function:
+    1. For accountmanagement.json: OVERWRITES the entire file with data from FETCHED_INVESTORS
+    2. For activities.json: UPDATES field by field (only updates existing fields, preserves others)
+    3. Creates missing folders and files if they don't exist
+    4. Handles all investors in FETCHED_INVESTORS
+    
+    Returns:
+        dict: Statistics about the update process
+    """
+    
+    print("\n" + "="*70)
+    print("  MANAGE ACCOUNTMANAGEMENT AND ACTIVITIES".center(70))
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    
+    stats = {
+        "processing_success": False,
+        "total_investors": 0,
+        "investors_processed": 0,
+        "accountmanagement_overwritten": 0,
+        "activities_updated": 0,
+        "folders_created": 0,
+        "errors": [],
+        "warnings": [],
+        "details": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # ============================================
+    # SAFE FILE OPERATIONS
+    # ============================================
+    def safe_json_load(filepath, default=None):
+        """Safely load JSON with error handling"""
+        if not os.path.exists(filepath):
+            return default
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"   ⚠️ Error loading {filepath}: {e}")
+            return default
+    
+    def safe_json_write(filepath, data):
+        """Safely write JSON with directory creation"""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"   ❌ Write error to {filepath}: {e}")
+            return False
+    
+    def update_dict_field_by_field(existing_dict, new_dict):
+        """
+        Update existing_dict field by field with values from new_dict.
+        
+        This function:
+        1. Updates only fields that exist in new_dict
+        2. Preserves fields in existing_dict that don't exist in new_dict
+        3. For nested dicts, recursively updates field by field
+        4. For lists, replaces the entire list if provided
+        
+        Args:
+            existing_dict: The existing dictionary to update
+            new_dict: The dictionary with new values
+            
+        Returns:
+            dict: Updated dictionary
+        """
+        if not existing_dict:
+            return new_dict.copy() if new_dict else {}
+        
+        if not new_dict:
+            return existing_dict
+        
+        result = existing_dict.copy()
+        
+        for key, value in new_dict.items():
+            # If key doesn't exist in result, add it
+            if key not in result:
+                result[key] = value
+                continue
+            
+            # If both are dicts, recursively update
+            if isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = update_dict_field_by_field(result[key], value)
+                continue
+            
+            # If existing is list and new is list, replace entirely
+            if isinstance(result[key], list) and isinstance(value, list):
+                result[key] = value
+                continue
+            
+            # For all other types, update the value
+            result[key] = value
+        
+        return result
+    
+    # ============================================
+    # LOAD FETCHED INVESTORS
+    # ============================================
+    print("\n📂 Loading FETCHED_INVESTORS...")
+    
+    if not os.path.exists(FETCHED_INVESTORS):
+        print(f"   ❌ FETCHED_INVESTORS not found: {FETCHED_INVESTORS}")
+        stats["errors"].append(f"FETCHED_INVESTORS not found")
+        return stats
+    
+    fetched_data = safe_json_load(FETCHED_INVESTORS, {})
+    
+    if not fetched_data:
+        print(f"   ❌ FETCHED_INVESTORS is empty or invalid")
+        stats["errors"].append("FETCHED_INVESTORS is empty or invalid")
+        return stats
+    
+    stats["total_investors"] = len(fetched_data)
+    print(f"   ✅ Loaded {len(fetched_data)} investors from FETCHED_INVESTORS")
+    
+    # ============================================
+    # PROCESS EACH INVESTOR
+    # ============================================
+    print("\n🔧 Processing investors...")
+    print("-"*70)
+    
+    for inv_id, investor_data in fetched_data.items():
+        print(f"\n📋 Investor: {inv_id}")
+        inv_detail = {
+            "investor_id": inv_id,
+            "accountmanagement_overwritten": False,
+            "activities_updated": False,
+            "folder_created": False,
+            "errors": [],
+            "warnings": []
+        }
+        
+        try:
+            # Create investor folder
+            inv_root = Path(INV_PATH) / str(inv_id)
+            if not inv_root.exists():
+                inv_root.mkdir(parents=True, exist_ok=True)
+                stats["folders_created"] += 1
+                inv_detail["folder_created"] = True
+                print(f"   📁 Created folder: {inv_root}")
+            else:
+                print(f"   📁 Folder exists: {inv_root}")
+            
+            # ============================================
+            # UPDATE ACCOUNTMANAGEMENT.JSON (OVERWRITE)
+            # ============================================
+            accountmanagement_path = inv_root / "accountmanagement.json"
+            
+            # Get accountmanagement data from fetched investor
+            accountmanagement_data = investor_data.get('accountmanagement', {})
+            
+            if accountmanagement_data:
+                # Overwrite the entire file
+                if safe_json_write(str(accountmanagement_path), accountmanagement_data):
+                    stats["accountmanagement_overwritten"] += 1
+                    inv_detail["accountmanagement_overwritten"] = True
+                    print(f"   ✅ accountmanagement.json OVERWRITTEN ({len(accountmanagement_data)} fields)")
+                else:
+                    error_msg = f"Failed to write accountmanagement.json"
+                    inv_detail["errors"].append(error_msg)
+                    stats["errors"].append(f"{inv_id}: {error_msg}")
+                    print(f"   ❌ Failed to overwrite accountmanagement.json")
+            else:
+                print(f"   ⚠️ No accountmanagement data in FETCHED_INVESTORS for {inv_id}")
+                inv_detail["warnings"].append("No accountmanagement data available")
+                stats["warnings"].append(f"{inv_id}: No accountmanagement data")
+            
+            # ============================================
+            # UPDATE ACTIVITIES.JSON (FIELD BY FIELD)
+            # ============================================
+            activities_path = inv_root / "activities.json"
+            
+            # Load existing activities.json if it exists
+            existing_activities = {}
+            if activities_path.exists():
+                existing_activities = safe_json_load(str(activities_path), {})
+                if existing_activities:
+                    print(f"   📋 Loaded existing activities.json ({len(existing_activities)} fields)")
+            
+            # Get data from fetched investor to update activities
+            # These are the fields we want to update in activities.json
+            update_fields = {}
+            
+            # Extract fields from investor_data
+            field_mappings = {
+                'execution_start_date': 'execution_start_date',
+                'contract_duration': 'contract_duration',
+                'contract_days_left': 'contract_days_left',
+                'min_broker_balance': 'min_broker_balance',
+                'broker_balance': 'broker_balance',
+                'broker_balance_str': 'broker_balance',
+                'account_mode': 'account_mode',
+                'demo_account': 'demo_account',
+                'enable_autotrading': 'activate_autotrading',
+                'bypass_restriction': 'bypass_restriction',
+                'invested_with': 'strategies'
+            }
+            
+            # Extract values from investor_data
+            for source_key, target_key in field_mappings.items():
+                if source_key in investor_data:
+                    value = investor_data[source_key]
+                    
+                    # Convert empty strings/None to None for certain fields
+                    if target_key == 'execution_start_date':
+                        if not value or value in ['NULL', 'NONE', '']:
+                            value = None
+                    
+                    # Special handling for strategies (convert comma-separated string to list)
+                    if target_key == 'strategies' and isinstance(value, str):
+                        if value and value.strip():
+                            value = [s.strip() for s in value.split(',') if s.strip()]
+                        else:
+                            value = []
+                    
+                    # Special handling for contract_duration
+                    if target_key == 'contract_duration' and value is not None:
+                        try:
+                            value = int(value)
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Special handling for min_broker_balance and broker_balance
+                    if target_key in ['min_broker_balance', 'broker_balance'] and value is not None:
+                        try:
+                            value = float(value)
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    update_fields[target_key] = value
+            
+            # Also extract from accountmanagement if available
+            if accountmanagement_data:
+                for key in ['login', 'password', 'server', 'activate_autotrading', 'bypass_restriction']:
+                    if key in accountmanagement_data:
+                        update_fields[key] = accountmanagement_data[key]
+            
+            # Add the authorized magic number from investor_data if available
+            if 'authorized_magic_number' in investor_data:
+                update_fields['authorized_magic_number'] = investor_data['authorized_magic_number']
+            elif 'unique_magicnumber' in investor_data:
+                update_fields['authorized_magic_number'] = investor_data['unique_magicnumber']
+            
+            # Now update existing_activities with the extracted fields
+            if update_fields:
+                # Use field-by-field update
+                updated_activities = update_dict_field_by_field(existing_activities, update_fields)
+                
+                # Add timestamp for the update
+                updated_activities['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Save the updated activities
+                if safe_json_write(str(activities_path), updated_activities):
+                    stats["activities_updated"] += 1
+                    inv_detail["activities_updated"] = True
+                    print(f"   ✅ activities.json UPDATED field by field ({len(update_fields)} fields updated)")
+                    
+                    # Show what was updated
+                    for key, value in update_fields.items():
+                        if key in existing_activities and existing_activities[key] != value:
+                            print(f"      • {key}: {existing_activities[key]} -> {value}")
+                        elif key not in existing_activities:
+                            print(f"      + {key}: Added new field")
+                else:
+                    error_msg = f"Failed to write activities.json"
+                    inv_detail["errors"].append(error_msg)
+                    stats["errors"].append(f"{inv_id}: {error_msg}")
+                    print(f"   ❌ Failed to update activities.json")
+            else:
+                print(f"   ⚠️ No fields to update in activities.json")
+                inv_detail["warnings"].append("No fields available for update")
+                
+                # Still ensure activities.json exists
+                if not activities_path.exists():
+                    # Create minimal activities.json
+                    minimal_activities = {
+                        "investor_id": str(inv_id),
+                        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    if safe_json_write(str(activities_path), minimal_activities):
+                        print(f"   ✅ Created minimal activities.json")
+                    else:
+                        print(f"   ❌ Failed to create minimal activities.json")
+            
+            # ============================================
+            # UPDATE INVESTORS FOLDER WITH ADDITIONAL DATA
+            # ============================================
+            
+            # Create/Update tradeshistory.json if it doesn't exist
+            tradeshistory_path = inv_root / "tradeshistory.json"
+            if not tradeshistory_path.exists():
+                if safe_json_write(str(tradeshistory_path), []):
+                    print(f"   ✅ Created tradeshistory.json")
+            
+            # Create/Update settings.json if needed (optional)
+            # This is a placeholder for any additional files
+            
+            stats["investors_processed"] += 1
+            
+        except Exception as e:
+            error_msg = f"Error processing investor {inv_id}: {str(e)}"
+            inv_detail["errors"].append(error_msg)
+            stats["errors"].append(error_msg)
+            print(f"   ❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+        
+        stats["details"].append(inv_detail)
+    
+    # ============================================
+    # SUMMARY
+    # ============================================
+    stats["processing_success"] = True if len(stats["errors"]) == 0 else False
+    
+    print("\n" + "="*70)
+    print("  SUMMARY".center(70))
+    print("="*70)
+    
+    print(f"\n  📊 Total investors in FETCHED_INVESTORS: {stats['total_investors']}")
+    print(f"  ✅ Investors processed: {stats['investors_processed']}")
+    print(f"  📁 Folders created: {stats['folders_created']}")
+    print(f"  🔄 accountmanagement.json overwritten: {stats['accountmanagement_overwritten']}")
+    print(f"  📝 activities.json updated: {stats['activities_updated']}")
+    
+    if stats["warnings"]:
+        print(f"\n  ⚠️ Warnings ({len(stats['warnings'])}):")
+        for warning in stats["warnings"][:10]:
+            print(f"     - {warning}")
+        if len(stats["warnings"]) > 10:
+            print(f"     ... and {len(stats['warnings']) - 10} more")
+    
+    if stats["errors"]:
+        print(f"\n  ❌ Errors ({len(stats['errors'])}):")
+        for error in stats["errors"][:10]:
+            print(f"     - {error}")
+        if len(stats["errors"]) > 10:
+            print(f"     ... and {len(stats['errors']) - 10} more")
+    
+    print(f"\n  ✅ Overall Status : {'SUCCESS' if stats['processing_success'] else 'WARNING - Some errors occurred'}")
+    print(f"  🕐 Time           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    
+    return stats
+        
 def move_fetched_investors():
     """
     Moves verified investors from fetched_investors.json to:
@@ -2946,6 +3530,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
     Returns:
         dict: Statistics about authorized/unauthorized actions found
     """
+    manage_accountmanagement_and_activities_jsons()
     
     # Helper function to get the last message for a specific section
     def get_last_message(notifications_dict, section_key):
