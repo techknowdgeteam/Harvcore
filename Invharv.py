@@ -1745,6 +1745,423 @@ def sync_and_distribute_investors():
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
          
+def restore_missing_fields():
+    """
+    Heal missing fields across JSON files using hierarchical field-by-field merging.
+    
+    Priority order:
+    1. INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS (highest priority)
+    2. INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
+    3. ALL_UPDATED_INVESTORS
+    4. ALL_FETCHED_INVESTORS (lowest priority)
+    
+    Rules:
+    - Individual files (invharv/harvhub) ONLY heal their own users
+    - ALL files can receive from individual files
+    - Individual files can receive from ALL files if they're missing fields
+    - Field-by-field merging (not whole record replacement)
+    - Files heal each other if individual files are empty
+    """
+    
+    print("\n" + "="*70)
+    print(f"  HEALING MISSING FIELDS (FIELD-BY-FIELD MERGE)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    
+    def safe_read_json(file_path, default={}):
+        """Safely read JSON file with error handling"""
+        if not os.path.exists(file_path):
+            print(f"    ⚠️ File not found: {file_path}")
+            return default
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"    ❌ JSON decode error in {file_path}: {str(e)}")
+            return default
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied reading {file_path}")
+            return default
+        except Exception as e:
+            print(f"    ❌ Error reading {file_path}: {str(e)}")
+            return default
+    
+    def safe_write_json(file_path, data):
+        """Safely write JSON file with permission handling"""
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied writing {file_path}")
+            # Try to delete and retry
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    return True
+            except:
+                pass
+            return False
+        except Exception as e:
+            print(f"    ❌ Error writing {file_path}: {str(e)}")
+            return False
+    
+    def merge_fields(source_record, target_record):
+        """
+        Merge fields from source to target where target is missing fields.
+        Returns: (merged_record, fields_added)
+        """
+        if not source_record or not target_record:
+            return target_record, 0
+        
+        merged = dict(target_record)  # Start with target
+        fields_added = 0
+        
+        for key, value in source_record.items():
+            # Skip 'id' field as it's the key
+            if key == 'id':
+                continue
+            
+            # Only add if target doesn't have this field OR target has it as None/null
+            if key not in merged or merged[key] is None:
+                merged[key] = value
+                fields_added += 1
+        
+        return merged, fields_added
+    
+    def get_record_id(record):
+        """Extract record ID from record dict"""
+        if isinstance(record, dict):
+            return str(record.get('id', ''))
+        return None
+    
+    def merge_file_pair(source_data, target_data, source_name, target_name, skip_missing_ids=False):
+        """
+        Merge fields from source to target for matching IDs.
+        If skip_missing_ids=True, only merge for IDs that exist in target.
+        """
+        if not source_data or not target_data:
+            return target_data, 0, 0, 0
+        
+        merged_target = dict(target_data)
+        total_records_healed = 0
+        total_fields_added = 0
+        total_records_skipped = 0
+        
+        for record_id, source_record in source_data.items():
+            if record_id in merged_target:
+                # Merge fields from source to target
+                target_record = merged_target[record_id]
+                merged_record, fields_added = merge_fields(source_record, target_record)
+                
+                if fields_added > 0:
+                    merged_target[record_id] = merged_record
+                    total_records_healed += 1
+                    total_fields_added += fields_added
+                    print(f"      ✅ Healed record {record_id}: added {fields_added} field(s)")
+            else:
+                if not skip_missing_ids:
+                    # If target doesn't have this ID, add the whole record
+                    merged_target[record_id] = source_record
+                    total_records_healed += 1
+                    print(f"      ➕ Added new record {record_id} from {source_name}")
+                else:
+                    total_records_skipped += 1
+        
+        return merged_target, total_records_healed, total_fields_added, total_records_skipped
+    
+    # Step 1: Load all JSON files
+    print("\n📁 [1/4] Loading JSON Files...")
+    
+    invharv_fetched = safe_read_json(INVHARV_FETCHED_INVESTORS, {})
+    invharv_updated = safe_read_json(INVHARV_UPDATED_INVESTORS, {})
+    harvhub_fetched = safe_read_json(HARVHUB_FETCHED_INVESTORS, {})
+    harvhub_updated = safe_read_json(HARVHUB_UPDATED_INVESTORS, {})
+    all_fetched = safe_read_json(ALL_FETCHED_INVESTORS, {})
+    all_updated = safe_read_json(ALL_UPDATED_INVESTORS, {})
+    
+    print(f"    📊 INVHARV_FETCHED: {len(invharv_fetched):,} records")
+    print(f"    📊 INVHARV_UPDATED: {len(invharv_updated):,} records")
+    print(f"    📊 HARVHUB_FETCHED: {len(harvhub_fetched):,} records")
+    print(f"    📊 HARVHUB_UPDATED: {len(harvhub_updated):,} records")
+    print(f"    📊 ALL_FETCHED: {len(all_fetched):,} records")
+    print(f"    📊 ALL_UPDATED: {len(all_updated):,} records")
+    
+    # Step 2: Determine which individual files have data
+    invharv_has_data = len(invharv_fetched) > 0 or len(invharv_updated) > 0
+    harvhub_has_data = len(harvhub_fetched) > 0 or len(harvhub_updated) > 0
+    
+    print(f"\n📊 [2/4] Analyzing Data Sources...")
+    print(f"    INVHARV has data: {invharv_has_data}")
+    print(f"    HARVHUB has data: {harvhub_has_data}")
+    
+    all_fetched_modified = False
+    all_updated_modified = False
+    invharv_fetched_modified = False
+    invharv_updated_modified = False
+    harvhub_fetched_modified = False
+    harvhub_updated_modified = False
+    
+    total_fields_added_all_fetched = 0
+    total_fields_added_all_updated = 0
+    total_fields_added_invharv_fetched = 0
+    total_fields_added_invharv_updated = 0
+    total_fields_added_harvhub_fetched = 0
+    total_fields_added_harvhub_updated = 0
+    
+    print("\n🔧 [3/4] Healing Files...")
+    print("-"*70)
+    
+    # CASE 1: Individual files have data - heal ALL files from individual files
+    if invharv_has_data or harvhub_has_data:
+        print("\n  📋 Using INDIVIDUAL files as primary source...")
+        
+        # 1A: Heal ALL_UPDATED from INVHARV_UPDATED
+        if invharv_updated:
+            print("\n    🔄 INVHARV_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                invharv_updated, all_updated, "INVHARV_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1B: Heal ALL_UPDATED from HARVHUB_UPDATED
+        if harvhub_updated:
+            print("\n    🔄 HARVHUB_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                harvhub_updated, all_updated, "HARVHUB_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1C: Heal ALL_FETCHED from INVHARV_FETCHED
+        if invharv_fetched:
+            print("\n    🔄 INVHARV_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                invharv_fetched, all_fetched, "INVHARV_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1D: Heal ALL_FETCHED from HARVHUB_FETCHED
+        if harvhub_fetched:
+            print("\n    🔄 HARVHUB_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                harvhub_fetched, all_fetched, "HARVHUB_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1E: Also heal ALL_FETCHED from ALL_UPDATED (in case updated has fields fetched doesn't)
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED (cross-healing)")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1F: Heal ALL_UPDATED from ALL_FETCHED (cross-healing)
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED (cross-healing)")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1G: Heal individual files from ALL files (if individual is missing fields)
+        print("\n    🔄 ALL_UPDATED → INVHARV_UPDATED (if needed)")
+        if invharv_updated and all_updated:
+            invharv_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, invharv_updated, "ALL_UPDATED", "INVHARV_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_updated_modified = True
+                total_fields_added_invharv_updated += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_UPDATED")
+        
+        print("\n    🔄 ALL_UPDATED → HARVHUB_UPDATED (if needed)")
+        if harvhub_updated and all_updated:
+            harvhub_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, harvhub_updated, "ALL_UPDATED", "HARVHUB_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_updated_modified = True
+                total_fields_added_harvhub_updated += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_UPDATED")
+        
+        print("\n    🔄 ALL_FETCHED → INVHARV_FETCHED (if needed)")
+        if invharv_fetched and all_fetched:
+            invharv_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, invharv_fetched, "ALL_FETCHED", "INVHARV_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_fetched_modified = True
+                total_fields_added_invharv_fetched += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_FETCHED")
+        
+        print("\n    🔄 ALL_FETCHED → HARVHUB_FETCHED (if needed)")
+        if harvhub_fetched and all_fetched:
+            harvhub_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, harvhub_fetched, "ALL_FETCHED", "HARVHUB_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_fetched_modified = True
+                total_fields_added_harvhub_fetched += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_FETCHED")
+    
+    # CASE 2: Individual files are empty - heal between ALL files only
+    else:
+        print("\n  📋 Individual files EMPTY - healing between ALL files only...")
+        
+        # 2A: Heal ALL_UPDATED from ALL_FETCHED
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 2B: Heal ALL_FETCHED from ALL_UPDATED
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+    
+    # Step 4: Write back all modified files
+    print("\n💾 [4/4] Saving Modified Files...")
+    print("-"*70)
+    
+    if all_fetched_modified:
+        if safe_write_json(ALL_FETCHED_INVESTORS, all_fetched):
+            print(f"    ✅ Saved: {ALL_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_FETCHED_INVESTORS}")
+    
+    if all_updated_modified:
+        if safe_write_json(ALL_UPDATED_INVESTORS, all_updated):
+            print(f"    ✅ Saved: {ALL_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_UPDATED_INVESTORS}")
+    
+    if invharv_fetched_modified:
+        if safe_write_json(INVHARV_FETCHED_INVESTORS, invharv_fetched):
+            print(f"    ✅ Saved: {INVHARV_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_FETCHED_INVESTORS}")
+    
+    if invharv_updated_modified:
+        if safe_write_json(INVHARV_UPDATED_INVESTORS, invharv_updated):
+            print(f"    ✅ Saved: {INVHARV_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_UPDATED_INVESTORS}")
+    
+    if harvhub_fetched_modified:
+        if safe_write_json(HARVHUB_FETCHED_INVESTORS, harvhub_fetched):
+            print(f"    ✅ Saved: {HARVHUB_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_FETCHED_INVESTORS}")
+    
+    if harvhub_updated_modified:
+        if safe_write_json(HARVHUB_UPDATED_INVESTORS, harvhub_updated):
+            print(f"    ✅ Saved: {HARVHUB_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_UPDATED_INVESTORS}")
+    
+    # Final Summary
+    print("\n" + "="*70)
+    print(f"  HEALING SUMMARY")
+    print("="*70)
+    print(f"\n  📊 FILES PROCESSED:")
+    print(f"     ALL_FETCHED     : {'✅ MODIFIED' if all_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     ALL_UPDATED     : {'✅ MODIFIED' if all_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_FETCHED : {'✅ MODIFIED' if invharv_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_UPDATED : {'✅ MODIFIED' if invharv_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_FETCHED : {'✅ MODIFIED' if harvhub_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_UPDATED : {'✅ MODIFIED' if harvhub_updated_modified else 'ℹ️ NO CHANGES'}")
+    
+    print(f"\n  📈 FIELDS ADDED BY FILE:")
+    print(f"     ALL_FETCHED     : {total_fields_added_all_fetched:,} fields")
+    print(f"     ALL_UPDATED     : {total_fields_added_all_updated:,} fields")
+    print(f"     INVHARV_FETCHED : {total_fields_added_invharv_fetched:,} fields")
+    print(f"     INVHARV_UPDATED : {total_fields_added_invharv_updated:,} fields")
+    print(f"     HARVHUB_FETCHED : {total_fields_added_harvhub_fetched:,} fields")
+    print(f"     HARVHUB_UPDATED : {total_fields_added_harvhub_updated:,} fields")
+    
+    print(f"\n  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    
+    return {
+        'all_fetched_modified': all_fetched_modified,
+        'all_updated_modified': all_updated_modified,
+        'invharv_fetched_modified': invharv_fetched_modified,
+        'invharv_updated_modified': invharv_updated_modified,
+        'harvhub_fetched_modified': harvhub_fetched_modified,
+        'harvhub_updated_modified': harvhub_updated_modified
+    }
+
 def manage_accountmanagement_and_activities_jsons():
     """
     Updates accountmanagement.json and activities.json for each investor using data from FETCHED_INVESTORS.
@@ -2121,6 +2538,7 @@ def move_fetched_investors():
     """
     repair_json_files()
     sync_and_distribute_investors()
+    restore_missing_fields()
     
     import traceback
     import sys
@@ -25683,306 +26101,6 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor_(inv_folder):
-    """
-    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
-    Connects directly to MT5 using the investor's credentials.
-    """
-    global restricted_timerange_alert
-    
-    inv_id = inv_folder.name
-    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
-    move_fetched_investors()
-    account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
-        "price_collection_stats": {},
-        "candle_fetch_stats": {},
-        "crosser_analysis_stats": {},
-        "trapped_analysis_stats": {},
-        "liquidator_analysis_stats": {},
-        "ranging_analysis_stats": {},
-        "order_placement_stats": {},
-        "risk_correction_stats": {},
-        "risk_audit_stats": {},
-        "symbols_filtered": 0,
-        "orders_filtered": 0,
-        "symbols_processed": 0,
-        "symbols_successful": 0,
-        "orders_placed": 0,
-        "counter_orders_placed": 0,
-        "total_active_orders": 0,
-        "orders_adjusted": 0,
-        "orders_removed": 0,
-        "current_candle_forming": False,
-        "bid_wins": 0,
-        "ask_wins": 0,
-        "trapped_candles_found": 0,
-        "symbols_with_trapped": 0,
-        "symbols_with_liquidator": 0,
-        "liquidator_candles_found": 0,
-        "bullish_liquidators": 0,
-        "bearish_liquidators": 0,
-        "symbols_ranging": 0,
-        "avg_ranging_cycles": 0,
-        "spread_check_skipped": False,
-        "spread_warning_details": None,
-        "restricted_timerange_purge": False,
-        "execution_skipped": False,
-        "skip_reason": None,
-        "account_type": "UNKNOWN",
-        "account_mode": "UNKNOWN",  
-        "is_real_account": False,
-        "grid_strategy_enabled": False,           # Track if grid strategy was enabled
-        "ohlc_strategy_enabled": False            # Track if OHLC strategy was enabled
-    }
-    
-    # 1. Extract structural demo permission policies from investor JSON log
-    allow_demo_processing = True 
-    try:
-        if Path(INVESTOR_USERS).exists():
-            with open(INVESTOR_USERS, 'r') as f:
-                investor_registry = json.load(f)
-            
-            user_meta = investor_registry.get(str(inv_id))
-            if user_meta:
-                demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
-                if str(demo_rule).strip().lower() in ["0", "false"]:
-                    allow_demo_processing = False
-                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
-                else:
-                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
-    except Exception as json_err:
-        print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
-
-    broker_cfg = usersdictionary.get(inv_id)
-    if not broker_cfg:
-        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
-        return account_stats
-
-    # =====================================================================
-    # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
-    # =====================================================================
-    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
-    fetched_json_path = Path(FETCHED_INVESTORS)
-    inv_str_id = str(inv_id)
-    
-    try:
-        investors_data = {}
-        if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
-            with open(fetched_json_path, 'r') as f_inv:
-                investors_data = json.load(f_inv)
-        
-        if inv_str_id not in investors_data:
-            investors_data[inv_str_id] = {}
-            
-        print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
-    except Exception as io_err:
-        print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
-    
-    # Always fire tracking file-movement tasks regardless of connection state
-    #move_fetched_investors()
-
-    # =====================================================================
-    # DIRECT MT5 INITIALIZATION WITH CREDENTIALS
-    # =====================================================================
-    delay = random.uniform(0.2, 1.5)
-    time.sleep(delay) 
-    
-    login_id = int(broker_cfg['LOGIN_ID'])
-    password_str = broker_cfg["PASSWORD"]
-    server_str = broker_cfg["SERVER"]
-    
-    configured_path = broker_cfg.get("Terminal_path", "")
-    init_successful = False
-    
-    # Attempt 1: Try to initialize with terminal path if provided
-    if configured_path:
-        terminal_path = os.path.abspath(configured_path)
-        if os.path.exists(terminal_path):
-            print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
-            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
-                init_successful = True
-                print(f"✅ MT5 initialized successfully with terminal path")
-            else:
-                print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
-        else:
-            print(f"⚠️ Terminal path does not exist: {terminal_path}")
-    
-    # Attempt 2: Fallback to default initialization without path
-    if not init_successful:
-        print(f"🔗 Attempting default MT5 initialization...")
-        if mt5.initialize(timeout=30000):
-            init_successful = True
-            print(f"✅ MT5 initialized successfully with default settings")
-        else:
-            print(f"⚠️ Failed default initialization: {mt5.last_error()}")
-
-    if not init_successful:
-        print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
-        print(f"   Last Error: {mt5.last_error()}")
-        account_stats["skip_reason"] = "MT5 Initialization Failure"
-        return account_stats
-
-    # =====================================================================
-    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
-    # =====================================================================
-    try:
-        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-        
-        # Shutdown any existing connection first to ensure clean state
-        mt5.shutdown()
-        time.sleep(1)
-        
-        # Re-initialize and login
-        if configured_path and os.path.exists(os.path.abspath(configured_path)):
-            if mt5.initialize(path=os.path.abspath(configured_path), timeout=60000, portable=True):
-                print(f"✅ Re-initialized with terminal path for login")
-            else:
-                print(f"⚠️ Re-initialization with path failed, trying default...")
-                mt5.initialize(timeout=30000)
-        else:
-            mt5.initialize(timeout=30000)
-        
-        
-        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-        
-        # Verify account info
-        acc = mt5.account_info()
-        
-        if acc is None:
-            print(f"[FAIL] Could not retrieve account information after login")
-            print(f"       Error: {mt5.last_error()}")
-            mt5.shutdown()
-            return account_stats
-
-        # =================================================================
-        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
-        # =================================================================
-        is_real = False
-        type_label = "UNKNOWN"
-        mode_label = "demo"
-
-        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
-            is_real = True
-            type_label = "REAL"
-        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
-            is_real = False
-            type_label = "DEMO"
-        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
-            is_real = False
-            type_label = "CONTEST"
-        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
-            is_real = False
-            type_label = "DEMO (MONETARY SO FOOTPRINT)"
-        else:
-            server_upper = acc.server.upper() if acc.server else ""
-            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
-                is_real = False
-                type_label = "DEMO (SERVER STR MATCH)"
-            else:
-                is_real = True
-                type_label = "REAL (FALLBACK)"
-
-        if is_real:
-            mode_label = "real"
-
-        account_stats["account_type"] = type_label
-        account_stats["account_mode"] = mode_label
-        account_stats["is_real_account"] = is_real
-        
-        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
-        print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
-        print(f"[{inv_id}] Account Leverage: {acc.leverage}")
-
-        # Synchronize finalized account authentication parameters with database records
-        try:
-            if fetched_json_path.exists():
-                with open(fetched_json_path, 'r') as f_inv:
-                    investors_data = json.load(f_inv)
-                investors_data[inv_str_id]["account_mode"] = mode_label
-                investors_data[inv_str_id]["account_balance"] = acc.balance
-                investors_data[inv_str_id]["account_currency"] = acc.currency
-                investors_data[inv_str_id]["account_leverage"] = acc.leverage
-                with open(fetched_json_path, 'w') as f_inv:
-                    json.dump(investors_data, f_inv, indent=2)
-        except Exception as update_err:
-            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
-
-        # Safety policy gate check
-        if not is_real and not allow_demo_processing:
-            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
-            account_stats["execution_skipped"] = True
-            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
-            mt5.shutdown()
-            return account_stats
-
-        
-        # =====================================================================
-        # READ CONFIGURATION FROM ACCOUNTMANAGEMENT.JSON
-        # =====================================================================
-        grid_strategy_enabled = False
-        ohlc_strategy_enabled = False
-        
-        try:
-            inv_root = Path(INV_PATH) / inv_id
-            acc_mgmt_path = inv_root / "accountmanagement.json"
-            
-            if acc_mgmt_path.exists():
-                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                settings = config.get("settings", {})
-                
-                # Read grid strategy setting
-                grid_strategy_enabled = settings.get("symbols_grid_strategy", False)
-                account_stats["grid_strategy_enabled"] = grid_strategy_enabled
-                
-                # Read OHLC/directional bias strategy setting
-                ohlc_strategy_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
-                account_stats["ohlc_strategy_enabled"] = ohlc_strategy_enabled
-                
-                # Print configuration status
-                print(f"\n{'='*10} 📋 CONFIGURATION STATUS FOR {inv_id} {'='*10}")
-                if ohlc_strategy_enabled:
-                    print(f"✅ fetch_ohlc_data_and_directional_bias_for_investor = TRUE - OHLC/Directional functions will be executed")
-                else:
-                    print(f"⚠️ fetch_ohlc_data_and_directional_bias_for_investor = FALSE - OHLC/Directional functions will be SKIPPED")
-                
-                if grid_strategy_enabled:
-                    print(f"✅ symbols_grid_strategy = TRUE - Grid functions will be executed")
-                else:
-                    print(f"⚠️ symbols_grid_strategy = FALSE - Grid functions will be SKIPPED")
-                print(f"{'='*55}\n")
-                
-            else:
-                print(f"⚠️ [{inv_id}] accountmanagement.json not found - All conditional functions will be SKIPPED")
-                account_stats["grid_strategy_enabled"] = False
-                account_stats["ohlc_strategy_enabled"] = False
-                
-        except Exception as config_err:
-            print(f"⚠️ [{inv_id}] Error reading config: {config_err} - Conditional functions will be SKIPPED")
-            account_stats["grid_strategy_enabled"] = False
-            account_stats["ohlc_strategy_enabled"] = False
-                
-        # =====================================================================
-        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
-        # =====================================================================
-        validate_strategy_authorized_orders(inv_id=inv_id)
-        
-        mt5.shutdown()
-        
-    except Exception as e:
-        print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        try:
-            mt5.shutdown()
-        except:
-            pass
-    
-    return account_stats
-
 def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.

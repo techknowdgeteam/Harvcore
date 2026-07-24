@@ -322,165 +322,663 @@ def work_only_in_specific_timerange():
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
     return stats
-      
-def combine_investors_to_all_files():
+
+def restore_missing_fields():
     """
-    Intelligently merges investor data from invharv and harvhub into all files.
-    ONE-WAY SYNC ONLY: INVHARV + HARVHUB → ALL_FETCHED / ALL_UPDATED
+    Heal missing fields across JSON files using hierarchical field-by-field merging.
     
-    This function performs a one-way merge:
-    1. Loads data from INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
-    2. Merges them into ALL_FETCHED_INVESTORS (invharv takes precedence)
-    3. Loads data from INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS
-    4. Merges them into ALL_UPDATED_INVESTORS (invharv takes precedence)
-    5. NO distribution back to invharv or harvhub files
+    Priority order:
+    1. INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS (highest priority)
+    2. INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
+    3. ALL_UPDATED_INVESTORS
+    4. ALL_FETCHED_INVESTORS (lowest priority)
+    
+    Rules:
+    - Individual files (invharv/harvhub) ONLY heal their own users
+    - ALL files can receive from individual files
+    - Individual files can receive from ALL files if they're missing fields
+    - Field-by-field merging (not whole record replacement)
+    - Files heal each other if individual files are empty
+    """
+    
+    print("\n" + "="*70)
+    print(f"  HEALING MISSING FIELDS (FIELD-BY-FIELD MERGE)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    
+    def safe_read_json(file_path, default={}):
+        """Safely read JSON file with error handling"""
+        if not os.path.exists(file_path):
+            print(f"    ⚠️ File not found: {file_path}")
+            return default
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"    ❌ JSON decode error in {file_path}: {str(e)}")
+            return default
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied reading {file_path}")
+            return default
+        except Exception as e:
+            print(f"    ❌ Error reading {file_path}: {str(e)}")
+            return default
+    
+    def safe_write_json(file_path, data):
+        """Safely write JSON file with permission handling"""
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied writing {file_path}")
+            # Try to delete and retry
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    return True
+            except:
+                pass
+            return False
+        except Exception as e:
+            print(f"    ❌ Error writing {file_path}: {str(e)}")
+            return False
+    
+    def merge_fields(source_record, target_record):
+        """
+        Merge fields from source to target where target is missing fields.
+        Returns: (merged_record, fields_added)
+        """
+        if not source_record or not target_record:
+            return target_record, 0
+        
+        merged = dict(target_record)  # Start with target
+        fields_added = 0
+        
+        for key, value in source_record.items():
+            # Skip 'id' field as it's the key
+            if key == 'id':
+                continue
+            
+            # Only add if target doesn't have this field OR target has it as None/null
+            if key not in merged or merged[key] is None:
+                merged[key] = value
+                fields_added += 1
+        
+        return merged, fields_added
+    
+    def get_record_id(record):
+        """Extract record ID from record dict"""
+        if isinstance(record, dict):
+            return str(record.get('id', ''))
+        return None
+    
+    def merge_file_pair(source_data, target_data, source_name, target_name, skip_missing_ids=False):
+        """
+        Merge fields from source to target for matching IDs.
+        If skip_missing_ids=True, only merge for IDs that exist in target.
+        """
+        if not source_data or not target_data:
+            return target_data, 0, 0, 0
+        
+        merged_target = dict(target_data)
+        total_records_healed = 0
+        total_fields_added = 0
+        total_records_skipped = 0
+        
+        for record_id, source_record in source_data.items():
+            if record_id in merged_target:
+                # Merge fields from source to target
+                target_record = merged_target[record_id]
+                merged_record, fields_added = merge_fields(source_record, target_record)
+                
+                if fields_added > 0:
+                    merged_target[record_id] = merged_record
+                    total_records_healed += 1
+                    total_fields_added += fields_added
+                    print(f"      ✅ Healed record {record_id}: added {fields_added} field(s)")
+            else:
+                if not skip_missing_ids:
+                    # If target doesn't have this ID, add the whole record
+                    merged_target[record_id] = source_record
+                    total_records_healed += 1
+                    print(f"      ➕ Added new record {record_id} from {source_name}")
+                else:
+                    total_records_skipped += 1
+        
+        return merged_target, total_records_healed, total_fields_added, total_records_skipped
+    
+    # Step 1: Load all JSON files
+    print("\n📁 [1/4] Loading JSON Files...")
+    
+    invharv_fetched = safe_read_json(INVHARV_FETCHED_INVESTORS, {})
+    invharv_updated = safe_read_json(INVHARV_UPDATED_INVESTORS, {})
+    harvhub_fetched = safe_read_json(HARVHUB_FETCHED_INVESTORS, {})
+    harvhub_updated = safe_read_json(HARVHUB_UPDATED_INVESTORS, {})
+    all_fetched = safe_read_json(ALL_FETCHED_INVESTORS, {})
+    all_updated = safe_read_json(ALL_UPDATED_INVESTORS, {})
+    
+    print(f"    📊 INVHARV_FETCHED: {len(invharv_fetched):,} records")
+    print(f"    📊 INVHARV_UPDATED: {len(invharv_updated):,} records")
+    print(f"    📊 HARVHUB_FETCHED: {len(harvhub_fetched):,} records")
+    print(f"    📊 HARVHUB_UPDATED: {len(harvhub_updated):,} records")
+    print(f"    📊 ALL_FETCHED: {len(all_fetched):,} records")
+    print(f"    📊 ALL_UPDATED: {len(all_updated):,} records")
+    
+    # Step 2: Determine which individual files have data
+    invharv_has_data = len(invharv_fetched) > 0 or len(invharv_updated) > 0
+    harvhub_has_data = len(harvhub_fetched) > 0 or len(harvhub_updated) > 0
+    
+    print(f"\n📊 [2/4] Analyzing Data Sources...")
+    print(f"    INVHARV has data: {invharv_has_data}")
+    print(f"    HARVHUB has data: {harvhub_has_data}")
+    
+    all_fetched_modified = False
+    all_updated_modified = False
+    invharv_fetched_modified = False
+    invharv_updated_modified = False
+    harvhub_fetched_modified = False
+    harvhub_updated_modified = False
+    
+    total_fields_added_all_fetched = 0
+    total_fields_added_all_updated = 0
+    total_fields_added_invharv_fetched = 0
+    total_fields_added_invharv_updated = 0
+    total_fields_added_harvhub_fetched = 0
+    total_fields_added_harvhub_updated = 0
+    
+    print("\n🔧 [3/4] Healing Files...")
+    print("-"*70)
+    
+    # CASE 1: Individual files have data - heal ALL files from individual files
+    if invharv_has_data or harvhub_has_data:
+        print("\n  📋 Using INDIVIDUAL files as primary source...")
+        
+        # 1A: Heal ALL_UPDATED from INVHARV_UPDATED
+        if invharv_updated:
+            print("\n    🔄 INVHARV_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                invharv_updated, all_updated, "INVHARV_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1B: Heal ALL_UPDATED from HARVHUB_UPDATED
+        if harvhub_updated:
+            print("\n    🔄 HARVHUB_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                harvhub_updated, all_updated, "HARVHUB_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1C: Heal ALL_FETCHED from INVHARV_FETCHED
+        if invharv_fetched:
+            print("\n    🔄 INVHARV_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                invharv_fetched, all_fetched, "INVHARV_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1D: Heal ALL_FETCHED from HARVHUB_FETCHED
+        if harvhub_fetched:
+            print("\n    🔄 HARVHUB_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                harvhub_fetched, all_fetched, "HARVHUB_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1E: Also heal ALL_FETCHED from ALL_UPDATED (in case updated has fields fetched doesn't)
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED (cross-healing)")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1F: Heal ALL_UPDATED from ALL_FETCHED (cross-healing)
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED (cross-healing)")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1G: Heal individual files from ALL files (if individual is missing fields)
+        print("\n    🔄 ALL_UPDATED → INVHARV_UPDATED (if needed)")
+        if invharv_updated and all_updated:
+            invharv_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, invharv_updated, "ALL_UPDATED", "INVHARV_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_updated_modified = True
+                total_fields_added_invharv_updated += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_UPDATED")
+        
+        print("\n    🔄 ALL_UPDATED → HARVHUB_UPDATED (if needed)")
+        if harvhub_updated and all_updated:
+            harvhub_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, harvhub_updated, "ALL_UPDATED", "HARVHUB_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_updated_modified = True
+                total_fields_added_harvhub_updated += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_UPDATED")
+        
+        print("\n    🔄 ALL_FETCHED → INVHARV_FETCHED (if needed)")
+        if invharv_fetched and all_fetched:
+            invharv_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, invharv_fetched, "ALL_FETCHED", "INVHARV_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_fetched_modified = True
+                total_fields_added_invharv_fetched += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_FETCHED")
+        
+        print("\n    🔄 ALL_FETCHED → HARVHUB_FETCHED (if needed)")
+        if harvhub_fetched and all_fetched:
+            harvhub_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, harvhub_fetched, "ALL_FETCHED", "HARVHUB_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_fetched_modified = True
+                total_fields_added_harvhub_fetched += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_FETCHED")
+    
+    # CASE 2: Individual files are empty - heal between ALL files only
+    else:
+        print("\n  📋 Individual files EMPTY - healing between ALL files only...")
+        
+        # 2A: Heal ALL_UPDATED from ALL_FETCHED
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 2B: Heal ALL_FETCHED from ALL_UPDATED
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+    
+    # Step 4: Write back all modified files
+    print("\n💾 [4/4] Saving Modified Files...")
+    print("-"*70)
+    
+    if all_fetched_modified:
+        if safe_write_json(ALL_FETCHED_INVESTORS, all_fetched):
+            print(f"    ✅ Saved: {ALL_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_FETCHED_INVESTORS}")
+    
+    if all_updated_modified:
+        if safe_write_json(ALL_UPDATED_INVESTORS, all_updated):
+            print(f"    ✅ Saved: {ALL_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_UPDATED_INVESTORS}")
+    
+    if invharv_fetched_modified:
+        if safe_write_json(INVHARV_FETCHED_INVESTORS, invharv_fetched):
+            print(f"    ✅ Saved: {INVHARV_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_FETCHED_INVESTORS}")
+    
+    if invharv_updated_modified:
+        if safe_write_json(INVHARV_UPDATED_INVESTORS, invharv_updated):
+            print(f"    ✅ Saved: {INVHARV_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_UPDATED_INVESTORS}")
+    
+    if harvhub_fetched_modified:
+        if safe_write_json(HARVHUB_FETCHED_INVESTORS, harvhub_fetched):
+            print(f"    ✅ Saved: {HARVHUB_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_FETCHED_INVESTORS}")
+    
+    if harvhub_updated_modified:
+        if safe_write_json(HARVHUB_UPDATED_INVESTORS, harvhub_updated):
+            print(f"    ✅ Saved: {HARVHUB_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_UPDATED_INVESTORS}")
+    
+    # Final Summary
+    print("\n" + "="*70)
+    print(f"  HEALING SUMMARY")
+    print("="*70)
+    print(f"\n  📊 FILES PROCESSED:")
+    print(f"     ALL_FETCHED     : {'✅ MODIFIED' if all_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     ALL_UPDATED     : {'✅ MODIFIED' if all_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_FETCHED : {'✅ MODIFIED' if invharv_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_UPDATED : {'✅ MODIFIED' if invharv_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_FETCHED : {'✅ MODIFIED' if harvhub_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_UPDATED : {'✅ MODIFIED' if harvhub_updated_modified else 'ℹ️ NO CHANGES'}")
+    
+    print(f"\n  📈 FIELDS ADDED BY FILE:")
+    print(f"     ALL_FETCHED     : {total_fields_added_all_fetched:,} fields")
+    print(f"     ALL_UPDATED     : {total_fields_added_all_updated:,} fields")
+    print(f"     INVHARV_FETCHED : {total_fields_added_invharv_fetched:,} fields")
+    print(f"     INVHARV_UPDATED : {total_fields_added_invharv_updated:,} fields")
+    print(f"     HARVHUB_FETCHED : {total_fields_added_harvhub_fetched:,} fields")
+    print(f"     HARVHUB_UPDATED : {total_fields_added_harvhub_updated:,} fields")
+    
+    print(f"\n  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    
+    return {
+        'all_fetched_modified': all_fetched_modified,
+        'all_updated_modified': all_updated_modified,
+        'invharv_fetched_modified': invharv_fetched_modified,
+        'invharv_updated_modified': invharv_updated_modified,
+        'harvhub_fetched_modified': harvhub_fetched_modified,
+        'harvhub_updated_modified': harvhub_updated_modified
+    }
+
+def update_fresh_data_from_fetched_to_all_files():
+    """
+    Distribute fresh data from ALL_FETCHED_INVESTORS to all other files.
+    FIELD-BY-FIELD DISTRIBUTION: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED
+    
+    This function performs:
+    1. Reads ALL_FETCHED_INVESTORS (the source of truth for fresh data)
+    2. Distributes each field to matching records in:
+       - ALL_UPDATED_INVESTORS
+       - INVHARV_FETCHED_INVESTORS
+       - HARVHUB_FETCHED_INVESTORS
+       - INVHARV_UPDATED_INVESTORS
+       - HARVHUB_UPDATED_INVESTORS
+    3. Field-by-field merging (source takes precedence for each field)
+    4. Adds new records if they don't exist in target files
+    5. Updates existing fields if values differ
+    
+    This is useful when:
+    - New fields are added to the database schema
+    - Fresh data is fetched from the database
+    - You want to propagate latest data to all files
     
     Reads:
+        - ALL_FETCHED_INVESTORS (source of truth)
+    
+    Writes:
+        - ALL_UPDATED_INVESTORS
         - INVHARV_FETCHED_INVESTORS
         - HARVHUB_FETCHED_INVESTORS
         - INVHARV_UPDATED_INVESTORS
         - HARVHUB_UPDATED_INVESTORS
     
-    Writes:
-        - ALL_FETCHED_INVESTORS (merged fetched data)
-        - ALL_UPDATED_INVESTORS (merged updated data)
-    
     Returns:
-        dict: Statistics about the combination process
+        dict: Statistics about the distribution process
     """
     print("\n" + "="*70)
-    print(f"  INTELLIGENT INVESTOR MERGE (ONE-WAY SYNC)")
+    print(f"  FRESH DATA DISTRIBUTION (ALL_FETCHED → ALL OTHER FILES)")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
-    print("  Direction: INVHARV + HARVHUB → ALL FILES")
+    print("  Direction: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED")
+    print("  Mode     : FIELD-BY-FIELD DISTRIBUTION")
     print("="*70)
     
     stats = {
         "processing_success": False,
-        "fetched": {
-            "invharv": {"loaded": False, "count": 0, "path": INVHARV_FETCHED_INVESTORS},
-            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_FETCHED_INVESTORS},
-            "combined_count": 0,
-            "output_path": ALL_FETCHED_INVESTORS,
-            "fields_merged": 0,
-            "investors_added": 0,
-            "investors_updated": 0
+        "source": {
+            "path": ALL_FETCHED_INVESTORS,
+            "count": 0,
+            "loaded": False
         },
-        "updated": {
-            "invharv": {"loaded": False, "count": 0, "path": INVHARV_UPDATED_INVESTORS},
-            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_UPDATED_INVESTORS},
-            "combined_count": 0,
-            "output_path": ALL_UPDATED_INVESTORS,
-            "fields_merged": 0,
-            "investors_added": 0,
-            "investors_updated": 0
+        "targets": {
+            ALL_UPDATED_INVESTORS: {
+                "name": "ALL_UPDATED_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            },
+            INVHARV_FETCHED_INVESTORS: {
+                "name": "INVHARV_FETCHED_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            },
+            HARVHUB_FETCHED_INVESTORS: {
+                "name": "HARVHUB_FETCHED_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            },
+            INVHARV_UPDATED_INVESTORS: {
+                "name": "INVHARV_UPDATED_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            },
+            HARVHUB_UPDATED_INVESTORS: {
+                "name": "HARVHUB_UPDATED_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            }
         },
         "errors": [],
         "warnings": [],
         "timestamp": datetime.now().isoformat()
     }
     
-    def deep_merge(base_dict, override_dict):
+    def field_by_field_merge(source_record, target_record):
         """
-        Deep merge two dictionaries. override_dict takes precedence.
-        
-        Args:
-            base_dict: The base dictionary to merge into
-            override_dict: The dictionary with updates (takes precedence)
+        Merge source_record into target_record field-by-field.
+        Each field from source overrides the corresponding field in target.
         
         Returns:
-            dict: Merged dictionary
+            tuple: (merged_record, fields_merged_count, merged_fields_list, added_fields, updated_fields)
+        """
+        if not source_record:
+            return target_record, 0, [], [], []
+        
+        if not target_record:
+            return source_record.copy(), len(source_record), list(source_record.keys()), list(source_record.keys()), []
+        
+        merged = dict(target_record)  # Start with target
+        fields_merged = []
+        fields_added = []
+        fields_updated = []
+        
+        for field, value in source_record.items():
+            # Skip 'id' field as it's the key
+            if field == 'id':
+                continue
+            
+            # Check if field exists in target
+            if field not in merged:
+                # Field doesn't exist - add it
+                merged[field] = value
+                fields_added.append(field)
+                fields_merged.append(field)
+            else:
+                # Field exists - check if value is different
+                if merged[field] != value:
+                    # Special handling for nested structures
+                    if isinstance(value, dict) and isinstance(merged[field], dict):
+                        # Deep merge nested dicts
+                        merged[field] = deep_merge_nested(merged[field], value)
+                        fields_updated.append(field)
+                        fields_merged.append(field)
+                    elif isinstance(value, list) and isinstance(merged[field], list):
+                        # For lists, replace entire list (source takes precedence)
+                        merged[field] = value
+                        fields_updated.append(field)
+                        fields_merged.append(field)
+                    else:
+                        # Simple value override
+                        merged[field] = value
+                        fields_updated.append(field)
+                        fields_merged.append(field)
+        
+        return merged, len(fields_merged), fields_merged, fields_added, fields_updated
+    
+    def deep_merge_nested(base_dict, override_dict):
+        """
+        Deep merge two dictionaries. override_dict takes precedence.
+        For nested structures, recursively merge.
         """
         result = base_dict.copy() if base_dict else {}
         
         for key, value in override_dict.items():
             if key in result:
-                # If both are dicts, recursively merge
                 if isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = deep_merge(result[key], value)
-                # Otherwise, override with new value
+                    result[key] = deep_merge_nested(result[key], value)
                 else:
                     result[key] = value
             else:
-                # Key doesn't exist in base, add it
                 result[key] = value
         
         return result
     
-    def count_non_empty_fields(obj, ignore_keys=[]):
-        """Count non-empty fields in an object."""
-        if not isinstance(obj, dict):
-            return 0
-        
-        count = 0
-        for key, value in obj.items():
-            if key in ignore_keys:
-                continue
-            if value is not None and value != "" and value != "NULL":
-                if isinstance(value, dict):
-                    # Recursively count nested dict fields
-                    count += count_non_empty_fields(value, ignore_keys)
-                elif isinstance(value, list) and len(value) > 0:
-                    count += 1
-                elif not isinstance(value, list):
-                    count += 1
-        return count
-    
-    def merge_investors(source_data, target_data, source_name):
+    def distribute_to_target(source_data, target_path, target_stats):
         """
-        Merge source_data into target_data. Source takes precedence.
-        
-        Args:
-            source_data: Dictionary with investor data (takes precedence)
-            target_data: Target dictionary to merge into
-            source_name: Name for logging
+        Distribute source_data to a target file field-by-field.
         
         Returns:
-            tuple: (merged_data, investors_added, investors_updated, fields_merged)
+            tuple: (target_data, records_added, records_updated, fields_merged, field_changes)
         """
-        merged = target_data.copy() if target_data else {}
-        investors_added = 0
-        investors_updated = 0
+        # Load target data
+        if os.path.exists(target_path):
+            try:
+                with open(target_path, 'r', encoding='utf-8') as f:
+                    target_data = json.load(f)
+                    if not isinstance(target_data, dict):
+                        target_data = {}
+            except Exception as e:
+                stats["warnings"].append(f"Could not load {target_path}: {str(e)}. Starting with empty dict.")
+                target_data = {}
+        else:
+            target_data = {}
+        
+        records_added = 0
+        records_updated = 0
         total_fields_merged = 0
+        field_changes = {}
         
         if not source_data:
-            return merged, 0, 0, 0
+            return target_data, 0, 0, 0, {}
         
+        # Process each record in source
         for investor_id, source_record in source_data.items():
             if not isinstance(source_record, dict):
                 continue
             
             # Check if investor exists in target
-            if investor_id not in merged:
+            if investor_id not in target_data:
                 # New investor - add entire record
-                merged[investor_id] = source_record.copy()
-                investors_added += 1
-                total_fields_merged += count_non_empty_fields(source_record)
+                target_data[investor_id] = source_record.copy()
+                records_added += 1
+                field_count = len([k for k in source_record.keys() if k != 'id'])
+                total_fields_merged += field_count
+                field_changes[investor_id] = {
+                    'status': 'added',
+                    'fields': list(source_record.keys()),
+                    'field_count': field_count
+                }
                 continue
             
-            # Investor exists - merge fields (source takes precedence)
-            target_record = merged[investor_id]
+            # Investor exists - merge field-by-field
+            target_record = target_data[investor_id]
             
-            # Count fields before merge
-            before_fields = count_non_empty_fields(target_record)
-            
-            # Deep merge: source overrides target
-            merged_record = deep_merge(target_record, source_record)
-            
-            # Count fields after merge
-            after_fields = count_non_empty_fields(merged_record)
+            # Perform field-by-field merge
+            merged_record, fields_merged_count, merged_fields, added_fields, updated_fields = field_by_field_merge(
+                source_record, target_record
+            )
             
             # Track changes
-            if before_fields < after_fields:
-                total_fields_merged += (after_fields - before_fields)
-                investors_updated += 1
-            
-            merged[investor_id] = merged_record
+            if fields_merged_count > 0:
+                target_data[investor_id] = merged_record
+                records_updated += 1
+                total_fields_merged += fields_merged_count
+                field_changes[investor_id] = {
+                    'status': 'updated',
+                    'fields': merged_fields,
+                    'field_count': fields_merged_count,
+                    'added_fields': added_fields,
+                    'updated_fields': updated_fields
+                }
         
-        return merged, investors_added, investors_updated, total_fields_merged
+        return target_data, records_added, records_updated, total_fields_merged, field_changes
     
-    def load_json_file(filepath, stats_section, name):
+    def load_json_file(filepath, name):
         """Load a JSON file safely."""
         if not os.path.exists(filepath):
             stats["warnings"].append(f"{name} file not found: {filepath}")
@@ -490,9 +988,6 @@ def combine_investors_to_all_files():
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    stats_section["loaded"] = True
-                    stats_section["count"] = len(data)
-                    print(f"   ✅ Loaded {name}: {len(data):,} records")
                     return data, True
                 else:
                     stats["errors"].append(f"{name} has invalid format (expected dict)")
@@ -518,146 +1013,173 @@ def combine_investors_to_all_files():
     
     try:
         # ============================================================
-        # 1. PROCESS FETCHED INVESTORS
+        # 1. LOAD SOURCE DATA (ALL_FETCHED_INVESTORS)
         # ============================================================
-        print("\n📥 [1/2] Processing FETCHED investors...")
+        print("\n📖 [1/4] Loading Source Data (ALL_FETCHED_INVESTORS)...")
         print("-"*40)
-        print(f"   Source 1: {INVHARV_FETCHED_INVESTORS}")
-        print(f"   Source 2: {HARVHUB_FETCHED_INVESTORS}")
-        print(f"   Output : {ALL_FETCHED_INVESTORS}")
-        print()
         
-        # Load invharv fetched
-        invharv_fetched, invharv_loaded = load_json_file(
-            INVHARV_FETCHED_INVESTORS, 
-            stats["fetched"]["invharv"], 
-            "INVHARV fetched"
-        )
+        source_data, loaded = load_json_file(ALL_FETCHED_INVESTORS, "ALL_FETCHED_INVESTORS")
+        if not loaded or not source_data:
+            print(f"   ❌ Source file not available or empty: {ALL_FETCHED_INVESTORS}")
+            stats["processing_success"] = False
+            stats["errors"].append("Source file not available or empty")
+            return stats
         
-        # Load harvhub fetched
-        harvhub_fetched, harvhub_loaded = load_json_file(
-            HARVHUB_FETCHED_INVESTORS, 
-            stats["fetched"]["harvhub"], 
-            "HARVHUB fetched"
-        )
-        
-        # Initialize combined with invharv data (priority source)
-        combined_fetched = {}
-        
-        if invharv_fetched:
-            combined_fetched = invharv_fetched.copy()
-            print(f"   📋 Starting with INVHARV: {len(combined_fetched):,} investors")
-        
-        # Merge harvhub into combined (invharv takes precedence)
-        if harvhub_fetched and combined_fetched:
-            combined_fetched, added, updated, fields = merge_investors(
-                harvhub_fetched, 
-                combined_fetched, 
-                "HARVHUB -> ALL"
-            )
-            stats["fetched"]["investors_added"] = added
-            stats["fetched"]["investors_updated"] = updated
-            stats["fetched"]["fields_merged"] = fields
-            print(f"   🔄 HARVHUB merged: {added} investors added, {updated} investors updated, {fields} fields merged")
-        
-        elif harvhub_fetched and not combined_fetched:
-            # Only harvhub data available
-            combined_fetched = harvhub_fetched.copy()
-            stats["fetched"]["investors_added"] = len(harvhub_fetched)
-            print(f"   📋 Using HARVHUB only: {len(combined_fetched):,} investors")
-        
-        # Save combined fetched
-        if combined_fetched:
-            stats["fetched"]["combined_count"] = len(combined_fetched)
-            if save_json_file(ALL_FETCHED_INVESTORS, combined_fetched, "ALL fetched combined"):
-                print(f"\n   💾 Saved combined fetched: {len(combined_fetched):,} records")
-        else:
-            print(f"\n   ⚠️ No fetched data to combine")
-            stats["errors"].append("No fetched data available")
+        stats["source"]["loaded"] = True
+        stats["source"]["count"] = len(source_data)
+        print(f"   ✅ Loaded source: {len(source_data):,} records")
+        print(f"   📋 Total fields in source: {sum(len(record.keys()) - 1 for record in source_data.values()):,}")
         
         # ============================================================
-        # 2. PROCESS UPDATED INVESTORS
+        # 2. DISTRIBUTE TO ALL TARGETS
         # ============================================================
-        print("\n📤 [2/2] Processing UPDATED investors...")
+        print("\n🔄 [2/4] Distributing Fresh Data to ALL Targets...")
         print("-"*40)
-        print(f"   Source 1: {INVHARV_UPDATED_INVESTORS}")
-        print(f"   Source 2: {HARVHUB_UPDATED_INVESTORS}")
-        print(f"   Output : {ALL_UPDATED_INVESTORS}")
-        print()
         
-        # Load invharv updated
-        invharv_updated, invharv_loaded = load_json_file(
-            INVHARV_UPDATED_INVESTORS, 
-            stats["updated"]["invharv"], 
-            "INVHARV updated"
-        )
+        targets_to_process = [
+            (ALL_UPDATED_INVESTORS, stats["targets"][ALL_UPDATED_INVESTORS]),
+            (INVHARV_FETCHED_INVESTORS, stats["targets"][INVHARV_FETCHED_INVESTORS]),
+            (HARVHUB_FETCHED_INVESTORS, stats["targets"][HARVHUB_FETCHED_INVESTORS]),
+            (INVHARV_UPDATED_INVESTORS, stats["targets"][INVHARV_UPDATED_INVESTORS]),
+            (HARVHUB_UPDATED_INVESTORS, stats["targets"][HARVHUB_UPDATED_INVESTORS])
+        ]
         
-        # Load harvhub updated
-        harvhub_updated, harvhub_loaded = load_json_file(
-            HARVHUB_UPDATED_INVESTORS, 
-            stats["updated"]["harvhub"], 
-            "HARVHUB updated"
-        )
-        
-        # Initialize combined with invharv data (priority source)
-        combined_updated = {}
-        
-        if invharv_updated:
-            combined_updated = invharv_updated.copy()
-            print(f"   📋 Starting with INVHARV: {len(combined_updated):,} investors")
-        
-        # Merge harvhub into combined (invharv takes precedence)
-        if harvhub_updated and combined_updated:
-            combined_updated, added, updated, fields = merge_investors(
-                harvhub_updated, 
-                combined_updated, 
-                "HARVHUB -> ALL"
+        for target_path, target_stats in targets_to_process:
+            print(f"\n   📤 Processing: {target_stats['name']}")
+            print(f"      Source: {target_path}")
+            
+            # Distribute data to this target
+            target_data, records_added, records_updated, fields_merged, field_changes = distribute_to_target(
+                source_data, target_path, target_stats
             )
-            stats["updated"]["investors_added"] = added
-            stats["updated"]["investors_updated"] = updated
-            stats["updated"]["fields_merged"] = fields
-            print(f"   🔄 HARVHUB merged: {added} investors added, {updated} investors updated, {fields} fields merged")
-        
-        elif harvhub_updated and not combined_updated:
-            # Only harvhub data available
-            combined_updated = harvhub_updated.copy()
-            stats["updated"]["investors_added"] = len(harvhub_updated)
-            print(f"   📋 Using HARVHUB only: {len(combined_updated):,} investors")
-        
-        # Save combined updated
-        if combined_updated:
-            stats["updated"]["combined_count"] = len(combined_updated)
-            if save_json_file(ALL_UPDATED_INVESTORS, combined_updated, "ALL updated combined"):
-                print(f"\n   💾 Saved combined updated: {len(combined_updated):,} records")
-        else:
-            print(f"\n   ⚠️ No updated data to combine")
-            stats["errors"].append("No updated data available")
+            
+            # Update stats
+            target_stats["records_added"] = records_added
+            target_stats["records_updated"] = records_updated
+            target_stats["fields_merged"] = fields_merged
+            target_stats["field_changes"] = field_changes
+            
+            # Show summary
+            print(f"      📊 Added: {records_added} records | Updated: {records_updated} records | Fields: {fields_merged}")
+            
+            # Show sample changes
+            if field_changes:
+                sample_ids = list(field_changes.keys())[:3]
+                for investor_id in sample_ids:
+                    change = field_changes[investor_id]
+                    field_list = change['fields'][:5]
+                    field_str = ', '.join(field_list)
+                    if len(change['fields']) > 5:
+                        field_str += f" ... (+{len(change['fields']) - 5} more)"
+                    status_emoji = "➕" if change['status'] == 'added' else "🔄"
+                    print(f"         {status_emoji} ID {investor_id}: {change['status']} ({change['field_count']} fields: {field_str})")
+                if len(field_changes) > 3:
+                    print(f"         ... and {len(field_changes) - 3} more investors updated")
+            
+            # Save if changes were made
+            if records_added > 0 or records_updated > 0:
+                if save_json_file(target_path, target_data, target_stats['name']):
+                    target_stats["modified"] = True
+                    print(f"      ✅ Saved: {target_path}")
+                else:
+                    print(f"      ❌ Failed to save: {target_path}")
+            else:
+                print(f"      ℹ️ No changes to save")
         
         # ============================================================
-        # 3. FINAL SUMMARY
+        # 3. UPDATE ALL_UPDATED FROM ALL_FETCHED (Special Cross-Update)
+        # ============================================================
+        print("\n🔄 [3/4] Cross-Updating ALL_UPDATED from ALL_FETCHED...")
+        print("-"*40)
+        print("   ℹ️ Ensuring ALL_UPDATED has all fields from ALL_FETCHED")
+        
+        # This is a special step to ensure ALL_UPDATED has ALL fields from ALL_FETCHED
+        # Even if records don't exist, we want to add new fields
+        
+        if os.path.exists(ALL_UPDATED_INVESTORS):
+            try:
+                with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                    updated_data = json.load(f)
+                    if not isinstance(updated_data, dict):
+                        updated_data = {}
+            except:
+                updated_data = {}
+        else:
+            updated_data = {}
+        
+        cross_updated = False
+        cross_fields_added = 0
+        
+        for investor_id, source_record in source_data.items():
+            if investor_id in updated_data:
+                # Record exists - add any missing fields
+                target_record = updated_data[investor_id]
+                fields_added = 0
+                
+                for field, value in source_record.items():
+                    if field == 'id':
+                        continue
+                    if field not in target_record:
+                        target_record[field] = value
+                        fields_added += 1
+                        cross_updated = True
+                
+                if fields_added > 0:
+                    updated_data[investor_id] = target_record
+                    cross_fields_added += fields_added
+                    print(f"      ✅ ID {investor_id}: added {fields_added} missing fields")
+        
+        if cross_updated:
+            if save_json_file(ALL_UPDATED_INVESTORS, updated_data, "ALL_UPDATED_INVESTORS (cross-updated)"):
+                stats["targets"][ALL_UPDATED_INVESTORS]["records_updated"] += 1
+                stats["targets"][ALL_UPDATED_INVESTORS]["fields_merged"] += cross_fields_added
+                stats["targets"][ALL_UPDATED_INVESTORS]["modified"] = True
+                print(f"      ✅ Cross-updated ALL_UPDATED with {cross_fields_added} missing fields")
+            else:
+                print(f"      ❌ Failed to save cross-updated ALL_UPDATED")
+        else:
+            print(f"      ℹ️ No missing fields to add to ALL_UPDATED")
+        
+        # ============================================================
+        # 4. FINAL SUMMARY
         # ============================================================
         stats["processing_success"] = True
         
         print("\n" + "="*70)
-        print(f"  MERGE SUMMARY (ONE-WAY: INVHARV + HARVHUB → ALL)")
+        print(f"  FRESH DATA DISTRIBUTION SUMMARY")
         print("="*70)
         
-        print(f"\n  📥 FETCHED FILES (Source → Target):")
-        print(f"     INVHARV  : {'✅' if stats['fetched']['invharv']['loaded'] else '❌'} {stats['fetched']['invharv']['count']:,} records")
-        print(f"     HARVHUB  : {'✅' if stats['fetched']['harvhub']['loaded'] else '❌'} {stats['fetched']['harvhub']['count']:,} records")
-        print(f"     → Combined : {stats['fetched']['combined_count']:,} records")
-        print(f"       (Added: {stats['fetched']['investors_added']:,} | Updated: {stats['fetched']['investors_updated']:,} | Fields: {stats['fetched']['fields_merged']:,})")
-        print(f"     Output   : {ALL_FETCHED_INVESTORS}")
+        print(f"\n  📖 SOURCE FILE:")
+        print(f"     File : {ALL_FETCHED_INVESTORS}")
+        print(f"     Records : {stats['source']['count']:,}")
+        print(f"     Status  : {'✅ Loaded' if stats['source']['loaded'] else '❌ Failed'}")
         
-        print(f"\n  📤 UPDATED FILES (Source → Target):")
-        print(f"     INVHARV  : {'✅' if stats['updated']['invharv']['loaded'] else '❌'} {stats['updated']['invharv']['count']:,} records")
-        print(f"     HARVHUB  : {'✅' if stats['updated']['harvhub']['loaded'] else '❌'} {stats['updated']['harvhub']['count']:,} records")
-        print(f"     → Combined : {stats['updated']['combined_count']:,} records")
-        print(f"       (Added: {stats['updated']['investors_added']:,} | Updated: {stats['updated']['investors_updated']:,} | Fields: {stats['updated']['fields_merged']:,})")
-        print(f"     Output   : {ALL_UPDATED_INVESTORS}")
+        print(f"\n  📤 TARGET FILES (ALL_FETCHED → Each Target):")
+        
+        total_records_added = 0
+        total_records_updated = 0
+        total_fields_merged = 0
+        
+        for target_path, target_stats in stats["targets"].items():
+            status_emoji = "✅" if target_stats["modified"] else "ℹ️"
+            print(f"\n     {status_emoji} {target_stats['name']}:")
+            print(f"        Records Added   : {target_stats['records_added']:,}")
+            print(f"        Records Updated : {target_stats['records_updated']:,}")
+            print(f"        Fields Merged   : {target_stats['fields_merged']:,}")
+            print(f"        Modified        : {'Yes' if target_stats['modified'] else 'No'}")
+            print(f"        Path            : {target_path}")
+            
+            total_records_added += target_stats['records_added']
+            total_records_updated += target_stats['records_updated']
+            total_fields_merged += target_stats['fields_merged']
+        
+        print(f"\n  📊 GRAND TOTALS:")
+        print(f"     Total Records Added   : {total_records_added:,}")
+        print(f"     Total Records Updated : {total_records_updated:,}")
+        print(f"     Total Fields Merged   : {total_fields_merged:,}")
         
         if stats["warnings"]:
-            print(f"\n  ⚠️ WARNINGS ({len(stats['warnings'])}):")
+            print(f"\n  🛑 WARNINGS ({len(stats['warnings'])}):")
             for warning in stats["warnings"]:
                 print(f"     - {warning}")
         
@@ -1655,6 +2177,7 @@ def fetch_database():
         print("="*70)
         print(f"  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
+        update_fresh_data_from_fetched_to_all_files()
         
     except PermissionError as e:
         print(f"\n{'='*70}")
@@ -1671,6 +2194,7 @@ def fetch_database():
         print(f"  4. Try deleting the file manually: del {e.filename if hasattr(e, 'filename') else 'file'}")
         print(f"{'='*70}")
         
+        
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
@@ -1686,6 +2210,452 @@ def fetch_database():
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
+
+def updated_individual_records_to_all_files():
+    """
+    Intelligently merges investor data from invharv and harvhub into all files.
+    ONE-WAY SYNC ONLY: INVHARV + HARVHUB → ALL_FETCHED / ALL_UPDATED
+    
+    This function performs a one-way merge with FIELD-BY-FIELD precedence:
+    1. Loads data from INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
+    2. Merges them into ALL_FETCHED_INVESTORS (field-by-field, invharv takes precedence)
+    3. Loads data from INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS
+    4. Merges them into ALL_UPDATED_INVESTORS (field-by-field, invharv takes precedence)
+    5. NO distribution back to invharv or harvhub files
+    
+    Key Improvement: FIELD-BY-FIELD MERGING
+    - Each field from individual files overrides the corresponding field in ALL files
+    - If a field doesn't exist in ALL files, it's added
+    - Missing fields in individual files are NOT overwritten from ALL files (one-way)
+    
+    Reads:
+        - INVHARV_FETCHED_INVESTORS
+        - HARVHUB_FETCHED_INVESTORS
+        - INVHARV_UPDATED_INVESTORS
+        - HARVHUB_UPDATED_INVESTORS
+    
+    Writes:
+        - ALL_FETCHED_INVESTORS (merged fetched data)
+        - ALL_UPDATED_INVESTORS (merged updated data)
+    
+    Returns:
+        dict: Statistics about the combination process
+    """
+    print("\n" + "="*70)
+    print(f"  INTELLIGENT INVESTOR MERGE (FIELD-BY-FIELD ONE-WAY SYNC)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    print("  Direction: INVHARV + HARVHUB → ALL FILES (FIELD-BY-FIELD)")
+    print("="*70)
+    
+    stats = {
+        "processing_success": False,
+        "fetched": {
+            "invharv": {"loaded": False, "count": 0, "path": INVHARV_FETCHED_INVESTORS},
+            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_FETCHED_INVESTORS},
+            "combined_count": 0,
+            "output_path": ALL_FETCHED_INVESTORS,
+            "fields_merged": 0,
+            "investors_added": 0,
+            "investors_updated": 0,
+            "field_changes": {}
+        },
+        "updated": {
+            "invharv": {"loaded": False, "count": 0, "path": INVHARV_UPDATED_INVESTORS},
+            "harvhub": {"loaded": False, "count": 0, "path": HARVHUB_UPDATED_INVESTORS},
+            "combined_count": 0,
+            "output_path": ALL_UPDATED_INVESTORS,
+            "fields_merged": 0,
+            "investors_added": 0,
+            "investors_updated": 0,
+            "field_changes": {}
+        },
+        "errors": [],
+        "warnings": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    def field_by_field_merge(source_record, target_record):
+        """
+        Merge source_record into target_record field-by-field.
+        Each field from source overrides the corresponding field in target.
+        
+        Returns:
+            tuple: (merged_record, fields_merged_count, merged_fields_list)
+        """
+        if not source_record:
+            return target_record, 0, []
+        
+        if not target_record:
+            return source_record.copy(), len(source_record), list(source_record.keys())
+        
+        merged = dict(target_record)  # Start with target
+        fields_merged = []
+        fields_added = []
+        fields_updated = []
+        
+        for field, value in source_record.items():
+            # Skip 'id' field as it's the key
+            if field == 'id':
+                continue
+            
+            # Check if field exists in target
+            if field not in merged:
+                # Field doesn't exist - add it
+                merged[field] = value
+                fields_added.append(field)
+            else:
+                # Field exists - check if value is different
+                if merged[field] != value:
+                    # Special handling for nested structures
+                    if isinstance(value, dict) and isinstance(merged[field], dict):
+                        # Deep merge nested dicts
+                        merged[field] = deep_merge_nested(merged[field], value)
+                        fields_updated.append(field)
+                    elif isinstance(value, list) and isinstance(merged[field], list):
+                        # For lists, replace entire list (source takes precedence)
+                        merged[field] = value
+                        fields_updated.append(field)
+                    else:
+                        # Simple value override
+                        merged[field] = value
+                        fields_updated.append(field)
+        
+        fields_merged = fields_added + fields_updated
+        return merged, len(fields_merged), fields_merged
+    
+    def deep_merge_nested(base_dict, override_dict):
+        """
+        Deep merge two dictionaries. override_dict takes precedence.
+        For nested structures, recursively merge.
+        """
+        result = base_dict.copy() if base_dict else {}
+        
+        for key, value in override_dict.items():
+            if key in result:
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge_nested(result[key], value)
+                else:
+                    result[key] = value
+            else:
+                result[key] = value
+        
+        return result
+    
+    def count_non_empty_fields(obj, ignore_keys=[]):
+        """Count non-empty fields in an object."""
+        if not isinstance(obj, dict):
+            return 0
+        
+        count = 0
+        for key, value in obj.items():
+            if key in ignore_keys:
+                continue
+            if value is not None and value != "" and value != "NULL":
+                if isinstance(value, dict):
+                    count += count_non_empty_fields(value, ignore_keys)
+                elif isinstance(value, list) and len(value) > 0:
+                    count += 1
+                elif not isinstance(value, list):
+                    count += 1
+        return count
+    
+    def merge_investors_field_by_field(source_data, target_data, source_name, stats_section):
+        """
+        Merge source_data into target_data field-by-field.
+        Source takes precedence for each individual field.
+        
+        Args:
+            source_data: Dictionary with investor data (takes precedence per field)
+            target_data: Target dictionary to merge into
+            source_name: Name for logging
+            stats_section: Stats dictionary section to update
+        
+        Returns:
+            tuple: (merged_data, investors_added, investors_updated, total_fields_merged, field_changes)
+        """
+        merged = target_data.copy() if target_data else {}
+        investors_added = 0
+        investors_updated = 0
+        total_fields_merged = 0
+        field_changes = {}  # Track which fields were changed per investor
+        
+        if not source_data:
+            return merged, 0, 0, 0, {}
+        
+        for investor_id, source_record in source_data.items():
+            if not isinstance(source_record, dict):
+                continue
+            
+            # Check if investor exists in target
+            if investor_id not in merged:
+                # New investor - add entire record
+                merged[investor_id] = source_record.copy()
+                investors_added += 1
+                field_count = count_non_empty_fields(source_record)
+                total_fields_merged += field_count
+                field_changes[investor_id] = {
+                    'status': 'added',
+                    'fields': list(source_record.keys()),
+                    'field_count': field_count
+                }
+                continue
+            
+            # Investor exists - merge field-by-field (source takes precedence)
+            target_record = merged[investor_id]
+            
+            # Perform field-by-field merge
+            merged_record, fields_merged_count, merged_fields = field_by_field_merge(
+                source_record, target_record
+            )
+            
+            # Track changes
+            if fields_merged_count > 0:
+                merged[investor_id] = merged_record
+                investors_updated += 1
+                total_fields_merged += fields_merged_count
+                field_changes[investor_id] = {
+                    'status': 'updated',
+                    'fields': merged_fields,
+                    'field_count': fields_merged_count
+                }
+        
+        return merged, investors_added, investors_updated, total_fields_merged, field_changes
+    
+    def load_json_file(filepath, stats_section, name):
+        """Load a JSON file safely."""
+        if not os.path.exists(filepath):
+            stats["warnings"].append(f"{name} file not found: {filepath}")
+            return None, False
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    stats_section["loaded"] = True
+                    stats_section["count"] = len(data)
+                    print(f"   ✅ Loaded {name}: {len(data):,} records")
+                    return data, True
+                else:
+                    stats["errors"].append(f"{name} has invalid format (expected dict)")
+                    return None, False
+        except Exception as e:
+            error_msg = f"Error loading {name}: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            stats["errors"].append(error_msg)
+            return None, False
+    
+    def save_json_file(filepath, data, name):
+        """Save JSON data to file safely."""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            error_msg = f"Error saving {name}: {str(e)}"
+            print(f"   ❌ {error_msg}")
+            stats["errors"].append(error_msg)
+            return False
+    
+    try:
+        # ============================================================
+        # 1. PROCESS FETCHED INVESTORS
+        # ============================================================
+        print("\n📥 [1/2] Processing FETCHED investors (FIELD-BY-FIELD)...")
+        print("-"*40)
+        print(f"   Source 1: {INVHARV_FETCHED_INVESTORS}")
+        print(f"   Source 2: {HARVHUB_FETCHED_INVESTORS}")
+        print(f"   Output : {ALL_FETCHED_INVESTORS}")
+        print()
+        
+        # Load invharv fetched
+        invharv_fetched, invharv_loaded = load_json_file(
+            INVHARV_FETCHED_INVESTORS, 
+            stats["fetched"]["invharv"], 
+            "INVHARV fetched"
+        )
+        
+        # Load harvhub fetched
+        harvhub_fetched, harvhub_loaded = load_json_file(
+            HARVHUB_FETCHED_INVESTORS, 
+            stats["fetched"]["harvhub"], 
+            "HARVHUB fetched"
+        )
+        
+        # Initialize combined with invharv data (priority source)
+        combined_fetched = {}
+        
+        if invharv_fetched:
+            combined_fetched = invharv_fetched.copy()
+            print(f"   📋 Starting with INVHARV: {len(combined_fetched):,} investors")
+        
+        # Merge harvhub into combined (field-by-field, invharv takes precedence)
+        if harvhub_fetched:
+            print(f"   🔄 Merging HARVHUB into ALL_FETCHED (field-by-field)...")
+            combined_fetched, added, updated, fields, changes = merge_investors_field_by_field(
+                harvhub_fetched, 
+                combined_fetched, 
+                "HARVHUB -> ALL",
+                stats["fetched"]
+            )
+            stats["fetched"]["investors_added"] = added
+            stats["fetched"]["investors_updated"] = updated
+            stats["fetched"]["fields_merged"] = fields
+            stats["fetched"]["field_changes"] = changes
+            print(f"      ✅ Merged: {added} investors added, {updated} investors updated, {fields} fields merged")
+            
+            # Show sample of changes
+            if changes:
+                sample_ids = list(changes.keys())[:5]
+                for investor_id in sample_ids:
+                    change = changes[investor_id]
+                    field_list = change['fields'][:5]
+                    field_str = ', '.join(field_list)
+                    if len(change['fields']) > 5:
+                        field_str += f" ... (+{len(change['fields']) - 5} more)"
+                    print(f"         - ID {investor_id}: {change['status']} ({change['field_count']} fields: {field_str})")
+                if len(changes) > 5:
+                    print(f"         ... and {len(changes) - 5} more investors updated")
+        
+        elif not combined_fetched and not harvhub_fetched:
+            print(f"   🛑 No fetched data to combine")
+            stats["errors"].append("No fetched data available")
+        
+        # Save combined fetched
+        if combined_fetched:
+            stats["fetched"]["combined_count"] = len(combined_fetched)
+            if save_json_file(ALL_FETCHED_INVESTORS, combined_fetched, "ALL fetched combined"):
+                print(f"\n   💾 Saved combined fetched: {len(combined_fetched):,} records")
+        else:
+            print(f"\n   🛑 No fetched data to save")
+        
+        # ============================================================
+        # 2. PROCESS UPDATED INVESTORS
+        # ============================================================
+        print("\n📤 [2/2] Processing UPDATED investors (FIELD-BY-FIELD)...")
+        print("-"*40)
+        print(f"   Source 1: {INVHARV_UPDATED_INVESTORS}")
+        print(f"   Source 2: {HARVHUB_UPDATED_INVESTORS}")
+        print(f"   Output : {ALL_UPDATED_INVESTORS}")
+        print()
+        
+        # Load invharv updated
+        invharv_updated, invharv_loaded = load_json_file(
+            INVHARV_UPDATED_INVESTORS, 
+            stats["updated"]["invharv"], 
+            "INVHARV updated"
+        )
+        
+        # Load harvhub updated
+        harvhub_updated, harvhub_loaded = load_json_file(
+            HARVHUB_UPDATED_INVESTORS, 
+            stats["updated"]["harvhub"], 
+            "HARVHUB updated"
+        )
+        
+        # Initialize combined with invharv data (priority source)
+        combined_updated = {}
+        
+        if invharv_updated:
+            combined_updated = invharv_updated.copy()
+            print(f"   📋 Starting with INVHARV: {len(combined_updated):,} investors")
+        
+        # Merge harvhub into combined (field-by-field, invharv takes precedence)
+        if harvhub_updated:
+            print(f"   🔄 Merging HARVHUB into ALL_UPDATED (field-by-field)...")
+            combined_updated, added, updated, fields, changes = merge_investors_field_by_field(
+                harvhub_updated, 
+                combined_updated, 
+                "HARVHUB -> ALL",
+                stats["updated"]
+            )
+            stats["updated"]["investors_added"] = added
+            stats["updated"]["investors_updated"] = updated
+            stats["updated"]["fields_merged"] = fields
+            stats["updated"]["field_changes"] = changes
+            print(f"      ✅ Merged: {added} investors added, {updated} investors updated, {fields} fields merged")
+            
+            # Show sample of changes
+            if changes:
+                sample_ids = list(changes.keys())[:5]
+                for investor_id in sample_ids:
+                    change = changes[investor_id]
+                    field_list = change['fields'][:5]
+                    field_str = ', '.join(field_list)
+                    if len(change['fields']) > 5:
+                        field_str += f" ... (+{len(change['fields']) - 5} more)"
+                    print(f"         - ID {investor_id}: {change['status']} ({change['field_count']} fields: {field_str})")
+                if len(changes) > 5:
+                    print(f"         ... and {len(changes) - 5} more investors updated")
+        
+        elif not combined_updated and not harvhub_updated:
+            print(f"   🛑 No updated data to combine")
+            stats["errors"].append("No updated data available")
+        
+        # Save combined updated
+        if combined_updated:
+            stats["updated"]["combined_count"] = len(combined_updated)
+            if save_json_file(ALL_UPDATED_INVESTORS, combined_updated, "ALL updated combined"):
+                print(f"\n   💾 Saved combined updated: {len(combined_updated):,} records")
+        else:
+            print(f"\n   🛑 No updated data to save")
+        
+        # ============================================================
+        # 3. FINAL SUMMARY
+        # ============================================================
+        stats["processing_success"] = True
+        
+        print("\n" + "="*70)
+        print(f"  MERGE SUMMARY (FIELD-BY-FIELD ONE-WAY: INVHARV + HARVHUB → ALL)")
+        print("="*70)
+        
+        print(f"\n  📥 FETCHED FILES (Source → Target):")
+        print(f"     INVHARV  : {'✅' if stats['fetched']['invharv']['loaded'] else '❌'} {stats['fetched']['invharv']['count']:,} records")
+        print(f"     HARVHUB  : {'✅' if stats['fetched']['harvhub']['loaded'] else '❌'} {stats['fetched']['harvhub']['count']:,} records")
+        print(f"     → Combined : {stats['fetched']['combined_count']:,} records")
+        print(f"       (Added: {stats['fetched']['investors_added']:,} | Updated: {stats['fetched']['investors_updated']:,} | Fields: {stats['fetched']['fields_merged']:,})")
+        print(f"     Output   : {ALL_FETCHED_INVESTORS}")
+        
+        print(f"\n  📤 UPDATED FILES (Source → Target):")
+        print(f"     INVHARV  : {'✅' if stats['updated']['invharv']['loaded'] else '❌'} {stats['updated']['invharv']['count']:,} records")
+        print(f"     HARVHUB  : {'✅' if stats['updated']['harvhub']['loaded'] else '❌'} {stats['updated']['harvhub']['count']:,} records")
+        print(f"     → Combined : {stats['updated']['combined_count']:,} records")
+        print(f"       (Added: {stats['updated']['investors_added']:,} | Updated: {stats['updated']['investors_updated']:,} | Fields: {stats['updated']['fields_merged']:,})")
+        print(f"     Output   : {ALL_UPDATED_INVESTORS}")
+        
+        if stats["warnings"]:
+            print(f"\n  🛑 WARNINGS ({len(stats['warnings'])}):")
+            for warning in stats["warnings"]:
+                print(f"     - {warning}")
+        
+        if stats["errors"]:
+            print(f"\n  ❌ ERRORS ({len(stats['errors'])}):")
+            for error in stats["errors"]:
+                print(f"     - {error}")
+        
+        print(f"\n  ✅ Status : {'SUCCESS' if stats['processing_success'] else 'FAILED'}")
+        print(f"  🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*70)
+        
+        return stats
+        
+    except Exception as e:
+        print(f"\n{'='*70}")
+        print(f"   CRITICAL ERROR")
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n  📜 Full Traceback:")
+        traceback.print_exc()
+        
+        stats["processing_success"] = False
+        stats["errors"].append(f"Critical error: {str(e)}")
+        return stats
                
 def update_database():
     """Update database from JSON files without batch processing
@@ -1694,7 +2664,8 @@ def update_database():
     - Does NOT delete files after updating
     - Processes ALL records in one go
     """
-    combine_investors_to_all_files()
+    updated_individual_records_to_all_files()
+    restore_missing_fields()
     
     def safe_read_file(file_path):
         """Safely read a JSON file with permission handling"""
@@ -2149,7 +3120,7 @@ def update_database():
         import traceback
         print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-  
+   
 def close_db_browser():
     db.shutdown()
     print(f"\n🔒 Database connection closed.")

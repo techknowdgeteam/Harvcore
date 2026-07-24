@@ -1744,7 +1744,424 @@ def sync_and_distribute_investors():
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
-         
+
+def restore_missing_fields():
+    """
+    Heal missing fields across JSON files using hierarchical field-by-field merging.
+    
+    Priority order:
+    1. INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS (highest priority)
+    2. INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
+    3. ALL_UPDATED_INVESTORS
+    4. ALL_FETCHED_INVESTORS (lowest priority)
+    
+    Rules:
+    - Individual files (invharv/harvhub) ONLY heal their own users
+    - ALL files can receive from individual files
+    - Individual files can receive from ALL files if they're missing fields
+    - Field-by-field merging (not whole record replacement)
+    - Files heal each other if individual files are empty
+    """
+    
+    print("\n" + "="*70)
+    print(f"  HEALING MISSING FIELDS (FIELD-BY-FIELD MERGE)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    
+    def safe_read_json(file_path, default={}):
+        """Safely read JSON file with error handling"""
+        if not os.path.exists(file_path):
+            print(f"    ⚠️ File not found: {file_path}")
+            return default
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"    ❌ JSON decode error in {file_path}: {str(e)}")
+            return default
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied reading {file_path}")
+            return default
+        except Exception as e:
+            print(f"    ❌ Error reading {file_path}: {str(e)}")
+            return default
+    
+    def safe_write_json(file_path, data):
+        """Safely write JSON file with permission handling"""
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied writing {file_path}")
+            # Try to delete and retry
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    return True
+            except:
+                pass
+            return False
+        except Exception as e:
+            print(f"    ❌ Error writing {file_path}: {str(e)}")
+            return False
+    
+    def merge_fields(source_record, target_record):
+        """
+        Merge fields from source to target where target is missing fields.
+        Returns: (merged_record, fields_added)
+        """
+        if not source_record or not target_record:
+            return target_record, 0
+        
+        merged = dict(target_record)  # Start with target
+        fields_added = 0
+        
+        for key, value in source_record.items():
+            # Skip 'id' field as it's the key
+            if key == 'id':
+                continue
+            
+            # Only add if target doesn't have this field OR target has it as None/null
+            if key not in merged or merged[key] is None:
+                merged[key] = value
+                fields_added += 1
+        
+        return merged, fields_added
+    
+    def get_record_id(record):
+        """Extract record ID from record dict"""
+        if isinstance(record, dict):
+            return str(record.get('id', ''))
+        return None
+    
+    def merge_file_pair(source_data, target_data, source_name, target_name, skip_missing_ids=False):
+        """
+        Merge fields from source to target for matching IDs.
+        If skip_missing_ids=True, only merge for IDs that exist in target.
+        """
+        if not source_data or not target_data:
+            return target_data, 0, 0, 0
+        
+        merged_target = dict(target_data)
+        total_records_healed = 0
+        total_fields_added = 0
+        total_records_skipped = 0
+        
+        for record_id, source_record in source_data.items():
+            if record_id in merged_target:
+                # Merge fields from source to target
+                target_record = merged_target[record_id]
+                merged_record, fields_added = merge_fields(source_record, target_record)
+                
+                if fields_added > 0:
+                    merged_target[record_id] = merged_record
+                    total_records_healed += 1
+                    total_fields_added += fields_added
+                    print(f"      ✅ Healed record {record_id}: added {fields_added} field(s)")
+            else:
+                if not skip_missing_ids:
+                    # If target doesn't have this ID, add the whole record
+                    merged_target[record_id] = source_record
+                    total_records_healed += 1
+                    print(f"      ➕ Added new record {record_id} from {source_name}")
+                else:
+                    total_records_skipped += 1
+        
+        return merged_target, total_records_healed, total_fields_added, total_records_skipped
+    
+    # Step 1: Load all JSON files
+    print("\n📁 [1/4] Loading JSON Files...")
+    
+    invharv_fetched = safe_read_json(INVHARV_FETCHED_INVESTORS, {})
+    invharv_updated = safe_read_json(INVHARV_UPDATED_INVESTORS, {})
+    harvhub_fetched = safe_read_json(HARVHUB_FETCHED_INVESTORS, {})
+    harvhub_updated = safe_read_json(HARVHUB_UPDATED_INVESTORS, {})
+    all_fetched = safe_read_json(ALL_FETCHED_INVESTORS, {})
+    all_updated = safe_read_json(ALL_UPDATED_INVESTORS, {})
+    
+    print(f"    📊 INVHARV_FETCHED: {len(invharv_fetched):,} records")
+    print(f"    📊 INVHARV_UPDATED: {len(invharv_updated):,} records")
+    print(f"    📊 HARVHUB_FETCHED: {len(harvhub_fetched):,} records")
+    print(f"    📊 HARVHUB_UPDATED: {len(harvhub_updated):,} records")
+    print(f"    📊 ALL_FETCHED: {len(all_fetched):,} records")
+    print(f"    📊 ALL_UPDATED: {len(all_updated):,} records")
+    
+    # Step 2: Determine which individual files have data
+    invharv_has_data = len(invharv_fetched) > 0 or len(invharv_updated) > 0
+    harvhub_has_data = len(harvhub_fetched) > 0 or len(harvhub_updated) > 0
+    
+    print(f"\n📊 [2/4] Analyzing Data Sources...")
+    print(f"    INVHARV has data: {invharv_has_data}")
+    print(f"    HARVHUB has data: {harvhub_has_data}")
+    
+    all_fetched_modified = False
+    all_updated_modified = False
+    invharv_fetched_modified = False
+    invharv_updated_modified = False
+    harvhub_fetched_modified = False
+    harvhub_updated_modified = False
+    
+    total_fields_added_all_fetched = 0
+    total_fields_added_all_updated = 0
+    total_fields_added_invharv_fetched = 0
+    total_fields_added_invharv_updated = 0
+    total_fields_added_harvhub_fetched = 0
+    total_fields_added_harvhub_updated = 0
+    
+    print("\n🔧 [3/4] Healing Files...")
+    print("-"*70)
+    
+    # CASE 1: Individual files have data - heal ALL files from individual files
+    if invharv_has_data or harvhub_has_data:
+        print("\n  📋 Using INDIVIDUAL files as primary source...")
+        
+        # 1A: Heal ALL_UPDATED from INVHARV_UPDATED
+        if invharv_updated:
+            print("\n    🔄 INVHARV_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                invharv_updated, all_updated, "INVHARV_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1B: Heal ALL_UPDATED from HARVHUB_UPDATED
+        if harvhub_updated:
+            print("\n    🔄 HARVHUB_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                harvhub_updated, all_updated, "HARVHUB_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1C: Heal ALL_FETCHED from INVHARV_FETCHED
+        if invharv_fetched:
+            print("\n    🔄 INVHARV_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                invharv_fetched, all_fetched, "INVHARV_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1D: Heal ALL_FETCHED from HARVHUB_FETCHED
+        if harvhub_fetched:
+            print("\n    🔄 HARVHUB_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                harvhub_fetched, all_fetched, "HARVHUB_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1E: Also heal ALL_FETCHED from ALL_UPDATED (in case updated has fields fetched doesn't)
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED (cross-healing)")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1F: Heal ALL_UPDATED from ALL_FETCHED (cross-healing)
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED (cross-healing)")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1G: Heal individual files from ALL files (if individual is missing fields)
+        print("\n    🔄 ALL_UPDATED → INVHARV_UPDATED (if needed)")
+        if invharv_updated and all_updated:
+            invharv_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, invharv_updated, "ALL_UPDATED", "INVHARV_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_updated_modified = True
+                total_fields_added_invharv_updated += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_UPDATED")
+        
+        print("\n    🔄 ALL_UPDATED → HARVHUB_UPDATED (if needed)")
+        if harvhub_updated and all_updated:
+            harvhub_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, harvhub_updated, "ALL_UPDATED", "HARVHUB_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_updated_modified = True
+                total_fields_added_harvhub_updated += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_UPDATED")
+        
+        print("\n    🔄 ALL_FETCHED → INVHARV_FETCHED (if needed)")
+        if invharv_fetched and all_fetched:
+            invharv_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, invharv_fetched, "ALL_FETCHED", "INVHARV_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_fetched_modified = True
+                total_fields_added_invharv_fetched += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_FETCHED")
+        
+        print("\n    🔄 ALL_FETCHED → HARVHUB_FETCHED (if needed)")
+        if harvhub_fetched and all_fetched:
+            harvhub_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, harvhub_fetched, "ALL_FETCHED", "HARVHUB_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_fetched_modified = True
+                total_fields_added_harvhub_fetched += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_FETCHED")
+    
+    # CASE 2: Individual files are empty - heal between ALL files only
+    else:
+        print("\n  📋 Individual files EMPTY - healing between ALL files only...")
+        
+        # 2A: Heal ALL_UPDATED from ALL_FETCHED
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 2B: Heal ALL_FETCHED from ALL_UPDATED
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+    
+    # Step 4: Write back all modified files
+    print("\n💾 [4/4] Saving Modified Files...")
+    print("-"*70)
+    
+    if all_fetched_modified:
+        if safe_write_json(ALL_FETCHED_INVESTORS, all_fetched):
+            print(f"    ✅ Saved: {ALL_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_FETCHED_INVESTORS}")
+    
+    if all_updated_modified:
+        if safe_write_json(ALL_UPDATED_INVESTORS, all_updated):
+            print(f"    ✅ Saved: {ALL_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_UPDATED_INVESTORS}")
+    
+    if invharv_fetched_modified:
+        if safe_write_json(INVHARV_FETCHED_INVESTORS, invharv_fetched):
+            print(f"    ✅ Saved: {INVHARV_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_FETCHED_INVESTORS}")
+    
+    if invharv_updated_modified:
+        if safe_write_json(INVHARV_UPDATED_INVESTORS, invharv_updated):
+            print(f"    ✅ Saved: {INVHARV_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_UPDATED_INVESTORS}")
+    
+    if harvhub_fetched_modified:
+        if safe_write_json(HARVHUB_FETCHED_INVESTORS, harvhub_fetched):
+            print(f"    ✅ Saved: {HARVHUB_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_FETCHED_INVESTORS}")
+    
+    if harvhub_updated_modified:
+        if safe_write_json(HARVHUB_UPDATED_INVESTORS, harvhub_updated):
+            print(f"    ✅ Saved: {HARVHUB_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_UPDATED_INVESTORS}")
+    
+    # Final Summary
+    print("\n" + "="*70)
+    print(f"  HEALING SUMMARY")
+    print("="*70)
+    print(f"\n  📊 FILES PROCESSED:")
+    print(f"     ALL_FETCHED     : {'✅ MODIFIED' if all_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     ALL_UPDATED     : {'✅ MODIFIED' if all_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_FETCHED : {'✅ MODIFIED' if invharv_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_UPDATED : {'✅ MODIFIED' if invharv_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_FETCHED : {'✅ MODIFIED' if harvhub_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_UPDATED : {'✅ MODIFIED' if harvhub_updated_modified else 'ℹ️ NO CHANGES'}")
+    
+    print(f"\n  📈 FIELDS ADDED BY FILE:")
+    print(f"     ALL_FETCHED     : {total_fields_added_all_fetched:,} fields")
+    print(f"     ALL_UPDATED     : {total_fields_added_all_updated:,} fields")
+    print(f"     INVHARV_FETCHED : {total_fields_added_invharv_fetched:,} fields")
+    print(f"     INVHARV_UPDATED : {total_fields_added_invharv_updated:,} fields")
+    print(f"     HARVHUB_FETCHED : {total_fields_added_harvhub_fetched:,} fields")
+    print(f"     HARVHUB_UPDATED : {total_fields_added_harvhub_updated:,} fields")
+    
+    print(f"\n  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    
+    return {
+        'all_fetched_modified': all_fetched_modified,
+        'all_updated_modified': all_updated_modified,
+        'invharv_fetched_modified': invharv_fetched_modified,
+        'invharv_updated_modified': invharv_updated_modified,
+        'harvhub_fetched_modified': harvhub_fetched_modified,
+        'harvhub_updated_modified': harvhub_updated_modified
+    }
+
 def manage_accountmanagement_and_activities_jsons():
     """
     Updates accountmanagement.json and activities.json for each investor using data from FETCHED_INVESTORS.
@@ -2121,6 +2538,7 @@ def move_fetched_investors():
     """
     repair_json_files()
     sync_and_distribute_investors()
+    restore_missing_fields()
     
     import traceback
     import sys
