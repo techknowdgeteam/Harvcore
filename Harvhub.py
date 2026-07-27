@@ -15929,6 +15929,643 @@ def martingale_system(inv_id=None):
     return stats
 # MARTINGALE #
 
+def daily_target_check(inv_id=None):
+    """
+    Function: Checks if today's profit/loss has reached the daily target limits.
+    
+    Reads daily_target configuration from accountmanagement.json:
+    - profit_limit: Maximum daily profit allowed (if "unlimited" or empty, no limit)
+    - Loss_limit: Maximum daily loss allowed (if "unlimited" or empty, no limit)
+    
+    When profit limit is reached: Raises alarm to stop trading for the day
+    When loss limit is reached: Raises alarm to stop trading for the day
+    
+    IMPORTANT: Only ONE notification per day. If both limits are hit, the first one
+    to be reached wins and gets recorded. The other is ignored.
+    
+    Supports:
+    - Individual profit and loss limits
+    - Unlimited/empty values mean no limit
+    - Fallback: If accountmanagement.json doesn't exist, checks FETCHED_INVESTORS
+      and UPDATED_INVESTORS for accountmanagement data.
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the daily target check
+    """
+    global daily_target_alert
+    
+    # Helper function to get today's profit/loss
+    def get_todays_pnl(investor_id):
+        """
+        Get today's profit/loss from MT5 history deals.
+        Uses the existing MT5 connection (assumed already initialized).
+        Returns: (today_profit, today_loss, today_net, total_trades)
+        """
+        try:
+            # Get today's start timestamp (00:00:00)
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_timestamp = int(today.timestamp())
+            current_timestamp = int(datetime.now().timestamp())
+            
+            # Get closed deals from today
+            deals = mt5.history_deals_get(today_timestamp, current_timestamp)
+            
+            if deals is None or len(deals) == 0:
+                print(f"  │ No deals found for today")
+                return 0, 0, 0, 0
+            
+            today_profit = 0
+            today_loss = 0
+            trade_count = 0
+            
+            for deal in deals:
+                if deal.type in [0, 1]:  # Buy/Sell deals
+                    profit = deal.profit or 0
+                    # Include swap and commission if available
+                    swap = deal.swap or 0
+                    commission = deal.commission or 0
+                    total_pnl = profit + swap + commission
+                    
+                    if total_pnl > 0:
+                        today_profit += total_pnl
+                    else:
+                        today_loss += abs(total_pnl)
+                    trade_count += 1
+            
+            today_net = today_profit - today_loss
+            
+            return today_profit, today_loss, today_net, trade_count
+            
+        except Exception as e:
+            print(f"  │ Error getting today's P&L: {e}")
+            return 0, 0, 0, 0
+    
+    # Helper function to get the last message for a specific section
+    def get_last_message(notifications_dict, section_key):
+        """Get the most recent message for a specific section"""
+        if not notifications_dict:
+            return None
+        
+        latest_message = None
+        latest_time = None
+        latest_id = None
+        
+        for msg_id, msg_data in notifications_dict.items():
+            if isinstance(msg_data, dict) and msg_data.get('section') == section_key:
+                try:
+                    msg_time = datetime.strptime(msg_data['time'], "%Y-%m-%d %H:%M:%S")
+                    if latest_time is None or msg_time > latest_time:
+                        latest_time = msg_time
+                        latest_message = msg_data
+                        latest_id = msg_id
+                except:
+                    pass
+        
+        if latest_message:
+            return {
+                'type': latest_message.get('type'),
+                'time': latest_time,
+                'id': latest_id,
+                'data': latest_message
+            }
+        return None
+    
+    # Helper function to check if today's notification already exists
+    def has_today_notification(notifications_dict, section_key):
+        """Check if there's already a notification for today in the given section"""
+        if not notifications_dict:
+            return False
+        
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        for msg_id, msg_data in notifications_dict.items():
+            if isinstance(msg_data, dict) and msg_data.get('section') == section_key:
+                msg_time = msg_data.get('time', '')
+                if msg_time and msg_time.startswith(today_str):
+                    return True
+        
+        return False
+    
+    # Helper function to add notification with date-based ID
+    def add_daily_notification(notifications_dict, section_key, message, message_type, limit_type, timestamp=None):
+        """
+        Add notification with date-based ID.
+        Only adds if no notification exists for today.
+        Returns: (added, message_id)
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Check if notification already exists for today
+        if has_today_notification(notifications_dict, section_key):
+            print(f"      📝 {section_key} notification already exists for today - skipping")
+            return False, None
+        
+        # Use date as the ID (YYYY-MM-DD format)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        notifications_dict[today_str] = {
+            "section": section_key,
+            "message": message,
+            "time": timestamp,
+            "type": message_type,
+            "limit_type": limit_type,  # 'profit' or 'loss'
+            "update": "new"
+        }
+        return True, today_str
+    
+    # Helper function to add execution notification with date-based ID
+    def add_daily_execution_notification(executions_dict, section_key, message, message_type, limit_type, timestamp=None):
+        """
+        Add execution notification with date-based ID.
+        Only adds if no notification exists for today.
+        Returns: (added, message_id)
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Check if notification already exists for today
+        if has_today_notification(executions_dict, section_key):
+            print(f"      📝 {section_key} execution notification already exists for today - skipping")
+            return False, None
+        
+        # Use date as the ID (YYYY-MM-DD format)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        executions_dict[today_str] = {
+            "section": section_key,
+            "message": message,
+            "time": timestamp,
+            "type": message_type,
+            "limit_type": limit_type,  # 'profit' or 'loss'
+            "update": "new"
+        }
+        return True, today_str
+    
+    print(f"\n{'='*10} 📊 DAILY TARGET CHECK {'='*10}")
+    if inv_id:
+        print(f" Investor: {inv_id}")
+
+    if not mt5.terminal_info():
+        print(f"  MT5 not connected")
+        daily_target_alert = {
+            'is_triggered': False,
+            'investor_id': inv_id if inv_id else "all",
+            'reason': 'MT5 not connected',
+            'timestamp': datetime.now().strftime('%I:%M:%S %p')
+        }
+        return {
+            "investor_id": inv_id if inv_id else "all",
+            "investors_checked": 0,
+            "profit_limit_hit": 0,
+            "loss_limit_hit": 0,
+            "no_limit_configured": 0,
+            "processing_success": False,
+            "current_time": datetime.now().strftime('%I:%M:%S %p'),
+            "errors": ["MT5 not connected"]
+        }
+    
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_checked": 0,
+        "profit_limit_hit": 0,
+        "loss_limit_hit": 0,
+        "no_limit_configured": 0,
+        "notifications_added": 0,
+        "processing_success": False,
+        "current_time": datetime.now().strftime('%I:%M:%S %p'),
+        "errors": []
+    }
+    
+    any_limit_hit = False
+    alert_details = {
+        'investors_processed': [],
+        'investors_limit_hit': [],
+        'hit_details': {}
+    }
+    
+    # Load updated_investors.json
+    updated_investors_data = {}
+    if os.path.exists(UPDATED_INVESTORS):
+        try:
+            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                updated_investors_data = json.load(f)
+        except Exception as e:
+            print(f"  Error loading updated_investors.json: {e}")
+    
+    # Load fetched_investors.json
+    fetched_investors_data = {}
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_investors_data = json.load(f)
+        except Exception as e:
+            print(f"  Error loading fetched_investors.json: {e}")
+    
+    investors_to_process = [inv_id] if inv_id else usersdictionary.keys()
+    total_investors = len(investors_to_process) if not inv_id else 1
+    processed = 0
+
+    for user_brokerid in investors_to_process:
+        processed += 1
+        print(f"\n[{processed}/{total_investors}] 📊 {user_brokerid}")
+        
+        inv_root = Path(INV_PATH) / user_brokerid
+        acc_mgmt_path = inv_root / "accountmanagement.json"
+        activities_path = inv_root / "activities.json"
+        
+        # Load existing activities.json
+        existing_activities = {}
+        if activities_path.exists():
+            try:
+                with open(activities_path, 'r', encoding='utf-8') as f:
+                    existing_activities = json.load(f)
+            except Exception as e:
+                print(f"  Error reading activities.json: {e}")
+        
+        # Initialize variables
+        profit_limit = None
+        loss_limit = None
+        today_profit = 0
+        today_loss = 0
+        today_net = 0
+        total_trades = 0
+        
+        # ============================================================
+        # LOAD ACCOUNT MANAGEMENT CONFIG (WITH FALLBACK)
+        # ============================================================
+        config = None
+        config_source = None
+        
+        # PRIMARY: Try to load from accountmanagement.json
+        if acc_mgmt_path.exists():
+            try:
+                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    config_source = "accountmanagement.json"
+                    print(f"  📁 Using config from: accountmanagement.json")
+            except Exception as e:
+                print(f"  Error reading accountmanagement.json: {e}")
+        
+        # FALLBACK 1: Try to get from UPDATED_INVESTORS
+        if config is None and user_brokerid in updated_investors_data:
+            updated_record = updated_investors_data[user_brokerid]
+            if 'accountmanagement' in updated_record and updated_record['accountmanagement']:
+                config = updated_record['accountmanagement']
+                config_source = "UPDATED_INVESTORS"
+                print(f"  📁 Using config from: UPDATED_INVESTORS")
+        
+        # FALLBACK 2: Try to get from FETCHED_INVESTORS
+        if config is None and user_brokerid in fetched_investors_data:
+            fetched_record = fetched_investors_data[user_brokerid]
+            if 'accountmanagement' in fetched_record and fetched_record['accountmanagement']:
+                config = fetched_record['accountmanagement']
+                config_source = "FETCHED_INVESTORS"
+                print(f"  📁 Using config from: FETCHED_INVESTORS")
+        
+        # Process config if found
+        if config:
+            # Get daily target from config
+            daily_target = config.get("daily_target", {})
+            
+            # Get profit limit
+            profit_limit_str = daily_target.get("profit_limit", "unlimited")
+            if profit_limit_str is not None and str(profit_limit_str).lower() not in ["", "unlimited", "none", "null"]:
+                try:
+                    profit_limit = float(profit_limit_str)
+                    print(f"  📈 Profit limit: ${profit_limit:.2f}")
+                except (ValueError, TypeError):
+                    print(f"  ⚠️ Invalid profit_limit value: {profit_limit_str} - treating as unlimited")
+                    profit_limit = None
+            else:
+                print(f"  📈 Profit limit: UNLIMITED")
+            
+            # Get loss limit
+            loss_limit_str = daily_target.get("Loss_limit", "unlimited")
+            if loss_limit_str is not None and str(loss_limit_str).lower() not in ["", "unlimited", "none", "null"]:
+                try:
+                    loss_limit = float(loss_limit_str)
+                    print(f"  📉 Loss limit: ${loss_limit:.2f}")
+                except (ValueError, TypeError):
+                    print(f"  ⚠️ Invalid Loss_limit value: {loss_limit_str} - treating as unlimited")
+                    loss_limit = None
+            else:
+                print(f"  📉 Loss limit: UNLIMITED")
+        else:
+            print(f"  ⚠️ No accountmanagement config found in any source (file, UPDATED_INVESTORS, FETCHED_INVESTORS)")
+            config_source = "none"
+        
+        # If no limits configured, skip
+        if profit_limit is None and loss_limit is None:
+            print(f"  ℹ️ No daily limits configured - all trading allowed")
+            stats["no_limit_configured"] += 1
+            
+            # Update activities.json with no limits status
+            activities_data = existing_activities.copy() if existing_activities else {}
+            
+            if 'notifications' not in activities_data:
+                activities_data['notifications'] = {}
+            if 'executions_notification' not in activities_data:
+                activities_data['executions_notification'] = {}
+            
+            activities_data['daily_target_status'] = {
+                'has_limits': False,
+                'last_check': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'message': 'No daily limits configured',
+                'config_source': config_source if config_source else 'none'
+            }
+            
+            try:
+                with open(activities_path, 'w', encoding='utf-8') as f:
+                    json.dump(activities_data, f, indent=4)
+                print(f"  ✅ activities.json updated (no limits)")
+            except Exception as e:
+                print(f"  Error saving activities.json: {e}")
+            
+            # Update updated_investors.json
+            if user_brokerid in updated_investors_data:
+                updated_record = updated_investors_data[user_brokerid].copy()
+            else:
+                updated_record = {}
+            
+            updated_record['daily_target_status'] = activities_data.get('daily_target_status', {})
+            updated_record['last_daily_target_check'] = datetime.now().isoformat()
+            updated_record['config_source'] = config_source if config_source else 'none'
+            updated_investors_data[user_brokerid] = updated_record
+            
+            stats["processing_success"] = True
+            continue
+        
+        stats["investors_checked"] += 1
+        
+        # ============================================================
+        # GET TODAY'S TRADING RESULTS
+        # ============================================================
+        print(f"\n  📊 TODAY'S TRADING RESULTS:")
+        today_profit, today_loss, today_net, total_trades = get_todays_pnl(user_brokerid)
+        
+        print(f"     Total trades: {total_trades}")
+        print(f"     Gross profit: ${today_profit:.2f}")
+        print(f"     Gross loss: ${today_loss:.2f}")
+        print(f"     Net P&L: ${today_net:.2f}")
+        
+        # Determine if limits are hit
+        profit_limit_hit = False
+        loss_limit_hit = False
+        limit_type = "none"
+        limit_message = ""
+        notification_message = ""
+        execution_message = ""
+        
+        # Check profit limit first (profit takes precedence)
+        if profit_limit is not None and today_profit >= profit_limit:
+            profit_limit_hit = True
+            limit_type = "profit"
+            limit_message = f"Daily profit target reached: ${today_profit:.2f} (limit: ${profit_limit:.2f})"
+            notification_message = f"🎯 PROFIT TARGET REACHED: Your account has reached the daily profit target of ${profit_limit:.2f} with ${today_profit:.2f} in profits. Trading is suspended for the remainder of today. Net P&L: ${today_net:.2f}"
+            execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} - PROFIT TARGET REACHED (${today_profit:.2f}/${profit_limit:.2f}) at {datetime.now().strftime('%I:%M:%S %p')}. Trading suspended for today."
+            print(f"\n  🚨 {limit_message}")
+        
+        # Check loss limit only if profit limit was NOT hit (one winner per day)
+        elif loss_limit is not None and today_loss >= loss_limit:
+            loss_limit_hit = True
+            limit_type = "loss"
+            limit_message = f"Daily loss limit reached: ${today_loss:.2f} (limit: ${loss_limit:.2f})"
+            notification_message = f"🛑 LOSS LIMIT REACHED: Your account has reached the daily loss limit of ${loss_limit:.2f} with ${today_loss:.2f} in losses. Trading is suspended for the remainder of today. Net P&L: ${today_net:.2f}"
+            execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} - LOSS LIMIT REACHED (${today_loss:.2f}/${loss_limit:.2f}) at {datetime.now().strftime('%I:%M:%S %p')}. Trading suspended for today."
+            print(f"\n  🚨 {limit_message}")
+        
+        # If both limits are hit but profit was checked first, profit wins
+        elif profit_limit is not None and loss_limit is not None:
+            if today_profit >= profit_limit and today_loss >= loss_limit:
+                # Profit wins (checked first)
+                profit_limit_hit = True
+                limit_type = "profit"
+                limit_message = f"Daily profit target reached: ${today_profit:.2f} (limit: ${profit_limit:.2f}) [Loss also reached: ${today_loss:.2f}]"
+                notification_message = f"🎯 PROFIT TARGET REACHED: Your account has reached the daily profit target of ${profit_limit:.2f} with ${today_profit:.2f} in profits. Trading is suspended for the remainder of today. (Loss also reached: ${today_loss:.2f}) Net P&L: ${today_net:.2f}"
+                execution_message = f"SERVER NOTIFICATION: Investor {user_brokerid} - PROFIT TARGET REACHED (${today_profit:.2f}/${profit_limit:.2f}) at {datetime.now().strftime('%I:%M:%S %p')}. Trading suspended for today."
+                print(f"\n  🚨 {limit_message}")
+        
+        # Update stats
+        if profit_limit_hit:
+            stats["profit_limit_hit"] += 1
+            any_limit_hit = True
+        if loss_limit_hit:
+            stats["loss_limit_hit"] += 1
+            any_limit_hit = True
+        
+        alert_details['investors_processed'].append(user_brokerid)
+        
+        # ============================================================
+        # UPDATE ACTIVITIES.JSON WITH NOTIFICATIONS (DATE-BASED ID)
+        # ============================================================
+        activities_data = existing_activities.copy() if existing_activities else {}
+        
+        if 'notifications' not in activities_data:
+            activities_data['notifications'] = {}
+        if 'executions_notification' not in activities_data:
+            activities_data['executions_notification'] = {}
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        
+        # Check if today's notification already exists
+        has_today_notif = has_today_notification(activities_data['notifications'], 'DailyTarget')
+        has_today_exec = has_today_notification(activities_data['executions_notification'], 'DailyTarget')
+        
+        print(f"\n  🔍 Checking today's notification status ({today_str}):")
+        print(f"     Today's notification exists: {has_today_notif}")
+        print(f"     Today's execution exists: {has_today_exec}")
+        
+        # Only add if limit is hit AND no notification exists for today
+        if (profit_limit_hit or loss_limit_hit) and not has_today_notif:
+            print(f"     📝 Adding new DailyTarget notification for today")
+            
+            # Add notification with date-based ID
+            added, msg_id = add_daily_notification(
+                activities_data['notifications'], 
+                'DailyTarget', 
+                notification_message, 
+                'warning',
+                limit_type,
+                timestamp
+            )
+            
+            if added:
+                stats["notifications_added"] += 1
+                print(f"  ✅ Added notification with ID: {msg_id} ({limit_type})")
+            
+            # Add execution notification with date-based ID
+            added_exec, exec_id = add_daily_execution_notification(
+                activities_data['executions_notification'],
+                'DailyTarget',
+                execution_message,
+                'warning',
+                limit_type,
+                timestamp
+            )
+            
+            if added_exec:
+                stats["notifications_added"] += 1
+                print(f"  ✅ Added execution notification with ID: {exec_id} ({limit_type})")
+            
+            # Store hit details
+            alert_details['investors_limit_hit'].append({
+                'investor': user_brokerid,
+                'today_profit': today_profit,
+                'today_loss': today_loss,
+                'today_net': today_net,
+                'profit_limit': profit_limit,
+                'loss_limit': loss_limit,
+                'limit_type': limit_type,
+                'notification_id': msg_id,
+                'timestamp': timestamp
+            })
+            
+            alert_details['hit_details'][user_brokerid] = {
+                'profit_limit_hit': profit_limit_hit,
+                'loss_limit_hit': loss_limit_hit,
+                'today_profit': today_profit,
+                'today_loss': today_loss,
+                'today_net': today_net,
+                'profit_limit': profit_limit,
+                'loss_limit': loss_limit,
+                'limit_type': limit_type,
+                'notification_added': True,
+                'notification_id': msg_id if 'msg_id' in locals() else None,
+                'config_source': config_source if config_source else 'none'
+            }
+            
+        elif (profit_limit_hit or loss_limit_hit) and has_today_notif:
+            print(f"     📝 Notification already exists for today - skipping")
+            
+            # Still store hit details but without adding notification
+            alert_details['investors_limit_hit'].append({
+                'investor': user_brokerid,
+                'today_profit': today_profit,
+                'today_loss': today_loss,
+                'today_net': today_net,
+                'profit_limit': profit_limit,
+                'loss_limit': loss_limit,
+                'limit_type': limit_type,
+                'notification_id': None,
+                'timestamp': timestamp,
+                'notification_skipped': True,
+                'reason': 'Today\'s notification already exists'
+            })
+            
+            alert_details['hit_details'][user_brokerid] = {
+                'profit_limit_hit': profit_limit_hit,
+                'loss_limit_hit': loss_limit_hit,
+                'today_profit': today_profit,
+                'today_loss': today_loss,
+                'today_net': today_net,
+                'profit_limit': profit_limit,
+                'loss_limit': loss_limit,
+                'limit_type': limit_type,
+                'notification_added': False,
+                'notification_skipped': True,
+                'reason': 'Today\'s notification already exists',
+                'config_source': config_source if config_source else 'none'
+            }
+        
+        # Update daily target status in activities.json
+        activities_data['daily_target_status'] = {
+            'profit_limit_hit': profit_limit_hit,
+            'loss_limit_hit': loss_limit_hit,
+            'today_profit': today_profit,
+            'today_loss': today_loss,
+            'today_net': today_net,
+            'total_trades': total_trades,
+            'profit_limit': profit_limit,
+            'loss_limit': loss_limit,
+            'last_check': timestamp,
+            'limit_type': limit_type,
+            'trading_allowed': not (profit_limit_hit or loss_limit_hit),
+            'has_limits': True,
+            'notification_added_today': (profit_limit_hit or loss_limit_hit) and not has_today_notif,
+            'notification_id': msg_id if 'msg_id' in locals() else None,
+            'config_source': config_source if config_source else 'none'
+        }
+        
+        try:
+            with open(activities_path, 'w', encoding='utf-8') as f:
+                json.dump(activities_data, f, indent=4)
+            print(f"\n  ✅ activities.json saved")
+            print(f"     • Trading allowed: {not (profit_limit_hit or loss_limit_hit)}")
+            print(f"     • Limit type: {limit_type if (profit_limit_hit or loss_limit_hit) else 'none'}")
+            print(f"     • Notification added today: {(profit_limit_hit or loss_limit_hit) and not has_today_notif}")
+            if 'msg_id' in locals() and msg_id:
+                print(f"     • Notification ID: {msg_id}")
+            print(f"     • Config source: {config_source if config_source else 'none'}")
+            print(f"     • Notifications count: {len(activities_data['notifications'])}")
+            print(f"     • Executions count: {len(activities_data['executions_notification'])}")
+        except Exception as e:
+            print(f"  Error saving activities.json: {e}")
+        
+        # ============================================================
+        # UPDATE UPDATED_INVESTORS.JSON
+        # ============================================================
+        if user_brokerid in updated_investors_data:
+            updated_record = updated_investors_data[user_brokerid].copy()
+        else:
+            updated_record = {}
+        
+        # Preserve notification data from activities.json
+        updated_record['daily_target_status'] = activities_data.get('daily_target_status', {})
+        updated_record['notifications'] = activities_data.get('notifications', {})
+        updated_record['executions_notification'] = activities_data.get('executions_notification', {})
+        updated_record['last_daily_target_check'] = datetime.now().isoformat()
+        updated_record['config_source'] = config_source if config_source else 'none'
+        
+        updated_investors_data[user_brokerid] = updated_record
+        stats["processing_success"] = True
+
+    # Save updated_investors.json
+    if updated_investors_data:
+        os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
+        try:
+            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(updated_investors_data, f, indent=4)
+            print(f"\n📝 Updated updated_investors.json")
+        except Exception as e:
+            print(f"\nError saving updated_investors.json: {e}")
+
+    daily_target_alert = {
+        'is_triggered': any_limit_hit,
+        'investor_id': inv_id if inv_id else "all",
+        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+        'investors_checked': stats['investors_checked'],
+        'profit_limit_hit': stats['profit_limit_hit'],
+        'loss_limit_hit': stats['loss_limit_hit'],
+        'no_limit_configured': stats['no_limit_configured'],
+        'notifications_added': stats['notifications_added'],
+        'investors_processed': alert_details['investors_processed'],
+        'investors_limit_hit': alert_details['investors_limit_hit'],
+        'hit_details': alert_details['hit_details']
+    }
+
+    print(f"\n{'='*10} 📊 DAILY TARGET SUMMARY {'='*10}")
+    print(f"  Investors checked: {stats['investors_checked']}")
+    print(f"  No limit configured: {stats['no_limit_configured']}")
+    print(f"  Profit limit hit: {stats['profit_limit_hit']}")
+    print(f"  Loss limit hit: {stats['loss_limit_hit']}")
+    print(f"  Notifications added this run: {stats['notifications_added']}")
+    if any_limit_hit:
+        print(f"\n  ⚠️  ALERT: Daily target limit(s) hit for {stats['profit_limit_hit'] + stats['loss_limit_hit']} investor(s)")
+        for hit in alert_details['investors_limit_hit']:
+            limit_type_display = hit.get('limit_type', 'unknown').upper()
+            net_display = f"${hit['today_net']:.2f}"
+            if hit.get('notification_skipped', False):
+                print(f"     • {hit['investor']}: {limit_type_display} - Net: {net_display} (notification skipped - already exists)")
+            else:
+                print(f"     • {hit['investor']}: {limit_type_display} - Net: {net_display} (notification added)")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+    
+    return stats
 
 def get_normalized_symbol(record_symbol, risk_keys=None):
     """
@@ -26410,7 +27047,7 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -26695,7 +27332,7 @@ def process_single_investor(inv_folder):
         # =====================================================================
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
-        martingale_system(inv_id=inv_id)
+        #martingale_system(inv_id=inv_id)
         mt5.shutdown()
         
     except Exception as e:
@@ -26709,7 +27346,7 @@ def process_single_investor(inv_folder):
     
     return account_stats
 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -27022,92 +27659,114 @@ def process_single_investor_(inv_folder):
         
         if not is_restricted_day and not is_restricted_time:
             print(f"✅ [{inv_id}] No restrictions active - Running full trading logic...")
-            
-            # =================================================================
-            # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
-            # =================================================================
-            check_and_record_unauthorized_actions(inv_id=inv_id)
-            delete_unauthorized_symbol_files(inv_id=inv_id)
-            
-            # =================================================================
-            # OHLC/DIRECTIONAL BIAS FUNCTIONS - CONDITIONALLY EXECUTED
-            # =================================================================
-            if ohlc_strategy_enabled:
-                print(f"\n{'='*10} 🎯 EXECUTING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
-                
-                # directional bias execution - all these functions are conditionally executed together
-                additional_candles_for_orders_limitation(inv_id=inv_id)
-                fetch_ohlc_data_for_investor(inv_id=inv_id)
-                directional_bias(inv_id=inv_id)
-                additional_candles_for_orders_limitation(inv_id=inv_id)
-                create_position_hedge(inv_id=inv_id)
-                
-                print(f"{'='*10} ✅ OHLC/DIRECTIONAL BIAS FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
-            else:
-                print(f"\n{'='*10} ⏭️ SKIPPING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
-                print(f"Reason: fetch_ohlc_data_and_directional_bias_for_investor = FALSE in accountmanagement.json")
-                print(f"{'='*55}\n")
-            
-            # =================================================================
-            # GRID FUNCTIONS - CONDITIONALLY EXECUTED BASED ON symbols_grid_strategy
-            # =================================================================
-            if grid_strategy_enabled:
-                symbols_dynamic_grid_prices(inv_id=inv_id)
-                # grid execution #
-                
-                # grid single position and pending #
-                convert_grid_prices_to_limit_orders(inv_id=inv_id)
-                # grid single position and pending #
-            
-                # grid single position and pending #
-                manage_grid_levels_in_json(inv_id=inv_id)
-                # single position and pending #
-                
-                print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
-            else:
-                print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
-                print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
-                print(f"{'='*55}\n")
-            
-            # =================================================================
-            # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
-            # =================================================================
-            deduplicate_orders(inv_id=inv_id)
-            validate_strategy_authorized_orders(inv_id=inv_id)
-            backup_limit_orders(inv_id=inv_id)
-            populate_orders_missing_fields(inv_id=inv_id)
-            calculate_investor_symbols_orders(inv_id=inv_id)
-            padding_stoploss_below_minimum_risk_to_maximum_risk(inv_id=inv_id)   
-            maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id) 
-            live_usd_risk_and_scaling(inv_id=inv_id)
-            apply_default_prices(inv_id=inv_id)
-            martingale_system(inv_id=inv_id)
+            daily_target_stats = daily_target_check(inv_id=inv_id)
+            daily_target_hit = False
+            if daily_target_alert and daily_target_alert.get('investor_id') == inv_id:
+                if daily_target_alert.get('is_triggered', False):
+                    daily_target_hit = True
+                    hit_details = daily_target_alert.get('hit_details', {}).get(inv_id, {})
+                    if hit_details.get('profit_limit_hit', False):
+                        print(f"  🚨 PROFIT TARGET REACHED IN {inv_id}'S ACCOUNT - No further trading today")
+                    if hit_details.get('loss_limit_hit', False):
+                        print(f"  🚨 LOSS LIMIT REACHED IN {inv_id}'S ACCOUNT - No further trading today")
 
-            #clean_trades_history(inv_id=inv_id)
-            pending_orders_per_symbol_limitation(inv_id=inv_id)
-            place_usd_orders(inv_id=inv_id)
+            if not daily_target_hit:
+                # =================================================================
+                # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
+                # =================================================================
+                check_and_record_unauthorized_actions(inv_id=inv_id)
+                delete_unauthorized_symbol_files(inv_id=inv_id)
+                
+                # =================================================================
+                # OHLC/DIRECTIONAL BIAS FUNCTIONS - CONDITIONALLY EXECUTED
+                # =================================================================
+                if ohlc_strategy_enabled:
+                    print(f"\n{'='*10} 🎯 EXECUTING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
+                    
+                    # directional bias execution - all these functions are conditionally executed together
+                    additional_candles_for_orders_limitation(inv_id=inv_id)
+                    fetch_ohlc_data_for_investor(inv_id=inv_id)
+                    directional_bias(inv_id=inv_id)
+                    additional_candles_for_orders_limitation(inv_id=inv_id)
+                    create_position_hedge(inv_id=inv_id)
+                    
+                    print(f"{'='*10} ✅ OHLC/DIRECTIONAL BIAS FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
+                else:
+                    print(f"\n{'='*10} ⏭️ SKIPPING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
+                    print(f"Reason: fetch_ohlc_data_and_directional_bias_for_investor = FALSE in accountmanagement.json")
+                    print(f"{'='*55}\n")
+                
+                # =================================================================
+                # GRID FUNCTIONS - CONDITIONALLY EXECUTED BASED ON symbols_grid_strategy
+                # =================================================================
+                if grid_strategy_enabled:
+                    symbols_dynamic_grid_prices(inv_id=inv_id)
+                    # grid execution #
+                    
+                    # grid single position and pending #
+                    convert_grid_prices_to_limit_orders(inv_id=inv_id)
+                    # grid single position and pending #
+                
+                    # grid single position and pending #
+                    manage_grid_levels_in_json(inv_id=inv_id)
+                    # single position and pending #
+                    
+                    print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
+                else:
+                    print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
+                    print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
+                    print(f"{'='*55}\n")
+                
+                # =================================================================
+                # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
+                # =================================================================
+                deduplicate_orders(inv_id=inv_id)
+                validate_strategy_authorized_orders(inv_id=inv_id)
+                backup_limit_orders(inv_id=inv_id)
+                populate_orders_missing_fields(inv_id=inv_id)
+                calculate_investor_symbols_orders(inv_id=inv_id)
+                
+                padding_stoploss_below_minimum_risk_to_maximum_risk(inv_id=inv_id)   
+                maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id) 
+                live_usd_risk_and_scaling(inv_id=inv_id)
+                apply_default_prices(inv_id=inv_id)
+                martingale_system(inv_id=inv_id)
 
-            if grid_strategy_enabled:
-                #grid affliate
-                manage_position_and_pending_orders(inv_id=inv_id)
-                manage_single_position_and_pending(inv_id=inv_id)
-                #grid affliate
-                print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
-            else:
-                print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
-                print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
-                print(f"{'='*55}\n")
+                #clean_trades_history(inv_id=inv_id)
+                pending_orders_per_symbol_limitation(inv_id=inv_id)
+                place_usd_orders(inv_id=inv_id)
 
-            close_unauthorized_orders(inv_id=inv_id)
-            orders_reward_correction(inv_id=inv_id)
-            check_pending_orders_risk(inv_id=inv_id)
-            #history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
-            apply_dynamic_breakeven(inv_id=inv_id)
-            check_and_record_unauthorized_actions(inv_id=inv_id)
-            trades_analytics(inv_id=inv_id)
-            
-            account_stats["success"] = True
-            print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
+                if grid_strategy_enabled:
+                    #grid affliate
+                    manage_position_and_pending_orders(inv_id=inv_id)
+                    manage_single_position_and_pending(inv_id=inv_id)
+                    #grid affliate
+                    print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
+                else:
+                    print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
+                    print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
+                    print(f"{'='*55}\n")
+
+                close_unauthorized_orders(inv_id=inv_id)
+                orders_reward_correction(inv_id=inv_id)
+                check_pending_orders_risk(inv_id=inv_id)
+                #history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
+                apply_dynamic_breakeven(inv_id=inv_id)
+                check_and_record_unauthorized_actions(inv_id=inv_id)
+                trades_analytics(inv_id=inv_id)
+                
+                account_stats["success"] = True
+                print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
+            elif daily_target_hit:
+                daily_target_hit = False
+                if daily_target_alert and daily_target_alert.get('investor_id') == inv_id:
+                    if daily_target_alert.get('is_triggered', False):
+                        daily_target_hit = True
+                        hit_details = daily_target_alert.get('hit_details', {}).get(inv_id, {})
+                        if hit_details.get('profit_limit_hit', False):
+                            print(f"  🚨 PROFIT TARGET REACHED IN {inv_id}'S ACCOUNT - No further trading today")
+                        if hit_details.get('loss_limit_hit', False):
+                            print(f"  🚨 LOSS LIMIT REACHED IN {inv_id}'S ACCOUNT - No further trading today")
 
         # =====================================================================
         # CONDITION B: DAY RESTRICTED - NO TRADING ALLOWED (CLEANUP ONLY)

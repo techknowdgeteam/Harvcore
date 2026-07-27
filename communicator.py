@@ -1820,6 +1820,7 @@ def sync_and_distribute_investors():
     
     Uses ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS as the source of truth.
     """
+    update_fresh_data_from_fetched_to_all_files()
     restore_empty_investor_files()
     
     print(f"\n{'='*70}")
@@ -6085,8 +6086,8 @@ def process_all_fetched_investors(inv_id):
    
 def main_once():
     """
-    ORCHESTRATOR (Single Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
-    without any capacity limitations or restrictions.
+    ORCHESTRATOR (Loop Execution): Processes ALL investors from ALL_FETCHED_INVESTORS
+    in a continuous loop without any capacity limitations or restrictions.
     """
     # Parse command line arguments for control flags
     run_as_loop = False
@@ -6140,7 +6141,7 @@ def main_once():
             print(f"✅ System is WITHIN allowed work time range - Fetching data")
             fetch_database()
         else:
-            print("executing some functions")
+            print("No executions")
         
         try:
             # ============ LOAD INVESTOR IDs FROM ALL_FETCHED_INVESTORS ============
@@ -6200,7 +6201,8 @@ def main_once():
                     jobs.append(job)
                 
                 # Force synchronization bar before closing the pool step block
-                results = [job.get() for job in jobs]  
+                results = [job.get() for job in jobs]
+                
             # Print summary of results
             print(f"\n--- Cycle Complete. Processed {len(active_batch)} investors. ---")
             successful = sum(1 for r in results if r.get("success", False))
@@ -6220,21 +6222,21 @@ def main_once():
             import traceback
             traceback.print_exc()
             time.sleep(5)
-
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
+        sync_and_distribute_investors() 
+        restore_empty_investor_files()
         if within_time_range:
             print(f"✅ System is WITHIN allowed work time range - Updating database")
             close_db_browser()
             update_database()
         else:
-            print("executing some functions")
-            close_db_browser()
+            print("No executions")
         
         # Merge all results (these functions now handle the merging safely)
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
-        restore_empty_investor_files()
-        sync_and_distribute_investors()    
+        
+          
 
         # Check loop conditions
         if not run_as_loop:
@@ -6390,7 +6392,11 @@ def main_loop():
             import traceback
             traceback.print_exc()
             time.sleep(5)
-
+        merge_create_results()
+        merge_balance_results()
+        merge_verify_results()
+        sync_and_distribute_investors() 
+        restore_empty_investor_files()
         if within_time_range:
             print(f"✅ System is WITHIN allowed work time range - Updating database")
             close_db_browser()
@@ -6399,11 +6405,8 @@ def main_loop():
             print("No executions")
         
         # Merge all results (these functions now handle the merging safely)
-        merge_create_results()
-        merge_balance_results()
-        merge_verify_results()
-        restore_empty_investor_files()
-        sync_and_distribute_investors()   
+        
+          
 
         # Check loop conditions
         if not run_as_loop:
@@ -6423,7 +6426,7 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    main_loop()
+    main_once()
 
 
     
