@@ -608,1560 +608,7 @@ def check_and_fix_json_files():
     print("="*80)
     
     return stats
-
-def restore_empty_investor_files():
-    """
-    Checks and synchronizes investor files between main and backup.
-    
-    This function handles two scenarios:
-    1. If main file is empty/doesn't exist -> Restore from backup
-    2. If main file has data -> Check backup and update if needed:
-       - If backup is empty -> Copy main to backup
-       - If backup has fewer records -> Add missing records from main
-       - If backup has missing fields -> Update with complete data from main
-    
-    Returns:
-        dict: Status of the synchronization process
-    """
-    
-    print(f"\n{'='*70}")
-    print(f"SYNCHRONIZE INVESTOR FILES".center(70))
-    print(f"{'='*70}")
-    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-"*70)
-    
-    result = {
-        "fetched_synced": False,
-        "updated_synced": False,
-        "fetched_main_exists": False,
-        "fetched_main_empty": False,
-        "fetched_main_records": 0,
-        "fetched_backup_exists": False,
-        "fetched_backup_empty": False,
-        "fetched_backup_records": 0,
-        "fetched_restored_from_backup": False,
-        "fetched_backup_updated_from_main": False,
-        "fetched_backup_records_added": 0,
-        "fetched_backup_fields_updated": 0,
-        "updated_main_exists": False,
-        "updated_main_empty": False,
-        "updated_main_records": 0,
-        "updated_backup_exists": False,
-        "updated_backup_empty": False,
-        "updated_backup_records": 0,
-        "updated_restored_from_main": False,
-        "updated_backup_updated_from_main": False,
-        "updated_backup_records_added": 0,
-        "updated_backup_fields_updated": 0,
-        "errors": [],
-        "warnings": [],
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    def is_file_empty(filepath):
-        """Check if a JSON file exists and is empty or contains empty data"""
-        if not os.path.exists(filepath):
-            return True, "File does not exist"
-        
-        try:
-            if os.path.getsize(filepath) == 0:
-                return True, "File is empty (0 bytes)"
-            
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read().strip()
-                if not content:
-                    return True, "File contains only whitespace"
-                
-                data = json.loads(content)
-                
-                if isinstance(data, dict) and len(data) == 0:
-                    return True, "File contains empty dictionary {}"
-                elif isinstance(data, list) and len(data) == 0:
-                    return True, "File contains empty list []"
-                elif data is None:
-                    return True, "File contains null"
-                
-                return False, "File has valid data"
-                
-        except json.JSONDecodeError as e:
-            return True, f"Invalid JSON: {str(e)}"
-        except Exception as e:
-            return True, f"Error reading file: {str(e)}"
-    
-    def load_json_data(filepath):
-        """Load JSON data from file"""
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            return None
-    
-    def save_json_data(filepath, data):
-        """Save JSON data to file"""
-        try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            return True
-        except Exception as e:
-            return False
-    
-    def count_non_empty_fields(obj, ignore_keys=[]):
-        """Count non-empty fields in an object."""
-        if not isinstance(obj, dict):
-            return 0
-        
-        count = 0
-        for key, value in obj.items():
-            if key in ignore_keys:
-                continue
-            if value is not None and value != "" and value != "NULL":
-                if isinstance(value, dict):
-                    count += count_non_empty_fields(value, ignore_keys)
-                elif isinstance(value, list) and len(value) > 0:
-                    count += 1
-                elif not isinstance(value, list):
-                    count += 1
-        return count
-    
-    def deep_merge(base_dict, override_dict):
-        """
-        Deep merge two dictionaries, preferring override_dict values.
-        
-        Returns:
-            dict: Merged dictionary
-        """
-        result = base_dict.copy() if base_dict else {}
-        
-        for key, value in override_dict.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = deep_merge(result[key], value)
-            elif value is not None and value != "NULL" and value != "":
-                result[key] = value
-        
-        return result
-    
-    def compare_and_update_backup(main_data, backup_data, file_type):
-        """
-        Compare main and backup data, update backup if main has more/better data.
-        
-        Returns:
-            tuple: (updated_backup, records_added, fields_updated)
-        """
-        if not main_data:
-            return backup_data, 0, 0
-        
-        if not backup_data:
-            return main_data.copy(), len(main_data), 0
-        
-        updated_backup = backup_data.copy()
-        records_added = 0
-        fields_updated = 0
-        
-        # Check each record in main
-        for investor_id, main_record in main_data.items():
-            if not isinstance(main_record, dict):
-                continue
-            
-            # If investor doesn't exist in backup, add it
-            if investor_id not in updated_backup:
-                updated_backup[investor_id] = main_record.copy()
-                records_added += 1
-                continue
-            
-            # Investor exists, check if main has more/better data
-            backup_record = updated_backup[investor_id]
-            
-            # Count fields in both
-            main_fields = count_non_empty_fields(main_record)
-            backup_fields = count_non_empty_fields(backup_record)
-            
-            # If main has more fields, merge/update
-            if main_fields > backup_fields:
-                # Deep merge: main updates take precedence
-                merged_record = deep_merge(backup_record, main_record)
-                updated_backup[investor_id] = merged_record
-                fields_updated += 1
-            elif main_fields == backup_fields:
-                # Same number of fields, check if any fields are different
-                merged_record = deep_merge(backup_record, main_record)
-                if merged_record != backup_record:
-                    updated_backup[investor_id] = merged_record
-                    fields_updated += 1
-        
-        return updated_backup, records_added, fields_updated
-    
-    def get_file_stats(filepath):
-        """Get basic stats about a JSON file"""
-        if not os.path.exists(filepath):
-            return {"exists": False, "size": 0, "count": 0}
-        
-        try:
-            size = os.path.getsize(filepath)
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                count = len(data) if isinstance(data, dict) else 0
-            return {"exists": True, "size": size, "count": count}
-        except:
-            return {"exists": True, "size": size, "count": 0}
-    
-    def get_backup_path(main_path):
-        """Get backup path for a given main file"""
-        if "fetched" in main_path.lower():
-            return ALL_FETCHED_INVESTORS_BACKUP
-        else:
-            # For updated files, we'll use fetched as source if needed
-            return None
-    
-    try:
-        # ============================================
-        # CHECK FETCHED FILE
-        # ============================================
-        
-        print("\n📋 Checking ALL_FETCHED_INVESTORS...")
-        print("-"*40)
-        
-        # Load main file
-        fetched_main_exists = os.path.exists(ALL_FETCHED_INVESTORS)
-        result["fetched_main_exists"] = fetched_main_exists
-        
-        if fetched_main_exists:
-            fetched_main_empty, reason = is_file_empty(ALL_FETCHED_INVESTORS)
-            result["fetched_main_empty"] = fetched_main_empty
-            
-            fetched_main_data = load_json_data(ALL_FETCHED_INVESTORS)
-            fetched_main_count = len(fetched_main_data) if fetched_main_data else 0
-            result["fetched_main_records"] = fetched_main_count
-            
-            print(f"   📄 Main file exists: {ALL_FETCHED_INVESTORS}")
-            print(f"   📊 Records: {fetched_main_count:,}")
-            
-            if fetched_main_empty:
-                print(f"   ⚠️ Main file is empty: {reason}")
-                result["warnings"].append(f"ALL_FETCHED_INVESTORS is empty: {reason}")
-                
-                # Scenario 1: Main is empty -> Restore from backup
-                backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
-                result["fetched_backup_exists"] = backup_exists
-                
-                if backup_exists:
-                    backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
-                    result["fetched_backup_empty"] = backup_empty
-                    
-                    if not backup_empty:
-                        backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
-                        backup_count = len(backup_data) if backup_data else 0
-                        result["fetched_backup_records"] = backup_count
-                        
-                        print(f"   📄 Backup found: {ALL_FETCHED_INVESTORS_BACKUP}")
-                        print(f"   📊 Backup records: {backup_count:,}")
-                        
-                        # Restore from backup
-                        print(f"   🔄 Restoring from backup...")
-                        if save_json_data(ALL_FETCHED_INVESTORS, backup_data):
-                            print(f"   ✅ Restored {backup_count:,} records from backup")
-                            result["fetched_restored_from_backup"] = True
-                            result["fetched_synced"] = True
-                        else:
-                            print(f"   ❌ Failed to restore from backup")
-                            result["errors"].append("Failed to restore fetched from backup")
-                    else:
-                        print(f"   ❌ Backup exists but is empty: {backup_reason}")
-                        result["errors"].append("Backup file is empty, cannot restore")
-                else:
-                    print(f"   ❌ No backup file found")
-                    result["errors"].append("No backup file found for fetched investors")
-            else:
-                print(f"   ✅ Main file has valid data")
-                
-                # Scenario 2: Main has data -> Check/update backup
-                backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
-                result["fetched_backup_exists"] = backup_exists
-                
-                if backup_exists:
-                    backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
-                    result["fetched_backup_empty"] = backup_empty
-                    
-                    backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
-                    backup_count = len(backup_data) if backup_data else 0
-                    result["fetched_backup_records"] = backup_count
-                    
-                    print(f"   📄 Backup exists: {ALL_FETCHED_INVESTORS_BACKUP}")
-                    print(f"   📊 Backup records: {backup_count:,}")
-                    
-                    # Compare and update backup if needed
-                    if backup_empty or backup_count < fetched_main_count:
-                        print(f"   🔄 Updating backup from main...")
-                        
-                        updated_backup, records_added, fields_updated = compare_and_update_backup(
-                            fetched_main_data, 
-                            backup_data if not backup_empty else {},
-                            "fetched"
-                        )
-                        
-                        if save_json_data(ALL_FETCHED_INVESTORS_BACKUP, updated_backup):
-                            print(f"   ✅ Backup updated successfully")
-                            print(f"      📝 Records added: {records_added:,}")
-                            print(f"      🔄 Records updated: {fields_updated:,}")
-                            
-                            result["fetched_backup_updated_from_main"] = True
-                            result["fetched_backup_records_added"] = records_added
-                            result["fetched_backup_fields_updated"] = fields_updated
-                            result["fetched_synced"] = True
-                        else:
-                            print(f"   ❌ Failed to update backup")
-                            result["errors"].append("Failed to update fetched backup")
-                    else:
-                        print(f"   ✅ Backup is up to date ({backup_count:,} records)")
-                        result["fetched_synced"] = True
-                else:
-                    # Backup doesn't exist, create it
-                    print(f"   📄 No backup exists, creating from main...")
-                    if save_json_data(ALL_FETCHED_INVESTORS_BACKUP, fetched_main_data):
-                        print(f"   ✅ Created backup with {fetched_main_count:,} records")
-                        result["fetched_backup_updated_from_main"] = True
-                        result["fetched_synced"] = True
-                    else:
-                        print(f"   ❌ Failed to create backup")
-                        result["errors"].append("Failed to create fetched backup")
-        else:
-            print(f"   ❌ Main file does not exist: {ALL_FETCHED_INVESTORS}")
-            result["warnings"].append("ALL_FETCHED_INVESTORS does not exist")
-            
-            # Try to restore from backup
-            backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
-            result["fetched_backup_exists"] = backup_exists
-            
-            if backup_exists:
-                backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
-                result["fetched_backup_empty"] = backup_empty
-                
-                if not backup_empty:
-                    backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
-                    backup_count = len(backup_data) if backup_data else 0
-                    result["fetched_backup_records"] = backup_count
-                    
-                    print(f"   📄 Creating from backup: {ALL_FETCHED_INVESTORS_BACKUP}")
-                    print(f"   📊 Backup records: {backup_count:,}")
-                    
-                    if save_json_data(ALL_FETCHED_INVESTORS, backup_data):
-                        print(f"   ✅ Created main from backup ({backup_count:,} records)")
-                        result["fetched_restored_from_backup"] = True
-                        result["fetched_synced"] = True
-                    else:
-                        print(f"   ❌ Failed to create from backup")
-                        result["errors"].append("Failed to create fetched from backup")
-                else:
-                    print(f"   ❌ Backup exists but is empty: {backup_reason}")
-                    result["errors"].append("Backup file is empty")
-            else:
-                print(f"   ❌ No backup file found")
-                result["errors"].append("No backup file found to create fetched investors")
-        
-        # ============================================
-        # CHECK UPDATED FILE
-        # ============================================
-        
-        print("\n📋 Checking ALL_UPDATED_INVESTORS...")
-        print("-"*40)
-        
-        updated_main_exists = os.path.exists(ALL_UPDATED_INVESTORS)
-        result["updated_main_exists"] = updated_main_exists
-        
-        if updated_main_exists:
-            updated_main_empty, reason = is_file_empty(ALL_UPDATED_INVESTORS)
-            result["updated_main_empty"] = updated_main_empty
-            
-            updated_main_data = load_json_data(ALL_UPDATED_INVESTORS)
-            updated_main_count = len(updated_main_data) if updated_main_data else 0
-            result["updated_main_records"] = updated_main_count
-            
-            print(f"   📄 Main file exists: {ALL_UPDATED_INVESTORS}")
-            print(f"   📊 Records: {updated_main_count:,}")
-            
-            if updated_main_empty:
-                print(f"   ⚠️ Main file is empty: {reason}")
-                result["warnings"].append("ALL_UPDATED_INVESTORS is empty")
-                
-                # Restore updated from fetched (since updated doesn't have a dedicated backup)
-                if result["fetched_synced"] and not result["fetched_main_empty"]:
-                    fetched_data = load_json_data(ALL_FETCHED_INVESTORS)
-                    if fetched_data:
-                        print(f"   🔄 Restoring from ALL_FETCHED_INVESTORS...")
-                        if save_json_data(ALL_UPDATED_INVESTORS, fetched_data):
-                            print(f"   ✅ Restored {len(fetched_data):,} records from fetched")
-                            result["updated_restored_from_main"] = True
-                            result["updated_synced"] = True
-                        else:
-                            print(f"   ❌ Failed to restore updated from fetched")
-                            result["errors"].append("Failed to restore updated from fetched")
-                    else:
-                        print(f"   ❌ Cannot restore: fetched data is empty")
-                        result["errors"].append("Cannot restore updated (fetched is empty)")
-                else:
-                    print(f"   ❌ Cannot restore: fetched file is empty or invalid")
-                    result["errors"].append("Cannot restore updated (fetched is empty or invalid)")
-            else:
-                print(f"   ✅ Main file has valid data")
-                
-                # Check if updated has data and fetched has more/better data
-                if result["fetched_synced"] and not result["fetched_main_empty"]:
-                    fetched_data = load_json_data(ALL_FETCHED_INVESTORS)
-                    fetched_count = len(fetched_data) if fetched_data else 0
-                    
-                    # If fetched has more records or is newer, update updated from fetched
-                    if fetched_count > updated_main_count:
-                        print(f"   🔄 Updating from ALL_FETCHED_INVESTORS...")
-                        print(f"      Fetched records: {fetched_count:,}")
-                        print(f"      Updated records: {updated_main_count:,}")
-                        
-                        updated_backup, records_added, fields_updated = compare_and_update_backup(
-                            fetched_data,
-                            updated_main_data,
-                            "updated"
-                        )
-                        
-                        if save_json_data(ALL_UPDATED_INVESTORS, updated_backup):
-                            print(f"   ✅ Updated from fetched successfully")
-                            print(f"      📝 Records added: {records_added:,}")
-                            print(f"      🔄 Records updated: {fields_updated:,}")
-                            
-                            result["updated_backup_updated_from_main"] = True
-                            result["updated_backup_records_added"] = records_added
-                            result["updated_backup_fields_updated"] = fields_updated
-                            result["updated_synced"] = True
-                        else:
-                            print(f"   ❌ Failed to update from fetched")
-                            result["errors"].append("Failed to update updated from fetched")
-                    else:
-                        print(f"   ✅ Updated file is up to date")
-                        result["updated_synced"] = True
-                else:
-                    print(f"   ✅ Updated file is valid (no sync needed)")
-                    result["updated_synced"] = True
-        else:
-            print(f"   ❌ Main file does not exist: {ALL_UPDATED_INVESTORS}")
-            result["warnings"].append("ALL_UPDATED_INVESTORS does not exist")
-            
-            # Create updated from fetched if available
-            if result["fetched_synced"] and not result["fetched_main_empty"]:
-                fetched_data = load_json_data(ALL_FETCHED_INVESTORS)
-                if fetched_data:
-                    print(f"   🔄 Creating from ALL_FETCHED_INVESTORS...")
-                    if save_json_data(ALL_UPDATED_INVESTORS, fetched_data):
-                        print(f"   ✅ Created updated from fetched ({len(fetched_data):,} records)")
-                        result["updated_restored_from_main"] = True
-                        result["updated_synced"] = True
-                    else:
-                        print(f"   ❌ Failed to create updated from fetched")
-                        result["errors"].append("Failed to create updated from fetched")
-                else:
-                    print(f"   ❌ Cannot create: fetched data is empty")
-                    result["errors"].append("Cannot create updated (fetched is empty)")
-            else:
-                print(f"   ❌ Cannot create: fetched file is empty or invalid")
-                result["errors"].append("Cannot create updated (fetched is empty or invalid)")
-        
-        # ============================================
-        # SUMMARY
-        # ============================================
-        
-        print("\n" + "="*70)
-        print(f"SYNCHRONIZATION SUMMARY".center(70))
-        print("="*70)
-        
-        print(f"\n📊 FETCHED FILES:")
-        if result["fetched_restored_from_backup"]:
-            print(f"   ✅ Restored from backup to main")
-        elif result["fetched_backup_updated_from_main"]:
-            print(f"   ✅ Updated backup from main")
-            if result["fetched_backup_records_added"] > 0:
-                print(f"      📝 Records added to backup: {result['fetched_backup_records_added']:,}")
-            if result["fetched_backup_fields_updated"] > 0:
-                print(f"      🔄 Records updated in backup: {result['fetched_backup_fields_updated']:,}")
-        elif result["fetched_synced"]:
-            print(f"   ✅ Files are synchronized (no changes needed)")
-        else:
-            print(f"   ❌ Synchronization failed")
-        
-        print(f"\n📊 UPDATED FILES:")
-        if result["updated_restored_from_main"]:
-            print(f"   ✅ Created/restored from fetched")
-        elif result["updated_backup_updated_from_main"]:
-            print(f"   ✅ Updated from fetched")
-            if result["updated_backup_records_added"] > 0:
-                print(f"      📝 Records added: {result['updated_backup_records_added']:,}")
-            if result["updated_backup_fields_updated"] > 0:
-                print(f"      🔄 Records updated: {result['updated_backup_fields_updated']:,}")
-        elif result["updated_synced"]:
-            print(f"   ✅ File is up to date (no changes needed)")
-        else:
-            print(f"   ❌ Synchronization failed")
-        
-        if result["errors"]:
-            print(f"\n❌ ERRORS ({len(result['errors'])}):")
-            for error in result["errors"]:
-                print(f"   - {error}")
-        
-        if result["warnings"]:
-            print(f"\n⚠️ WARNINGS ({len(result['warnings'])}):")
-            for warning in result["warnings"]:
-                print(f"   - {warning}")
-        
-        print(f"\n🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*70)
-        
-        return result
-        
-    except Exception as e:
-        print(f"\n{'='*70}")
-        print(f"CRITICAL ERROR".center(70))
-        print(f"{'='*70}")
-        print(f"  Error Type : {type(e).__name__}")
-        print(f"  Message    : {str(e)}")
-        print(f"{'='*70}")
-        
-        import traceback
-        print(f"\n📜 Full Traceback:")
-        traceback.print_exc()
-        
-        result["errors"].append(f"Critical error: {str(e)}")
-        return result
-      
-def sync_and_distribute_investors():
-    """
-    Synchronizes and distributes investors between invharv and harvhub files.
-    
-    This function performs two main tasks:
-    1. For existing investors in both files:
-       - Updates missing fields in invharv/harvhub from ALL files
-       - Updates ALL files with new data from invharv/harvhub
-       - Filters grid traders to HARVHUB and non-grid traders to INVHARV
-    2. For new investors not yet distributed:
-       - Copies grid traders to harvhub with complete data
-       - Copies non-grid traders to invharv with complete data
-    
-    Uses ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS as the source of truth.
-    """
-    restore_empty_investor_files()
-    
-    print(f"\n{'='*70}")
-    print(f"SYNC AND DISTRIBUTE INVESTORS".center(70))
-    print(f"{'='*70}")
-    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-"*70)
-    
-    stats = {
-        "processing_success": False,
-        "fetched": {
-            "existing_investors": {"processed": 0, "fields_filled": 0, "fields_updated": 0},
-            "grid_traders_moved_to_harvhub": 0,
-            "non_grid_traders_moved_to_invharv": 0,
-            "new_grid_traders": {"copied_to_harvhub": 0, "ids": []},
-            "new_non_grid_traders": {"copied_to_invharv": 0, "ids": []},
-            "invharv_count": 0,
-            "harvhub_count": 0,
-            "all_count": 0
-        },
-        "updated": {
-            "existing_investors": {"processed": 0, "fields_filled": 0, "fields_updated": 0},
-            "grid_traders_moved_to_harvhub": 0,
-            "non_grid_traders_moved_to_invharv": 0,
-            "new_grid_traders": {"copied_to_harvhub": 0, "ids": []},
-            "new_non_grid_traders": {"copied_to_invharv": 0, "ids": []},
-            "invharv_count": 0,
-            "harvhub_count": 0,
-            "all_count": 0
-        },
-        "errors": [],
-        "warnings": [],
-        "timestamp": datetime.now().isoformat()
-    }
-    
-    # ============================================
-    # HELPER FUNCTIONS
-    # ============================================
-    
-    def safe_json_load(filepath, default=None):
-        """Safely load JSON"""
-        if default is None:
-            default = {}
-        
-        if not os.path.exists(filepath):
-            return default
-        
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-                return default
-        except Exception as e:
-            print(f"   ⚠️ Error loading {filepath}: {e}")
-            return default
-    
-    def safe_json_write(filepath, data):
-        """Safely write JSON"""
-        try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            temp_file = filepath + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            os.rename(temp_file, filepath)
-            return True
-        except Exception as e:
-            print(f"   ❌ Write error to {filepath}: {e}")
-            return False
-    
-    def deep_merge(base_dict, override_dict, prefer_override=True):
-        """
-        Deep merge two dictionaries.
-        
-        Args:
-            base_dict: The base dictionary to merge into
-            override_dict: The dictionary with potential updates
-            prefer_override: If True, override_dict values take precedence
-        
-        Returns:
-            dict: Merged dictionary
-        """
-        result = base_dict.copy()
-        
-        for key, value in override_dict.items():
-            if key in result:
-                # If both are dicts, recursively merge
-                if isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = deep_merge(result[key], value, prefer_override)
-                # If value is not None or empty, update based on preference
-                elif value is not None and value != "NULL" and value != "":
-                    if prefer_override:
-                        result[key] = value
-                    # If we prefer base, only update if base value is empty/missing
-                    elif result.get(key) is None or result.get(key) == "NULL" or result.get(key) == "":
-                        result[key] = value
-            else:
-                # Key doesn't exist in base, add it
-                result[key] = value
-        
-        return result
-    
-    def count_non_empty_fields(obj, ignore_keys=[]):
-        """Count non-empty fields in an object."""
-        if not isinstance(obj, dict):
-            return 0
-        
-        count = 0
-        for key, value in obj.items():
-            if key in ignore_keys:
-                continue
-            if value is not None and value != "" and value != "NULL":
-                if isinstance(value, dict):
-                    # Recursively count nested dict fields
-                    count += count_non_empty_fields(value, ignore_keys)
-                elif isinstance(value, list) and len(value) > 0:
-                    count += 1
-                elif not isinstance(value, list):
-                    count += 1
-        return count
-    
-    def merge_investor_records(source_data, target_data, source_name):
-        """
-        Merge source_data into target_data at the field level.
-        
-        Returns:
-            tuple: (updated_target, missing_fields_count, updated_fields_count)
-        """
-        updated_target = target_data.copy() if target_data else {}
-        total_missing_fields = 0
-        total_updated_fields = 0
-        
-        # For each investor in source_data
-        for investor_id, source_record in source_data.items():
-            if not isinstance(source_record, dict):
-                continue
-                
-            # If investor doesn't exist in target, add the entire record
-            if investor_id not in updated_target:
-                updated_target[investor_id] = source_record.copy()
-                # Count fields added
-                total_missing_fields += count_non_empty_fields(source_record)
-                continue
-            
-            # Investor exists, merge fields
-            target_record = updated_target[investor_id]
-            
-            # Count fields before merge
-            before_fields = count_non_empty_fields(target_record)
-            
-            # Deep merge: source updates take precedence for existing fields,
-            # but we also fill missing fields from target if source has them
-            merged_record = deep_merge(target_record, source_record, prefer_override=True)
-            
-            # Now fill any fields that exist in target but missing in source
-            # This ensures bidirectionality
-            merged_record = deep_merge(merged_record, target_record, prefer_override=False)
-            
-            after_fields = count_non_empty_fields(merged_record)
-            
-            # Count changes
-            if before_fields < after_fields:
-                total_missing_fields += (after_fields - before_fields)
-            elif before_fields > after_fields:
-                total_updated_fields += (before_fields - after_fields)
-            
-            updated_target[investor_id] = merged_record
-        
-        return updated_target, total_missing_fields, total_updated_fields
-    
-    def is_grid_trader(investor_data):
-        """
-        Check if investor is a grid trader by looking for grid-related keywords
-        in various fields. Handles patterns where keywords may be:
-        - Attached before: dynamic_grid_trader, xiwo48gridtrade
-        - Attached after: grid_trade_x, gridtrades123
-        - Inside other words: a_man_grid_trade, user10_dynamic_grid
-        - Partial matches: grid, grid_trade, grid_trades, dynamic_grid
-        
-        Returns:
-            bool: True if investor is a grid trader, False otherwise
-        """
-        if not isinstance(investor_data, dict):
-            return False
-        
-        # Fields to check for grid trader indicators
-        fields_to_check = [
-            'invested_with',
-            'strategy',
-            'type',
-            'category',
-            'investment_type',
-            'trader_type',
-            'description',
-            'notes',
-            'tags'
-        ]
-        
-        # Grid-related keywords with patterns
-        grid_patterns = [
-            r'grid',                    # Matches "grid" anywhere
-            r'grid_trade',             # Matches "grid_trade" 
-            r'grid_trades',            # Matches "grid_trades"
-            r'dynamic_grid',           # Matches "dynamic_grid"
-            r'dynamic_grid_trade',     # Matches "dynamic_grid_trade"
-            r'dynamic_grid_trades',    # Matches "dynamic_grid_trades"
-            r'grid[-_]?trade',         # Matches "grid-trade" or "grid_trade"
-            r'grid[-_]?trades',        # Matches "grid-trades" or "grid_trades"
-            r'dynamic[-_]?grid',       # Matches "dynamic-grid" or "dynamic_grid"
-            r'^grid',                  # Starts with "grid"
-            r'grid$',                  # Ends with "grid"
-        ]
-        
-        # Compile regex patterns for case-insensitive matching
-        compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in grid_patterns]
-        
-        # Check all relevant fields
-        for field in fields_to_check:
-            value = investor_data.get(field, '')
-            
-            # Skip if value is not a string or is empty
-            if not isinstance(value, str) or not value.strip():
-                continue
-            
-            # Clean and normalize the value
-            clean_value = value.strip().lower()
-            
-            # Check for grid-related patterns
-            for pattern in compiled_patterns:
-                if pattern.search(clean_value):
-                    return True
-            
-            # Additional check: split by common delimiters and check each part
-            delimiters = [' ', '_', '-', '.', ',', ';', '|', '/', '\\', ':', ';']
-            parts = [clean_value]
-            
-            # Split by each delimiter
-            for delimiter in delimiters:
-                new_parts = []
-                for part in parts:
-                    new_parts.extend(part.split(delimiter))
-                parts = new_parts
-            
-            # Check each part for grid-related keywords
-            grid_keywords = [
-                'grid', 'gridtrade', 'grid_trade', 'gridtrades', 'grid_trades',
-                'dynamic_grid', 'dynamicgrid', 'dynamic_grid_trade', 'dynamicgridtrade',
-                'gridding', 'gridder', 'gridbot', 'grid_bot', 'gridrobot'
-            ]
-            
-            for part in parts:
-                if part in grid_keywords or any(keyword in part for keyword in grid_keywords):
-                    return True
-        
-        # Check if 'grid' appears in any key name
-        for key in investor_data.keys():
-            if isinstance(key, str) and 'grid' in key.lower():
-                value = investor_data.get(key)
-                if isinstance(value, str) and value.strip():
-                    # Check if the value contains grid-related terms
-                    clean_value = value.strip().lower()
-                    for pattern in compiled_patterns:
-                        if pattern.search(clean_value):
-                            return True
-        
-        return False
-    
-    def process_category(all_data, invharv_data, harvhub_data, category_name, file_type):
-        """
-        Process a category (fetched or updated) for sync and distribution.
-        
-        Returns:
-            tuple: (updated_invharv, updated_harvhub, updated_all, stats_dict)
-        """
-        print(f"\n📊 Processing {category_name} {file_type}...")
-        print("-"*40)
-        
-        # Stats for this category
-        category_stats = {
-            "existing_processed": 0,
-            "fields_filled": 0,
-            "fields_updated": 0,
-            "grid_moved_to_harvhub": 0,
-            "non_grid_moved_to_invharv": 0,
-            "new_grid_copied": 0,
-            "new_grid_ids": [],
-            "new_non_grid_copied": 0,
-            "new_non_grid_ids": []
-        }
-        
-        # Create working copies
-        working_all = all_data.copy() if all_data else {}
-        working_invharv = {}
-        working_harvhub = {}
-        
-        # Track all investor IDs from source files
-        all_investor_ids = set(working_all.keys())
-        invharv_ids = set(invharv_data.keys()) if invharv_data else set()
-        harvhub_ids = set(harvhub_data.keys()) if harvhub_data else set()
-        
-        print(f"   📋 ALL investors: {len(working_all):,}")
-        print(f"   📋 INVHARV investors: {len(invharv_ids):,}")
-        print(f"   📋 HARVHUB investors: {len(harvhub_ids):,}")
-        
-        # ============================================
-        # PART 1: SYNC AND FILTER EXISTING INVESTORS
-        # ============================================
-        
-        print(f"\n   🔄 Syncing and filtering existing investors...")
-        
-        # Process ALL investors - these are the source of truth
-        for inv_id, investor_data in working_all.items():
-            if not isinstance(investor_data, dict):
-                continue
-            
-            # Determine if this is a grid trader
-            is_grid = is_grid_trader(investor_data)
-            
-            # Check if investor exists in invharv or harvhub
-            in_invharv = inv_id in invharv_ids
-            in_harvhub = inv_id in harvhub_ids
-            
-            # Get the existing data from source files
-            invharv_record = invharv_data.get(inv_id, {}) if invharv_data else {}
-            harvhub_record = harvhub_data.get(inv_id, {}) if harvhub_data else {}
-            
-            # Determine which record to use as base (prefer the most complete)
-            # Count fields in each record
-            all_fields = count_non_empty_fields(investor_data)
-            inv_fields = count_non_empty_fields(invharv_record)
-            hub_fields = count_non_empty_fields(harvhub_record)
-            
-            # Choose the most complete record as base
-            base_record = investor_data.copy()
-            
-            # Merge with invharv if it has more fields
-            if inv_fields > all_fields:
-                base_record, _, _ = merge_investor_records(
-                    {inv_id: invharv_record}, 
-                    {inv_id: base_record}, 
-                    "INVHARV -> BASE"
-                )
-                base_record = base_record[inv_id]
-            
-            # Merge with harvhub if it has more fields
-            if hub_fields > all_fields:
-                base_record, _, _ = merge_investor_records(
-                    {inv_id: harvhub_record}, 
-                    {inv_id: base_record}, 
-                    "HARVHUB -> BASE"
-                )
-                base_record = base_record[inv_id]
-            
-            # Now update ALL with the most complete data
-            working_all[inv_id] = base_record.copy()
-            
-            # Distribute to correct file based on grid status
-            if is_grid:
-                # Grid trader -> HARVHUB
-                working_harvhub[inv_id] = base_record.copy()
-                if in_invharv and inv_id in working_invharv:
-                    # Remove from invharv if it was there
-                    pass
-                category_stats["grid_moved_to_harvhub"] += 1
-                print(f"      ➡️  Grid trader {inv_id} -> HARVHUB")
-            else:
-                # Non-grid trader -> INVHARV
-                working_invharv[inv_id] = base_record.copy()
-                if in_harvhub and inv_id in working_harvhub:
-                    # Remove from harvhub if it was there
-                    pass
-                category_stats["non_grid_moved_to_invharv"] += 1
-                print(f"      ➡️  Non-grid {inv_id} -> INVHARV")
-            
-            category_stats["existing_processed"] += 1
-            
-            # Count fields filled/updated
-            if invharv_record:
-                invharv_merged, missing, updated = merge_investor_records(
-                    {inv_id: base_record},
-                    {inv_id: invharv_record},
-                    "BASE -> INVHARV"
-                )
-                category_stats["fields_filled"] += missing
-                category_stats["fields_updated"] += updated
-        
-        # ============================================
-        # PART 2: HANDLE NEW INVESTORS
-        # ============================================
-        
-        # Find investors in ALL that are NOT in invharv or harvhub
-        existing_in_sources = set(working_invharv.keys()) | set(working_harvhub.keys())
-        new_investors = all_investor_ids - existing_in_sources
-        
-        if new_investors:
-            print(f"\n   📦 Distributing {len(new_investors):,} new investors...")
-            
-            for inv_id in new_investors:
-                investor_data = working_all.get(inv_id, {})
-                
-                if not investor_data:
-                    continue
-                
-                if is_grid_trader(investor_data):
-                    # Copy to HARVHUB
-                    working_harvhub[inv_id] = investor_data.copy()
-                    category_stats["new_grid_copied"] += 1
-                    category_stats["new_grid_ids"].append(inv_id)
-                    print(f"      ➡️  New grid trader {inv_id} -> HARVHUB")
-                else:
-                    # Copy to INVHARV
-                    working_invharv[inv_id] = investor_data.copy()
-                    category_stats["new_non_grid_copied"] += 1
-                    category_stats["new_non_grid_ids"].append(inv_id)
-                    print(f"      ➡️  New non-grid {inv_id} -> INVHARV")
-        
-        # Update ALL with the latest data (ensuring complete records)
-        updated_all = working_all.copy()
-        
-        return working_invharv, working_harvhub, updated_all, category_stats
-    
-    try:
-        # ============================================
-        # LOAD ALL FILES
-        # ============================================
-        
-        print("\n📂 Loading files...")
-        print("-"*40)
-        
-        # Load fetched files
-        all_fetched = safe_json_load(ALL_FETCHED_INVESTORS)
-        invharv_fetched = safe_json_load(INVHARV_FETCHED_INVESTORS)
-        harvhub_fetched = safe_json_load(HARVHUB_FETCHED_INVESTORS)
-        
-        print(f"   ✅ Loaded ALL fetched: {len(all_fetched):,} records")
-        print(f"   ✅ Loaded INVHARV fetched: {len(invharv_fetched):,} records")
-        print(f"   ✅ Loaded HARVHUB fetched: {len(harvhub_fetched):,} records")
-        
-        # Load updated files
-        all_updated = safe_json_load(ALL_UPDATED_INVESTORS)
-        invharv_updated = safe_json_load(INVHARV_UPDATED_INVESTORS)
-        harvhub_updated = safe_json_load(HARVHUB_UPDATED_INVESTORS)
-        
-        print(f"   ✅ Loaded ALL updated: {len(all_updated):,} records")
-        print(f"   ✅ Loaded INVHARV updated: {len(invharv_updated):,} records")
-        print(f"   ✅ Loaded HARVHUB updated: {len(harvhub_updated):,} records")
-        
-        # ============================================
-        # PROCESS FETCHED FILES
-        # ============================================
-        
-        updated_invharv_fetched, updated_harvhub_fetched, updated_all_fetched, fetched_stats = process_category(
-            all_fetched, invharv_fetched, harvhub_fetched, "FETCHED", "fetched"
-        )
-        
-        stats["fetched"]["existing_investors"]["processed"] = fetched_stats["existing_processed"]
-        stats["fetched"]["existing_investors"]["fields_filled"] = fetched_stats["fields_filled"]
-        stats["fetched"]["existing_investors"]["fields_updated"] = fetched_stats["fields_updated"]
-        stats["fetched"]["grid_traders_moved_to_harvhub"] = fetched_stats["grid_moved_to_harvhub"]
-        stats["fetched"]["non_grid_traders_moved_to_invharv"] = fetched_stats["non_grid_moved_to_invharv"]
-        stats["fetched"]["new_grid_traders"]["copied_to_harvhub"] = fetched_stats["new_grid_copied"]
-        stats["fetched"]["new_grid_traders"]["ids"] = fetched_stats["new_grid_ids"]
-        stats["fetched"]["new_non_grid_traders"]["copied_to_invharv"] = fetched_stats["new_non_grid_copied"]
-        stats["fetched"]["new_non_grid_traders"]["ids"] = fetched_stats["new_non_grid_ids"]
-        
-        # ============================================
-        # PROCESS UPDATED FILES
-        # ============================================
-        
-        updated_invharv_updated, updated_harvhub_updated, updated_all_updated, updated_stats = process_category(
-            all_updated, invharv_updated, harvhub_updated, "UPDATED", "updated"
-        )
-        
-        stats["updated"]["existing_investors"]["processed"] = updated_stats["existing_processed"]
-        stats["updated"]["existing_investors"]["fields_filled"] = updated_stats["fields_filled"]
-        stats["updated"]["existing_investors"]["fields_updated"] = updated_stats["fields_updated"]
-        stats["updated"]["grid_traders_moved_to_harvhub"] = updated_stats["grid_moved_to_harvhub"]
-        stats["updated"]["non_grid_traders_moved_to_invharv"] = updated_stats["non_grid_moved_to_invharv"]
-        stats["updated"]["new_grid_traders"]["copied_to_harvhub"] = updated_stats["new_grid_copied"]
-        stats["updated"]["new_grid_traders"]["ids"] = updated_stats["new_grid_ids"]
-        stats["updated"]["new_non_grid_traders"]["copied_to_invharv"] = updated_stats["new_non_grid_copied"]
-        stats["updated"]["new_non_grid_traders"]["ids"] = updated_stats["new_non_grid_ids"]
-        
-        # ============================================
-        # SAVE ALL FILES
-        # ============================================
-        
-        print("\n💾 Saving files...")
-        print("-"*40)
-        
-        # Save fetched files
-        if safe_json_write(ALL_FETCHED_INVESTORS, updated_all_fetched):
-            print(f"   ✅ Saved ALL fetched: {len(updated_all_fetched):,} records")
-            stats["fetched"]["all_count"] = len(updated_all_fetched)
-        
-        if safe_json_write(INVHARV_FETCHED_INVESTORS, updated_invharv_fetched):
-            print(f"   ✅ Saved INVHARV fetched: {len(updated_invharv_fetched):,} records")
-            stats["fetched"]["invharv_count"] = len(updated_invharv_fetched)
-        
-        if safe_json_write(HARVHUB_FETCHED_INVESTORS, updated_harvhub_fetched):
-            print(f"   ✅ Saved HARVHUB fetched: {len(updated_harvhub_fetched):,} records")
-            stats["fetched"]["harvhub_count"] = len(updated_harvhub_fetched)
-        
-        # Save updated files
-        if safe_json_write(ALL_UPDATED_INVESTORS, updated_all_updated):
-            print(f"   ✅ Saved ALL updated: {len(updated_all_updated):,} records")
-            stats["updated"]["all_count"] = len(updated_all_updated)
-        
-        if safe_json_write(INVHARV_UPDATED_INVESTORS, updated_invharv_updated):
-            print(f"   ✅ Saved INVHARV updated: {len(updated_invharv_updated):,} records")
-            stats["updated"]["invharv_count"] = len(updated_invharv_updated)
-        
-        if safe_json_write(HARVHUB_UPDATED_INVESTORS, updated_harvhub_updated):
-            print(f"   ✅ Saved HARVHUB updated: {len(updated_harvhub_updated):,} records")
-            stats["updated"]["harvhub_count"] = len(updated_harvhub_updated)
-        
-        # ============================================
-        # SUMMARY
-        # ============================================
-        
-        stats["processing_success"] = True
-        
-        print("\n" + "="*70)
-        print(f"SYNC AND DISTRIBUTION SUMMARY".center(70))
-        print("="*70)
-        
-        print(f"\n📥 FETCHED FILES SUMMARY:")
-        print(f"   🔄 Existing investors processed: {stats['fetched']['existing_investors']['processed']:,}")
-        print(f"      📝 Missing fields filled: {stats['fetched']['existing_investors']['fields_filled']:,}")
-        print(f"      🔄 Fields updated: {stats['fetched']['existing_investors']['fields_updated']:,}")
-        print(f"   🔀 Grid traders moved to HARVHUB: {stats['fetched']['grid_traders_moved_to_harvhub']:,}")
-        print(f"   🔀 Non-grid traders moved to INVHARV: {stats['fetched']['non_grid_traders_moved_to_invharv']:,}")
-        print(f"   📦 New grid traders copied to HARVHUB: {stats['fetched']['new_grid_traders']['copied_to_harvhub']:,}")
-        if stats['fetched']['new_grid_traders']['ids']:
-            print(f"      IDs: {', '.join(stats['fetched']['new_grid_traders']['ids'][:10])}")
-            if len(stats['fetched']['new_grid_traders']['ids']) > 10:
-                print(f"      ... and {len(stats['fetched']['new_grid_traders']['ids']) - 10} more")
-        print(f"   📦 New non-grid traders copied to INVHARV: {stats['fetched']['new_non_grid_traders']['copied_to_invharv']:,}")
-        if stats['fetched']['new_non_grid_traders']['ids']:
-            print(f"      IDs: {', '.join(stats['fetched']['new_non_grid_traders']['ids'][:10])}")
-            if len(stats['fetched']['new_non_grid_traders']['ids']) > 10:
-                print(f"      ... and {len(stats['fetched']['new_non_grid_traders']['ids']) - 10} more")
-        print(f"   📊 Final counts:")
-        print(f"      ALL: {stats['fetched']['all_count']:,} investors")
-        print(f"      INVHARV: {stats['fetched']['invharv_count']:,} investors")
-        print(f"      HARVHUB: {stats['fetched']['harvhub_count']:,} investors")
-        
-        print(f"\n📤 UPDATED FILES SUMMARY:")
-        print(f"   🔄 Existing investors processed: {stats['updated']['existing_investors']['processed']:,}")
-        print(f"      📝 Missing fields filled: {stats['updated']['existing_investors']['fields_filled']:,}")
-        print(f"      🔄 Fields updated: {stats['updated']['existing_investors']['fields_updated']:,}")
-        print(f"   🔀 Grid traders moved to HARVHUB: {stats['updated']['grid_traders_moved_to_harvhub']:,}")
-        print(f"   🔀 Non-grid traders moved to INVHARV: {stats['updated']['non_grid_traders_moved_to_invharv']:,}")
-        print(f"   📦 New grid traders copied to HARVHUB: {stats['updated']['new_grid_traders']['copied_to_harvhub']:,}")
-        if stats['updated']['new_grid_traders']['ids']:
-            print(f"      IDs: {', '.join(stats['updated']['new_grid_traders']['ids'][:10])}")
-            if len(stats['updated']['new_grid_traders']['ids']) > 10:
-                print(f"      ... and {len(stats['updated']['new_grid_traders']['ids']) - 10} more")
-        print(f"   📦 New non-grid traders copied to INVHARV: {stats['updated']['new_non_grid_traders']['copied_to_invharv']:,}")
-        if stats['updated']['new_non_grid_traders']['ids']:
-            print(f"      IDs: {', '.join(stats['updated']['new_non_grid_traders']['ids'][:10])}")
-            if len(stats['updated']['new_non_grid_traders']['ids']) > 10:
-                print(f"      ... and {len(stats['updated']['new_non_grid_traders']['ids']) - 10} more")
-        print(f"   📊 Final counts:")
-        print(f"      ALL: {stats['updated']['all_count']:,} investors")
-        print(f"      INVHARV: {stats['updated']['invharv_count']:,} investors")
-        print(f"      HARVHUB: {stats['updated']['harvhub_count']:,} investors")
-        
-        if stats["warnings"]:
-            print(f"\n⚠️ WARNINGS ({len(stats['warnings'])}):")
-            for warning in stats["warnings"]:
-                print(f"   - {warning}")
-        
-        if stats["errors"]:
-            print(f"\n❌ ERRORS ({len(stats['errors'])}):")
-            for error in stats["errors"]:
-                print(f"   - {error}")
-        
-        print(f"\n✅ Status : {'SUCCESS' if stats['processing_success'] else 'FAILED'}")
-        print(f"🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("="*70)
-        
-        return stats
-        
-    except Exception as e:
-        print(f"\n{'='*70}")
-        print(f"CRITICAL ERROR".center(70))
-        print(f"{'='*70}")
-        print(f"  Error Type : {type(e).__name__}")
-        print(f"  Message    : {str(e)}")
-        print(f"{'='*70}")
-        
-        import traceback
-        print(f"\n📜 Full Traceback:")
-        traceback.print_exc()
-        
-        stats["processing_success"] = False
-        stats["errors"].append(f"Critical error: {str(e)}")
-        return stats
          
-def restore_missing_fields():
-    """
-    Heal missing fields across JSON files using hierarchical field-by-field merging.
-    
-    Priority order:
-    1. INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS (highest priority)
-    2. INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
-    3. ALL_UPDATED_INVESTORS
-    4. ALL_FETCHED_INVESTORS (lowest priority)
-    
-    Rules:
-    - Individual files (invharv/harvhub) ONLY heal their own users
-    - ALL files can receive from individual files
-    - Individual files can receive from ALL files if they're missing fields
-    - Field-by-field merging (not whole record replacement)
-    - Files heal each other if individual files are empty
-    """
-    
-    print("\n" + "="*70)
-    print(f"  HEALING MISSING FIELDS (FIELD-BY-FIELD MERGE)")
-    print("="*70)
-    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("-"*70)
-    
-    def safe_read_json(file_path, default={}):
-        """Safely read JSON file with error handling"""
-        if not os.path.exists(file_path):
-            print(f"    ⚠️ File not found: {file_path}")
-            return default
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"    ❌ JSON decode error in {file_path}: {str(e)}")
-            return default
-        except PermissionError as e:
-            print(f"    ⚠️ Permission denied reading {file_path}")
-            return default
-        except Exception as e:
-            print(f"    ❌ Error reading {file_path}: {str(e)}")
-            return default
-    
-    def safe_write_json(file_path, data):
-        """Safely write JSON file with permission handling"""
-        try:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            return True
-        except PermissionError as e:
-            print(f"    ⚠️ Permission denied writing {file_path}")
-            # Try to delete and retry
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False)
-                    return True
-            except:
-                pass
-            return False
-        except Exception as e:
-            print(f"    ❌ Error writing {file_path}: {str(e)}")
-            return False
-    
-    def merge_fields(source_record, target_record):
-        """
-        Merge fields from source to target where target is missing fields.
-        Returns: (merged_record, fields_added)
-        """
-        if not source_record or not target_record:
-            return target_record, 0
-        
-        merged = dict(target_record)  # Start with target
-        fields_added = 0
-        
-        for key, value in source_record.items():
-            # Skip 'id' field as it's the key
-            if key == 'id':
-                continue
-            
-            # Only add if target doesn't have this field OR target has it as None/null
-            if key not in merged or merged[key] is None:
-                merged[key] = value
-                fields_added += 1
-        
-        return merged, fields_added
-    
-    def get_record_id(record):
-        """Extract record ID from record dict"""
-        if isinstance(record, dict):
-            return str(record.get('id', ''))
-        return None
-    
-    def merge_file_pair(source_data, target_data, source_name, target_name, skip_missing_ids=False):
-        """
-        Merge fields from source to target for matching IDs.
-        If skip_missing_ids=True, only merge for IDs that exist in target.
-        """
-        if not source_data or not target_data:
-            return target_data, 0, 0, 0
-        
-        merged_target = dict(target_data)
-        total_records_healed = 0
-        total_fields_added = 0
-        total_records_skipped = 0
-        
-        for record_id, source_record in source_data.items():
-            if record_id in merged_target:
-                # Merge fields from source to target
-                target_record = merged_target[record_id]
-                merged_record, fields_added = merge_fields(source_record, target_record)
-                
-                if fields_added > 0:
-                    merged_target[record_id] = merged_record
-                    total_records_healed += 1
-                    total_fields_added += fields_added
-                    print(f"      ✅ Healed record {record_id}: added {fields_added} field(s)")
-            else:
-                if not skip_missing_ids:
-                    # If target doesn't have this ID, add the whole record
-                    merged_target[record_id] = source_record
-                    total_records_healed += 1
-                    print(f"      ➕ Added new record {record_id} from {source_name}")
-                else:
-                    total_records_skipped += 1
-        
-        return merged_target, total_records_healed, total_fields_added, total_records_skipped
-    
-    # Step 1: Load all JSON files
-    print("\n📁 [1/4] Loading JSON Files...")
-    
-    invharv_fetched = safe_read_json(INVHARV_FETCHED_INVESTORS, {})
-    invharv_updated = safe_read_json(INVHARV_UPDATED_INVESTORS, {})
-    harvhub_fetched = safe_read_json(HARVHUB_FETCHED_INVESTORS, {})
-    harvhub_updated = safe_read_json(HARVHUB_UPDATED_INVESTORS, {})
-    all_fetched = safe_read_json(ALL_FETCHED_INVESTORS, {})
-    all_updated = safe_read_json(ALL_UPDATED_INVESTORS, {})
-    
-    print(f"    📊 INVHARV_FETCHED: {len(invharv_fetched):,} records")
-    print(f"    📊 INVHARV_UPDATED: {len(invharv_updated):,} records")
-    print(f"    📊 HARVHUB_FETCHED: {len(harvhub_fetched):,} records")
-    print(f"    📊 HARVHUB_UPDATED: {len(harvhub_updated):,} records")
-    print(f"    📊 ALL_FETCHED: {len(all_fetched):,} records")
-    print(f"    📊 ALL_UPDATED: {len(all_updated):,} records")
-    
-    # Step 2: Determine which individual files have data
-    invharv_has_data = len(invharv_fetched) > 0 or len(invharv_updated) > 0
-    harvhub_has_data = len(harvhub_fetched) > 0 or len(harvhub_updated) > 0
-    
-    print(f"\n📊 [2/4] Analyzing Data Sources...")
-    print(f"    INVHARV has data: {invharv_has_data}")
-    print(f"    HARVHUB has data: {harvhub_has_data}")
-    
-    all_fetched_modified = False
-    all_updated_modified = False
-    invharv_fetched_modified = False
-    invharv_updated_modified = False
-    harvhub_fetched_modified = False
-    harvhub_updated_modified = False
-    
-    total_fields_added_all_fetched = 0
-    total_fields_added_all_updated = 0
-    total_fields_added_invharv_fetched = 0
-    total_fields_added_invharv_updated = 0
-    total_fields_added_harvhub_fetched = 0
-    total_fields_added_harvhub_updated = 0
-    
-    print("\n🔧 [3/4] Healing Files...")
-    print("-"*70)
-    
-    # CASE 1: Individual files have data - heal ALL files from individual files
-    if invharv_has_data or harvhub_has_data:
-        print("\n  📋 Using INDIVIDUAL files as primary source...")
-        
-        # 1A: Heal ALL_UPDATED from INVHARV_UPDATED
-        if invharv_updated:
-            print("\n    🔄 INVHARV_UPDATED → ALL_UPDATED")
-            all_updated, healed, fields, skipped = merge_file_pair(
-                invharv_updated, all_updated, "INVHARV_UPDATED", "ALL_UPDATED", skip_missing_ids=True
-            )
-            if healed > 0:
-                all_updated_modified = True
-                total_fields_added_all_updated += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 1B: Heal ALL_UPDATED from HARVHUB_UPDATED
-        if harvhub_updated:
-            print("\n    🔄 HARVHUB_UPDATED → ALL_UPDATED")
-            all_updated, healed, fields, skipped = merge_file_pair(
-                harvhub_updated, all_updated, "HARVHUB_UPDATED", "ALL_UPDATED", skip_missing_ids=True
-            )
-            if healed > 0:
-                all_updated_modified = True
-                total_fields_added_all_updated += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 1C: Heal ALL_FETCHED from INVHARV_FETCHED
-        if invharv_fetched:
-            print("\n    🔄 INVHARV_FETCHED → ALL_FETCHED")
-            all_fetched, healed, fields, skipped = merge_file_pair(
-                invharv_fetched, all_fetched, "INVHARV_FETCHED", "ALL_FETCHED", skip_missing_ids=True
-            )
-            if healed > 0:
-                all_fetched_modified = True
-                total_fields_added_all_fetched += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 1D: Heal ALL_FETCHED from HARVHUB_FETCHED
-        if harvhub_fetched:
-            print("\n    🔄 HARVHUB_FETCHED → ALL_FETCHED")
-            all_fetched, healed, fields, skipped = merge_file_pair(
-                harvhub_fetched, all_fetched, "HARVHUB_FETCHED", "ALL_FETCHED", skip_missing_ids=True
-            )
-            if healed > 0:
-                all_fetched_modified = True
-                total_fields_added_all_fetched += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 1E: Also heal ALL_FETCHED from ALL_UPDATED (in case updated has fields fetched doesn't)
-        if all_updated:
-            print("\n    🔄 ALL_UPDATED → ALL_FETCHED (cross-healing)")
-            all_fetched, healed, fields, skipped = merge_file_pair(
-                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=True
-            )
-            if healed > 0:
-                all_fetched_modified = True
-                total_fields_added_all_fetched += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 1F: Heal ALL_UPDATED from ALL_FETCHED (cross-healing)
-        if all_fetched:
-            print("\n    🔄 ALL_FETCHED → ALL_UPDATED (cross-healing)")
-            all_updated, healed, fields, skipped = merge_file_pair(
-                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=True
-            )
-            if healed > 0:
-                all_updated_modified = True
-                total_fields_added_all_updated += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 1G: Heal individual files from ALL files (if individual is missing fields)
-        print("\n    🔄 ALL_UPDATED → INVHARV_UPDATED (if needed)")
-        if invharv_updated and all_updated:
-            invharv_updated, healed, fields, skipped = merge_file_pair(
-                all_updated, invharv_updated, "ALL_UPDATED", "INVHARV_UPDATED", skip_missing_ids=True
-            )
-            if healed > 0:
-                invharv_updated_modified = True
-                total_fields_added_invharv_updated += fields
-                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_UPDATED")
-            else:
-                print(f"      ℹ️ No healing needed for INVHARV_UPDATED")
-        
-        print("\n    🔄 ALL_UPDATED → HARVHUB_UPDATED (if needed)")
-        if harvhub_updated and all_updated:
-            harvhub_updated, healed, fields, skipped = merge_file_pair(
-                all_updated, harvhub_updated, "ALL_UPDATED", "HARVHUB_UPDATED", skip_missing_ids=True
-            )
-            if healed > 0:
-                harvhub_updated_modified = True
-                total_fields_added_harvhub_updated += fields
-                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_UPDATED")
-            else:
-                print(f"      ℹ️ No healing needed for HARVHUB_UPDATED")
-        
-        print("\n    🔄 ALL_FETCHED → INVHARV_FETCHED (if needed)")
-        if invharv_fetched and all_fetched:
-            invharv_fetched, healed, fields, skipped = merge_file_pair(
-                all_fetched, invharv_fetched, "ALL_FETCHED", "INVHARV_FETCHED", skip_missing_ids=True
-            )
-            if healed > 0:
-                invharv_fetched_modified = True
-                total_fields_added_invharv_fetched += fields
-                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_FETCHED")
-            else:
-                print(f"      ℹ️ No healing needed for INVHARV_FETCHED")
-        
-        print("\n    🔄 ALL_FETCHED → HARVHUB_FETCHED (if needed)")
-        if harvhub_fetched and all_fetched:
-            harvhub_fetched, healed, fields, skipped = merge_file_pair(
-                all_fetched, harvhub_fetched, "ALL_FETCHED", "HARVHUB_FETCHED", skip_missing_ids=True
-            )
-            if healed > 0:
-                harvhub_fetched_modified = True
-                total_fields_added_harvhub_fetched += fields
-                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_FETCHED")
-            else:
-                print(f"      ℹ️ No healing needed for HARVHUB_FETCHED")
-    
-    # CASE 2: Individual files are empty - heal between ALL files only
-    else:
-        print("\n  📋 Individual files EMPTY - healing between ALL files only...")
-        
-        # 2A: Heal ALL_UPDATED from ALL_FETCHED
-        if all_fetched:
-            print("\n    🔄 ALL_FETCHED → ALL_UPDATED")
-            all_updated, healed, fields, skipped = merge_file_pair(
-                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=False
-            )
-            if healed > 0:
-                all_updated_modified = True
-                total_fields_added_all_updated += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-        
-        # 2B: Heal ALL_FETCHED from ALL_UPDATED
-        if all_updated:
-            print("\n    🔄 ALL_UPDATED → ALL_FETCHED")
-            all_fetched, healed, fields, skipped = merge_file_pair(
-                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=False
-            )
-            if healed > 0:
-                all_fetched_modified = True
-                total_fields_added_all_fetched += fields
-                print(f"      ✅ Healed {healed} records, added {fields} fields")
-            else:
-                print(f"      ℹ️ No healing needed")
-    
-    # Step 4: Write back all modified files
-    print("\n💾 [4/4] Saving Modified Files...")
-    print("-"*70)
-    
-    if all_fetched_modified:
-        if safe_write_json(ALL_FETCHED_INVESTORS, all_fetched):
-            print(f"    ✅ Saved: {ALL_FETCHED_INVESTORS}")
-        else:
-            print(f"    ❌ Failed to save: {ALL_FETCHED_INVESTORS}")
-    else:
-        print(f"    ℹ️ No changes to: {ALL_FETCHED_INVESTORS}")
-    
-    if all_updated_modified:
-        if safe_write_json(ALL_UPDATED_INVESTORS, all_updated):
-            print(f"    ✅ Saved: {ALL_UPDATED_INVESTORS}")
-        else:
-            print(f"    ❌ Failed to save: {ALL_UPDATED_INVESTORS}")
-    else:
-        print(f"    ℹ️ No changes to: {ALL_UPDATED_INVESTORS}")
-    
-    if invharv_fetched_modified:
-        if safe_write_json(INVHARV_FETCHED_INVESTORS, invharv_fetched):
-            print(f"    ✅ Saved: {INVHARV_FETCHED_INVESTORS}")
-        else:
-            print(f"    ❌ Failed to save: {INVHARV_FETCHED_INVESTORS}")
-    else:
-        print(f"    ℹ️ No changes to: {INVHARV_FETCHED_INVESTORS}")
-    
-    if invharv_updated_modified:
-        if safe_write_json(INVHARV_UPDATED_INVESTORS, invharv_updated):
-            print(f"    ✅ Saved: {INVHARV_UPDATED_INVESTORS}")
-        else:
-            print(f"    ❌ Failed to save: {INVHARV_UPDATED_INVESTORS}")
-    else:
-        print(f"    ℹ️ No changes to: {INVHARV_UPDATED_INVESTORS}")
-    
-    if harvhub_fetched_modified:
-        if safe_write_json(HARVHUB_FETCHED_INVESTORS, harvhub_fetched):
-            print(f"    ✅ Saved: {HARVHUB_FETCHED_INVESTORS}")
-        else:
-            print(f"    ❌ Failed to save: {HARVHUB_FETCHED_INVESTORS}")
-    else:
-        print(f"    ℹ️ No changes to: {HARVHUB_FETCHED_INVESTORS}")
-    
-    if harvhub_updated_modified:
-        if safe_write_json(HARVHUB_UPDATED_INVESTORS, harvhub_updated):
-            print(f"    ✅ Saved: {HARVHUB_UPDATED_INVESTORS}")
-        else:
-            print(f"    ❌ Failed to save: {HARVHUB_UPDATED_INVESTORS}")
-    else:
-        print(f"    ℹ️ No changes to: {HARVHUB_UPDATED_INVESTORS}")
-    
-    # Final Summary
-    print("\n" + "="*70)
-    print(f"  HEALING SUMMARY")
-    print("="*70)
-    print(f"\n  📊 FILES PROCESSED:")
-    print(f"     ALL_FETCHED     : {'✅ MODIFIED' if all_fetched_modified else 'ℹ️ NO CHANGES'}")
-    print(f"     ALL_UPDATED     : {'✅ MODIFIED' if all_updated_modified else 'ℹ️ NO CHANGES'}")
-    print(f"     INVHARV_FETCHED : {'✅ MODIFIED' if invharv_fetched_modified else 'ℹ️ NO CHANGES'}")
-    print(f"     INVHARV_UPDATED : {'✅ MODIFIED' if invharv_updated_modified else 'ℹ️ NO CHANGES'}")
-    print(f"     HARVHUB_FETCHED : {'✅ MODIFIED' if harvhub_fetched_modified else 'ℹ️ NO CHANGES'}")
-    print(f"     HARVHUB_UPDATED : {'✅ MODIFIED' if harvhub_updated_modified else 'ℹ️ NO CHANGES'}")
-    
-    print(f"\n  📈 FIELDS ADDED BY FILE:")
-    print(f"     ALL_FETCHED     : {total_fields_added_all_fetched:,} fields")
-    print(f"     ALL_UPDATED     : {total_fields_added_all_updated:,} fields")
-    print(f"     INVHARV_FETCHED : {total_fields_added_invharv_fetched:,} fields")
-    print(f"     INVHARV_UPDATED : {total_fields_added_invharv_updated:,} fields")
-    print(f"     HARVHUB_FETCHED : {total_fields_added_harvhub_fetched:,} fields")
-    print(f"     HARVHUB_UPDATED : {total_fields_added_harvhub_updated:,} fields")
-    
-    print(f"\n  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*70)
-    
-    return {
-        'all_fetched_modified': all_fetched_modified,
-        'all_updated_modified': all_updated_modified,
-        'invharv_fetched_modified': invharv_fetched_modified,
-        'invharv_updated_modified': invharv_updated_modified,
-        'harvhub_fetched_modified': harvhub_fetched_modified,
-        'harvhub_updated_modified': harvhub_updated_modified
-    }
-
 def manage_accountmanagement_and_activities_jsons():
     """
     Updates accountmanagement.json and activities.json for each investor using data from FETCHED_INVESTORS.
@@ -2537,8 +984,6 @@ def move_fetched_investors():
     Handles database values: "1"/1 = True, "0"/0 = False
     """
     repair_json_files()
-    sync_and_distribute_investors()
-    restore_missing_fields()
     
     import traceback
     import sys
@@ -12722,6 +11167,7 @@ def martingale_system(inv_id=None):
                 if martingale_config:
                     martingale_enabled = martingale_config.get("enable_martingale", False)
                     martingale_type = martingale_config.get("martingale_type", "loss_streak")
+                    martingale_assumption = martingale_config.get("martingale_assumption", "stoploss_factor")  # NEW
                     recovery_adder_str = martingale_config.get("martingale_loss_recovery_adder_percentage", "0%")
                     martingale_for_position_order_scale = martingale_config.get("martingale_for_position_order_scale", False)
                     
@@ -12732,15 +11178,18 @@ def martingale_system(inv_id=None):
                         highest_risk_reduction_str = pre_scaling_config.get("highest_risk_reduction_percentage", "0%")
                         martingale_pre_scale_expected_loss_adder = pre_scaling_config.get("martingale_pre_scale_expected_loss_adder", False)
                         expected_loss_reduction_str = pre_scaling_config.get("expected_loss_reduction_percentage", "0%")
+                        martingale_linear_scaling = pre_scaling_config.get("martingale_linear_scaling", False)
                     else:
                         martingale_pre_scaling = martingale_config.get("martingale_pre_scaling", False)
                         martingale_pre_scale_highest_risk_adder = False
                         highest_risk_reduction_str = "0%"
                         martingale_pre_scale_expected_loss_adder = False
                         expected_loss_reduction_str = "0%"
+                        martingale_linear_scaling = False
                 else:
                     martingale_enabled = settings.get("enable_martingale", False)
                     martingale_type = "loss_streak"
+                    martingale_assumption = "stoploss_factor"  # NEW - default
                     recovery_adder_str = settings.get("martingale_loss_recovery_adder_percentage", "0%")
                     martingale_for_position_order_scale = settings.get("martingale_for_position_order_scale", False)
                     martingale_pre_scaling = settings.get("martingale_pre_scaling", False)
@@ -12748,6 +11197,7 @@ def martingale_system(inv_id=None):
                     highest_risk_reduction_str = "0%"
                     martingale_pre_scale_expected_loss_adder = False
                     expected_loss_reduction_str = "0%"
+                    martingale_linear_scaling = False
                 
                 recovery_adder_percentage = 0
                 if recovery_adder_str:
@@ -12789,6 +11239,7 @@ def martingale_system(inv_id=None):
                     "config": config,
                     "martingale_enabled": martingale_enabled,
                     "martingale_type": martingale_type,
+                    "martingale_assumption": martingale_assumption,  # NEW
                     "recovery_adder_percentage": recovery_adder_percentage,
                     "martingale_for_position_order_scale": martingale_for_position_order_scale,
                     "martingale_pre_scaling": martingale_pre_scaling,
@@ -12796,7 +11247,8 @@ def martingale_system(inv_id=None):
                     "highest_risk_reduction_percentage": highest_risk_reduction_percentage,
                     "martingale_pre_scale_expected_loss_adder": martingale_pre_scale_expected_loss_adder,
                     "expected_loss_reduction_percentage": expected_loss_reduction_percentage,
-                    "default_minimum_risk": default_minimum_risk
+                    "default_minimum_risk": default_minimum_risk,
+                    "martingale_linear_scaling": martingale_linear_scaling  # NEW
                 }
             except Exception as e:
                 print(f"  ✗ Failed to read config: {e}")
@@ -12810,6 +11262,7 @@ def martingale_system(inv_id=None):
         config = config_data["config"]
         martingale_enabled = config_data["martingale_enabled"]
         martingale_type = config_data.get("martingale_type", "loss_streak")
+        martingale_assumption = config_data.get("martingale_assumption", "stoploss_factor")  # ADD THIS
         recovery_adder_percentage = config_data["recovery_adder_percentage"]
         martingale_for_position_order_scale = config_data["martingale_for_position_order_scale"]
         martingale_pre_scaling = config_data["martingale_pre_scaling"]
@@ -12818,10 +11271,12 @@ def martingale_system(inv_id=None):
         martingale_pre_scale_expected_loss_adder = config_data["martingale_pre_scale_expected_loss_adder"]
         expected_loss_reduction_percentage = config_data["expected_loss_reduction_percentage"]
         default_minimum_risk = config_data["default_minimum_risk"]
+        martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)  # ADD THIS
 
         stats.update({
             "martingale_enabled": martingale_enabled,
             "martingale_type": martingale_type,
+            "martingale_assumption": martingale_assumption,  # ADD THIS
             "martingale_loss_recovery_adder_percentage": recovery_adder_percentage,
             "martingale_for_position_order_scale": martingale_for_position_order_scale,
             "martingale_pre_scaling": martingale_pre_scaling,
@@ -12829,7 +11284,8 @@ def martingale_system(inv_id=None):
             "highest_risk_reduction_percentage": highest_risk_reduction_percentage,
             "martingale_pre_scale_expected_loss_adder": martingale_pre_scale_expected_loss_adder,
             "expected_loss_reduction_percentage": expected_loss_reduction_percentage,
-            "default_minimum_risk": default_minimum_risk
+            "default_minimum_risk": default_minimum_risk,
+            "martingale_linear_scaling": martingale_linear_scaling  # ADD THIS
         })
 
         if not martingale_enabled:
@@ -12839,88 +11295,16 @@ def martingale_system(inv_id=None):
 
         print(f"  ✓ Martingale ENABLED")
         print(f"  │ Type: {martingale_type.upper()}")
+        print(f"  │ Assumption: {martingale_assumption.upper()}")  # ADD THIS
+        if martingale_assumption == "takeprofit_factor":
+            print(f"  │   └─ Using TP profit with drawdown deduction")
+        else:
+            print(f"  │   └─ Using SL risk (standard behavior)")
         print(f"  │ Recovery adder: {recovery_adder_percentage}%")
         print(f"  │ Pre-scaling: {'ON' if martingale_pre_scaling else 'OFF'}")
+        print(f"  │ Linear scaling: {'ON' if martingale_linear_scaling else 'OFF'}")
         print(f"  │ Default min risk floor: ${default_minimum_risk:.2f}")
 
-        config_data = load_configuration()
-        if config_data is None:
-            stats["errors"] += 1
-            continue
-
-        config = config_data["config"]
-        martingale_enabled = config_data["martingale_enabled"]
-        martingale_type = config_data.get("martingale_type", "loss_streak")  # NEW
-        recovery_adder_percentage = config_data["recovery_adder_percentage"]
-        martingale_for_position_order_scale = config_data["martingale_for_position_order_scale"]
-        martingale_pre_scaling = config_data["martingale_pre_scaling"]
-        martingale_pre_scale_highest_risk_adder = config_data["martingale_pre_scale_highest_risk_adder"]
-        highest_risk_reduction_percentage = config_data["highest_risk_reduction_percentage"]
-        martingale_pre_scale_expected_loss_adder = config_data["martingale_pre_scale_expected_loss_adder"]
-        expected_loss_reduction_percentage = config_data["expected_loss_reduction_percentage"]
-        default_minimum_risk = config_data["default_minimum_risk"]
-
-        stats.update({
-            "martingale_enabled": martingale_enabled,
-            "martingale_type": martingale_type,  # NEW
-            "martingale_loss_recovery_adder_percentage": recovery_adder_percentage,
-            "martingale_for_position_order_scale": martingale_for_position_order_scale,
-            "martingale_pre_scaling": martingale_pre_scaling,
-            "martingale_pre_scale_highest_risk_adder": martingale_pre_scale_highest_risk_adder,
-            "highest_risk_reduction_percentage": highest_risk_reduction_percentage,
-            "martingale_pre_scale_expected_loss_adder": martingale_pre_scale_expected_loss_adder,
-            "expected_loss_reduction_percentage": expected_loss_reduction_percentage,
-            "default_minimum_risk": default_minimum_risk
-        })
-
-        if not martingale_enabled:
-            print(f"  ⏭️ Martingale DISABLED")
-            stats["processing_success"] = True
-            continue
-
-        print(f"  ✓ Martingale ENABLED")
-        print(f"  │ Type: {martingale_type.upper()}")  # NEW
-        print(f"  │ Recovery adder: {recovery_adder_percentage}%")
-        print(f"  │ Pre-scaling: {'ON' if martingale_pre_scaling else 'OFF'}")
-        print(f"  │ Default min risk floor: ${default_minimum_risk:.2f}")
-
-        config_data = load_configuration()
-        if config_data is None:
-            stats["errors"] += 1
-            continue
-        
-        config = config_data["config"]
-        martingale_enabled = config_data["martingale_enabled"]
-        recovery_adder_percentage = config_data["recovery_adder_percentage"]
-        martingale_for_position_order_scale = config_data["martingale_for_position_order_scale"]
-        martingale_pre_scaling = config_data["martingale_pre_scaling"]
-        martingale_pre_scale_highest_risk_adder = config_data["martingale_pre_scale_highest_risk_adder"]
-        highest_risk_reduction_percentage = config_data["highest_risk_reduction_percentage"]
-        martingale_pre_scale_expected_loss_adder = config_data["martingale_pre_scale_expected_loss_adder"]
-        expected_loss_reduction_percentage = config_data["expected_loss_reduction_percentage"]
-        default_minimum_risk = config_data["default_minimum_risk"]
-        
-        stats.update({
-            "martingale_enabled": martingale_enabled,
-            "martingale_loss_recovery_adder_percentage": recovery_adder_percentage,
-            "martingale_for_position_order_scale": martingale_for_position_order_scale,
-            "martingale_pre_scaling": martingale_pre_scaling,
-            "martingale_pre_scale_highest_risk_adder": martingale_pre_scale_highest_risk_adder,
-            "highest_risk_reduction_percentage": highest_risk_reduction_percentage,
-            "martingale_pre_scale_expected_loss_adder": martingale_pre_scale_expected_loss_adder,
-            "expected_loss_reduction_percentage": expected_loss_reduction_percentage,
-            "default_minimum_risk": default_minimum_risk
-        })
-        
-        if not martingale_enabled:
-            print(f"  ⏭️ Martingale DISABLED")
-            stats["processing_success"] = True
-            continue
-        
-        print(f"  ✓ Martingale ENABLED")
-        print(f"  │ Recovery adder: {recovery_adder_percentage}%")
-        print(f"  │ Pre-scaling: {'ON' if martingale_pre_scaling else 'OFF'}")
-        print(f"  │ Default min risk floor: ${default_minimum_risk:.2f}")
 
         # ========== SECTION 2: GET CURRENT BALANCE ==========
         print(f"\n  📊 STEP 1: Balance Analysis")
@@ -13982,7 +12366,7 @@ def martingale_system(inv_id=None):
                 return False
     
         # ========== SECTION 7: PRE-SCALING (LIMIT ORDERS ONLY) ==========
-        def process_pre_scaling():
+        def process_pre_scaling_old():
             """
             Process pre-scaling based on martingale type:
             - loss_streak: Analyzes sequential losses from closed trades
@@ -15388,6 +13772,1865 @@ def martingale_system(inv_id=None):
                 import traceback
                 traceback.print_exc()
                 return False
+        
+        def process_pre_scaling():
+            """
+            Process pre-scaling based on martingale type and assumption:
+            - loss_streak: Analyzes sequential losses from closed trades
+            - balance_based: Uses drawdown amount as base target risk
+            
+            Assumption modes:
+            - stoploss_factor: Uses exit (stop loss) for risk calculation (existing behavior)
+            - takeprofit_factor: Uses tp (take profit) for profit calculation (NEW behavior)
+            - Calculates profit from entry to tp
+            - Deducts drawdown recovery from each order's TP profit
+            - Remaining profit becomes the target
+            
+            IMPORTANT: NEVER scales DOWN volumes. Only scales UP or keeps the same.
+            If no scaling is needed, resets to default risk from config.
+            """
+            if not martingale_pre_scaling:
+                return False
+            
+            # Get linear scaling config from loaded config
+            martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)
+            
+            print(f"\n{'='*60}")
+            print(f"  🎯 PRE-SCALING ANALYSIS")
+            print(f"{'='*60}")
+            print(f"  │ Mode: {martingale_type.upper()}")
+            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            if martingale_assumption == "takeprofit_factor":
+                print(f"  │   └─ Using TP profit with drawdown deduction")
+            else:
+                print(f"  │   └─ Using SL risk (standard behavior)")
+            print(f"  │ Linear scaling: {'✓ ENABLED' if martingale_linear_scaling else '✗ DISABLED'}")
+            print(f"  │ Highest risk adder: {'✓ ENABLED' if martingale_pre_scale_highest_risk_adder else '✗ DISABLED'}")
+            print(f"  │   - Reduction: {highest_risk_reduction_percentage}%")
+            print(f"  │ Expected loss adder: {'✓ ENABLED' if martingale_pre_scale_expected_loss_adder else '✗ DISABLED'}")
+            print(f"  │   - Reduction: {expected_loss_reduction_percentage}%")
+            print(f"  │ Stage max risk: ${stage_max_risk:.2f}")
+            print(f"  │ Recovery adder: {recovery_adder_percentage}%")
+            print(f"{'─'*60}")
+
+            # ========== DEFINE HELPER FUNCTIONS ==========
+            def remove_invalid_price_levels(orders_data, symbol):
+                if not orders_data or not isinstance(orders_data, list):
+                    return orders_data, 0, []
+                
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    return orders_data, 0, []
+                
+                current_bid = symbol_info.bid
+                current_ask = symbol_info.ask
+                
+                if current_bid is None or current_ask is None:
+                    return orders_data, 0, []
+                
+                filtered_orders = []
+                removed_count = 0
+                
+                for order in orders_data:
+                    if not isinstance(order, dict):
+                        filtered_orders.append(order)
+                        continue
+                    
+                    order_symbol = order.get('symbol')
+                    if order_symbol != symbol:
+                        filtered_orders.append(order)
+                        continue
+                    
+                    entry = order.get('entry')
+                    order_type = order.get('order_type', '').lower()
+                    
+                    if entry is None:
+                        filtered_orders.append(order)
+                        continue
+                    
+                    is_valid = True
+                    
+                    if order_type in ['buy_stop', 'sell_limit']:
+                        if entry <= current_ask:
+                            is_valid = False
+                    elif order_type in ['sell_stop', 'buy_limit']:
+                        if entry >= current_bid:
+                            is_valid = False
+                    
+                    if is_valid:
+                        filtered_orders.append(order)
+                    else:
+                        removed_count += 1
+                
+                return filtered_orders, removed_count, []
+
+            def load_limit_orders():
+                strategy_name = None
+                if FETCHED_INVESTORS:
+                    try:
+                        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                            investor_users = json.load(f)
+                        
+                        investor_cfg = investor_users.get(user_brokerid)
+                        if investor_cfg:
+                            strategy_name = investor_cfg.get("invested_with", "")
+                    except:
+                        pass
+
+                if not strategy_name:
+                    return None, None
+
+                limit_orders_path = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
+                
+                if limit_orders_path.exists():
+                    with open(limit_orders_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    return limit_orders_path, data
+                
+                return None, None
+
+            def save_limit_orders(file_path, data):
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+
+            def analyze_highest_risk_from_limit_orders(limit_orders_data):
+                highest_risk_orders = {}
+                
+                if not limit_orders_data or not isinstance(limit_orders_data, list):
+                    return highest_risk_orders
+                
+                symbol_orders = {}
+                for order in limit_orders_data:
+                    if isinstance(order, dict):
+                        symbol = order.get('symbol')
+                        if symbol:
+                            if symbol not in symbol_orders:
+                                symbol_orders[symbol] = []
+                            symbol_orders[symbol].append(order)
+                
+                for symbol, orders_list in symbol_orders.items():
+                    highest_risk = 0
+                    highest_risk_order_info = None
+                    
+                    for order in orders_list:
+                        entry = order.get('entry')
+                        stop = order.get('exit') or order.get('stop_loss')
+                        volume_key, volume = get_volume_field_from_order(order)
+                        order_type = order.get('order_type', 'Unknown')
+                        
+                        if entry and stop and volume and volume > 0:
+                            symbol_info = mt5.symbol_info(symbol)
+                            if symbol_info:
+                                contract_size = symbol_info.trade_contract_size
+                                price_diff = abs(entry - stop)
+                                risk = price_diff * volume * contract_size
+                                
+                                if risk > highest_risk:
+                                    highest_risk = risk
+                                    highest_risk_order_info = {
+                                        'order_type': order_type,
+                                        'entry': entry,
+                                        'stop': stop,
+                                        '_volume': volume,
+                                        'risk': risk,
+                                        'original_risk': risk,
+                                        'source': 'limit_orders'
+                                    }
+                    
+                    if highest_risk_order_info:
+                        # Apply highest risk reduction to the highest risk value
+                        if highest_risk_reduction_percentage > 0:
+                            reduction_amount = highest_risk * (highest_risk_reduction_percentage / 100)
+                            highest_risk = highest_risk - reduction_amount
+                            highest_risk_order_info['risk'] = highest_risk
+                            highest_risk_order_info['reduction_applied'] = reduction_amount
+                        
+                        highest_risk_orders[symbol] = highest_risk_order_info
+                
+                return highest_risk_orders
+
+            def get_volume_field_from_order(order):
+                for key, value in order.items():
+                    if '_volume' in key.lower() and isinstance(value, (int, float)):
+                        return key, value
+                return None, None
+
+            def get_current_volumes_from_limit_orders(orders_data):
+                volumes = {}
+                if isinstance(orders_data, list):
+                    for order in orders_data:
+                        if isinstance(order, dict):
+                            symbol = order.get('symbol')
+                            if symbol:
+                                volume_key, volume = get_volume_field_from_order(order)
+                                if volume:
+                                    volumes[symbol] = volume
+                return volumes
+
+            def calculate_order_risk(order, symbol_info):
+                """Calculate the risk of a single limit order using exit (stop loss)"""
+                entry = order.get('entry')
+                stop = order.get('exit') or order.get('stop_loss')
+                volume_key, volume = get_volume_field_from_order(order)
+                
+                if not entry or not stop or not volume or volume <= 0:
+                    return 0
+                
+                price_diff = abs(entry - stop)
+                contract_size = symbol_info.trade_contract_size if symbol_info else 1
+                risk = price_diff * volume * contract_size
+                return risk
+
+            def calculate_order_profit_tp(order, symbol_info):
+                """
+                NEW: Calculate the profit of a single limit order using tp (take profit)
+                Used for takeprofit_factor assumption
+                """
+                entry = order.get('entry')
+                tp = order.get('tp') or order.get('target')  # Check both 'tp' and 'target' fields
+                volume_key, volume = get_volume_field_from_order(order)
+                
+                if not entry or not tp or not volume or volume <= 0:
+                    return 0
+                
+                price_diff = abs(entry - tp)
+                contract_size = symbol_info.trade_contract_size if symbol_info else 1
+                profit = price_diff * volume * contract_size
+                return profit
+
+            def get_default_risk_from_config():
+                """Get default risk from account_balance_default_risk_management"""
+                default_risk_map = config.get("account_balance_default_risk_management", {})
+                
+                if not default_risk_map:
+                    print(f"  ⚠️ No default risk map found in config!")
+                    return None
+                
+                for range_str, risk_value in default_risk_map.items():
+                    try:
+                        raw_range = range_str.split("_")[0]
+                        low_str, high_str = raw_range.split("-")
+                        low = float(low_str)
+                        high = float(high_str)
+                        
+                        if low <= current_balance <= high:
+                            return float(risk_value)
+                    except Exception:
+                        continue
+                
+                print(f"  ⚠️ No default risk found for balance ${current_balance:.2f}")
+                return None
+
+            def scale_order_volume_to_target(order, symbol_info, target_risk):
+                """
+                Scale a single order's volume to match target risk.
+                ALWAYS scales to target risk (up or down) within constraints.
+                Returns: (new_volume, actual_risk, scaled)
+                """
+                entry = order.get('entry')
+                stop = order.get('exit') or order.get('stop_loss')
+                volume_key, current_volume = get_volume_field_from_order(order)
+                
+                if not entry or not stop or not current_volume or current_volume <= 0:
+                    return current_volume, 0, False
+                
+                price_diff = abs(entry - stop)
+                contract_size = symbol_info.trade_contract_size if symbol_info else 1
+                risk_per_lot = price_diff * contract_size
+                
+                if risk_per_lot <= 0:
+                    return current_volume, 0, False
+                
+                # Calculate current risk
+                current_risk = risk_per_lot * current_volume
+                
+                # Calculate required volume to achieve target risk
+                required_volume = target_risk / risk_per_lot
+                required_volume = round(required_volume, 2)
+                
+                # Apply volume constraints - MINIMUM ONLY, NO MAXIMUM
+                min_volume = symbol_info.volume_min if symbol_info else 0.01
+                volume_step = symbol_info.volume_step if symbol_info else 0.01
+                
+                # Round to step
+                steps = round(required_volume / volume_step) if volume_step > 0 else 0
+                required_volume = max(min_volume, round(steps * volume_step, 2))
+                
+                # Calculate actual risk at required volume
+                actual_risk = risk_per_lot * required_volume
+                
+                threshold = 0.10  # $0.10 threshold for precision
+                
+                # Check if we're already at target risk (within threshold)
+                if abs(current_risk - target_risk) <= threshold:
+                    return current_volume, current_risk, False
+                
+                # Scale to target risk
+                return required_volume, actual_risk, True
+
+            def scale_order_volume_to_target_profit(order, symbol_info, target_profit):
+                """
+                NEW: Scale a single order's volume to match target profit using tp.
+                Used for takeprofit_factor assumption.
+                Returns: (new_volume, actual_profit, scaled)
+                
+                IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
+                """
+                entry = order.get('entry')
+                tp = order.get('tp') or order.get('target')  # Check both 'tp' and 'target' fields
+                volume_key, current_volume = get_volume_field_from_order(order)
+                
+                if not entry or not tp or not current_volume or current_volume <= 0:
+                    return current_volume, 0, False
+                
+                price_diff = abs(entry - tp)
+                contract_size = symbol_info.trade_contract_size if symbol_info else 1
+                profit_per_lot = price_diff * contract_size
+                
+                if profit_per_lot <= 0:
+                    return current_volume, 0, False
+                
+                # Calculate current profit
+                current_profit = profit_per_lot * current_volume
+                
+                # If current profit already covers drawdown (current_profit >= target_profit + drawdown)
+                # Keep current volume - NO DOWNSCALING
+                if current_profit >= target_profit:
+                    print(f"        │ Order #{order_index}: Current profit ${current_profit:.2f} already covers target ${target_profit:.2f}")
+                    print(f"        │ → Keeping current volume {current_volume:.2f} lots (NO DOWNSCALING)")
+                    return current_volume, current_profit, False
+                
+                # Calculate required volume to achieve target profit
+                required_volume = target_profit / profit_per_lot
+                required_volume = round(required_volume, 2)
+                
+                # Apply volume constraints - MINIMUM ONLY, NO MAXIMUM
+                min_volume = symbol_info.volume_min if symbol_info else 0.01
+                volume_step = symbol_info.volume_step if symbol_info else 0.01
+                
+                # Round to step
+                steps = round(required_volume / volume_step) if volume_step > 0 else 0
+                required_volume = max(min_volume, round(steps * volume_step, 2))
+                
+                # CRITICAL: NEVER SCALE DOWN
+                # If required_volume is less than current_volume, keep current_volume
+                if required_volume < current_volume:
+                    print(f"        │ Required volume {required_volume:.2f} is LESS than current {current_volume:.2f}")
+                    print(f"        │ → Keeping current volume (NO DOWNSCALING)")
+                    return current_volume, current_profit, False
+                
+                # Calculate actual profit at required volume
+                actual_profit = profit_per_lot * required_volume
+                
+                threshold = 0.10  # $0.10 threshold for precision
+                
+                # Check if we're already at target profit (within threshold)
+                if abs(current_profit - target_profit) <= threshold:
+                    return current_volume, current_profit, False
+                
+                # Scale to target profit (only up)
+                return required_volume, actual_profit, True
+
+            def group_orders_by_linear(orders_data):
+                stepup_linear = []
+                stepdown_linear = []
+                
+                if not orders_data or not isinstance(orders_data, list):
+                    return stepup_linear, stepdown_linear
+                
+                for idx, order in enumerate(orders_data):
+                    if not isinstance(order, dict):
+                        continue
+                    
+                    order_type = order.get('order_type', '').lower()
+                    entry = order.get('entry')
+                    
+                    if not entry:
+                        continue
+                    
+                    order_info = {'order': order, 'index': idx}
+                    
+                    if 'sell_limit' in order_type or 'buy_stop' in order_type:
+                        stepup_linear.append(order_info)
+                    elif 'buy_limit' in order_type or 'sell_stop' in order_type:
+                        stepdown_linear.append(order_info)
+                
+                stepup_linear.sort(key=lambda x: x['order'].get('entry', 0))
+                stepdown_linear.sort(key=lambda x: x['order'].get('entry', 0), reverse=True)
+                
+                return stepup_linear, stepdown_linear
+
+            def apply_linear_step_scaling(orders_linear, linear_name, symbol_info, 
+                                        total_extra_risk, calculation_details):
+                """
+                Apply linear scaling to a group of orders.
+                Uses the appropriate calculation based on martingale_assumption.
+                
+                IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
+                """
+                linear_updates = {}
+                
+                if not orders_linear:
+                    return linear_updates
+                
+                print(f"\n     📊 {linear_name.upper()} LINEAR SCALING:")
+                print(f"        Orders in linear: {len(orders_linear)}")
+                
+                if martingale_assumption == "takeprofit_factor":
+                    print(f"        LEADER amount (first order TP profit after deduction): ${total_extra_risk:.2f}")
+                    print(f"        Deducting drawdown from each order's TP profit...")
+                    print(f"        IMPORTANT: NEVER scaling DOWN, only UP or keep same")
+                else:
+                    print(f"        LEADER amount (first order risk): ${total_extra_risk:.2f}")
+                
+                calculated_volumes = []
+                calculated_amounts = []  # risk or profit depending on assumption
+                
+                for idx, order_info in enumerate(orders_linear):
+                    order = order_info['order']
+                    order_index = order_info['index']
+                    symbol = order.get('symbol')
+                    entry = order.get('entry')
+                    order_type = order.get('order_type', '')
+                    
+                    if martingale_assumption == "takeprofit_factor":
+                        # Use TP for profit calculation
+                        tp = order.get('tp') or order.get('target')
+                        if not entry or not tp:
+                            continue
+                        
+                        price_diff = abs(entry - tp)
+                        amount_per_lot = price_diff * symbol_info.trade_contract_size
+                        amount_type = "profit"
+                    else:
+                        # Use stoploss for risk calculation (standard)
+                        stop = order.get('exit') or order.get('stop_loss')
+                        if not entry or not stop:
+                            continue
+                        
+                        is_buy = 'buy' in order_type.lower()
+                        if is_buy:
+                            price_diff = entry - stop
+                        else:
+                            price_diff = stop - entry
+                        
+                        if price_diff <= 0:
+                            continue
+                        
+                        amount_per_lot = price_diff * symbol_info.trade_contract_size
+                        amount_type = "risk"
+                    
+                    if idx == 0:
+                        # LEADER order - keep original volume
+                        leader_volume = get_volume_field_from_order(order)[1] or 0.01
+                        leader_amount = amount_per_lot * leader_volume
+                        
+                        print(f"\n        🔹 Order #1 (LEADER): {symbol} @ {entry:.5f} ({order_type})")
+                        print(f"          ├─ LEADER {amount_type}: ${leader_amount:.2f}")
+                        print(f"          ├─ Volume: {leader_volume:.2f} lots")
+                        
+                        if martingale_assumption == "takeprofit_factor":
+                            print(f"          ├─ This is the TP profit after deduction")
+                            print(f"          └─ Drawdown deducted: ${total_extra_risk:.2f}")
+                        else:
+                            print(f"          └─ This is the LEADER amount for scaling")
+                        
+                        calculated_volumes.append(leader_volume)
+                        calculated_amounts.append(leader_amount)
+                        
+                    else:
+                        # Subsequent orders - progressive scaling
+                        previous_amount = calculated_amounts[idx - 1]
+                        
+                        current_volume = get_volume_field_from_order(order)[1] or 0.01
+                        current_amount = amount_per_lot * current_volume
+                        
+                        # CRITICAL: NEVER SCALE DOWN
+                        # If current amount already >= previous amount, keep current volume
+                        if current_amount >= previous_amount:
+                            print(f"\n        Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
+                            print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
+                            print(f"          ├─ {amount_type.upper()} to match (from previous order): ${previous_amount:.2f}")
+                            print(f"          ├─ Already meets or exceeds target!")
+                            print(f"          └─ → Keeping current volume (NO DOWNSCALING)")
+                            calculated_volumes.append(current_volume)
+                            calculated_amounts.append(current_amount)
+                            continue
+                        
+                        additional_volume = (previous_amount - current_amount) / amount_per_lot
+                        additional_volume = round(additional_volume, 2)
+                        
+                        new_volume = current_volume + additional_volume
+                        new_volume = round(new_volume, 2)
+                        
+                        min_volume = symbol_info.volume_min
+                        max_volume = symbol_info.volume_max
+                        volume_step = symbol_info.volume_step
+                        
+                        steps = round(new_volume / volume_step) if volume_step > 0 else 0
+                        new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                        
+                        new_amount = amount_per_lot * new_volume
+                        
+                        print(f"\n        Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
+                        print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
+                        print(f"          ├─ {amount_type.upper()} to match (from previous order): ${previous_amount:.2f}")
+                        print(f"          ├─ Additional volume needed: {additional_volume:.2f} lots")
+                        print(f"          ├─ New volume: {new_volume:.2f} lots")
+                        print(f"          └─ New {amount_type}: ${new_amount:.2f}")
+                        
+                        calculated_volumes.append(new_volume)
+                        calculated_amounts.append(new_amount)
+                        
+                        if abs(current_volume - new_volume) > 0.001:
+                            linear_updates[order_index] = new_volume
+                
+                print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
+                for i, (vol, amt) in enumerate(zip(calculated_volumes, calculated_amounts)):
+                    if martingale_assumption == "takeprofit_factor":
+                        print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} profit after deduction")
+                    else:
+                        print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} risk")
+                
+                return linear_updates
+
+            # ========== LOSS_STREAK SPECIFIC FUNCTIONS ==========
+            def fetch_and_analyze_trades_with_sequential_loss():
+                """
+                Fetches all closed trades and analyzes sequential losses per symbol.
+                ONLY used for loss_streak mode.
+                Returns: (closed_positions, sequential_losses_by_symbol, last_expected_risk, stage_info)
+                """
+                print(f"\n  📊 CLOSED TRADE HISTORY WITH SEQUENTIAL LOSS ANALYSIS")
+                print(f"{'─'*60}")
+                
+                try:
+                    try:
+                        from dateutil import parser as date_parser
+                        has_dateutil = True
+                    except ImportError:
+                        has_dateutil = False
+                    
+                    activities_path = inv_root / "activities.json"
+                    execution_start_date = None
+                    start_timestamp = None
+                    
+                    if activities_path.exists():
+                        with open(activities_path, 'r', encoding='utf-8') as f:
+                            activities = json.load(f)
+                        execution_start_date = activities.get('execution_start_date')
+                        
+                        if execution_start_date:
+                            try:
+                                if isinstance(execution_start_date, str):
+                                    if has_dateutil:
+                                        start_datetime = date_parser.parse(execution_start_date)
+                                        start_timestamp = int(start_datetime.timestamp())
+                                    else:
+                                        date_str = execution_start_date.strip()
+                                        date_formats = [
+                                            '%B %d, %Y', '%b %d, %Y', '%B %d %Y', '%b %d %Y',
+                                            '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%Y/%m/%d %H:%M:%S',
+                                            '%Y/%m/%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y',
+                                            '%d/%m/%Y %H:%M:%S', '%d/%m/%Y',
+                                            '%m-%d-%Y %H:%M:%S', '%m-%d-%Y',
+                                            '%m/%d/%Y %H:%M:%S', '%m/%d/%Y',
+                                        ]
+                                        for fmt in date_formats:
+                                            try:
+                                                start_datetime = datetime.strptime(date_str, fmt)
+                                                start_timestamp = int(start_datetime.timestamp())
+                                                break
+                                            except ValueError:
+                                                continue
+                            except:
+                                pass
+                    
+                    if start_timestamp is None:
+                        start_timestamp = int((datetime.now() - timedelta(days=30)).timestamp())
+                    
+                    current_timestamp = int(datetime.now().timestamp())
+                    if start_timestamp > current_timestamp:
+                        start_timestamp = current_timestamp - (30 * 24 * 60 * 60)
+                    
+                    print(f"  │ Execution start date: {execution_start_date if execution_start_date else 'Not found'}")
+                    print(f"  │ From timestamp: {start_timestamp} ({datetime.fromtimestamp(start_timestamp).strftime('%Y-%m-%d %H:%M:%S')})")
+                    print(f"  │ Present time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"{'─'*60}")
+                    
+                    closed_trades = mt5.history_deals_get(start_timestamp, int(datetime.now().timestamp()))
+                    
+                    if closed_trades is None or len(closed_trades) == 0:
+                        print(f"  │ ℹ️ No closed trades found")
+                        return [], {}, 0, {}
+                    
+                    positions_map = {}
+                    for deal in closed_trades:
+                        if deal.type in [0, 1]:
+                            if deal.entry == 0:
+                                positions_map[deal.position_id] = {
+                                    'position_id': deal.position_id,
+                                    'symbol': deal.symbol,
+                                    'entry_time': deal.time,
+                                    'entry_price': deal.price,
+                                    'volume': deal.volume,
+                                    'entry_type': 'BUY' if deal.type == 0 else 'SELL',
+                                    'profit': 0,
+                                    'exit_time': None,
+                                    'exit_price': None,
+                                    'swap': deal.swap or 0,
+                                    'commission': deal.commission or 0,
+                                    'magic': deal.magic,
+                                    'comment': deal.comment or ''
+                                }
+                            elif deal.entry in [1, 3]:
+                                if deal.position_id in positions_map:
+                                    positions_map[deal.position_id]['exit_time'] = deal.time
+                                    positions_map[deal.position_id]['exit_price'] = deal.price
+                                    positions_map[deal.position_id]['profit'] = deal.profit or 0
+                                    if deal.swap:
+                                        positions_map[deal.position_id]['swap'] += deal.swap
+                                    if deal.commission:
+                                        positions_map[deal.position_id]['commission'] += deal.commission
+                    
+                    closed_positions = []
+                    for pos_id, pos_data in positions_map.items():
+                        if pos_data['exit_time'] is not None:
+                            holding_seconds = pos_data['exit_time'] - pos_data['entry_time']
+                            holding_days = holding_seconds / (24 * 60 * 60)
+                            
+                            symbol_info = mt5.symbol_info(pos_data['symbol'])
+                            if symbol_info:
+                                pip_size = symbol_info.point * 10 if 'JPY' in pos_data['symbol'] else symbol_info.point
+                                if pos_data['entry_type'] == 'BUY':
+                                    pips = (pos_data['exit_price'] - pos_data['entry_price']) / pip_size
+                                else:
+                                    pips = (pos_data['entry_price'] - pos_data['exit_price']) / pip_size
+                            else:
+                                pips = 0
+                            
+                            total_profit = pos_data['profit'] + pos_data['swap'] + pos_data['commission']
+                            pos_data['holding_days'] = holding_days
+                            pos_data['pips'] = pips
+                            pos_data['total_profit'] = total_profit
+                            closed_positions.append(pos_data)
+                    
+                    closed_positions.sort(key=lambda x: x['entry_time'])
+                    
+                    if not closed_positions:
+                        print(f"  │ ℹ️ No fully closed positions found")
+                        return [], {}, 0, {}
+                    
+                    # ========== TRACK SEQUENTIAL LOSSES PER SYMBOL ==========
+                    symbol_loss_tracking = {}
+                    sequential_losses_by_symbol = {}
+                    
+                    for pos in closed_positions:
+                        symbol = pos['symbol']
+                        profit = pos['total_profit']
+                        is_loss = profit < 0
+                        is_profit = profit > 0
+                        
+                        if symbol not in symbol_loss_tracking:
+                            symbol_loss_tracking[symbol] = {
+                                'current_losses': [],
+                                'current_loss_total': 0,
+                                'in_loss_sequence': False
+                            }
+                        
+                        tracking = symbol_loss_tracking[symbol]
+                        
+                        if is_loss:
+                            tracking['current_losses'].append(pos)
+                            tracking['current_loss_total'] += abs(profit)
+                            tracking['in_loss_sequence'] = True
+                        elif is_profit:
+                            if tracking['in_loss_sequence'] and tracking['current_losses']:
+                                if symbol not in sequential_losses_by_symbol:
+                                    sequential_losses_by_symbol[symbol] = []
+                                sequential_losses_by_symbol[symbol].append({
+                                    'losses': tracking['current_losses'].copy(),
+                                    'total_loss': tracking['current_loss_total'],
+                                    'count': len(tracking['current_losses'])
+                                })
+                                tracking['current_losses'] = []
+                                tracking['current_loss_total'] = 0
+                                tracking['in_loss_sequence'] = False
+                    
+                    for symbol, tracking in symbol_loss_tracking.items():
+                        if tracking['in_loss_sequence'] and tracking['current_losses']:
+                            if symbol not in sequential_losses_by_symbol:
+                                sequential_losses_by_symbol[symbol] = []
+                            sequential_losses_by_symbol[symbol].append({
+                                'losses': tracking['current_losses'].copy(),
+                                'total_loss': tracking['current_loss_total'],
+                                'count': len(tracking['current_losses'])
+                            })
+                    
+                    # ========== BUILD TRADE TO SEQUENCE MAP ==========
+                    trade_to_sequence = {}
+                    for symbol, sequences in sequential_losses_by_symbol.items():
+                        for seq in sequences:
+                            for idx, trade in enumerate(seq['losses']):
+                                trade_to_sequence[trade['position_id']] = {
+                                    'sequence': seq,
+                                    'position': idx,
+                                    'total_in_sequence': len(seq['losses']),
+                                    'is_first': idx == 0,
+                                    'is_last': idx == len(seq['losses']) - 1,
+                                    'symbol': symbol
+                                }
+                    
+                    trade_follows_loss = {}
+                    for i, pos in enumerate(closed_positions):
+                        if i > 0:
+                            prev_trade = closed_positions[i - 1]
+                            prev_is_loss = prev_trade['total_profit'] < 0
+                            if prev_is_loss:
+                                trade_follows_loss[pos['position_id']] = {
+                                    'previous_loss': prev_trade,
+                                    'loss_position_id': prev_trade['position_id']
+                                }
+                    
+                    # ========== PRINT TRADES WITH ANALYSIS ==========
+                    print(f"\n  📈 CLOSED POSITIONS ({len(closed_positions)} total):")
+                    print(f"{'─'*70}")
+                    
+                    total_profit = 0
+                    winning_count = 0
+                    losing_count = 0
+                    total_pips = 0
+                    total_trades = 0
+                    
+                    # Store the last trade's expected risk
+                    last_expected_risk = 0
+                    last_actual_risk = 0
+                    last_trade_symbol = ""
+                    
+                    for i, pos in enumerate(closed_positions, 1):
+                        entry_time = datetime.fromtimestamp(pos['entry_time']).strftime('%Y-%m-%d %H:%M')
+                        exit_time = datetime.fromtimestamp(pos['exit_time']).strftime('%Y-%m-%d %H:%M')
+                        
+                        profit = pos['total_profit']
+                        total_profit += profit
+                        total_trades += 1
+                        
+                        if profit > 0:
+                            winning_count += 1
+                            profit_symbol = '+'
+                        elif profit < 0:
+                            losing_count += 1
+                            profit_symbol = ''
+                        else:
+                            profit_symbol = ' '
+                        
+                        total_pips += pos['pips']
+                        
+                        print(f"\n  {i:2d}. {pos['symbol']:8s} | {pos['entry_type']:4s} | Vol: {pos['volume']:.2f}")
+                        print(f"      ├─ Entry: {pos['entry_price']:.5f} @ {entry_time}")
+                        print(f"      ├─ Exit:  {pos['exit_price']:.5f} @ {exit_time}")
+                        print(f"      ├─ Pips:  {pos['pips']:.1f}  |  Holding: {pos['holding_days']:.2f} days")
+                        print(f"      ├─ Profit: {profit_symbol}${profit:.2f}")
+                        if pos.get('comment'):
+                            print(f"      └─ Comment: {pos['comment']}")
+                        else:
+                            print(f"      └─ Magic: {pos['magic']}")
+                        
+                        # ========== CHECK IF THIS TRADE SHOULD BE ANALYZED ==========
+                        should_analyze = False
+                        seq_info = None
+                        cumulative_loss = 0
+                        previous_losses = []
+                        actual_risk = abs(profit)
+                        
+                        if pos['position_id'] in trade_to_sequence:
+                            should_analyze = True
+                            seq_info = trade_to_sequence[pos['position_id']]
+                            seq = seq_info['sequence']
+                            cumulative_loss = sum(abs(t['total_profit']) for t in seq['losses'][:seq_info['position'] + 1])
+                            previous_losses = seq['losses'][:seq_info['position']]
+                            
+                        elif pos['position_id'] in trade_follows_loss:
+                            should_analyze = True
+                            loss_info = trade_follows_loss[pos['position_id']]
+                            prev_loss = loss_info['previous_loss']
+                            
+                            if prev_loss['position_id'] in trade_to_sequence:
+                                seq_info = trade_to_sequence[prev_loss['position_id']]
+                                seq = seq_info['sequence']
+                                cumulative_loss = sum(abs(t['total_profit']) for t in seq['losses'])
+                                previous_losses = seq['losses']
+                            else:
+                                cumulative_loss = abs(prev_loss['total_profit'])
+                                previous_losses = [prev_loss]
+                        
+                        if should_analyze:
+                            if previous_losses:
+                                print(f"\n      📊 SEQUENTIAL LOSS ANALYSIS:")
+                                print(f"      ├─ Previous losses in sequence:")
+                                for p_idx, prev_trade in enumerate(previous_losses):
+                                    print(f"      │   └─ Trade {p_idx+1}: ${prev_trade['total_profit']:.2f}")
+                            else:
+                                print(f"\n      📊 SEQUENTIAL LOSS ANALYSIS:")
+                                print(f"      ├─ Previous losses: None (first loss)")
+                            
+                            # ========== CALCULATE EXPECTED RISK ==========
+                            # Start with cumulative loss
+                            base_risk = cumulative_loss
+                            
+                            # Track applied config values for display
+                            applied_highest_reduction = 0
+                            applied_expected_reduction = 0
+                            applied_recovery_adder = 0
+                            
+                            # Step 1: Add highest risk adder if enabled
+                            highest_risk_adder = 0
+                            if martingale_pre_scale_highest_risk_adder:
+                                highest_risk_adder = actual_risk
+                                base_risk += highest_risk_adder
+                            
+                            # Step 2: Apply highest risk REDUCTION (reduce the highest risk adder)
+                            risk_after_highest_reduction = base_risk
+                            if martingale_pre_scale_highest_risk_adder and highest_risk_reduction_percentage > 0:
+                                applied_highest_reduction = highest_risk_adder * (highest_risk_reduction_percentage / 100)
+                                risk_after_highest_reduction = base_risk - applied_highest_reduction
+                            else:
+                                risk_after_highest_reduction = base_risk
+                            
+                            # Step 3: Apply expected loss REDUCTION (only if open position exists)
+                            risk_after_expected_reduction = risk_after_highest_reduction
+                            if martingale_pre_scale_expected_loss_adder and expected_loss_reduction_percentage > 0:
+                                applied_expected_reduction = 0
+                                risk_after_expected_reduction = risk_after_highest_reduction
+                            else:
+                                risk_after_expected_reduction = risk_after_highest_reduction
+                            
+                            # Step 4: Apply recovery ADDER (add percentage to the final risk)
+                            if recovery_adder_percentage > 0:
+                                applied_recovery_adder = risk_after_expected_reduction * (recovery_adder_percentage / 100)
+                                expected_risk = risk_after_expected_reduction + applied_recovery_adder
+                            else:
+                                expected_risk = risk_after_expected_reduction
+                            
+                            mismatch = expected_risk - actual_risk
+                            
+                            # Print the calculation breakdown
+                            print(f"      ├─ Cumulative loss: ${cumulative_loss:.2f}")
+                            if martingale_pre_scale_highest_risk_adder:
+                                print(f"      ├─ Highest risk adder: +${highest_risk_adder:.2f}")
+                            print(f"      ├─ Base risk: ${base_risk:.2f}")
+                            
+                            if martingale_pre_scale_highest_risk_adder and highest_risk_reduction_percentage > 0:
+                                print(f"      ├─ Highest risk reduction ({highest_risk_reduction_percentage}%): -${applied_highest_reduction:.2f}")
+                                print(f"      │   └─ After reduction: ${risk_after_highest_reduction:.2f}")
+                            
+                            if recovery_adder_percentage > 0:
+                                print(f"      ├─ Recovery adder ({recovery_adder_percentage}%): +${applied_recovery_adder:.2f}")
+                            
+                            print(f"      ├─ FINAL EXPECTED RISK: ${expected_risk:.2f}")
+                            print(f"      ├─ Actual risk: ${actual_risk:.2f}")
+                            print(f"      ├─ Mismatch: ${mismatch:+.2f}")
+                            
+                            if expected_risk > 0:
+                                if abs(expected_risk - actual_risk) < 0.01:
+                                    print(f"      ✅ MATCH: Expected ${expected_risk:.2f} = Actual ${actual_risk:.2f}")
+                                else:
+                                    ratio = actual_risk / expected_risk if expected_risk > 0 else 0
+                                    print(f"      ⚠️ MISMATCH: Expected ${expected_risk:.2f} vs Actual ${actual_risk:.2f} (Ratio: {ratio:.2f}x)")
+                                    if ratio < 1:
+                                        print(f"      │   └─ Under-risked by ${mismatch:.2f} ({(1-ratio)*100:.1f}% below expected)")
+                                    else:
+                                        print(f"      │   └─ Over-risked by ${abs(mismatch):.2f} ({(ratio-1)*100:.1f}% above expected)")
+                            
+                            # ========== STAGE DRAWDOWN CLARIFICATION ==========
+                            print(f"\n      📌 STAGE DRAWDOWN CLARIFICATION:")
+                            
+                            if expected_risk <= stage_max_risk:
+                                print(f"      │   ├─ Expected risk ${expected_risk:.2f} is WITHIN Stage 1 drawdown (${stage_max_risk:.2f})")
+                                print(f"      │   └─ ✓ Falls in Stage 1 - Risks as expected")
+                            else:
+                                stage_number = int(expected_risk // stage_max_risk) + 1
+                                remaining_in_stage = expected_risk % stage_max_risk
+                                if remaining_in_stage == 0:
+                                    stage_number = int(expected_risk // stage_max_risk)
+                                    remaining_in_stage = stage_max_risk
+                                print(f"      │   ├─ Expected risk ${expected_risk:.2f} EXCEEDS Stage 1 drawdown (${stage_max_risk:.2f})")
+                                print(f"      │   ├─ Falls into Stage {stage_number} drawdown")
+                                print(f"      │   └─ Stage {stage_number} remaining: ${remaining_in_stage:.2f}")
+                            
+                            last_expected_risk = expected_risk
+                            last_actual_risk = actual_risk
+                            last_trade_symbol = pos['symbol']
+                            
+                            # ========== CHECK NEXT TRADE ==========
+                            if i < len(closed_positions):
+                                next_trade = closed_positions[i]
+                                next_cumulative = cumulative_loss + abs(next_trade['total_profit']) if next_trade['total_profit'] < 0 else cumulative_loss
+                                next_base = next_cumulative
+                                
+                                if martingale_pre_scale_highest_risk_adder:
+                                    next_base += highest_risk_adder
+                                
+                                # Apply reductions and adder to next trade
+                                next_risk_after_highest = next_base
+                                if martingale_pre_scale_highest_risk_adder and highest_risk_reduction_percentage > 0:
+                                    next_risk_after_highest = next_base - (highest_risk_adder * (highest_risk_reduction_percentage / 100))
+                                
+                                if recovery_adder_percentage > 0:
+                                    next_expected = next_risk_after_highest * (1 + recovery_adder_percentage / 100)
+                                else:
+                                    next_expected = next_risk_after_highest
+                                
+                                next_actual = abs(next_trade['total_profit'])
+                                next_is_profit = next_trade['total_profit'] > 0
+                                
+                                print(f"\n      🎯 NEXT TRADE (Trade #{i+1}) SHOULD RISK: ${next_expected:.2f}")
+                                if next_is_profit:
+                                    print(f"      │   └─ Next trade is a PROFIT trade")
+                                else:
+                                    print(f"      │   └─ Next trade is a LOSS trade")
+                                
+                                if next_expected <= stage_max_risk:
+                                    print(f"      │   └─ Falls in Stage 1 - Risks as expected")
+                                else:
+                                    next_stage = int(next_expected // stage_max_risk) + 1
+                                    print(f"      │   └─ Falls in Stage {next_stage}")
+                                
+                                if abs(next_expected - next_actual) < 0.01:
+                                    print(f"      ✅ NEXT TRADE MATCHES: ${next_expected:.2f}")
+                                else:
+                                    print(f"      ⚠️ NEXT TRADE MISMATCH: Expected ${next_expected:.2f} vs Actual ${next_actual:.2f}")
+                                    if next_actual < next_expected:
+                                        print(f"      │   └─ Next trade is under-risked by ${next_expected - next_actual:.2f}")
+                                    else:
+                                        print(f"      │   └─ Next trade is over-risked by ${next_actual - next_expected:.2f}")
+                            else:
+                                # ========== THIS IS THE LAST TRADE ==========
+                                print(f"\n      🎯 NEXT TRADE RISK SHOULD BE: ${expected_risk:.2f}")
+                                print(f"      │   └─ This becomes the BASE TARGET RISK for limit order scaling")
+                                
+                                if expected_risk <= stage_max_risk:
+                                    print(f"      │   └─ Falls in Stage 1 - Risks as expected")
+                                    print(f"      │   └─ ✓ Within current stage drawdown (${stage_max_risk:.2f})")
+                                else:
+                                    stage_number = int(expected_risk // stage_max_risk) + 1
+                                    remaining = expected_risk % stage_max_risk
+                                    if remaining == 0:
+                                        stage_number = int(expected_risk // stage_max_risk)
+                                        remaining = stage_max_risk
+                                    print(f"      │   └─ Falls in Stage {stage_number}")
+                                    print(f"      │   └─ Stage {stage_number} remaining: ${remaining:.2f}")
+                                
+                                print(f"      │   └─ Actual risk for this trade: ${actual_risk:.2f}")
+                                if abs(expected_risk - actual_risk) < 0.01:
+                                    print(f"      ✅ MATCH: Expected ${expected_risk:.2f} = Actual ${actual_risk:.2f}")
+                                else:
+                                    print(f"      ⚠️ MISMATCH: Expected ${expected_risk:.2f} vs Actual ${actual_risk:.2f}")
+                                
+                                last_expected_risk = expected_risk
+                                last_actual_risk = actual_risk
+                                last_trade_symbol = pos['symbol']
+                        
+                        print()
+                    
+                    print(f"{'─'*70}")
+                    print(f"  📊 SUMMARY:")
+                    print(f"  │ Total closed positions: {len(closed_positions)}")
+                    if total_trades > 0:
+                        print(f"  │ Winning: {winning_count} ({(winning_count/total_trades*100):.1f}%)")
+                        print(f"  │ Losing: {losing_count} ({(losing_count/total_trades*100):.1f}%)")
+                    print(f"  │ Total profit: ${total_profit:.2f}")
+                    print(f"  │ Total pips: {total_pips:.1f}")
+                    
+                    print(f"\n  │ 🔑 LAST TRADE'S EXPECTED RISK (BASE TARGET): ${last_expected_risk:.2f}")
+                    print(f"  │   └─ Symbol: {last_trade_symbol}")
+                    print(f"  │   └─ Actual risk: ${last_actual_risk:.2f}")
+                    print(f"  │   └─ Mismatch: ${last_expected_risk - last_actual_risk:+.2f}")
+                    
+                    if last_expected_risk <= stage_max_risk:
+                        print(f"  │   └─ ✓ Falls in Stage 1 - Within current stage drawdown (${stage_max_risk:.2f})")
+                    else:
+                        stage_number = int(last_expected_risk // stage_max_risk) + 1
+                        remaining = last_expected_risk % stage_max_risk
+                        if remaining == 0:
+                            stage_number = int(last_expected_risk // stage_max_risk)
+                            remaining = stage_max_risk
+                        print(f"  │   └─ Falls in Stage {stage_number}")
+                        print(f"  │   └─ Stage {stage_number} remaining: ${remaining:.2f}")
+                    
+                    print(f"{'─'*70}")
+                    
+                    return closed_positions, sequential_losses_by_symbol, last_expected_risk, {
+                        'last_expected_risk': last_expected_risk,
+                        'last_actual_risk': last_actual_risk,
+                        'last_symbol': last_trade_symbol,
+                        'stage_max_risk': stage_max_risk,
+                        'stage_number': int(last_expected_risk // stage_max_risk) + 1 if last_expected_risk > 0 else 1
+                    }
+                    
+                except Exception as e:
+                    print(f"  │ ✗ Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return [], {}, 0, {}
+
+            def get_open_position_risk():
+                """
+                Get current open positions and calculate their risk.
+                Returns: (symbol, risk_amount, position_info)
+                """
+                positions = mt5.positions_get()
+                if positions is None or len(positions) == 0:
+                    return None, 0, None
+                
+                for pos in positions:
+                    symbol = pos.symbol
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        continue
+                    
+                    if pos.sl is None or pos.sl == 0:
+                        continue
+                    
+                    if pos.type == mt5.POSITION_TYPE_BUY:
+                        price_diff = pos.price_open - pos.sl
+                    else:
+                        price_diff = pos.sl - pos.price_open
+                    
+                    if price_diff <= 0:
+                        continue
+                    
+                    contract_size = symbol_info.trade_contract_size
+                    risk = price_diff * pos.volume * contract_size
+                    
+                    return symbol, risk, {
+                        'ticket': pos.ticket,
+                        'symbol': symbol,
+                        'volume': pos.volume,
+                        'entry': pos.price_open,
+                        'sl': pos.sl,
+                        'type': 'BUY' if pos.type == 0 else 'SELL',
+                        'risk': risk
+                    }
+                
+                return None, 0, None
+
+            # ========== MAIN EXECUTION ==========
+            
+            # STEP 1: Check for open positions
+            open_position_symbol, open_position_risk, open_position_info = get_open_position_risk()
+            has_open_position = open_position_symbol is not None and open_position_risk > 0
+            
+            # STEP 2: Get BASE TARGET RISK based on martingale type
+            if martingale_type == "balance_based":
+                # For balance_based: base target is the drawdown amount
+                base_target_risk = total_drawdown
+                
+                # CRITICAL FIX: If no drawdown, use default risk from config
+                if base_target_risk == 0:
+                    print(f"\n  📊 No drawdown detected - using default risk from config")
+                    default_risk = get_default_risk_from_config()
+                    if default_risk is None:
+                        print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
+                        print(f"  → Cannot proceed without default risk. Skipping pre-scaling.")
+                        return False
+                    print(f"  │ Default risk from config: ${default_risk:.2f}")
+                    base_target_risk = default_risk
+                
+                print(f"\n  📊 BALANCE-BASED BASE TARGET:")
+                print(f"  │ Drawdown amount: ${total_drawdown:.2f}")
+                print(f"  │ Base target risk: ${base_target_risk:.2f}")
+            else:
+                # For loss_streak: analyze closed trades
+                print(f"\n  📊 Analyzing closed trades for sequential losses...")
+                closed_positions, sequential_losses_by_symbol, base_target_risk, stage_info = fetch_and_analyze_trades_with_sequential_loss()
+                
+                # FIX: If no target risk from loss streak, use default risk from config
+                if base_target_risk == 0:
+                    print(f"\n  📊 No sequential loss detected - using default risk from config")
+                    default_risk = get_default_risk_from_config()
+                    if default_risk is None:
+                        print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
+                        print(f"  → Cannot proceed without default risk. Skipping pre-scaling.")
+                        return False
+                    print(f"  │ Default risk from config: ${default_risk:.2f}")
+                    base_target_risk = default_risk
+            
+            # STEP 3: Load limit orders and calculate highest risk
+            limit_orders_path, limit_orders_data = load_limit_orders()
+            
+            if not limit_orders_data or not isinstance(limit_orders_data, list):
+                print(f"  │ No limit_orders.json data found")
+                return False
+            
+            # ========== CALCULATE FINAL TARGET RISK ==========
+            final_target_risk = base_target_risk
+            applied_highest_reduction = 0
+            applied_expected_reduction = 0
+            applied_recovery_adder = 0
+            highest_risk_value = 0
+            expected_loss_value = 0
+            
+            print(f"\n{'='*60}")
+            print(f"  📊 CALCULATING FINAL TARGET RISK")
+            print(f"{'='*60}")
+            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            print(f"  │ Base target risk: ${base_target_risk:.2f}")
+            
+            # STEP 3a: Add Expected Loss from Open Position (if exists)
+            if has_open_position and martingale_pre_scale_expected_loss_adder:
+                expected_loss_value = open_position_risk
+                print(f"\n  │ Open position expected loss: ${expected_loss_value:.2f}")
+                
+                # Apply expected loss reduction to the open position risk
+                if expected_loss_reduction_percentage > 0:
+                    applied_expected_reduction = expected_loss_value * (expected_loss_reduction_percentage / 100)
+                    expected_loss_after_reduction = expected_loss_value - applied_expected_reduction
+                    print(f"  │   ├─ Expected loss reduction ({expected_loss_reduction_percentage}%): -${applied_expected_reduction:.2f}")
+                    print(f"  │   └─ Expected loss after reduction: ${expected_loss_after_reduction:.2f}")
+                else:
+                    expected_loss_after_reduction = expected_loss_value
+                    print(f"  │   └─ Expected loss reduction: 0% (no reduction)")
+                
+                final_target_risk += expected_loss_after_reduction
+                print(f"  │   └─ Added to target: +${expected_loss_after_reduction:.2f}")
+            else:
+                if has_open_position:
+                    print(f"\n  │ Open position exists but expected loss adder is DISABLED")
+                else:
+                    print(f"\n  │ No open position found - skipping expected loss adder")
+            
+            # STEP 3b: Add Highest Risk from Limit Orders (if enabled)
+            if martingale_pre_scale_highest_risk_adder:
+                # Analyze highest risk from limit orders
+                limit_highest_risk_orders = analyze_highest_risk_from_limit_orders(limit_orders_data)
+                
+                # Get highest risk for each symbol
+                total_highest_risk = 0
+                for symbol, order_info in limit_highest_risk_orders.items():
+                    highest_risk = order_info['risk']
+                    total_highest_risk += highest_risk
+                    print(f"\n  │ {symbol} highest risk: ${highest_risk:.2f}")
+                    
+                    # Apply highest risk reduction to the highest risk value
+                    if highest_risk_reduction_percentage > 0:
+                        reduction = highest_risk * (highest_risk_reduction_percentage / 100)
+                        applied_highest_reduction += reduction
+                        highest_risk_after_reduction = highest_risk - reduction
+                        print(f"  │   ├─ Highest risk reduction ({highest_risk_reduction_percentage}%): -${reduction:.2f}")
+                        print(f"  │   └─ After reduction: ${highest_risk_after_reduction:.2f}")
+                    else:
+                        highest_risk_after_reduction = highest_risk
+                        print(f"  │   └─ Highest risk reduction: 0% (no reduction)")
+                    
+                    # Add the reduced highest risk to final target
+                    final_target_risk += highest_risk_after_reduction
+                    print(f"  │   └─ Added to target: +${highest_risk_after_reduction:.2f}")
+                
+                highest_risk_value = total_highest_risk
+            
+            # STEP 3c: Apply Recovery Adder to final target
+            if recovery_adder_percentage > 0:
+                applied_recovery_adder = final_target_risk * (recovery_adder_percentage / 100)
+                final_target_risk_before_adder = final_target_risk
+                final_target_risk = final_target_risk + applied_recovery_adder
+                print(f"\n  │ Recovery adder ({recovery_adder_percentage}%): +${applied_recovery_adder:.2f}")
+                print(f"  │   ├─ Before adder: ${final_target_risk_before_adder:.2f}")
+                print(f"  │   └─ After adder: ${final_target_risk:.2f}")
+            
+            print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
+            print(f"{'='*60}")
+            
+            # ========== STEP 4: APPLY SMART SCALING TO LIMIT ORDERS ==========
+            print(f"\n{'='*60}")
+            print(f"  🎯 APPLYING SMART SCALING TO LIMIT ORDERS")
+            print(f"{'='*60}")
+            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            print(f"  │ Base target risk: ${base_target_risk:.2f}")
+            
+            if martingale_assumption == "takeprofit_factor":
+                print(f"  │ TAKEPROFIT FACTOR MODE:")
+                print(f"  │   - Orders will be scaled based on TP profit")
+                print(f"  │   - Drawdown recovery: ${final_target_risk:.2f}")
+                print(f"  │   - Each order's TP profit will have drawdown deducted")
+                print(f"  │   - Remaining profit becomes the target for scaling")
+                print(f"  │   - IMPORTANT: NEVER scales DOWN, only UP or keep same")
+            else:
+                print(f"  │ STOPLOSS FACTOR MODE (standard):")
+                print(f"  │   - Orders will be scaled based on SL risk")
+                print(f"  │   - Using standard risk-based calculation")
+                print(f"  │   - Orders scaled to match target risk: ${final_target_risk:.2f}")
+            
+            print(f"{'─'*60}")
+            
+            try:
+                # ========== STEP 5: REMOVE INVALID PRICE LEVELS ==========
+                print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
+                print(f"{'─'*60}")
+                
+                symbols_in_orders = set()
+                for order in limit_orders_data:
+                    if isinstance(order, dict) and order.get('symbol'):
+                        symbols_in_orders.add(order['symbol'])
+                
+                total_removed = 0
+                for symbol in symbols_in_orders:
+                    filtered_orders, removed_count, _ = remove_invalid_price_levels(limit_orders_data, symbol)
+                    if removed_count > 0:
+                        total_removed += removed_count
+                        limit_orders_data = filtered_orders
+                
+                if total_removed > 0:
+                    print(f"\n  📝 Removing {total_removed} invalid order(s) from limit_orders.json...")
+                    save_limit_orders(limit_orders_path, limit_orders_data)
+                    print(f"  ✓ Removed {total_removed} invalid order(s)")
+                
+                # Get current volumes after removal
+                current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
+                print(f"\n  📄 Current limit_orders.json volumes:")
+                for symbol, vol in current_limit_volumes.items():
+                    print(f"     {symbol}: {vol:.2f} lots")
+                
+                # ========== STEP 6: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
+                print(f"\n  📈 STEP: Scaling Limit Orders")
+                print(f"{'─'*60}")
+                
+                if martingale_assumption == "takeprofit_factor":
+                    print(f"  TAKEPROFIT FACTOR MODE:")
+                    print(f"  │ Target (drawdown to recover): ${final_target_risk:.2f}")
+                    print(f"  │ Will calculate each order's TP profit and deduct drawdown")
+                    print(f"  │ Orders scaled to achieve target profit after deduction")
+                    print(f"  │ IMPORTANT: NEVER scales DOWN, only UP or keep same")
+                else:
+                    print(f"  STOPLOSS FACTOR MODE (standard):")
+                    print(f"  │ Target risk: ${final_target_risk:.2f}")
+                    print(f"  │ Will scale orders to match target risk")
+                
+                print(f"{'─'*60}")
+                
+                all_symbols = set()
+                for order in limit_orders_data:
+                    if isinstance(order, dict) and order.get('symbol'):
+                        all_symbols.add(order['symbol'])
+                
+                total_scaled = 0
+                scaling_results_by_symbol = {}
+                
+                for symbol in all_symbols:
+                    print(f"\n  🔹 Scaling {symbol} orders:")
+                    
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        print(f"     No symbol info for {symbol} - skipping")
+                        continue
+                    
+                    # Get all orders for this symbol
+                    symbol_orders = []
+                    for idx, order in enumerate(limit_orders_data):
+                        if isinstance(order, dict) and order.get('symbol') == symbol:
+                            symbol_orders.append({'order': order, 'index': idx})
+                    
+                    if not symbol_orders:
+                        print(f"     No orders found for {symbol}")
+                        continue
+                    
+                    # Get a sample order to calculate per-lot amount
+                    sample_order = symbol_orders[0]['order']
+                    
+                    if martingale_assumption == "takeprofit_factor":
+                        # Use TP for profit calculation
+                        sample_entry = sample_order.get('entry')
+                        sample_tp = sample_order.get('tp') or sample_order.get('target')
+                        
+                        if not sample_entry or not sample_tp:
+                            print(f"     No tp found in sample order for {symbol} - skipping")
+                            continue
+                        
+                        price_diff = abs(sample_entry - sample_tp)
+                        amount_per_lot = price_diff * symbol_info.trade_contract_size
+                        amount_type = "profit"
+                        print(f"     Using TP profit with drawdown deduction")
+                        
+                        # Calculate current TP profit for each order
+                        for item in symbol_orders:
+                            order = item['order']
+                            entry = order.get('entry')
+                            tp = order.get('tp') or order.get('target')
+                            volume_key, current_volume = get_volume_field_from_order(order)
+                            
+                            if entry and tp and current_volume:
+                                current_profit = abs(entry - tp) * current_volume * symbol_info.trade_contract_size
+                                print(f"     Order #{item['index']}: current TP profit = ${current_profit:.2f}")
+                        
+                    else:
+                        # Use stoploss for risk calculation (standard)
+                        sample_entry = sample_order.get('entry')
+                        sample_stop = sample_order.get('exit') or sample_order.get('stop_loss')
+                        
+                        if not sample_entry or not sample_stop:
+                            print(f"     No valid sample order for {symbol}")
+                            continue
+                        
+                        price_diff = abs(sample_entry - sample_stop)
+                        amount_per_lot = price_diff * symbol_info.trade_contract_size
+                        amount_type = "risk"
+                        print(f"     Risk per lot: ${amount_per_lot:.2f}")
+                    
+                    if amount_per_lot <= 0:
+                        print(f"     Invalid amount per lot - skipping")
+                        continue
+                    
+                    # Calculate target per order
+                    if martingale_assumption == "takeprofit_factor":
+                        # For TP factor: target is the final drawdown to recover
+                        # Each order will have this amount deducted from its TP profit
+                        target_per_order = final_target_risk
+                        print(f"     Drawdown to deduct per order: ${target_per_order:.2f}")
+                    else:
+                        target_per_order = final_target_risk
+                    
+                    print(f"     Number of orders: {len(symbol_orders)}")
+                    
+                    # Apply scaling to ALL orders for this symbol
+                    scaled_count = 0
+                    for item in symbol_orders:
+                        order = item['order']
+                        order_index = item['index']
+                        volume_key, current_volume = get_volume_field_from_order(order)
+                        
+                        if not volume_key or current_volume <= 0:
+                            continue
+                        
+                        if martingale_assumption == "takeprofit_factor":
+                            # Calculate current TP profit for this specific order
+                            entry = order.get('entry')
+                            tp = order.get('tp') or order.get('target')
+                            
+                            if not entry or not tp:
+                                print(f"        Order #{order_index}: no tp found - skipping")
+                                continue
+                            
+                            current_price_diff = abs(entry - tp)
+                            current_amount_per_lot = current_price_diff * symbol_info.trade_contract_size
+                            
+                            if current_amount_per_lot <= 0:
+                                continue
+                            
+                            current_tp_profit = current_amount_per_lot * current_volume
+                            
+                            # CRITICAL: Check if current TP profit already covers drawdown
+                            # Target profit after deduction should be positive
+                            # We want: current_tp_profit - final_target_risk = remaining_profit
+                            remaining_profit = current_tp_profit - final_target_risk
+                            
+                            # If remaining_profit is already >= 0, we don't need to scale up
+                            if remaining_profit >= 0:
+                                print(f"        Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers drawdown ${final_target_risk:.2f}")
+                                print(f"        └─ Remaining profit: ${remaining_profit:.2f} - Keeping current volume (NO SCALING)")
+                                continue
+                            
+                            # We need to scale up to cover the deficit
+                            # Target profit needed = final_target_risk + minimum_profit
+                            minimum_profit = final_target_risk * 0.01  # 1% of drawdown as minimum profit
+                            target_profit = final_target_risk + minimum_profit
+                            
+                            print(f"        Order #{order_index}: TP profit ${current_tp_profit:.2f} < drawdown ${final_target_risk:.2f}")
+                            print(f"        → Deficit: ${final_target_risk - current_tp_profit:.2f}")
+                            print(f"        → Scaling up to achieve ${target_profit:.2f} total profit")
+                            
+                            # Calculate required volume to achieve target_profit
+                            required_volume = target_profit / current_amount_per_lot
+                            required_volume = round(required_volume, 2)
+                            
+                            # Apply volume constraints
+                            min_volume = symbol_info.volume_min if symbol_info else 0.01
+                            volume_step = symbol_info.volume_step if symbol_info else 0.01
+                            steps = round(required_volume / volume_step) if volume_step > 0 else 0
+                            required_volume = max(min_volume, round(steps * volume_step, 2))
+                            
+                            # CRITICAL: NEVER SCALE DOWN
+                            if required_volume < current_volume:
+                                print(f"        Required volume {required_volume:.2f} is LESS than current {current_volume:.2f}")
+                                print(f"        → Keeping current volume (NO DOWNSCALING)")
+                                continue
+                            
+                            # Calculate actual profit at required volume
+                            actual_profit = current_amount_per_lot * required_volume
+                            
+                            # Only update if different and volume increased
+                            if abs(current_volume - required_volume) > 0.001:
+                                order[volume_key] = required_volume
+                                scaled_count += 1
+                                order_type = order.get('order_type', 'Unknown').upper()
+                                print(f"        [{order_type}] Vol: {current_volume:.2f} → {required_volume:.2f} lots")
+                                print(f"        TP profit before deduction: ${actual_profit:.2f}")
+                                print(f"        └─ After deducting ${final_target_risk:.2f}: ${actual_profit - final_target_risk:.2f} remaining")
+                            else:
+                                print(f"        Volume unchanged (already at target)")
+                            
+                        else:
+                            # STOPLOSS FACTOR: Standard risk-based scaling
+                            target_volume = target_per_order / amount_per_lot
+                            target_volume = round(target_volume, 2)
+                            
+                            min_volume = symbol_info.volume_min if symbol_info else 0.01
+                            volume_step = symbol_info.volume_step if symbol_info else 0.01
+                            steps = round(target_volume / volume_step) if volume_step > 0 else 0
+                            target_volume = max(min_volume, round(steps * volume_step, 2))
+                            
+                            # CRITICAL: NEVER SCALE DOWN
+                            if target_volume < current_volume:
+                                print(f"        Target volume {target_volume:.2f} is LESS than current {current_volume:.2f}")
+                                print(f"        → Keeping current volume (NO DOWNSCALING)")
+                                continue
+                            
+                            actual_risk = amount_per_lot * target_volume
+                            
+                            if abs(current_volume - target_volume) > 0.001:
+                                order[volume_key] = target_volume
+                                scaled_count += 1
+                                order_type = order.get('order_type', 'Unknown').upper()
+                                print(f"        [{order_type}] Vol: {current_volume:.2f} → {target_volume:.2f} lots (risk: ${actual_risk:.2f})")
+                            else:
+                                print(f"        Volume unchanged (already at target)")
+                    
+                    if scaled_count > 0:
+                        total_scaled += scaled_count
+                        scaling_results_by_symbol[symbol] = {
+                            'scaled': scaled_count,
+                            'total_orders': len(symbol_orders),
+                            'target_per_order': target_per_order,
+                            'mode': martingale_assumption
+                        }
+                        print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
+                    else:
+                        print(f"     ℹ️ No scaling needed for {symbol}")
+                
+                # Save if any orders were scaled
+                if total_scaled > 0:
+                    print(f"\n  📝 Saving scaled limit_orders.json...")
+                    save_limit_orders(limit_orders_path, limit_orders_data)
+                    print(f"  ✓ Scaled {total_scaled} order(s)")
+                    
+                    # Verify final totals
+                    verify_symbols = set()
+                    for order in limit_orders_data:
+                        if isinstance(order, dict) and order.get('symbol'):
+                            verify_symbols.add(order['symbol'])
+                    
+                    for symbol in verify_symbols:
+                        symbol_info = mt5.symbol_info(symbol)
+                        if symbol_info:
+                            total_vol = 0
+                            total_amount = 0
+                            stepup_count = 0
+                            stepdown_count = 0
+                            for order in limit_orders_data:
+                                if isinstance(order, dict) and order.get('symbol') == symbol:
+                                    vol = get_volume_field_from_order(order)[1] or 0
+                                    total_vol += vol
+                                    
+                                    if martingale_assumption == "takeprofit_factor":
+                                        entry = order.get('entry')
+                                        tp = order.get('tp') or order.get('target')
+                                        if entry and tp:
+                                            amount = abs(entry - tp) * vol * symbol_info.trade_contract_size
+                                            total_amount += amount
+                                    else:
+                                        entry = order.get('entry')
+                                        stop = order.get('exit') or order.get('stop_loss')
+                                        if entry and stop:
+                                            amount = abs(entry - stop) * vol * symbol_info.trade_contract_size
+                                            total_amount += amount
+                                    
+                                    order_type = order.get('order_type', '').lower()
+                                    if 'sell_limit' in order_type or 'buy_stop' in order_type:
+                                        stepup_count += 1
+                                    elif 'buy_limit' in order_type or 'sell_stop' in order_type:
+                                        stepdown_count += 1
+                            print(f"     📊 {symbol} final: {total_vol:.2f} lots")
+                            if martingale_assumption == "takeprofit_factor":
+                                print(f"        Total TP profit before deduction: ${total_amount:.2f}")
+                                total_deduction = final_target_risk * len([o for o in limit_orders_data if isinstance(o, dict) and o.get('symbol') == symbol])
+                                print(f"        Total after deducting ${total_deduction:.2f}: ${total_amount - total_deduction:.2f}")
+                            else:
+                                print(f"        Total risk: ${total_amount:.2f}")
+                            print(f"        STEPUP: {stepup_count} orders, STEPDOWN: {stepdown_count} orders")
+                else:
+                    print(f"\n  ℹ️ No scaling needed - all orders already at target")
+                
+                # ========== STEP 7: LINEAR SCALING ==========
+                print(f"\n{'─'*60}")
+                print(f"  📈 STEP: Linear Scaling (Progressive)")
+                print(f"{'─'*60}")
+                if martingale_assumption == "takeprofit_factor":
+                    print(f"  Using TP profit with drawdown deduction for linear scaling")
+                else:
+                    print(f"  Using SL risk (standard behavior)")
+                print(f"  NOTE: Linear scaling uses the FIRST order's amount as LEADER")
+                print(f"  IMPORTANT: NEVER scales DOWN, only UP or keep same")
+                print(f"{'─'*60}")
+                
+                current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
+                
+                order_updates = {}
+                pre_scaling_details = {}
+                
+                def group_orders_by_linear(orders_data):
+                    stepup_linear = []
+                    stepdown_linear = []
+                    
+                    if not orders_data or not isinstance(orders_data, list):
+                        return stepup_linear, stepdown_linear
+                    
+                    for idx, order in enumerate(orders_data):
+                        if not isinstance(order, dict):
+                            continue
+                        
+                        order_type = order.get('order_type', '').lower()
+                        entry = order.get('entry')
+                        
+                        if not entry:
+                            continue
+                        
+                        order_info = {'order': order, 'index': idx}
+                        
+                        if 'sell_limit' in order_type or 'buy_stop' in order_type:
+                            stepup_linear.append(order_info)
+                        elif 'buy_limit' in order_type or 'sell_stop' in order_type:
+                            stepdown_linear.append(order_info)
+                    
+                    stepup_linear.sort(key=lambda x: x['order'].get('entry', 0))
+                    stepdown_linear.sort(key=lambda x: x['order'].get('entry', 0), reverse=True)
+                    
+                    return stepup_linear, stepdown_linear
+                
+                def apply_linear_step_scaling(orders_linear, linear_name, symbol_info, 
+                                            total_extra_risk, calculation_details):
+                    """
+                    Apply linear scaling to a group of orders.
+                    Uses the appropriate calculation based on martingale_assumption.
+                    
+                    IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
+                    """
+                    linear_updates = {}
+                    
+                    if not orders_linear:
+                        return linear_updates
+                    
+                    print(f"\n     📊 {linear_name.upper()} LINEAR SCALING:")
+                    print(f"        Orders in linear: {len(orders_linear)}")
+                    
+                    if martingale_assumption == "takeprofit_factor":
+                        print(f"        LEADER amount (first order TP profit after deduction): ${total_extra_risk:.2f}")
+                        print(f"        Deducting drawdown from each order's TP profit...")
+                        print(f"        IMPORTANT: NEVER scaling DOWN, only UP or keep same")
+                    else:
+                        print(f"        LEADER amount (first order risk): ${total_extra_risk:.2f}")
+                    
+                    calculated_volumes = []
+                    calculated_amounts = []  # risk or profit depending on assumption
+                    
+                    for idx, order_info in enumerate(orders_linear):
+                        order = order_info['order']
+                        order_index = order_info['index']
+                        symbol = order.get('symbol')
+                        entry = order.get('entry')
+                        order_type = order.get('order_type', '')
+                        
+                        if martingale_assumption == "takeprofit_factor":
+                            # Use TP for profit calculation
+                            tp = order.get('tp') or order.get('target')
+                            if not entry or not tp:
+                                continue
+                            
+                            price_diff = abs(entry - tp)
+                            amount_per_lot = price_diff * symbol_info.trade_contract_size
+                            amount_type = "profit"
+                        else:
+                            # Use stoploss for risk calculation (standard)
+                            stop = order.get('exit') or order.get('stop_loss')
+                            if not entry or not stop:
+                                continue
+                            
+                            is_buy = 'buy' in order_type.lower()
+                            if is_buy:
+                                price_diff = entry - stop
+                            else:
+                                price_diff = stop - entry
+                            
+                            if price_diff <= 0:
+                                continue
+                            
+                            amount_per_lot = price_diff * symbol_info.trade_contract_size
+                            amount_type = "risk"
+                        
+                        if idx == 0:
+                            # LEADER order - keep original volume (NEVER scale down LEADER)
+                            leader_volume = get_volume_field_from_order(order)[1] or 0.01
+                            leader_amount = amount_per_lot * leader_volume
+                            
+                            print(f"\n        🔹 Order #1 (LEADER): {symbol} @ {entry:.5f} ({order_type})")
+                            print(f"          ├─ LEADER {amount_type}: ${leader_amount:.2f}")
+                            print(f"          ├─ Volume: {leader_volume:.2f} lots")
+                            
+                            if martingale_assumption == "takeprofit_factor":
+                                print(f"          ├─ This is the TP profit after deduction")
+                                print(f"          └─ Drawdown deducted: ${total_extra_risk:.2f}")
+                            else:
+                                print(f"          └─ This is the LEADER amount for scaling")
+                            
+                            calculated_volumes.append(leader_volume)
+                            calculated_amounts.append(leader_amount)
+                            
+                        else:
+                            # Subsequent orders - progressive scaling
+                            previous_amount = calculated_amounts[idx - 1]
+                            
+                            current_volume = get_volume_field_from_order(order)[1] or 0.01
+                            current_amount = amount_per_lot * current_volume
+                            
+                            # CRITICAL: NEVER SCALE DOWN
+                            # If current amount already >= previous amount, keep current volume
+                            if current_amount >= previous_amount:
+                                print(f"\n        Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
+                                print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
+                                print(f"          ├─ {amount_type.upper()} to match (from previous order): ${previous_amount:.2f}")
+                                print(f"          ├─ Already meets or exceeds target!")
+                                print(f"          └─ → Keeping current volume (NO DOWNSCALING)")
+                                calculated_volumes.append(current_volume)
+                                calculated_amounts.append(current_amount)
+                                continue
+                            
+                            additional_volume = (previous_amount - current_amount) / amount_per_lot
+                            additional_volume = round(additional_volume, 2)
+                            
+                            new_volume = current_volume + additional_volume
+                            new_volume = round(new_volume, 2)
+                            
+                            min_volume = symbol_info.volume_min
+                            max_volume = symbol_info.volume_max
+                            volume_step = symbol_info.volume_step
+                            
+                            steps = round(new_volume / volume_step) if volume_step > 0 else 0
+                            new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                            
+                            new_amount = amount_per_lot * new_volume
+                            
+                            print(f"\n        Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
+                            print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
+                            print(f"          ├─ {amount_type.upper()} to match (from previous order): ${previous_amount:.2f}")
+                            print(f"          ├─ Additional volume needed: {additional_volume:.2f} lots")
+                            print(f"          ├─ New volume: {new_volume:.2f} lots")
+                            print(f"          └─ New {amount_type}: ${new_amount:.2f}")
+                            
+                            calculated_volumes.append(new_volume)
+                            calculated_amounts.append(new_amount)
+                            
+                            if abs(current_volume - new_volume) > 0.001:
+                                linear_updates[order_index] = new_volume
+                    
+                    print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
+                    for i, (vol, amt) in enumerate(zip(calculated_volumes, calculated_amounts)):
+                        if martingale_assumption == "takeprofit_factor":
+                            print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} profit after deduction")
+                        else:
+                            print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} risk")
+                    
+                    return linear_updates
+                
+                all_symbols = set()
+                for order in limit_orders_data:
+                    if isinstance(order, dict) and order.get('symbol'):
+                        all_symbols.add(order['symbol'])
+                
+                for symbol in all_symbols:
+                    print(f"\n  🔹 Linear Scaling {symbol}:")
+                    
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        print(f"     No symbol info for {symbol}")
+                        continue
+                    
+                    symbol_orders_with_indices = []
+                    for idx, order in enumerate(limit_orders_data):
+                        if isinstance(order, dict) and order.get('symbol') == symbol:
+                            symbol_orders_with_indices.append({'order': order, 'index': idx})
+                    
+                    if not symbol_orders_with_indices:
+                        print(f"     No orders found for {symbol}")
+                        continue
+                    
+                    first_order = symbol_orders_with_indices[0]['order']
+                    first_entry = first_order.get('entry')
+                    
+                    leader_amount = 0
+                    
+                    if martingale_assumption == "takeprofit_factor":
+                        # Calculate leader TP profit
+                        first_tp = first_order.get('tp') or first_order.get('target')
+                        if first_entry and first_tp:
+                            price_diff = abs(first_entry - first_tp)
+                            if price_diff > 0:
+                                first_volume = get_volume_field_from_order(first_order)[1] or 0.01
+                                leader_amount = price_diff * first_volume * symbol_info.trade_contract_size
+                                print(f"     LEADER TP profit (before deduction): ${leader_amount:.2f}")
+                                print(f"     Deducting drawdown: ${final_target_risk:.2f}")
+                                leader_amount = leader_amount - final_target_risk
+                                if leader_amount < 0:
+                                    leader_amount = final_target_risk * 0.01  # Minimum target
+                                    print(f"     → Set minimum target: ${leader_amount:.2f}")
+                                else:
+                                    print(f"     → LEADER amount after deduction: ${leader_amount:.2f}")
+                    else:
+                        # Standard risk calculation
+                        first_stop = first_order.get('exit') or first_order.get('stop_loss')
+                        if first_entry and first_stop:
+                            is_buy = 'buy' in first_order.get('order_type', '').lower()
+                            if is_buy:
+                                price_diff = first_entry - first_stop
+                            else:
+                                price_diff = first_stop - first_entry
+                            
+                            if price_diff > 0:
+                                first_volume = get_volume_field_from_order(first_order)[1] or 0.01
+                                leader_amount = price_diff * first_volume * symbol_info.trade_contract_size
+                                print(f"     LEADER risk: ${leader_amount:.2f}")
+                    
+                    if leader_amount <= 0:
+                        print(f"     No valid leader amount for {symbol}")
+                        continue
+                    
+                    stepup_linear, stepdown_linear = group_orders_by_linear(limit_orders_data)
+                    stepup_linear = [o for o in stepup_linear if o['order'].get('symbol') == symbol]
+                    stepdown_linear = [o for o in stepdown_linear if o['order'].get('symbol') == symbol]
+                    
+                    calculation_details = {
+                        "symbol": symbol,
+                        "leader_amount": leader_amount,
+                        "linear_scaling_applied": martingale_linear_scaling,
+                        "assumption": martingale_assumption
+                    }
+                    
+                    if martingale_linear_scaling:
+                        print(f"\n     🎯 APPLYING LINEAR SCALING WITH LEADER AMOUNT:")
+                        if martingale_assumption == "takeprofit_factor":
+                            print(f"     LEADER amount (TP profit after deduction): ${leader_amount:.2f}")
+                        else:
+                            print(f"     LEADER amount (risk): ${leader_amount:.2f}")
+                        
+                        print(f"\n     📈 STEPUP GROUP - {len(stepup_linear)} orders:")
+                        if stepup_linear:
+                            print(f"        └─ Order 1: RETAINS original volume (LEADER)")
+                        if len(stepup_linear) > 1:
+                            print(f"        └─ Orders 2-{len(stepup_linear)}: Progressive scaling from LEADER")
+                            print(f"        IMPORTANT: NEVER scales DOWN, only UP or keep same")
+                        
+                        print(f"\n     📉 STEPDOWN GROUP - {len(stepdown_linear)} orders:")
+                        if stepdown_linear:
+                            print(f"        └─ Order 1: RETAINS original volume (LEADER)")
+                        if len(stepdown_linear) > 1:
+                            print(f"        └─ Orders 2-{len(stepdown_linear)}: Progressive scaling from LEADER")
+                            print(f"        IMPORTANT: NEVER scales DOWN, only UP or keep same")
+                        
+                        if stepup_linear:
+                            stepup_updates = apply_linear_step_scaling(
+                                stepup_linear, "STEPUP", symbol_info,
+                                leader_amount, calculation_details
+                            )
+                            order_updates.update(stepup_updates)
+                        
+                        if stepdown_linear:
+                            stepdown_updates = apply_linear_step_scaling(
+                                stepdown_linear, "STEPDOWN", symbol_info,
+                                leader_amount, calculation_details
+                            )
+                            order_updates.update(stepdown_updates)
+                        
+                        calculation_details["linear_scaling_applied"] = True
+                        
+                    else:
+                        print(f"\n     Applying same volume to all orders (standard mode)")
+                        current_volume = current_limit_volumes.get(symbol, 0)
+                        if current_volume > 0:
+                            for order_info in symbol_orders_with_indices:
+                                order_updates[order_info['index']] = current_volume
+                    
+                    pre_scaling_details[f"{symbol}_limit"] = calculation_details
+                
+                # ========== STEP 8: APPLY UPDATES ==========
+                print(f"\n{'─'*60}")
+                print(f"  💾 APPLYING FINAL UPDATES")
+                print(f"{'─'*60}")
+                
+                updated = False
+                
+                if order_updates and limit_orders_data:
+                    print(f"\n  📄 Updating limit_orders.json with scaling:")
+                    updated_count = 0
+                    
+                    for order_idx, new_volume in order_updates.items():
+                        if order_idx < len(limit_orders_data):
+                            order = limit_orders_data[order_idx]
+                            volume_key, old_volume = get_volume_field_from_order(order)
+                            
+                            if volume_key and abs(old_volume - new_volume) > 0.001:
+                                order[volume_key] = new_volume
+                                updated_count += 1
+                                symbol = order.get('symbol', 'Unknown')
+                                entry = order.get('entry', 0)
+                                order_type = order.get('order_type', 'Unknown')
+                                
+                                order_type_lower = order_type.lower()
+                                if 'sell_limit' in order_type_lower or 'buy_stop' in order_type_lower:
+                                    group = "STEPUP"
+                                elif 'buy_limit' in order_type_lower or 'sell_stop' in order_type_lower:
+                                    group = "STEPDOWN"
+                                else:
+                                    group = "UNKNOWN"
+                                
+                                if martingale_assumption == "takeprofit_factor":
+                                    tp = order.get('tp') or order.get('target')
+                                    if tp:
+                                        amount = abs(entry - tp) * new_volume * symbol_info.trade_contract_size if symbol_info else 0
+                                        print(f"        │ [{group}] {symbol} @ {entry:.5f}: {old_volume:.2f} → {new_volume:.2f} lots (TP profit: ${amount:.2f}, after deduction: ${amount - final_target_risk:.2f})")
+                                else:
+                                    print(f"        │ [{group}] {symbol} @ {entry:.5f}: {old_volume:.2f} → {new_volume:.2f} lots")
+                    
+                    if updated_count > 0:
+                        save_limit_orders(limit_orders_path, limit_orders_data)
+                        updated = True
+                        print(f"\n     ✓ Updated {updated_count} order(s) with scaling")
+                    else:
+                        print(f"     ℹ️ No scaling changes needed")
+                
+                stats["pre_scaling_details"] = pre_scaling_details
+                
+                print(f"\n{'='*60}")
+                print(f"  ✅ PRE-SCALING COMPLETE")
+                print(f"{'='*60}")
+                print(f"  │ Mode: {martingale_type.upper()}")
+                print(f"  │ Assumption: {martingale_assumption.upper()}")
+                print(f"  │ Base target: ${base_target_risk:.2f}")
+                print(f"  │ Final target: ${final_target_risk:.2f}")
+                if martingale_assumption == "takeprofit_factor":
+                    print(f"  │ Each order's TP profit had ${final_target_risk:.2f} deducted")
+                    print(f"  │ Remaining profit used for scaling")
+                    print(f"  │ IMPORTANT: NEVER scaled DOWN, only UP or kept same")
+                else:
+                    print(f"  │ Orders scaled to match target risk")
+                print(f"  │ Orders scaled: {total_scaled}")
+                print(f"  │ Linear scaling updated: {updated_count if 'updated_count' in locals() else 0}")
+                print(f"{'='*60}")
+                
+                return updated
+                
+            except Exception as e:
+                print(f"  ✗ Pre-scaling error: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
     
         def safety_check_pending_orders():
             """Check MT5 orders against expected volumes from JSON files"""
@@ -15496,6 +15739,11 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} RECOVERY - ${current_stage_drawdown:.2f}")
             print(f"  Mode: {martingale_type.upper()}")
+            print(f"  Assumption: {martingale_assumption.upper()}")  # NEW
+            if martingale_assumption == "takeprofit_factor":
+                print(f"  └─ Using TP profit with drawdown deduction")
+            else:
+                print(f"  └─ Using SL risk (standard behavior)")
             print(f"{'='*50}")
             
             # ========== STEP 0: RECORD EXISTING AUTHORIZED ORDERS ==========
@@ -15520,6 +15768,7 @@ def martingale_system(inv_id=None):
             # ⭐ PRE-SCALING - RUNS FOR BOTH MODES ⭐
             # For loss_streak: Base target from sequential loss analysis
             # For balance_based: Base target from drawdown amount
+            # For takeprofit_factor: Uses TP profit with drawdown deduction
             pre_scaling_updated = process_pre_scaling()
             stats["pre_scaling_applied"] = pre_scaling_updated
             
@@ -15540,12 +15789,15 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} COMPLETE")
             print(f"  │ Mode: {martingale_type.upper()}")
+            print(f"  │ Assumption: {martingale_assumption.upper()}")  # NEW
             print(f"  │ Pre-recorded orders: {record_result.get('recorded', 0)}")
             print(f"  │ Limit orders: {'✓' if limit_orders_updated else '−'}")
             print(f"  │ Pre-scaling: {'✓' if pre_scaling_updated else '−'}")
             print(f"  │ Orders cancelled (mismatched): {cancel_result.get('deleted', 0)}")
             print(f"  │ Orders kept (matching): {cancel_result.get('kept_matching', 0)}")
             print(f"  │ Orders kept (not in JSON): {cancel_result.get('kept_not_in_json', 0)}")
+            if martingale_assumption == "takeprofit_factor":
+                print(f"  │ └─ TP factor: Drawdown deducted from each order's TP profit")
             print(f"{'='*50}")
 
         main()
@@ -15557,6 +15809,7 @@ def martingale_system(inv_id=None):
     print(f"  MARTINGALE SUMMARY")
     print(f"{'='*50}")
     print(f"  Investor: {stats['investor_id']}")
+    print(f"  Assumption: {stats.get('martingale_assumption', 'stoploss_factor').upper()}")
     print(f"  Status: {'✓ SUCCESS' if stats['processing_success'] else '✗ FAILED'}")
     
     if stats['martingale_enabled']:
