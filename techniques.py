@@ -12557,6 +12557,8 @@ def sync_dev_investors(dev_user_id):
     - Single strategy: "KEY-LEVEL-BREAKOUT"
     - Multiple strategies: "KEY-LEVEL-BREAKOUT, STRUCTURAL-LIQUIDITY-1"
     - With developer ID prefix: "6_KEY-LEVEL-BREAKOUT", "6keylevelbreakout", "6-KEY-LEVEL-BREAKOUT"
+    - Suffixes: "6_structural_liquidity-3", "6-structure-1", "6 structure"
+    - Spaces normalized: "6 structure" -> "structure"
     """
     try:
         print(f"\n{'='*60}")
@@ -12641,29 +12643,79 @@ def sync_dev_investors(dev_user_id):
         for strat in developer_strategies:
             print(f"  • {strat}")
 
-        # 4. Helper function to extract developer ID and strategy name
-        def extract_dev_id_and_strategy(invested_value):
+        # 4. Helper function to normalize strategy names for matching
+        def normalize_for_matching(name):
             """
-            Extracts developer ID and strategy name from invested_with value.
-            Returns: (dev_id, strategy_name) or (None, None) if no ID found
+            Normalize strategy name for comparison by:
+            - Converting to lowercase
+            - Removing all separators: underscores, hyphens, spaces
+            - Keeping numbers (suffixes like -1, -2, _3 are preserved)
             """
-            invested_value = invested_value.strip()
+            import re
+            # Convert to lowercase
+            name = name.lower()
+            # Remove all separators (underscore, hyphen, space) but keep letters and numbers
+            name = re.sub(r'[_\-\s]+', '', name)
+            return name
+        
+        def extract_dev_id_and_normalized_strategy(invested_value):
+            """
+            Extracts developer ID and normalized strategy name(s) from invested_with value.
+            Returns: (dev_id, list_of_normalized_strategy_names)
+            """
             import re
             
-            # Pattern: number at start, optionally followed by _ or -, then the rest
-            match = re.match(r'^(\d+)[_\-]?(.*)$', invested_value)
+            # Normalize: remove extra spaces around commas and trim
+            invested_value = re.sub(r'\s*,\s*', ',', invested_value.strip())
             
-            if match:
-                dev_id = match.group(1)
-                strategy_part = match.group(2)
-                return dev_id, strategy_part
-            else:
-                return None, invested_value
+            # Split by comma to get individual strategies
+            strategy_parts = [s.strip() for s in invested_value.split(',') if s.strip()]
+            
+            dev_id = None
+            normalized_strategies = []
+            
+            for part in strategy_parts:
+                # Try to extract developer ID from the beginning of each part
+                # Pattern: number at start, optionally followed by _, -, or space
+                match = re.match(r'^(\d+)[_\-\s]?(.*)$', part)
+                
+                if match:
+                    extracted_dev_id = match.group(1)
+                    strategy_part = match.group(2)
+                    
+                    # If this is the first strategy, store the dev_id
+                    if dev_id is None:
+                        dev_id = extracted_dev_id
+                    # If dev_id doesn't match, skip this strategy
+                    elif dev_id != extracted_dev_id:
+                        continue
+                    
+                    # Normalize the strategy part (keep numbers/suffixes)
+                    normalized = normalize_for_matching(strategy_part)
+                    if normalized:
+                        normalized_strategies.append(normalized)
+                else:
+                    # No developer ID found in this part
+                    # If we already have a dev_id, treat this as a strategy without prefix
+                    if dev_id is not None:
+                        normalized = normalize_for_matching(part)
+                        if normalized:
+                            normalized_strategies.append(normalized)
+            
+            return dev_id, normalized_strategies
+
+        # Create normalized versions of developer strategies for matching
+        normalized_developer_strategies = {}
+        for dev_strat in developer_strategies:
+            normalized = normalize_for_matching(dev_strat)
+            normalized_developer_strategies[normalized] = dev_strat
+            print(f"  🔄 Normalized: '{dev_strat}' -> '{normalized}'")
+
+        print(f"\n🔍 Searching for investors with developer ID: {dev_user_id}")
+        print(f"   Normalized developer strategies: {list(normalized_developer_strategies.keys())}")
 
         # 5. Find investors linked to this developer
         linked_investors = []
-        
-        print(f"\n🔍 Searching for investors with developer ID: {dev_user_id}")
         
         for inv_user_id, inv_info in investors_data.items():
             # Check both possible field names for invested_with
@@ -12671,34 +12723,45 @@ def sync_dev_investors(dev_user_id):
             
             if not invested_with:
                 continue
-        
             
-            # Split by comma for multiple strategies
-            investor_strategies_raw = [s.strip() for s in invested_with.split(",") if s.strip()]
+            print(f"\n  🔍 Checking investor {inv_user_id}: '{invested_with}'")
             
-            # Process each strategy to extract developer ID and strategy name
+            # Extract developer ID and normalized strategy names
+            extracted_dev_id, normalized_strategies = extract_dev_id_and_normalized_strategy(invested_with)
+            
+            print(f"     Extracted dev_id: {extracted_dev_id}, normalized strategies: {normalized_strategies}")
+            
+            # Check if the developer ID matches our target dev_user_id
+            if extracted_dev_id != str(dev_user_id):
+                print(f"     ❌ Dev ID mismatch: {extracted_dev_id} != {dev_user_id}")
+                continue
+            
+            if not normalized_strategies:
+                print(f"     ⚠️ No strategies found after normalization")
+                continue
+            
+            # Now check if the extracted strategies match any of our developer's strategies
             matched_strategies = []
             
-            for raw_strategy in investor_strategies_raw:
-                extracted_dev_id, extracted_strategy = extract_dev_id_and_strategy(raw_strategy)
-                
-                # Check if the developer ID matches our target dev_user_id
-                if extracted_dev_id == str(dev_user_id):
-                    # Now check if the extracted strategy matches any of our developer's strategies
-                    for dev_strategy in developer_strategies:
-                        if extracted_strategy.lower() == dev_strategy.lower():
-                            matched_strategies.append(dev_strategy)
-                            break
-                    else:
-                        print(f"     No matching strategy found for: '{extracted_strategy}'")
+            for normalized_inv_strat in normalized_strategies:
+                # Try to match with developer strategies using normalized names
+                if normalized_inv_strat in normalized_developer_strategies:
+                    original_dev_strat = normalized_developer_strategies[normalized_inv_strat]
+                    matched_strategies.append(original_dev_strat)
+                    print(f"     ✅ Matched: '{invested_with}' -> '{normalized_inv_strat}' -> '{original_dev_strat}'")
+                else:
+                    print(f"     ❌ No matching strategy for: '{normalized_inv_strat}'")
+                    print(f"        Available: {list(normalized_developer_strategies.keys())}")
             
             if matched_strategies:
                 linked_investors.append({
                     "inv_user_id": inv_user_id,
                     "inv_info": inv_info,
-                    "matched_strategies": matched_strategies
+                    "matched_strategies": matched_strategies,
+                    "original_invested_with": invested_with
                 })
-                print(f"  ✅ Investor {inv_user_id} signed with User {dev_user_id} {dev_strategy} {len(matched_strategies)} strategies")
+                print(f"  ✅ Investor {inv_user_id} matched with User {dev_user_id}: {len(matched_strategies)} strategies")
+                print(f"     Original: '{invested_with}' -> Matched: {', '.join(matched_strategies)}")
 
         # 6. If no investors found, return message
         if not linked_investors:
@@ -12806,7 +12869,7 @@ def sync_dev_investors(dev_user_id):
         import traceback
         traceback.print_exc()
         return error_msg
-
+    
 def process_single_developer_pipeline_(user_id, max_symbols_parallel=5):
     """
     Orchestrator: Runs the full suite of tasks for one developer sequentially.

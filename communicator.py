@@ -6225,9 +6225,9 @@ def main_once():
         merge_create_results()
         merge_balance_results()
         merge_verify_results()
-        sync_and_distribute_investors() 
-        restore_empty_investor_files()
         if within_time_range:
+            sync_and_distribute_investors() 
+            restore_empty_investor_files()
             print(f"✅ System is WITHIN allowed work time range - Updating database")
             close_db_browser()
             update_database()
@@ -6395,9 +6395,9 @@ def main_loop():
         merge_create_results()
         merge_balance_results()
         merge_verify_results()
-        sync_and_distribute_investors() 
-        restore_empty_investor_files()
         if within_time_range:
+            sync_and_distribute_investors() 
+            restore_empty_investor_files()
             print(f"✅ System is WITHIN allowed work time range - Updating database")
             close_db_browser()
             update_database()

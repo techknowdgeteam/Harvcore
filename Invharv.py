@@ -379,6 +379,942 @@ def repair_json_files():
     
     return stats
 
+def restore_missing_fields():
+    """
+    Heal missing fields across JSON files using hierarchical field-by-field merging.
+    
+    Priority order:
+    1. INVHARV_UPDATED_INVESTORS and HARVHUB_UPDATED_INVESTORS (highest priority)
+    2. INVHARV_FETCHED_INVESTORS and HARVHUB_FETCHED_INVESTORS
+    3. ALL_UPDATED_INVESTORS
+    4. ALL_FETCHED_INVESTORS (lowest priority)
+    
+    Rules:
+    - Individual files (invharv/harvhub) ONLY heal their own users
+    - ALL files can receive from individual files
+    - Individual files can receive from ALL files if they're missing fields
+    - Field-by-field merging (not whole record replacement)
+    - Files heal each other if individual files are empty
+    """
+    
+    print("\n" + "="*70)
+    print(f"  HEALING MISSING FIELDS (FIELD-BY-FIELD MERGE)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    
+    def safe_read_json(file_path, default={}):
+        """Safely read JSON file with error handling"""
+        if not os.path.exists(file_path):
+            print(f"    ⚠️ File not found: {file_path}")
+            return default
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"    ❌ JSON decode error in {file_path}: {str(e)}")
+            return default
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied reading {file_path}")
+            return default
+        except Exception as e:
+            print(f"    ❌ Error reading {file_path}: {str(e)}")
+            return default
+    
+    def safe_write_json(file_path, data):
+        """Safely write JSON file with permission handling"""
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except PermissionError as e:
+            print(f"    ⚠️ Permission denied writing {file_path}")
+            # Try to delete and retry
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    return True
+            except:
+                pass
+            return False
+        except Exception as e:
+            print(f"    ❌ Error writing {file_path}: {str(e)}")
+            return False
+    
+    def merge_fields(source_record, target_record):
+        """
+        Merge fields from source to target where target is missing fields.
+        Returns: (merged_record, fields_added)
+        """
+        if not source_record or not target_record:
+            return target_record, 0
+        
+        merged = dict(target_record)  # Start with target
+        fields_added = 0
+        
+        for key, value in source_record.items():
+            # Skip 'id' field as it's the key
+            if key == 'id':
+                continue
+            
+            # Only add if target doesn't have this field OR target has it as None/null
+            if key not in merged or merged[key] is None:
+                merged[key] = value
+                fields_added += 1
+        
+        return merged, fields_added
+    
+    def get_record_id(record):
+        """Extract record ID from record dict"""
+        if isinstance(record, dict):
+            return str(record.get('id', ''))
+        return None
+    
+    def merge_file_pair(source_data, target_data, source_name, target_name, skip_missing_ids=False):
+        """
+        Merge fields from source to target for matching IDs.
+        If skip_missing_ids=True, only merge for IDs that exist in target.
+        """
+        if not source_data or not target_data:
+            return target_data, 0, 0, 0
+        
+        merged_target = dict(target_data)
+        total_records_healed = 0
+        total_fields_added = 0
+        total_records_skipped = 0
+        
+        for record_id, source_record in source_data.items():
+            if record_id in merged_target:
+                # Merge fields from source to target
+                target_record = merged_target[record_id]
+                merged_record, fields_added = merge_fields(source_record, target_record)
+                
+                if fields_added > 0:
+                    merged_target[record_id] = merged_record
+                    total_records_healed += 1
+                    total_fields_added += fields_added
+                    print(f"      ✅ Healed record {record_id}: added {fields_added} field(s)")
+            else:
+                if not skip_missing_ids:
+                    # If target doesn't have this ID, add the whole record
+                    merged_target[record_id] = source_record
+                    total_records_healed += 1
+                    print(f"      ➕ Added new record {record_id} from {source_name}")
+                else:
+                    total_records_skipped += 1
+        
+        return merged_target, total_records_healed, total_fields_added, total_records_skipped
+    
+    # Step 1: Load all JSON files
+    print("\n📁 [1/4] Loading JSON Files...")
+    
+    invharv_fetched = safe_read_json(INVHARV_FETCHED_INVESTORS, {})
+    invharv_updated = safe_read_json(INVHARV_UPDATED_INVESTORS, {})
+    harvhub_fetched = safe_read_json(HARVHUB_FETCHED_INVESTORS, {})
+    harvhub_updated = safe_read_json(HARVHUB_UPDATED_INVESTORS, {})
+    all_fetched = safe_read_json(ALL_FETCHED_INVESTORS, {})
+    all_updated = safe_read_json(ALL_UPDATED_INVESTORS, {})
+    
+    print(f"    📊 INVHARV_FETCHED: {len(invharv_fetched):,} records")
+    print(f"    📊 INVHARV_UPDATED: {len(invharv_updated):,} records")
+    print(f"    📊 HARVHUB_FETCHED: {len(harvhub_fetched):,} records")
+    print(f"    📊 HARVHUB_UPDATED: {len(harvhub_updated):,} records")
+    print(f"    📊 ALL_FETCHED: {len(all_fetched):,} records")
+    print(f"    📊 ALL_UPDATED: {len(all_updated):,} records")
+    
+    # Step 2: Determine which individual files have data
+    invharv_has_data = len(invharv_fetched) > 0 or len(invharv_updated) > 0
+    harvhub_has_data = len(harvhub_fetched) > 0 or len(harvhub_updated) > 0
+    
+    print(f"\n📊 [2/4] Analyzing Data Sources...")
+    print(f"    INVHARV has data: {invharv_has_data}")
+    print(f"    HARVHUB has data: {harvhub_has_data}")
+    
+    all_fetched_modified = False
+    all_updated_modified = False
+    invharv_fetched_modified = False
+    invharv_updated_modified = False
+    harvhub_fetched_modified = False
+    harvhub_updated_modified = False
+    
+    total_fields_added_all_fetched = 0
+    total_fields_added_all_updated = 0
+    total_fields_added_invharv_fetched = 0
+    total_fields_added_invharv_updated = 0
+    total_fields_added_harvhub_fetched = 0
+    total_fields_added_harvhub_updated = 0
+    
+    print("\n🔧 [3/4] Healing Files...")
+    print("-"*70)
+    
+    # CASE 1: Individual files have data - heal ALL files from individual files
+    if invharv_has_data or harvhub_has_data:
+        print("\n  📋 Using INDIVIDUAL files as primary source...")
+        
+        # 1A: Heal ALL_UPDATED from INVHARV_UPDATED
+        if invharv_updated:
+            print("\n    🔄 INVHARV_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                invharv_updated, all_updated, "INVHARV_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1B: Heal ALL_UPDATED from HARVHUB_UPDATED
+        if harvhub_updated:
+            print("\n    🔄 HARVHUB_UPDATED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                harvhub_updated, all_updated, "HARVHUB_UPDATED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1C: Heal ALL_FETCHED from INVHARV_FETCHED
+        if invharv_fetched:
+            print("\n    🔄 INVHARV_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                invharv_fetched, all_fetched, "INVHARV_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1D: Heal ALL_FETCHED from HARVHUB_FETCHED
+        if harvhub_fetched:
+            print("\n    🔄 HARVHUB_FETCHED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                harvhub_fetched, all_fetched, "HARVHUB_FETCHED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1E: Also heal ALL_FETCHED from ALL_UPDATED (in case updated has fields fetched doesn't)
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED (cross-healing)")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1F: Heal ALL_UPDATED from ALL_FETCHED (cross-healing)
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED (cross-healing)")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 1G: Heal individual files from ALL files (if individual is missing fields)
+        print("\n    🔄 ALL_UPDATED → INVHARV_UPDATED (if needed)")
+        if invharv_updated and all_updated:
+            invharv_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, invharv_updated, "ALL_UPDATED", "INVHARV_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_updated_modified = True
+                total_fields_added_invharv_updated += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_UPDATED")
+        
+        print("\n    🔄 ALL_UPDATED → HARVHUB_UPDATED (if needed)")
+        if harvhub_updated and all_updated:
+            harvhub_updated, healed, fields, skipped = merge_file_pair(
+                all_updated, harvhub_updated, "ALL_UPDATED", "HARVHUB_UPDATED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_updated_modified = True
+                total_fields_added_harvhub_updated += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_UPDATED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_UPDATED")
+        
+        print("\n    🔄 ALL_FETCHED → INVHARV_FETCHED (if needed)")
+        if invharv_fetched and all_fetched:
+            invharv_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, invharv_fetched, "ALL_FETCHED", "INVHARV_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                invharv_fetched_modified = True
+                total_fields_added_invharv_fetched += fields
+                print(f"      ✅ Healed {healed} INVHARV records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for INVHARV_FETCHED")
+        
+        print("\n    🔄 ALL_FETCHED → HARVHUB_FETCHED (if needed)")
+        if harvhub_fetched and all_fetched:
+            harvhub_fetched, healed, fields, skipped = merge_file_pair(
+                all_fetched, harvhub_fetched, "ALL_FETCHED", "HARVHUB_FETCHED", skip_missing_ids=True
+            )
+            if healed > 0:
+                harvhub_fetched_modified = True
+                total_fields_added_harvhub_fetched += fields
+                print(f"      ✅ Healed {healed} HARVHUB records, added {fields} fields from ALL_FETCHED")
+            else:
+                print(f"      ℹ️ No healing needed for HARVHUB_FETCHED")
+    
+    # CASE 2: Individual files are empty - heal between ALL files only
+    else:
+        print("\n  📋 Individual files EMPTY - healing between ALL files only...")
+        
+        # 2A: Heal ALL_UPDATED from ALL_FETCHED
+        if all_fetched:
+            print("\n    🔄 ALL_FETCHED → ALL_UPDATED")
+            all_updated, healed, fields, skipped = merge_file_pair(
+                all_fetched, all_updated, "ALL_FETCHED", "ALL_UPDATED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_updated_modified = True
+                total_fields_added_all_updated += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+        
+        # 2B: Heal ALL_FETCHED from ALL_UPDATED
+        if all_updated:
+            print("\n    🔄 ALL_UPDATED → ALL_FETCHED")
+            all_fetched, healed, fields, skipped = merge_file_pair(
+                all_updated, all_fetched, "ALL_UPDATED", "ALL_FETCHED", skip_missing_ids=False
+            )
+            if healed > 0:
+                all_fetched_modified = True
+                total_fields_added_all_fetched += fields
+                print(f"      ✅ Healed {healed} records, added {fields} fields")
+            else:
+                print(f"      ℹ️ No healing needed")
+    
+    # Step 4: Write back all modified files
+    print("\n💾 [4/4] Saving Modified Files...")
+    print("-"*70)
+    
+    if all_fetched_modified:
+        if safe_write_json(ALL_FETCHED_INVESTORS, all_fetched):
+            print(f"    ✅ Saved: {ALL_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_FETCHED_INVESTORS}")
+    
+    if all_updated_modified:
+        if safe_write_json(ALL_UPDATED_INVESTORS, all_updated):
+            print(f"    ✅ Saved: {ALL_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {ALL_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {ALL_UPDATED_INVESTORS}")
+    
+    if invharv_fetched_modified:
+        if safe_write_json(INVHARV_FETCHED_INVESTORS, invharv_fetched):
+            print(f"    ✅ Saved: {INVHARV_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_FETCHED_INVESTORS}")
+    
+    if invharv_updated_modified:
+        if safe_write_json(INVHARV_UPDATED_INVESTORS, invharv_updated):
+            print(f"    ✅ Saved: {INVHARV_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {INVHARV_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {INVHARV_UPDATED_INVESTORS}")
+    
+    if harvhub_fetched_modified:
+        if safe_write_json(HARVHUB_FETCHED_INVESTORS, harvhub_fetched):
+            print(f"    ✅ Saved: {HARVHUB_FETCHED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_FETCHED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_FETCHED_INVESTORS}")
+    
+    if harvhub_updated_modified:
+        if safe_write_json(HARVHUB_UPDATED_INVESTORS, harvhub_updated):
+            print(f"    ✅ Saved: {HARVHUB_UPDATED_INVESTORS}")
+        else:
+            print(f"    ❌ Failed to save: {HARVHUB_UPDATED_INVESTORS}")
+    else:
+        print(f"    ℹ️ No changes to: {HARVHUB_UPDATED_INVESTORS}")
+    
+    # Final Summary
+    print("\n" + "="*70)
+    print(f"  HEALING SUMMARY")
+    print("="*70)
+    print(f"\n  📊 FILES PROCESSED:")
+    print(f"     ALL_FETCHED     : {'✅ MODIFIED' if all_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     ALL_UPDATED     : {'✅ MODIFIED' if all_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_FETCHED : {'✅ MODIFIED' if invharv_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     INVHARV_UPDATED : {'✅ MODIFIED' if invharv_updated_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_FETCHED : {'✅ MODIFIED' if harvhub_fetched_modified else 'ℹ️ NO CHANGES'}")
+    print(f"     HARVHUB_UPDATED : {'✅ MODIFIED' if harvhub_updated_modified else 'ℹ️ NO CHANGES'}")
+    
+    print(f"\n  📈 FIELDS ADDED BY FILE:")
+    print(f"     ALL_FETCHED     : {total_fields_added_all_fetched:,} fields")
+    print(f"     ALL_UPDATED     : {total_fields_added_all_updated:,} fields")
+    print(f"     INVHARV_FETCHED : {total_fields_added_invharv_fetched:,} fields")
+    print(f"     INVHARV_UPDATED : {total_fields_added_invharv_updated:,} fields")
+    print(f"     HARVHUB_FETCHED : {total_fields_added_harvhub_fetched:,} fields")
+    print(f"     HARVHUB_UPDATED : {total_fields_added_harvhub_updated:,} fields")
+    
+    print(f"\n  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    
+    return {
+        'all_fetched_modified': all_fetched_modified,
+        'all_updated_modified': all_updated_modified,
+        'invharv_fetched_modified': invharv_fetched_modified,
+        'invharv_updated_modified': invharv_updated_modified,
+        'harvhub_fetched_modified': harvhub_fetched_modified,
+        'harvhub_updated_modified': harvhub_updated_modified
+    }
+
+def restore_empty_investor_files():
+    """
+    Checks and synchronizes investor files between main and backup.
+    
+    This function handles two scenarios:
+    1. If main file is empty/doesn't exist -> Restore from backup
+    2. If main file has data -> Check backup and update if needed:
+       - If backup is empty -> Copy main to backup
+       - If backup has fewer records -> Add missing records from main
+       - If backup has missing fields -> Update with complete data from main
+    
+    Returns:
+        dict: Status of the synchronization process
+    """
+    
+    print(f"\n{'='*70}")
+    print(f"SYNCHRONIZE INVESTOR FILES".center(70))
+    print(f"{'='*70}")
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    
+    result = {
+        "fetched_synced": False,
+        "updated_synced": False,
+        "fetched_main_exists": False,
+        "fetched_main_empty": False,
+        "fetched_main_records": 0,
+        "fetched_backup_exists": False,
+        "fetched_backup_empty": False,
+        "fetched_backup_records": 0,
+        "fetched_restored_from_backup": False,
+        "fetched_backup_updated_from_main": False,
+        "fetched_backup_records_added": 0,
+        "fetched_backup_fields_updated": 0,
+        "updated_main_exists": False,
+        "updated_main_empty": False,
+        "updated_main_records": 0,
+        "updated_backup_exists": False,
+        "updated_backup_empty": False,
+        "updated_backup_records": 0,
+        "updated_restored_from_main": False,
+        "updated_backup_updated_from_main": False,
+        "updated_backup_records_added": 0,
+        "updated_backup_fields_updated": 0,
+        "errors": [],
+        "warnings": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    def is_file_empty(filepath):
+        """Check if a JSON file exists and is empty or contains empty data"""
+        if not os.path.exists(filepath):
+            return True, "File does not exist"
+        
+        try:
+            if os.path.getsize(filepath) == 0:
+                return True, "File is empty (0 bytes)"
+            
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if not content:
+                    return True, "File contains only whitespace"
+                
+                data = json.loads(content)
+                
+                if isinstance(data, dict) and len(data) == 0:
+                    return True, "File contains empty dictionary {}"
+                elif isinstance(data, list) and len(data) == 0:
+                    return True, "File contains empty list []"
+                elif data is None:
+                    return True, "File contains null"
+                
+                return False, "File has valid data"
+                
+        except json.JSONDecodeError as e:
+            return True, f"Invalid JSON: {str(e)}"
+        except Exception as e:
+            return True, f"Error reading file: {str(e)}"
+    
+    def load_json_data(filepath):
+        """Load JSON data from file"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            return None
+    
+    def save_json_data(filepath, data):
+        """Save JSON data to file"""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            return False
+    
+    def count_non_empty_fields(obj, ignore_keys=[]):
+        """Count non-empty fields in an object."""
+        if not isinstance(obj, dict):
+            return 0
+        
+        count = 0
+        for key, value in obj.items():
+            if key in ignore_keys:
+                continue
+            if value is not None and value != "" and value != "NULL":
+                if isinstance(value, dict):
+                    count += count_non_empty_fields(value, ignore_keys)
+                elif isinstance(value, list) and len(value) > 0:
+                    count += 1
+                elif not isinstance(value, list):
+                    count += 1
+        return count
+    
+    def deep_merge(base_dict, override_dict):
+        """
+        Deep merge two dictionaries, preferring override_dict values.
+        
+        Returns:
+            dict: Merged dictionary
+        """
+        result = base_dict.copy() if base_dict else {}
+        
+        for key, value in override_dict.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = deep_merge(result[key], value)
+            elif value is not None and value != "NULL" and value != "":
+                result[key] = value
+        
+        return result
+    
+    def compare_and_update_backup(main_data, backup_data, file_type):
+        """
+        Compare main and backup data, update backup if main has more/better data.
+        
+        Returns:
+            tuple: (updated_backup, records_added, fields_updated)
+        """
+        if not main_data:
+            return backup_data, 0, 0
+        
+        if not backup_data:
+            return main_data.copy(), len(main_data), 0
+        
+        updated_backup = backup_data.copy()
+        records_added = 0
+        fields_updated = 0
+        
+        # Check each record in main
+        for investor_id, main_record in main_data.items():
+            if not isinstance(main_record, dict):
+                continue
+            
+            # If investor doesn't exist in backup, add it
+            if investor_id not in updated_backup:
+                updated_backup[investor_id] = main_record.copy()
+                records_added += 1
+                continue
+            
+            # Investor exists, check if main has more/better data
+            backup_record = updated_backup[investor_id]
+            
+            # Count fields in both
+            main_fields = count_non_empty_fields(main_record)
+            backup_fields = count_non_empty_fields(backup_record)
+            
+            # If main has more fields, merge/update
+            if main_fields > backup_fields:
+                # Deep merge: main updates take precedence
+                merged_record = deep_merge(backup_record, main_record)
+                updated_backup[investor_id] = merged_record
+                fields_updated += 1
+            elif main_fields == backup_fields:
+                # Same number of fields, check if any fields are different
+                merged_record = deep_merge(backup_record, main_record)
+                if merged_record != backup_record:
+                    updated_backup[investor_id] = merged_record
+                    fields_updated += 1
+        
+        return updated_backup, records_added, fields_updated
+    
+    def get_file_stats(filepath):
+        """Get basic stats about a JSON file"""
+        if not os.path.exists(filepath):
+            return {"exists": False, "size": 0, "count": 0}
+        
+        try:
+            size = os.path.getsize(filepath)
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                count = len(data) if isinstance(data, dict) else 0
+            return {"exists": True, "size": size, "count": count}
+        except:
+            return {"exists": True, "size": size, "count": 0}
+    
+    def get_backup_path(main_path):
+        """Get backup path for a given main file"""
+        if "fetched" in main_path.lower():
+            return ALL_FETCHED_INVESTORS_BACKUP
+        else:
+            # For updated files, we'll use fetched as source if needed
+            return None
+    
+    try:
+        # ============================================
+        # CHECK FETCHED FILE
+        # ============================================
+        
+        print("\n📋 Checking ALL_FETCHED_INVESTORS...")
+        print("-"*40)
+        
+        # Load main file
+        fetched_main_exists = os.path.exists(ALL_FETCHED_INVESTORS)
+        result["fetched_main_exists"] = fetched_main_exists
+        
+        if fetched_main_exists:
+            fetched_main_empty, reason = is_file_empty(ALL_FETCHED_INVESTORS)
+            result["fetched_main_empty"] = fetched_main_empty
+            
+            fetched_main_data = load_json_data(ALL_FETCHED_INVESTORS)
+            fetched_main_count = len(fetched_main_data) if fetched_main_data else 0
+            result["fetched_main_records"] = fetched_main_count
+            
+            print(f"   📄 Main file exists: {ALL_FETCHED_INVESTORS}")
+            print(f"   📊 Records: {fetched_main_count:,}")
+            
+            if fetched_main_empty:
+                print(f"   ⚠️ Main file is empty: {reason}")
+                result["warnings"].append(f"ALL_FETCHED_INVESTORS is empty: {reason}")
+                
+                # Scenario 1: Main is empty -> Restore from backup
+                backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
+                result["fetched_backup_exists"] = backup_exists
+                
+                if backup_exists:
+                    backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
+                    result["fetched_backup_empty"] = backup_empty
+                    
+                    if not backup_empty:
+                        backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
+                        backup_count = len(backup_data) if backup_data else 0
+                        result["fetched_backup_records"] = backup_count
+                        
+                        print(f"   📄 Backup found: {ALL_FETCHED_INVESTORS_BACKUP}")
+                        print(f"   📊 Backup records: {backup_count:,}")
+                        
+                        # Restore from backup
+                        print(f"   🔄 Restoring from backup...")
+                        if save_json_data(ALL_FETCHED_INVESTORS, backup_data):
+                            print(f"   ✅ Restored {backup_count:,} records from backup")
+                            result["fetched_restored_from_backup"] = True
+                            result["fetched_synced"] = True
+                        else:
+                            print(f"   ❌ Failed to restore from backup")
+                            result["errors"].append("Failed to restore fetched from backup")
+                    else:
+                        print(f"   ❌ Backup exists but is empty: {backup_reason}")
+                        result["errors"].append("Backup file is empty, cannot restore")
+                else:
+                    print(f"   ❌ No backup file found")
+                    result["errors"].append("No backup file found for fetched investors")
+            else:
+                print(f"   ✅ Main file has valid data")
+                
+                # Scenario 2: Main has data -> Check/update backup
+                backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
+                result["fetched_backup_exists"] = backup_exists
+                
+                if backup_exists:
+                    backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
+                    result["fetched_backup_empty"] = backup_empty
+                    
+                    backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
+                    backup_count = len(backup_data) if backup_data else 0
+                    result["fetched_backup_records"] = backup_count
+                    
+                    print(f"   📄 Backup exists: {ALL_FETCHED_INVESTORS_BACKUP}")
+                    print(f"   📊 Backup records: {backup_count:,}")
+                    
+                    # Compare and update backup if needed
+                    if backup_empty or backup_count < fetched_main_count:
+                        print(f"   🔄 Updating backup from main...")
+                        
+                        updated_backup, records_added, fields_updated = compare_and_update_backup(
+                            fetched_main_data, 
+                            backup_data if not backup_empty else {},
+                            "fetched"
+                        )
+                        
+                        if save_json_data(ALL_FETCHED_INVESTORS_BACKUP, updated_backup):
+                            print(f"   ✅ Backup updated successfully")
+                            print(f"      📝 Records added: {records_added:,}")
+                            print(f"      🔄 Records updated: {fields_updated:,}")
+                            
+                            result["fetched_backup_updated_from_main"] = True
+                            result["fetched_backup_records_added"] = records_added
+                            result["fetched_backup_fields_updated"] = fields_updated
+                            result["fetched_synced"] = True
+                        else:
+                            print(f"   ❌ Failed to update backup")
+                            result["errors"].append("Failed to update fetched backup")
+                    else:
+                        print(f"   ✅ Backup is up to date ({backup_count:,} records)")
+                        result["fetched_synced"] = True
+                else:
+                    # Backup doesn't exist, create it
+                    print(f"   📄 No backup exists, creating from main...")
+                    if save_json_data(ALL_FETCHED_INVESTORS_BACKUP, fetched_main_data):
+                        print(f"   ✅ Created backup with {fetched_main_count:,} records")
+                        result["fetched_backup_updated_from_main"] = True
+                        result["fetched_synced"] = True
+                    else:
+                        print(f"   ❌ Failed to create backup")
+                        result["errors"].append("Failed to create fetched backup")
+        else:
+            print(f"   ❌ Main file does not exist: {ALL_FETCHED_INVESTORS}")
+            result["warnings"].append("ALL_FETCHED_INVESTORS does not exist")
+            
+            # Try to restore from backup
+            backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
+            result["fetched_backup_exists"] = backup_exists
+            
+            if backup_exists:
+                backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
+                result["fetched_backup_empty"] = backup_empty
+                
+                if not backup_empty:
+                    backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
+                    backup_count = len(backup_data) if backup_data else 0
+                    result["fetched_backup_records"] = backup_count
+                    
+                    print(f"   📄 Creating from backup: {ALL_FETCHED_INVESTORS_BACKUP}")
+                    print(f"   📊 Backup records: {backup_count:,}")
+                    
+                    if save_json_data(ALL_FETCHED_INVESTORS, backup_data):
+                        print(f"   ✅ Created main from backup ({backup_count:,} records)")
+                        result["fetched_restored_from_backup"] = True
+                        result["fetched_synced"] = True
+                    else:
+                        print(f"   ❌ Failed to create from backup")
+                        result["errors"].append("Failed to create fetched from backup")
+                else:
+                    print(f"   ❌ Backup exists but is empty: {backup_reason}")
+                    result["errors"].append("Backup file is empty")
+            else:
+                print(f"   ❌ No backup file found")
+                result["errors"].append("No backup file found to create fetched investors")
+        
+        # ============================================
+        # CHECK UPDATED FILE
+        # ============================================
+        
+        print("\n📋 Checking ALL_UPDATED_INVESTORS...")
+        print("-"*40)
+        
+        updated_main_exists = os.path.exists(ALL_UPDATED_INVESTORS)
+        result["updated_main_exists"] = updated_main_exists
+        
+        if updated_main_exists:
+            updated_main_empty, reason = is_file_empty(ALL_UPDATED_INVESTORS)
+            result["updated_main_empty"] = updated_main_empty
+            
+            updated_main_data = load_json_data(ALL_UPDATED_INVESTORS)
+            updated_main_count = len(updated_main_data) if updated_main_data else 0
+            result["updated_main_records"] = updated_main_count
+            
+            print(f"   📄 Main file exists: {ALL_UPDATED_INVESTORS}")
+            print(f"   📊 Records: {updated_main_count:,}")
+            
+            if updated_main_empty:
+                print(f"   ⚠️ Main file is empty: {reason}")
+                result["warnings"].append("ALL_UPDATED_INVESTORS is empty")
+                
+                # Restore updated from fetched (since updated doesn't have a dedicated backup)
+                if result["fetched_synced"] and not result["fetched_main_empty"]:
+                    fetched_data = load_json_data(ALL_FETCHED_INVESTORS)
+                    if fetched_data:
+                        print(f"   🔄 Restoring from ALL_FETCHED_INVESTORS...")
+                        if save_json_data(ALL_UPDATED_INVESTORS, fetched_data):
+                            print(f"   ✅ Restored {len(fetched_data):,} records from fetched")
+                            result["updated_restored_from_main"] = True
+                            result["updated_synced"] = True
+                        else:
+                            print(f"   ❌ Failed to restore updated from fetched")
+                            result["errors"].append("Failed to restore updated from fetched")
+                    else:
+                        print(f"   ❌ Cannot restore: fetched data is empty")
+                        result["errors"].append("Cannot restore updated (fetched is empty)")
+                else:
+                    print(f"   ❌ Cannot restore: fetched file is empty or invalid")
+                    result["errors"].append("Cannot restore updated (fetched is empty or invalid)")
+            else:
+                print(f"   ✅ Main file has valid data")
+                
+                # Check if updated has data and fetched has more/better data
+                if result["fetched_synced"] and not result["fetched_main_empty"]:
+                    fetched_data = load_json_data(ALL_FETCHED_INVESTORS)
+                    fetched_count = len(fetched_data) if fetched_data else 0
+                    
+                    # If fetched has more records or is newer, update updated from fetched
+                    if fetched_count > updated_main_count:
+                        print(f"   🔄 Updating from ALL_FETCHED_INVESTORS...")
+                        print(f"      Fetched records: {fetched_count:,}")
+                        print(f"      Updated records: {updated_main_count:,}")
+                        
+                        updated_backup, records_added, fields_updated = compare_and_update_backup(
+                            fetched_data,
+                            updated_main_data,
+                            "updated"
+                        )
+                        
+                        if save_json_data(ALL_UPDATED_INVESTORS, updated_backup):
+                            print(f"   ✅ Updated from fetched successfully")
+                            print(f"      📝 Records added: {records_added:,}")
+                            print(f"      🔄 Records updated: {fields_updated:,}")
+                            
+                            result["updated_backup_updated_from_main"] = True
+                            result["updated_backup_records_added"] = records_added
+                            result["updated_backup_fields_updated"] = fields_updated
+                            result["updated_synced"] = True
+                        else:
+                            print(f"   ❌ Failed to update from fetched")
+                            result["errors"].append("Failed to update updated from fetched")
+                    else:
+                        print(f"   ✅ Updated file is up to date")
+                        result["updated_synced"] = True
+                else:
+                    print(f"   ✅ Updated file is valid (no sync needed)")
+                    result["updated_synced"] = True
+        else:
+            print(f"   ❌ Main file does not exist: {ALL_UPDATED_INVESTORS}")
+            result["warnings"].append("ALL_UPDATED_INVESTORS does not exist")
+            
+            # Create updated from fetched if available
+            if result["fetched_synced"] and not result["fetched_main_empty"]:
+                fetched_data = load_json_data(ALL_FETCHED_INVESTORS)
+                if fetched_data:
+                    print(f"   🔄 Creating from ALL_FETCHED_INVESTORS...")
+                    if save_json_data(ALL_UPDATED_INVESTORS, fetched_data):
+                        print(f"   ✅ Created updated from fetched ({len(fetched_data):,} records)")
+                        result["updated_restored_from_main"] = True
+                        result["updated_synced"] = True
+                    else:
+                        print(f"   ❌ Failed to create updated from fetched")
+                        result["errors"].append("Failed to create updated from fetched")
+                else:
+                    print(f"   ❌ Cannot create: fetched data is empty")
+                    result["errors"].append("Cannot create updated (fetched is empty)")
+            else:
+                print(f"   ❌ Cannot create: fetched file is empty or invalid")
+                result["errors"].append("Cannot create updated (fetched is empty or invalid)")
+        
+        # ============================================
+        # SUMMARY
+        # ============================================
+        
+        print("\n" + "="*70)
+        print(f"SYNCHRONIZATION SUMMARY".center(70))
+        print("="*70)
+        
+        print(f"\n📊 FETCHED FILES:")
+        if result["fetched_restored_from_backup"]:
+            print(f"   ✅ Restored from backup to main")
+        elif result["fetched_backup_updated_from_main"]:
+            print(f"   ✅ Updated backup from main")
+            if result["fetched_backup_records_added"] > 0:
+                print(f"      📝 Records added to backup: {result['fetched_backup_records_added']:,}")
+            if result["fetched_backup_fields_updated"] > 0:
+                print(f"      🔄 Records updated in backup: {result['fetched_backup_fields_updated']:,}")
+        elif result["fetched_synced"]:
+            print(f"   ✅ Files are synchronized (no changes needed)")
+        else:
+            print(f"   ❌ Synchronization failed")
+        
+        print(f"\n📊 UPDATED FILES:")
+        if result["updated_restored_from_main"]:
+            print(f"   ✅ Created/restored from fetched")
+        elif result["updated_backup_updated_from_main"]:
+            print(f"   ✅ Updated from fetched")
+            if result["updated_backup_records_added"] > 0:
+                print(f"      📝 Records added: {result['updated_backup_records_added']:,}")
+            if result["updated_backup_fields_updated"] > 0:
+                print(f"      🔄 Records updated: {result['updated_backup_fields_updated']:,}")
+        elif result["updated_synced"]:
+            print(f"   ✅ File is up to date (no changes needed)")
+        else:
+            print(f"   ❌ Synchronization failed")
+        
+        if result["errors"]:
+            print(f"\n❌ ERRORS ({len(result['errors'])}):")
+            for error in result["errors"]:
+                print(f"   - {error}")
+        
+        if result["warnings"]:
+            print(f"\n⚠️ WARNINGS ({len(result['warnings'])}):")
+            for warning in result["warnings"]:
+                print(f"   - {warning}")
+        
+        print(f"\n🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*70)
+        
+        return result
+        
+    except Exception as e:
+        print(f"\n{'='*70}")
+        print(f"CRITICAL ERROR".center(70))
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n📜 Full Traceback:")
+        traceback.print_exc()
+        
+        result["errors"].append(f"Critical error: {str(e)}")
+        return result
+ 
 def check_and_fix_json_files():
     """
     Simple function to fix ONLY locked/permission-denied JSON files by:
@@ -962,7 +1898,900 @@ def manage_accountmanagement_and_activities_jsons():
     print("="*70)
     
     return stats
+
+def sync_and_distribute_investors():
+    """
+    Synchronizes and distributes investors between invharv and harvhub files.
+    
+    This function performs three main tasks:
+    1. For existing investors in both files:
+       - Updates missing fields in invharv/harvhub from ALL files
+       - Updates ALL files with new data from invharv/harvhub
+       - Filters grid traders to HARVHUB and non-grid traders to INVHARV
+    2. For new investors not yet distributed:
+       - Copies grid traders to harvhub with complete data
+       - Copies non-grid traders to invharv with complete data
+    3. Validation and cleanup:
+       - Removes any investors from incorrect files
+       - Ensures grid traders are only in HARVHUB
+       - Ensures non-grid traders are only in INVHARV
+    
+    PRIORITY: FETCHED data takes precedence over UPDATED data
+    - First process fetched files to get the latest data
+    - Then apply fetched data to updated files (override)
+    
+    Uses ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS as the source of truth.
+    """
+    
+    print(f"\n{'='*70}")
+    print(f"SYNC AND DISTRIBUTE INVESTORS".center(70))
+    print(f"{'='*70}")
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    print("  PRIORITY: FETCHED data takes precedence over UPDATED data")
+    print("="*70)
+    
+    stats = {
+        "processing_success": False,
+        "fetched": {
+            "existing_investors": {"processed": 0, "fields_filled": 0, "fields_updated": 0},
+            "grid_traders_moved_to_harvhub": 0,
+            "non_grid_traders_moved_to_invharv": 0,
+            "new_grid_traders": {"copied_to_harvhub": 0, "ids": []},
+            "new_non_grid_traders": {"copied_to_invharv": 0, "ids": []},
+            "invharv_count": 0,
+            "harvhub_count": 0,
+            "all_count": 0,
+            "cleanup": {
+                "removed_from_invharv": 0,
+                "removed_from_harvhub": 0,
+                "invalid_grid_in_invharv": [],
+                "invalid_non_grid_in_harvhub": []
+            }
+        },
+        "updated": {
+            "existing_investors": {"processed": 0, "fields_filled": 0, "fields_updated": 0},
+            "grid_traders_moved_to_harvhub": 0,
+            "non_grid_traders_moved_to_invharv": 0,
+            "new_grid_traders": {"copied_to_harvhub": 0, "ids": []},
+            "new_non_grid_traders": {"copied_to_invharv": 0, "ids": []},
+            "invharv_count": 0,
+            "harvhub_count": 0,
+            "all_count": 0,
+            "cleanup": {
+                "removed_from_invharv": 0,
+                "removed_from_harvhub": 0,
+                "invalid_grid_in_invharv": [],
+                "invalid_non_grid_in_harvhub": []
+            }
+        },
+        "sync_from_fetched_to_updated": {
+            "records_updated": 0,
+            "fields_synced": 0,
+            "records_added": 0,
+            "field_changes": {}
+        },
+        "errors": [],
+        "warnings": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # ============================================
+    # HELPER FUNCTIONS
+    # ============================================
+    
+    def safe_json_load(filepath, default=None):
+        """Safely load JSON"""
+        if default is None:
+            default = {}
         
+        if not os.path.exists(filepath):
+            return default
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                return default
+        except Exception as e:
+            print(f"   ⚠️ Error loading {filepath}: {e}")
+            return default
+    
+    def safe_json_write(filepath, data):
+        """Safely write JSON"""
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            temp_file = filepath + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            if os.path.exists(filepath):
+                os.remove(filepath)
+            os.rename(temp_file, filepath)
+            return True
+        except Exception as e:
+            print(f"   ❌ Write error to {filepath}: {e}")
+            return False
+    
+    def deep_merge(base_dict, override_dict, prefer_override=True):
+        """
+        Deep merge two dictionaries.
+        
+        Args:
+            base_dict: The base dictionary to merge into
+            override_dict: The dictionary with potential updates
+            prefer_override: If True, override_dict values take precedence
+        
+        Returns:
+            dict: Merged dictionary
+        """
+        result = base_dict.copy()
+        
+        for key, value in override_dict.items():
+            if key in result:
+                # If both are dicts, recursively merge
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value, prefer_override)
+                # If value is not None or empty, update based on preference
+                elif value is not None and value != "NULL" and value != "":
+                    if prefer_override:
+                        result[key] = value
+                    # If we prefer base, only update if base value is empty/missing
+                    elif result.get(key) is None or result.get(key) == "NULL" or result.get(key) == "":
+                        result[key] = value
+            else:
+                # Key doesn't exist in base, add it
+                result[key] = value
+        
+        return result
+    
+    def count_non_empty_fields(obj, ignore_keys=[]):
+        """Count non-empty fields in an object."""
+        if not isinstance(obj, dict):
+            return 0
+        
+        count = 0
+        for key, value in obj.items():
+            if key in ignore_keys:
+                continue
+            if value is not None and value != "" and value != "NULL":
+                if isinstance(value, dict):
+                    # Recursively count nested dict fields
+                    count += count_non_empty_fields(value, ignore_keys)
+                elif isinstance(value, list) and len(value) > 0:
+                    count += 1
+                elif not isinstance(value, list):
+                    count += 1
+        return count
+    
+    def merge_investor_records(source_data, target_data, source_name):
+        """
+        Merge source_data into target_data at the field level.
+        
+        Returns:
+            tuple: (updated_target, missing_fields_count, updated_fields_count)
+        """
+        updated_target = target_data.copy() if target_data else {}
+        total_missing_fields = 0
+        total_updated_fields = 0
+        
+        # For each investor in source_data
+        for investor_id, source_record in source_data.items():
+            if not isinstance(source_record, dict):
+                continue
+                
+            # If investor doesn't exist in target, add the entire record
+            if investor_id not in updated_target:
+                updated_target[investor_id] = source_record.copy()
+                # Count fields added
+                total_missing_fields += count_non_empty_fields(source_record)
+                continue
+            
+            # Investor exists, merge fields
+            target_record = updated_target[investor_id]
+            
+            # Count fields before merge
+            before_fields = count_non_empty_fields(target_record)
+            
+            # Deep merge: source updates take precedence for existing fields,
+            # but we also fill missing fields from target if source has them
+            merged_record = deep_merge(target_record, source_record, prefer_override=True)
+            
+            # Now fill any fields that exist in target but missing in source
+            # This ensures bidirectionality
+            merged_record = deep_merge(merged_record, target_record, prefer_override=False)
+            
+            after_fields = count_non_empty_fields(merged_record)
+            
+            # Count changes
+            if before_fields < after_fields:
+                total_missing_fields += (after_fields - before_fields)
+            elif before_fields > after_fields:
+                total_updated_fields += (before_fields - after_fields)
+            
+            updated_target[investor_id] = merged_record
+        
+        return updated_target, total_missing_fields, total_updated_fields
+    
+    def is_grid_trader(investor_data):
+        """
+        Check if investor is a grid trader by looking for grid-related keywords
+        in various fields.
+        
+        Returns:
+            bool: True if investor is a grid trader, False otherwise
+        """
+        if not isinstance(investor_data, dict):
+            return False
+        
+        # Fields to check for grid trader indicators
+        fields_to_check = [
+            'invested_with',
+            'strategy',
+            'type',
+            'category',
+            'investment_type',
+            'trader_type',
+            'description',
+            'notes',
+            'tags'
+        ]
+        
+        # Grid-related keywords with patterns
+        grid_patterns = [
+            r'grid',
+            r'grid_trade',
+            r'grid_trades',
+            r'dynamic_grid',
+            r'dynamic_grid_trade',
+            r'dynamic_grid_trades',
+            r'grid[-_]?trade',
+            r'grid[-_]?trades',
+            r'dynamic[-_]?grid',
+            r'^grid',
+            r'grid$',
+        ]
+        
+        # Compile regex patterns for case-insensitive matching
+        compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in grid_patterns]
+        
+        # Check all relevant fields
+        for field in fields_to_check:
+            value = investor_data.get(field, '')
+            
+            # Skip if value is not a string or is empty
+            if not isinstance(value, str) or not value.strip():
+                continue
+            
+            # Clean and normalize the value
+            clean_value = value.strip().lower()
+            
+            # Check for grid-related patterns
+            for pattern in compiled_patterns:
+                if pattern.search(clean_value):
+                    return True
+            
+            # Additional check: split by common delimiters
+            delimiters = [' ', '_', '-', '.', ',', ';', '|', '/', '\\', ':', ';']
+            parts = [clean_value]
+            
+            for delimiter in delimiters:
+                new_parts = []
+                for part in parts:
+                    new_parts.extend(part.split(delimiter))
+                parts = new_parts
+            
+            # Check each part for grid-related keywords
+            grid_keywords = [
+                'grid', 'gridtrade', 'grid_trade', 'gridtrades', 'grid_trades',
+                'dynamic_grid', 'dynamicgrid', 'dynamic_grid_trade', 'dynamicgridtrade',
+                'gridding', 'gridder', 'gridbot', 'grid_bot', 'gridrobot'
+            ]
+            
+            for part in parts:
+                if part in grid_keywords or any(keyword in part for keyword in grid_keywords):
+                    return True
+        
+        return False
+    
+    def validate_and_cleanup(invharv_data, harvhub_data, all_data, category_name, file_type, stats_section):
+        """
+        Validate and cleanup investor distribution.
+        """
+        print(f"\n   🔍 Validating and cleaning up {category_name} {file_type}...")
+        print("-"*40)
+        
+        cleanup_stats = {
+            "removed_from_invharv": 0,
+            "removed_from_harvhub": 0,
+            "invalid_grid_in_invharv": [],
+            "invalid_non_grid_in_harvhub": [],
+            "moved_to_correct_file": 0
+        }
+        
+        # Create working copies
+        working_invharv = invharv_data.copy() if invharv_data else {}
+        working_harvhub = harvhub_data.copy() if harvhub_data else {}
+        working_all = all_data.copy() if all_data else {}
+        
+        # Track all investor IDs
+        invharv_ids = set(working_invharv.keys())
+        harvhub_ids = set(working_harvhub.keys())
+        
+        print(f"      📊 Before cleanup:")
+        print(f"         INVHARV: {len(invharv_ids):,} investors")
+        print(f"         HARVHUB: {len(harvhub_ids):,} investors")
+        
+        # STEP 1: Check INVHARV for grid traders
+        invalid_in_invharv = []
+        for inv_id in list(invharv_ids):
+            investor_data = working_all.get(inv_id, {})
+            if not investor_data:
+                investor_data = working_invharv.get(inv_id, {})
+            
+            if is_grid_trader(investor_data):
+                invalid_in_invharv.append(inv_id)
+                cleanup_stats["invalid_grid_in_invharv"].append(inv_id)
+                
+                if inv_id in harvhub_ids:
+                    del working_invharv[inv_id]
+                    cleanup_stats["removed_from_invharv"] += 1
+                    print(f"         🗑️  Removed grid trader {inv_id} from INVHARV (already in HARVHUB)")
+                else:
+                    working_harvhub[inv_id] = working_invharv[inv_id].copy()
+                    del working_invharv[inv_id]
+                    cleanup_stats["removed_from_invharv"] += 1
+                    cleanup_stats["moved_to_correct_file"] += 1
+                    print(f"         📦 Moved grid trader {inv_id} from INVHARV to HARVHUB")
+        
+        # STEP 2: Check HARVHUB for non-grid traders
+        invalid_in_harvhub = []
+        for hub_id in list(harvhub_ids):
+            investor_data = working_all.get(hub_id, {})
+            if not investor_data:
+                investor_data = working_harvhub.get(hub_id, {})
+            
+            if not is_grid_trader(investor_data):
+                invalid_in_harvhub.append(hub_id)
+                cleanup_stats["invalid_non_grid_in_harvhub"].append(hub_id)
+                
+                if hub_id in invharv_ids:
+                    del working_harvhub[hub_id]
+                    cleanup_stats["removed_from_harvhub"] += 1
+                    print(f"         🗑️  Removed non-grid trader {hub_id} from HARVHUB (already in INVHARV)")
+                else:
+                    working_invharv[hub_id] = working_harvhub[hub_id].copy()
+                    del working_harvhub[hub_id]
+                    cleanup_stats["removed_from_harvhub"] += 1
+                    cleanup_stats["moved_to_correct_file"] += 1
+                    print(f"         📦 Moved non-grid trader {hub_id} from HARVHUB to INVHARV")
+        
+        # STEP 3: Update ALL with cleaned data
+        for inv_id, inv_data in working_invharv.items():
+            if inv_id in working_all:
+                working_all[inv_id], _, _ = merge_investor_records(
+                    {inv_id: inv_data},
+                    {inv_id: working_all[inv_id]},
+                    "INVHARV -> ALL"
+                )
+                working_all[inv_id] = working_all[inv_id][inv_id]
+            else:
+                working_all[inv_id] = inv_data.copy()
+        
+        for hub_id, hub_data in working_harvhub.items():
+            if hub_id in working_all:
+                working_all[hub_id], _, _ = merge_investor_records(
+                    {hub_id: hub_data},
+                    {hub_id: working_all[hub_id]},
+                    "HARVHUB -> ALL"
+                )
+                working_all[hub_id] = working_all[hub_id][hub_id]
+            else:
+                working_all[hub_id] = hub_data.copy()
+        
+        print(f"\n      📊 After cleanup:")
+        print(f"         INVHARV: {len(working_invharv):,} investors")
+        print(f"         HARVHUB: {len(working_harvhub):,} investors")
+        print(f"         ALL: {len(working_all):,} investors")
+        print(f"      🗑️  Removed from INVHARV: {cleanup_stats['removed_from_invharv']}")
+        print(f"      🗑️  Removed from HARVHUB: {cleanup_stats['removed_from_harvhub']}")
+        print(f"      📦 Moved to correct file: {cleanup_stats['moved_to_correct_file']}")
+        
+        # Update stats
+        stats_section["cleanup"]["removed_from_invharv"] = cleanup_stats["removed_from_invharv"]
+        stats_section["cleanup"]["removed_from_harvhub"] = cleanup_stats["removed_from_harvhub"]
+        stats_section["cleanup"]["invalid_grid_in_invharv"] = cleanup_stats["invalid_grid_in_invharv"]
+        stats_section["cleanup"]["invalid_non_grid_in_harvhub"] = cleanup_stats["invalid_non_grid_in_harvhub"]
+        
+        return working_invharv, working_harvhub, working_all, cleanup_stats
+    
+    def process_category(all_data, invharv_data, harvhub_data, category_name, file_type):
+        """
+        Process a category (fetched or updated) for sync and distribution.
+        """
+        print(f"\n📊 Processing {category_name} {file_type}...")
+        print("-"*40)
+        
+        category_stats = {
+            "existing_processed": 0,
+            "fields_filled": 0,
+            "fields_updated": 0,
+            "grid_moved_to_harvhub": 0,
+            "non_grid_moved_to_invharv": 0,
+            "new_grid_copied": 0,
+            "new_grid_ids": [],
+            "new_non_grid_copied": 0,
+            "new_non_grid_ids": []
+        }
+        
+        working_all = all_data.copy() if all_data else {}
+        working_invharv = {}
+        working_harvhub = {}
+        
+        all_investor_ids = set(working_all.keys())
+        invharv_ids = set(invharv_data.keys()) if invharv_data else set()
+        harvhub_ids = set(harvhub_data.keys()) if harvhub_data else set()
+        
+        print(f"   📋 ALL investors: {len(working_all):,}")
+        print(f"   📋 INVHARV investors: {len(invharv_ids):,}")
+        print(f"   📋 HARVHUB investors: {len(harvhub_ids):,}")
+        
+        # PART 1: SYNC AND FILTER EXISTING INVESTORS
+        print(f"\n   🔄 Syncing and filtering existing investors...")
+        
+        for inv_id, investor_data in working_all.items():
+            if not isinstance(investor_data, dict):
+                continue
+            
+            is_grid = is_grid_trader(investor_data)
+            in_invharv = inv_id in invharv_ids
+            in_harvhub = inv_id in harvhub_ids
+            
+            invharv_record = invharv_data.get(inv_id, {}) if invharv_data else {}
+            harvhub_record = harvhub_data.get(inv_id, {}) if harvhub_data else {}
+            
+            all_fields = count_non_empty_fields(investor_data)
+            inv_fields = count_non_empty_fields(invharv_record)
+            hub_fields = count_non_empty_fields(harvhub_record)
+            
+            base_record = investor_data.copy()
+            
+            if inv_fields > all_fields:
+                base_record, _, _ = merge_investor_records(
+                    {inv_id: invharv_record}, 
+                    {inv_id: base_record}, 
+                    "INVHARV -> BASE"
+                )
+                base_record = base_record[inv_id]
+            
+            if hub_fields > all_fields:
+                base_record, _, _ = merge_investor_records(
+                    {inv_id: harvhub_record}, 
+                    {inv_id: base_record}, 
+                    "HARVHUB -> BASE"
+                )
+                base_record = base_record[inv_id]
+            
+            working_all[inv_id] = base_record.copy()
+            
+            if is_grid:
+                working_harvhub[inv_id] = base_record.copy()
+                category_stats["grid_moved_to_harvhub"] += 1
+                print(f"      ➡️  Grid trader {inv_id} -> HARVHUB")
+            else:
+                working_invharv[inv_id] = base_record.copy()
+                category_stats["non_grid_moved_to_invharv"] += 1
+                print(f"      ➡️  Non-grid {inv_id} -> INVHARV")
+            
+            category_stats["existing_processed"] += 1
+            
+            if invharv_record:
+                invharv_merged, missing, updated = merge_investor_records(
+                    {inv_id: base_record},
+                    {inv_id: invharv_record},
+                    "BASE -> INVHARV"
+                )
+                category_stats["fields_filled"] += missing
+                category_stats["fields_updated"] += updated
+        
+        # PART 2: HANDLE NEW INVESTORS
+        existing_in_sources = set(working_invharv.keys()) | set(working_harvhub.keys())
+        new_investors = all_investor_ids - existing_in_sources
+        
+        if new_investors:
+            print(f"\n   📦 Distributing {len(new_investors):,} new investors...")
+            
+            for inv_id in new_investors:
+                investor_data = working_all.get(inv_id, {})
+                
+                if not investor_data:
+                    continue
+                
+                if is_grid_trader(investor_data):
+                    working_harvhub[inv_id] = investor_data.copy()
+                    category_stats["new_grid_copied"] += 1
+                    category_stats["new_grid_ids"].append(inv_id)
+                    print(f"      ➡️  New grid trader {inv_id} -> HARVHUB")
+                else:
+                    working_invharv[inv_id] = investor_data.copy()
+                    category_stats["new_non_grid_copied"] += 1
+                    category_stats["new_non_grid_ids"].append(inv_id)
+                    print(f"      ➡️  New non-grid {inv_id} -> INVHARV")
+        
+        updated_all = working_all.copy()
+        
+        return working_invharv, working_harvhub, updated_all, category_stats
+    
+    def sync_fetched_to_updated(fetched_invharv, fetched_harvhub, updated_invharv, updated_harvhub):
+        """
+        Sync data from fetched files to updated files.
+        FETCHED data takes precedence over UPDATED data.
+        """
+        print("\n🔄 SYNCING FETCHED → UPDATED (FETCHED TAKES PRECEDENCE)")
+        print("-"*40)
+        
+        sync_stats = {
+            "records_updated": 0,
+            "fields_synced": 0,
+            "records_added": 0,
+            "field_changes": {}
+        }
+        
+        # Sync INVHARV fetched → INVHARV updated
+        print("\n   📤 Syncing INVHARV fetched → INVHARV updated...")
+        updated_invharv_working = updated_invharv.copy() if updated_invharv else {}
+        
+        for inv_id, fetched_record in fetched_invharv.items():
+            if inv_id in updated_invharv_working:
+                # Update existing record with fetched data (FETCHED takes precedence)
+                updated_record = updated_invharv_working[inv_id]
+                fields_changed = 0
+                changed_fields = []
+                
+                for field, value in fetched_record.items():
+                    if field == 'id':
+                        continue
+                    # Fetched data overrides updated data
+                    if field not in updated_record or updated_record[field] != value:
+                        updated_record[field] = value
+                        fields_changed += 1
+                        changed_fields.append(field)
+                
+                if fields_changed > 0:
+                    updated_invharv_working[inv_id] = updated_record
+                    sync_stats["records_updated"] += 1
+                    sync_stats["fields_synced"] += fields_changed
+                    sync_stats["field_changes"][f"INVHARV_{inv_id}"] = {
+                        'fields': changed_fields,
+                        'count': fields_changed
+                    }
+                    print(f"      ✅ Updated investor {inv_id} in INVHARV updated ({fields_changed} fields)")
+            else:
+                # Add new record from fetched
+                updated_invharv_working[inv_id] = fetched_record.copy()
+                sync_stats["records_added"] += 1
+                fields_count = len(fetched_record) - 1
+                sync_stats["fields_synced"] += fields_count
+                sync_stats["field_changes"][f"INVHARV_{inv_id}"] = {
+                    'fields': list(fetched_record.keys()),
+                    'count': fields_count,
+                    'status': 'added'
+                }
+                print(f"      ➕ Added investor {inv_id} to INVHARV updated ({fields_count} fields)")
+        
+        # Sync HARVHUB fetched → HARVHUB updated
+        print("\n   📤 Syncing HARVHUB fetched → HARVHUB updated...")
+        updated_harvhub_working = updated_harvhub.copy() if updated_harvhub else {}
+        
+        for hub_id, fetched_record in fetched_harvhub.items():
+            if hub_id in updated_harvhub_working:
+                # Update existing record with fetched data
+                updated_record = updated_harvhub_working[hub_id]
+                fields_changed = 0
+                changed_fields = []
+                
+                for field, value in fetched_record.items():
+                    if field == 'id':
+                        continue
+                    if field not in updated_record or updated_record[field] != value:
+                        updated_record[field] = value
+                        fields_changed += 1
+                        changed_fields.append(field)
+                
+                if fields_changed > 0:
+                    updated_harvhub_working[hub_id] = updated_record
+                    sync_stats["records_updated"] += 1
+                    sync_stats["fields_synced"] += fields_changed
+                    sync_stats["field_changes"][f"HARVHUB_{hub_id}"] = {
+                        'fields': changed_fields,
+                        'count': fields_changed
+                    }
+                    print(f"      ✅ Updated investor {hub_id} in HARVHUB updated ({fields_changed} fields)")
+            else:
+                # Add new record from fetched
+                updated_harvhub_working[hub_id] = fetched_record.copy()
+                sync_stats["records_added"] += 1
+                fields_count = len(fetched_record) - 1
+                sync_stats["fields_synced"] += fields_count
+                sync_stats["field_changes"][f"HARVHUB_{hub_id}"] = {
+                    'fields': list(fetched_record.keys()),
+                    'count': fields_count,
+                    'status': 'added'
+                }
+                print(f"      ➕ Added investor {hub_id} to HARVHUB updated ({fields_count} fields)")
+        
+        print(f"\n   📊 Sync summary:")
+        print(f"      Records updated: {sync_stats['records_updated']:,}")
+        print(f"      Records added: {sync_stats['records_added']:,}")
+        print(f"      Fields synced: {sync_stats['fields_synced']:,}")
+        
+        return updated_invharv_working, updated_harvhub_working, sync_stats
+    
+    try:
+        # ============================================
+        # LOAD ALL FILES
+        # ============================================
+        
+        print("\n📂 Loading files...")
+        print("-"*40)
+        
+        # Load fetched files
+        all_fetched = safe_json_load(ALL_FETCHED_INVESTORS)
+        invharv_fetched = safe_json_load(INVHARV_FETCHED_INVESTORS)
+        harvhub_fetched = safe_json_load(HARVHUB_FETCHED_INVESTORS)
+        
+        print(f"   ✅ Loaded ALL fetched: {len(all_fetched):,} records")
+        print(f"   ✅ Loaded INVHARV fetched: {len(invharv_fetched):,} records")
+        print(f"   ✅ Loaded HARVHUB fetched: {len(harvhub_fetched):,} records")
+        
+        # Load updated files
+        all_updated = safe_json_load(ALL_UPDATED_INVESTORS)
+        invharv_updated = safe_json_load(INVHARV_UPDATED_INVESTORS)
+        harvhub_updated = safe_json_load(HARVHUB_UPDATED_INVESTORS)
+        
+        print(f"   ✅ Loaded ALL updated: {len(all_updated):,} records")
+        print(f"   ✅ Loaded INVHARV updated: {len(invharv_updated):,} records")
+        print(f"   ✅ Loaded HARVHUB updated: {len(harvhub_updated):,} records")
+        
+        # ============================================
+        # PROCESS FETCHED FILES
+        # ============================================
+        
+        print("\n" + "="*70)
+        print("STEP 1: PROCESSING FETCHED FILES".center(70))
+        print("="*70)
+        
+        updated_invharv_fetched, updated_harvhub_fetched, updated_all_fetched, fetched_stats = process_category(
+            all_fetched, invharv_fetched, harvhub_fetched, "FETCHED", "fetched"
+        )
+        
+        stats["fetched"]["existing_investors"]["processed"] = fetched_stats["existing_processed"]
+        stats["fetched"]["existing_investors"]["fields_filled"] = fetched_stats["fields_filled"]
+        stats["fetched"]["existing_investors"]["fields_updated"] = fetched_stats["fields_updated"]
+        stats["fetched"]["grid_traders_moved_to_harvhub"] = fetched_stats["grid_moved_to_harvhub"]
+        stats["fetched"]["non_grid_traders_moved_to_invharv"] = fetched_stats["non_grid_moved_to_invharv"]
+        stats["fetched"]["new_grid_traders"]["copied_to_harvhub"] = fetched_stats["new_grid_copied"]
+        stats["fetched"]["new_grid_traders"]["ids"] = fetched_stats["new_grid_ids"]
+        stats["fetched"]["new_non_grid_traders"]["copied_to_invharv"] = fetched_stats["new_non_grid_copied"]
+        stats["fetched"]["new_non_grid_traders"]["ids"] = fetched_stats["new_non_grid_ids"]
+        
+        # ============================================
+        # VALIDATE AND CLEANUP FETCHED FILES
+        # ============================================
+        
+        cleaned_invharv_fetched, cleaned_harvhub_fetched, cleaned_all_fetched, fetched_cleanup = validate_and_cleanup(
+            updated_invharv_fetched, updated_harvhub_fetched, updated_all_fetched, 
+            "FETCHED", "fetched", stats["fetched"]
+        )
+        
+        # ============================================
+        # PROCESS UPDATED FILES (USING FETCHED AS SOURCE)
+        # ============================================
+        
+        print("\n" + "="*70)
+        print("STEP 2: PROCESSING UPDATED FILES".center(70))
+        print("="*70)
+        
+        # Process updated files using fetched data as the source
+        updated_invharv_updated, updated_harvhub_updated, updated_all_updated, updated_stats = process_category(
+            all_updated, invharv_updated, harvhub_updated, "UPDATED", "updated"
+        )
+        
+        stats["updated"]["existing_investors"]["processed"] = updated_stats["existing_processed"]
+        stats["updated"]["existing_investors"]["fields_filled"] = updated_stats["fields_filled"]
+        stats["updated"]["existing_investors"]["fields_updated"] = updated_stats["fields_updated"]
+        stats["updated"]["grid_traders_moved_to_harvhub"] = updated_stats["grid_moved_to_harvhub"]
+        stats["updated"]["non_grid_traders_moved_to_invharv"] = updated_stats["non_grid_moved_to_invharv"]
+        stats["updated"]["new_grid_traders"]["copied_to_harvhub"] = updated_stats["new_grid_copied"]
+        stats["updated"]["new_grid_traders"]["ids"] = updated_stats["new_grid_ids"]
+        stats["updated"]["new_non_grid_traders"]["copied_to_invharv"] = updated_stats["new_non_grid_copied"]
+        stats["updated"]["new_non_grid_traders"]["ids"] = updated_stats["new_non_grid_ids"]
+        
+        # ============================================
+        # VALIDATE AND CLEANUP UPDATED FILES
+        # ============================================
+        
+        cleaned_invharv_updated, cleaned_harvhub_updated, cleaned_all_updated, updated_cleanup = validate_and_cleanup(
+            updated_invharv_updated, updated_harvhub_updated, updated_all_updated,
+            "UPDATED", "updated", stats["updated"]
+        )
+        
+        # ============================================
+        # SYNC FETCHED → UPDATED (FETCHED TAKES PRECEDENCE)
+        # ============================================
+        
+        print("\n" + "="*70)
+        print("STEP 3: SYNCING FETCHED → UPDATED (FETCHED PRIORITY)".center(70))
+        print("="*70)
+        
+        synced_invharv_updated, synced_harvhub_updated, sync_stats = sync_fetched_to_updated(
+            cleaned_invharv_fetched, cleaned_harvhub_fetched, 
+            cleaned_invharv_updated, cleaned_harvhub_updated
+        )
+        
+        stats["sync_from_fetched_to_updated"] = sync_stats
+        
+        # ============================================
+        # UPDATE ALL_UPDATED WITH SYNCED DATA
+        # ============================================
+        
+        print("\n🔄 Updating ALL_UPDATED with synced data...")
+        print("-"*40)
+        
+        # Create final ALL_UPDATED by merging synced invharv and harvhub
+        final_all_updated = {}
+        
+        # Add all INVHARV updated records
+        for inv_id, inv_data in synced_invharv_updated.items():
+            final_all_updated[inv_id] = inv_data.copy()
+        
+        # Add all HARVHUB updated records
+        for hub_id, hub_data in synced_harvhub_updated.items():
+            if hub_id in final_all_updated:
+                # Merge if exists
+                final_all_updated[hub_id], _, _ = merge_investor_records(
+                    {hub_id: hub_data},
+                    {hub_id: final_all_updated[hub_id]},
+                    "HARVHUB -> ALL_UPDATED"
+                )
+                final_all_updated[hub_id] = final_all_updated[hub_id][hub_id]
+            else:
+                final_all_updated[hub_id] = hub_data.copy()
+        
+        print(f"   ✅ Created ALL_UPDATED with {len(final_all_updated):,} records")
+        
+        # ============================================
+        # SAVE ALL FILES
+        # ============================================
+        
+        print("\n💾 Saving files...")
+        print("-"*40)
+        
+        # Save fetched files
+        if safe_json_write(ALL_FETCHED_INVESTORS, cleaned_all_fetched):
+            print(f"   ✅ Saved ALL fetched: {len(cleaned_all_fetched):,} records")
+            stats["fetched"]["all_count"] = len(cleaned_all_fetched)
+        
+        if safe_json_write(INVHARV_FETCHED_INVESTORS, cleaned_invharv_fetched):
+            print(f"   ✅ Saved INVHARV fetched: {len(cleaned_invharv_fetched):,} records")
+            stats["fetched"]["invharv_count"] = len(cleaned_invharv_fetched)
+        
+        if safe_json_write(HARVHUB_FETCHED_INVESTORS, cleaned_harvhub_fetched):
+            print(f"   ✅ Saved HARVHUB fetched: {len(cleaned_harvhub_fetched):,} records")
+            stats["fetched"]["harvhub_count"] = len(cleaned_harvhub_fetched)
+        
+        # Save updated files (using synced data)
+        if safe_json_write(ALL_UPDATED_INVESTORS, final_all_updated):
+            print(f"   ✅ Saved ALL updated: {len(final_all_updated):,} records")
+            stats["updated"]["all_count"] = len(final_all_updated)
+        
+        if safe_json_write(INVHARV_UPDATED_INVESTORS, synced_invharv_updated):
+            print(f"   ✅ Saved INVHARV updated: {len(synced_invharv_updated):,} records")
+            stats["updated"]["invharv_count"] = len(synced_invharv_updated)
+        
+        if safe_json_write(HARVHUB_UPDATED_INVESTORS, synced_harvhub_updated):
+            print(f"   ✅ Saved HARVHUB updated: {len(synced_harvhub_updated):,} records")
+            stats["updated"]["harvhub_count"] = len(synced_harvhub_updated)
+        
+        # ============================================
+        # SUMMARY
+        # ============================================
+        
+        stats["processing_success"] = True
+        
+        print("\n" + "="*70)
+        print(f"SYNC AND DISTRIBUTION SUMMARY".center(70))
+        print("="*70)
+        
+        print(f"\n📥 FETCHED FILES SUMMARY:")
+        print(f"   🔄 Existing investors processed: {stats['fetched']['existing_investors']['processed']:,}")
+        print(f"      📝 Missing fields filled: {stats['fetched']['existing_investors']['fields_filled']:,}")
+        print(f"      🔄 Fields updated: {stats['fetched']['existing_investors']['fields_updated']:,}")
+        print(f"   🔀 Grid traders moved to HARVHUB: {stats['fetched']['grid_traders_moved_to_harvhub']:,}")
+        print(f"   🔀 Non-grid traders moved to INVHARV: {stats['fetched']['non_grid_traders_moved_to_invharv']:,}")
+        print(f"   📦 New grid traders copied to HARVHUB: {stats['fetched']['new_grid_traders']['copied_to_harvhub']:,}")
+        if stats['fetched']['new_grid_traders']['ids']:
+            print(f"      IDs: {', '.join(stats['fetched']['new_grid_traders']['ids'][:10])}")
+            if len(stats['fetched']['new_grid_traders']['ids']) > 10:
+                print(f"      ... and {len(stats['fetched']['new_grid_traders']['ids']) - 10} more")
+        print(f"   📦 New non-grid traders copied to INVHARV: {stats['fetched']['new_non_grid_traders']['copied_to_invharv']:,}")
+        if stats['fetched']['new_non_grid_traders']['ids']:
+            print(f"      IDs: {', '.join(stats['fetched']['new_non_grid_traders']['ids'][:10])}")
+            if len(stats['fetched']['new_non_grid_traders']['ids']) > 10:
+                print(f"      ... and {len(stats['fetched']['new_non_grid_traders']['ids']) - 10} more")
+        
+        print(f"\n   🧹 CLEANUP SUMMARY (FETCHED):")
+        print(f"      🗑️  Removed from INVHARV: {stats['fetched']['cleanup']['removed_from_invharv']}")
+        print(f"      🗑️  Removed from HARVHUB: {stats['fetched']['cleanup']['removed_from_harvhub']}")
+        
+        print(f"\n   📊 Final counts:")
+        print(f"      ALL: {stats['fetched']['all_count']:,} investors")
+        print(f"      INVHARV: {stats['fetched']['invharv_count']:,} investors")
+        print(f"      HARVHUB: {stats['fetched']['harvhub_count']:,} investors")
+        
+        print(f"\n📤 UPDATED FILES SUMMARY:")
+        print(f"   🔄 Existing investors processed: {stats['updated']['existing_investors']['processed']:,}")
+        print(f"      📝 Missing fields filled: {stats['updated']['existing_investors']['fields_filled']:,}")
+        print(f"      🔄 Fields updated: {stats['updated']['existing_investors']['fields_updated']:,}")
+        print(f"   🔀 Grid traders moved to HARVHUB: {stats['updated']['grid_traders_moved_to_harvhub']:,}")
+        print(f"   🔀 Non-grid traders moved to INVHARV: {stats['updated']['non_grid_traders_moved_to_invharv']:,}")
+        print(f"   📦 New grid traders copied to HARVHUB: {stats['updated']['new_grid_traders']['copied_to_harvhub']:,}")
+        if stats['updated']['new_grid_traders']['ids']:
+            print(f"      IDs: {', '.join(stats['updated']['new_grid_traders']['ids'][:10])}")
+            if len(stats['updated']['new_grid_traders']['ids']) > 10:
+                print(f"      ... and {len(stats['updated']['new_grid_traders']['ids']) - 10} more")
+        print(f"   📦 New non-grid traders copied to INVHARV: {stats['updated']['new_non_grid_traders']['copied_to_invharv']:,}")
+        if stats['updated']['new_non_grid_traders']['ids']:
+            print(f"      IDs: {', '.join(stats['updated']['new_non_grid_traders']['ids'][:10])}")
+            if len(stats['updated']['new_non_grid_traders']['ids']) > 10:
+                print(f"      ... and {len(stats['updated']['new_non_grid_traders']['ids']) - 10} more")
+        
+        print(f"\n   🧹 CLEANUP SUMMARY (UPDATED):")
+        print(f"      🗑️  Removed from INVHARV: {stats['updated']['cleanup']['removed_from_invharv']}")
+        print(f"      🗑️  Removed from HARVHUB: {stats['updated']['cleanup']['removed_from_harvhub']}")
+        
+        print(f"\n   📊 Final counts:")
+        print(f"      ALL: {stats['updated']['all_count']:,} investors")
+        print(f"      INVHARV: {stats['updated']['invharv_count']:,} investors")
+        print(f"      HARVHUB: {stats['updated']['harvhub_count']:,} investors")
+        
+        print(f"\n🔄 FETCHED → UPDATED SYNC SUMMARY:")
+        print(f"   📝 Records updated: {stats['sync_from_fetched_to_updated']['records_updated']:,}")
+        print(f"   ➕ Records added: {stats['sync_from_fetched_to_updated']['records_added']:,}")
+        print(f"   📊 Fields synced: {stats['sync_from_fetched_to_updated']['fields_synced']:,}")
+        
+        if stats["warnings"]:
+            print(f"\n⚠️ WARNINGS ({len(stats['warnings'])}):")
+            for warning in stats["warnings"]:
+                print(f"   - {warning}")
+        
+        if stats["errors"]:
+            print(f"\n❌ ERRORS ({len(stats['errors'])}):")
+            for error in stats["errors"]:
+                print(f"   - {error}")
+        
+        print(f"\n✅ Status : {'SUCCESS' if stats['processing_success'] else 'FAILED'}")
+        print(f"🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*70)
+        
+        return stats
+        
+    except Exception as e:
+        print(f"\n{'='*70}")
+        print(f"CRITICAL ERROR".center(70))
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n📜 Full Traceback:")
+        traceback.print_exc()
+        
+        stats["processing_success"] = False
+        stats["errors"].append(f"Critical error: {str(e)}")
+        return stats
+
 def move_fetched_investors():
     """
     Moves verified investors from fetched_investors.json to:
@@ -984,6 +2813,9 @@ def move_fetched_investors():
     Handles database values: "1"/1 = True, "0"/0 = False
     """
     repair_json_files()
+    restore_missing_fields()
+    restore_empty_investor_files()
+    sync_and_distribute_investors()
     
     import traceback
     import sys
@@ -12128,15 +13960,8 @@ def martingale_system(inv_id=None):
                 print(f"        │ Risk limit would be exceeded: ${required_risk:.2f} > ${stage_max_risk:.2f}")
                 print(f"        │ → Reduced volume from {required_volume:.2f} to {safe_volume:.2f} lots (risk: ${actual_risk:.2f})")
             
-            if is_exact_stage_completion and safe_volume < default_volume:
-                default_risk = calculate_risk(default_volume)
-                if default_risk and default_risk <= stage_max_risk:
-                    safe_volume = default_volume
-                    actual_risk = default_risk
-                    stats["used_minimum_risk"] = True
-                    print(f"        │ → Exact stage completion: using floor volume {default_volume:.2f} lots (risk: ${actual_risk:.2f})")
-                else:
-                    print(f"        │ Exact stage completion but floor volume would exceed risk limit - keeping reduced volume")
+            # ⭐ REMOVED: The section that reduces volume below default_volume
+            # The default risk floor is now enforced in the calling functions
             
             return safe_volume, risk_check_passed, actual_risk
 
@@ -12158,6 +13983,34 @@ def martingale_system(inv_id=None):
                 print(f"  │ Total to recover: ${total_recovery:.2f}")
             else:
                 total_recovery = recovery_amount
+            
+            # Get default risk from config - we need this to enforce minimum
+            default_risk_map = config.get("account_balance_default_risk_management", {})
+            default_min_risk_floor = None
+            
+            if default_risk_map:
+                for range_str, risk_value in default_risk_map.items():
+                    try:
+                        raw_range = range_str.split("_")[0]
+                        low_str, high_str = raw_range.split("-")
+                        low = float(low_str)
+                        high = float(high_str)
+                        
+                        if low <= current_balance <= high:
+                            default_min_risk_floor = float(risk_value)
+                            break
+                    except Exception:
+                        continue
+            
+            # If no default risk found, fall back to the config value
+            if default_min_risk_floor is None:
+                default_min_risk_floor = default_minimum_risk
+            
+            # Ensure recovery amount is at least the default risk floor
+            if total_recovery < default_min_risk_floor:
+                print(f"  │ ⚠️ Recovery amount ${total_recovery:.2f} is below default risk floor ${default_min_risk_floor:.2f}")
+                print(f"  │ → ENFORCING default risk floor: ${default_min_risk_floor:.2f}")
+                total_recovery = default_min_risk_floor
             
             orders_path, orders_data = load_limit_orders()
             if orders_path is None or orders_data is None:
@@ -12209,6 +14062,26 @@ def martingale_system(inv_id=None):
                         sample_order_type, stage_max_risk, is_exact_stage_completion, default_volume
                     )
                     
+                    # ⭐ CRITICAL: Enforce minimum volume based on default risk management
+                    # Calculate the minimum volume that achieves at least default_min_risk_floor
+                    if default_min_risk_floor > 0:
+                        min_volume_for_default_risk = default_min_risk_floor / (price_diff * contract_size)
+                        min_volume_for_default_risk = round(min_volume_for_default_risk, 2)
+                        
+                        # Apply volume step rounding
+                        volume_step = symbol_info.volume_step if symbol_info else 0.01
+                        steps = round(min_volume_for_default_risk / volume_step) if volume_step > 0 else 0
+                        min_volume_for_default_risk = max(0.01, round(steps * volume_step, 2))
+                        
+                        if safe_volume < min_volume_for_default_risk:
+                            print(f"  │ ⚠️ {symbol}: Safe volume {safe_volume:.2f} lots would create risk below default floor ${default_min_risk_floor:.2f}")
+                            print(f"  │ → ENFORCING minimum volume: {min_volume_for_default_risk:.2f} lots")
+                            safe_volume = min_volume_for_default_risk
+                            
+                            # Recalculate actual risk at enforced volume
+                            actual_risk = price_diff * safe_volume * contract_size
+                            risk_check_passed = (actual_risk <= stage_max_risk)
+                    
                     if safe_volume >= 0.01:
                         volumes_to_update[symbol] = safe_volume
                         status = "✓" if risk_check_passed else ""
@@ -12244,7 +14117,7 @@ def martingale_system(inv_id=None):
                 print(f"  ✗ Error: {e}")
                 stats["errors"] += 1
                 return False, {}
-        
+    
         def reset_limit_orders_to_default():
             """
             Reset all limit orders to default risk volume based on account_balance_default_risk_management.
@@ -12331,13 +14204,24 @@ def martingale_system(inv_id=None):
                     else:
                         target_volume = 0.01  # Minimum volume
                     
-                    # Apply volume constraints
+                    # Apply volume constraints - ENSURE minimum volume meets default risk
                     min_volume = symbol_info.volume_min
                     max_volume = symbol_info.volume_max
                     volume_step = symbol_info.volume_step
                     
                     steps = round(target_volume / volume_step) if volume_step > 0 else 0
                     target_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                    
+                    # ⭐ CRITICAL: Ensure target_volume achieves at least default_risk
+                    if default_risk > 0:
+                        min_volume_for_risk = default_risk / risk_per_lot
+                        min_volume_for_risk = round(min_volume_for_risk, 2)
+                        steps = round(min_volume_for_risk / volume_step) if volume_step > 0 else 0
+                        min_volume_for_risk = max(min_volume, round(steps * volume_step, 2))
+                        if target_volume < min_volume_for_risk:
+                            print(f"  │ ⚠️ {symbol}: Target volume {target_volume:.2f} would be below default risk floor")
+                            print(f"  │ → ENFORCING minimum volume: {min_volume_for_risk:.2f} lots")
+                            target_volume = min_volume_for_risk
                     
                     # Calculate the actual risk at target volume
                     actual_risk = price_diff * target_volume * symbol_info.trade_contract_size
@@ -15772,12 +17656,35 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} RECOVERY - ${current_stage_drawdown:.2f}")
             print(f"  Mode: {martingale_type.upper()}")
-            print(f"  Assumption: {martingale_assumption.upper()}")  # NEW
+            print(f"  Assumption: {martingale_assumption.upper()}")
             if martingale_assumption == "takeprofit_factor":
                 print(f"  └─ Using TP profit with drawdown deduction")
             else:
                 print(f"  └─ Using SL risk (standard behavior)")
             print(f"{'='*50}")
+            
+            # ========== EXTRACT DEFAULT RISK FLOOR ==========
+            default_risk_floor = None
+            default_risk_map = config.get("account_balance_default_risk_management", {})
+            if default_risk_map:
+                for range_str, risk_value in default_risk_map.items():
+                    try:
+                        raw_range = range_str.split("_")[0]
+                        low_str, high_str = raw_range.split("-")
+                        low = float(low_str)
+                        high = float(high_str)
+                        
+                        if low <= current_balance <= high:
+                            default_risk_floor = float(risk_value)
+                            break
+                    except Exception:
+                        continue
+
+            if default_risk_floor is None:
+                default_risk_floor = default_minimum_risk
+
+            print(f"\n  📊 Default Risk Floor:")
+            print(f"  │ Default risk floor enforced: ${default_risk_floor:.2f}")
             
             # ========== STEP 0: RECORD EXISTING AUTHORIZED ORDERS ==========
             print(f"\n  📋 STEP 0: Pre-Recovery Operations")
@@ -15822,7 +17729,8 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} COMPLETE")
             print(f"  │ Mode: {martingale_type.upper()}")
-            print(f"  │ Assumption: {martingale_assumption.upper()}")  # NEW
+            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            print(f"  │ Default risk floor: ${default_risk_floor:.2f}")
             print(f"  │ Pre-recorded orders: {record_result.get('recorded', 0)}")
             print(f"  │ Limit orders: {'✓' if limit_orders_updated else '−'}")
             print(f"  │ Pre-scaling: {'✓' if pre_scaling_updated else '−'}")
@@ -27024,6 +28932,306 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
+def process_single_investor_(inv_folder):
+    """
+    WORKER FUNCTION: Handles the entire pipeline for ONE investor.
+    Connects directly to MT5 using the investor's credentials.
+    """
+    global restricted_timerange_alert
+    
+    inv_id = inv_folder.name
+    print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
+    move_fetched_investors()
+    account_stats = {
+        "inv_id": inv_id, 
+        "success": False, 
+        "price_collection_stats": {},
+        "candle_fetch_stats": {},
+        "crosser_analysis_stats": {},
+        "trapped_analysis_stats": {},
+        "liquidator_analysis_stats": {},
+        "ranging_analysis_stats": {},
+        "order_placement_stats": {},
+        "risk_correction_stats": {},
+        "risk_audit_stats": {},
+        "symbols_filtered": 0,
+        "orders_filtered": 0,
+        "symbols_processed": 0,
+        "symbols_successful": 0,
+        "orders_placed": 0,
+        "counter_orders_placed": 0,
+        "total_active_orders": 0,
+        "orders_adjusted": 0,
+        "orders_removed": 0,
+        "current_candle_forming": False,
+        "bid_wins": 0,
+        "ask_wins": 0,
+        "trapped_candles_found": 0,
+        "symbols_with_trapped": 0,
+        "symbols_with_liquidator": 0,
+        "liquidator_candles_found": 0,
+        "bullish_liquidators": 0,
+        "bearish_liquidators": 0,
+        "symbols_ranging": 0,
+        "avg_ranging_cycles": 0,
+        "spread_check_skipped": False,
+        "spread_warning_details": None,
+        "restricted_timerange_purge": False,
+        "execution_skipped": False,
+        "skip_reason": None,
+        "account_type": "UNKNOWN",
+        "account_mode": "UNKNOWN",  
+        "is_real_account": False,
+        "grid_strategy_enabled": False,           # Track if grid strategy was enabled
+        "ohlc_strategy_enabled": False            # Track if OHLC strategy was enabled
+    }
+    
+    # 1. Extract structural demo permission policies from investor JSON log
+    allow_demo_processing = True 
+    try:
+        if Path(INVESTOR_USERS).exists():
+            with open(INVESTOR_USERS, 'r') as f:
+                investor_registry = json.load(f)
+            
+            user_meta = investor_registry.get(str(inv_id))
+            if user_meta:
+                demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
+                if str(demo_rule).strip().lower() in ["0", "false"]:
+                    allow_demo_processing = False
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
+                else:
+                    print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
+    except Exception as json_err:
+        print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
+
+    broker_cfg = usersdictionary.get(inv_id)
+    if not broker_cfg:
+        print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+        return account_stats
+
+    # =====================================================================
+    # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
+    # =====================================================================
+    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
+    fetched_json_path = Path(FETCHED_INVESTORS)
+    inv_str_id = str(inv_id)
+    
+    try:
+        investors_data = {}
+        if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
+            with open(fetched_json_path, 'r') as f_inv:
+                investors_data = json.load(f_inv)
+        
+        if inv_str_id not in investors_data:
+            investors_data[inv_str_id] = {}
+            
+        print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
+    except Exception as io_err:
+        print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
+    
+    # Always fire tracking file-movement tasks regardless of connection state
+    #move_fetched_investors()
+
+    # =====================================================================
+    # DIRECT MT5 INITIALIZATION WITH CREDENTIALS
+    # =====================================================================
+    delay = random.uniform(0.2, 1.5)
+    time.sleep(delay) 
+    
+    login_id = int(broker_cfg['LOGIN_ID'])
+    password_str = broker_cfg["PASSWORD"]
+    server_str = broker_cfg["SERVER"]
+    
+    configured_path = broker_cfg.get("Terminal_path", "")
+    init_successful = False
+    
+    # Attempt 1: Try to initialize with terminal path if provided
+    if configured_path:
+        terminal_path = os.path.abspath(configured_path)
+        if os.path.exists(terminal_path):
+            print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
+            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
+                init_successful = True
+                print(f"✅ MT5 initialized successfully with terminal path")
+            else:
+                print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
+        else:
+            print(f"⚠️ Terminal path does not exist: {terminal_path}")
+    
+    # Attempt 2: Fallback to default initialization without path
+    if not init_successful:
+        print(f"🔗 Attempting default MT5 initialization...")
+        if mt5.initialize(timeout=30000):
+            init_successful = True
+            print(f"✅ MT5 initialized successfully with default settings")
+        else:
+            print(f"⚠️ Failed default initialization: {mt5.last_error()}")
+
+    if not init_successful:
+        print(f"[FAIL] 🛑 Failed to initialize MT5 connection")
+        print(f"   Last Error: {mt5.last_error()}")
+        account_stats["skip_reason"] = "MT5 Initialization Failure"
+        return account_stats
+
+    # =====================================================================
+    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
+    # =====================================================================
+    try:
+        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
+        
+        # Shutdown any existing connection first to ensure clean state
+        mt5.shutdown()
+        time.sleep(1)
+        
+        # Re-initialize and login
+        if configured_path and os.path.exists(os.path.abspath(configured_path)):
+            if mt5.initialize(path=os.path.abspath(configured_path), timeout=60000, portable=True):
+                print(f"✅ Re-initialized with terminal path for login")
+            else:
+                print(f"⚠️ Re-initialization with path failed, trying default...")
+                mt5.initialize(timeout=30000)
+        else:
+            mt5.initialize(timeout=30000)
+        
+        
+        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
+        
+        # Verify account info
+        acc = mt5.account_info()
+        
+        if acc is None:
+            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"       Error: {mt5.last_error()}")
+            mt5.shutdown()
+            return account_stats
+
+        # =================================================================
+        # ACCOUNT TYPE IDENTIFICATION HIERARCHY
+        # =================================================================
+        is_real = False
+        type_label = "UNKNOWN"
+        mode_label = "demo"
+
+        if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            is_real = True
+            type_label = "REAL"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO:
+            is_real = False
+            type_label = "DEMO"
+        elif acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_CONTEST:
+            is_real = False
+            type_label = "CONTEST"
+        elif acc.margin_so_mode == mt5.ACCOUNT_STOPOUT_MODE_MONEY:
+            is_real = False
+            type_label = "DEMO (MONETARY SO FOOTPRINT)"
+        else:
+            server_upper = acc.server.upper() if acc.server else ""
+            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+                is_real = False
+                type_label = "DEMO (SERVER STR MATCH)"
+            else:
+                is_real = True
+                type_label = "REAL (FALLBACK)"
+
+        if is_real:
+            mode_label = "real"
+
+        account_stats["account_type"] = type_label
+        account_stats["account_mode"] = mode_label
+        account_stats["is_real_account"] = is_real
+        
+        print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
+        print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
+        print(f"[{inv_id}] Account Leverage: {acc.leverage}")
+
+        # Synchronize finalized account authentication parameters with database records
+        try:
+            if fetched_json_path.exists():
+                with open(fetched_json_path, 'r') as f_inv:
+                    investors_data = json.load(f_inv)
+                investors_data[inv_str_id]["account_mode"] = mode_label
+                investors_data[inv_str_id]["account_balance"] = acc.balance
+                investors_data[inv_str_id]["account_currency"] = acc.currency
+                investors_data[inv_str_id]["account_leverage"] = acc.leverage
+                with open(fetched_json_path, 'w') as f_inv:
+                    json.dump(investors_data, f_inv, indent=2)
+        except Exception as update_err:
+            print(f"[WARN] Non-critical error updating tracking JSON: {str(update_err)}")
+
+        # Safety policy gate check
+        if not is_real and not allow_demo_processing:
+            print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
+            account_stats["execution_skipped"] = True
+            account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
+            mt5.shutdown()
+            return account_stats
+
+        
+        # =====================================================================
+        # READ CONFIGURATION FROM ACCOUNTMANAGEMENT.JSON
+        # =====================================================================
+        grid_strategy_enabled = False
+        ohlc_strategy_enabled = False
+        
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            acc_mgmt_path = inv_root / "accountmanagement.json"
+            
+            if acc_mgmt_path.exists():
+                with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                settings = config.get("settings", {})
+                
+                # Read grid strategy setting
+                grid_strategy_enabled = settings.get("symbols_grid_strategy", False)
+                account_stats["grid_strategy_enabled"] = grid_strategy_enabled
+                
+                # Read OHLC/directional bias strategy setting
+                ohlc_strategy_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
+                account_stats["ohlc_strategy_enabled"] = ohlc_strategy_enabled
+                
+                # Print configuration status
+                print(f"\n{'='*10} 📋 CONFIGURATION STATUS FOR {inv_id} {'='*10}")
+                if ohlc_strategy_enabled:
+                    print(f"✅ fetch_ohlc_data_and_directional_bias_for_investor = TRUE - OHLC/Directional functions will be executed")
+                else:
+                    print(f"⚠️ fetch_ohlc_data_and_directional_bias_for_investor = FALSE - OHLC/Directional functions will be SKIPPED")
+                
+                if grid_strategy_enabled:
+                    print(f"✅ symbols_grid_strategy = TRUE - Grid functions will be executed")
+                else:
+                    print(f"⚠️ symbols_grid_strategy = FALSE - Grid functions will be SKIPPED")
+                print(f"{'='*55}\n")
+                
+            else:
+                print(f"⚠️ [{inv_id}] accountmanagement.json not found - All conditional functions will be SKIPPED")
+                account_stats["grid_strategy_enabled"] = False
+                account_stats["ohlc_strategy_enabled"] = False
+                
+        except Exception as config_err:
+            print(f"⚠️ [{inv_id}] Error reading config: {config_err} - Conditional functions will be SKIPPED")
+            account_stats["grid_strategy_enabled"] = False
+            account_stats["ohlc_strategy_enabled"] = False
+                
+        # =====================================================================
+        # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
+        # =====================================================================
+        martingale_system(inv_id=inv_id)
+        
+        mt5.shutdown()
+        
+    except Exception as e:
+        print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        try:
+            mt5.shutdown()
+        except:
+            pass
+    
+    return account_stats
+
 def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
@@ -27099,6 +29307,7 @@ def process_single_investor(inv_folder):
     broker_cfg = usersdictionary.get(inv_id)
     if not broker_cfg:
         print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
+        move_fetched_investors()
         return account_stats
 
     # =====================================================================
@@ -27557,7 +29766,7 @@ def main_once():
             
             # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
             if not all_investor_folders:
-                print(" └─ 🔘 No investor directories found during loop. Executing move_fetched_investors()...")
+                print(" └─ 🔘 No investor directories found during loop. Moving fetched investors...")
                 try:
                     move_fetched_investors()
                     all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
@@ -27565,8 +29774,8 @@ def main_once():
                     print(f" [ERROR] Fallback shift error: {inner_err}")
                 
                 if not all_investor_folders:
-                    print(" ⏳ Directory empty. Sleeping for 10 seconds before next scan...")
-                    time.sleep(10)
+                    print(" ⏳ Directory empty. Moving fetched investors...")
+                    move_fetched_investors()
                     continue
 
             # Display system info for awareness only (no limiting)
@@ -27675,7 +29884,7 @@ def main_loop():
             
             # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
             if not all_investor_folders:
-                print(" └─ 🔘 No investor directories found during loop. Executing move_fetched_investors()...")
+                print(" └─ 🔘 No investor directories found during loop. Moving fetched investors...")
                 try:
                     move_fetched_investors()
                     all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
@@ -27683,8 +29892,8 @@ def main_loop():
                     print(f" [ERROR] Fallback shift error: {inner_err}")
                 
                 if not all_investor_folders:
-                    print(" ⏳ Directory empty. Sleeping for 10 seconds before next scan...")
-                    time.sleep(10)
+                    print(" ⏳ Directory empty. Moving fetched investors...")
+                    move_fetched_investors()
                     continue
 
             # Display system info for awareness only (no limiting)
