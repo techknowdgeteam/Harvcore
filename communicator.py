@@ -34,10 +34,179 @@ INVHARV_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\updated_in
 HARVHUB_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_harvhub_investors.json"
 HARVHUB_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
 ALL_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
-ALL_FETCHED_INVESTORS_BACKUP = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors_backup.json"
+ALL_INVESTORS_BACKUP = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors_backup.json"
 ALL_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\updated_investors.json"
 
-
+def delete_investor_files():
+    """
+    Delete all files in DEFAULT_PATH that contain 'investor' or 'investors' in their filename.
+    Recursively searches through all subfolders. Only deletes files, not folders.
+    Case-insensitive search.
+    
+    This function:
+    1. Recursively scans DEFAULT_PATH and all subdirectories
+    2. Checks each filename (case-insensitive) for 'investor' or 'investors'
+    3. Deletes matching files
+    4. Provides detailed logging and statistics
+    
+    Returns:
+        dict: Statistics about the deletion process
+    """
+    print("\n" + "="*70)
+    print(f"  DELETE INVESTOR FILES (RECURSIVE)")
+    print("="*70)
+    print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("-"*70)
+    print(f"  Target Path : {DEFAULT_PATH}")
+    print(f"  Pattern     : *investor* or *investors* (case-insensitive)")
+    print(f"  Mode        : RECURSIVE (searches all subfolders)")
+    print("="*70)
+    
+    stats = {
+        "processing_success": False,
+        "path": DEFAULT_PATH,
+        "path_exists": False,
+        "files_scanned": 0,
+        "files_deleted": 0,
+        "files_skipped": 0,
+        "folders_scanned": 0,
+        "deleted_files": [],
+        "skipped_files": [],
+        "folders_with_deletions": [],
+        "errors": [],
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Check if path exists
+    if not os.path.exists(DEFAULT_PATH):
+        error_msg = f"Path does not exist: {DEFAULT_PATH}"
+        print(f"  ❌ {error_msg}")
+        stats["errors"].append(error_msg)
+        stats["processing_success"] = False
+        return stats
+    
+    stats["path_exists"] = True
+    print(f"  ✅ Path exists: {DEFAULT_PATH}")
+    print(f"\n  🔍 Starting recursive scan...")
+    print("-"*70)
+    
+    try:
+        # Pattern to match 'investor' or 'investors' (case-insensitive)
+        pattern = re.compile(r'investor(s)?', re.IGNORECASE)
+        
+        # Walk through all directories recursively
+        for root, dirs, files in os.walk(DEFAULT_PATH):
+            # Track the current folder
+            current_folder = os.path.basename(root)
+            stats["folders_scanned"] += 1
+            
+            # Show current folder being processed (only if it has investor files)
+            folder_has_matches = False
+            
+            # Process each file in the current folder
+            for file in files:
+                stats["files_scanned"] += 1
+                file_path = os.path.join(root, file)
+                relative_path = os.path.relpath(file_path, DEFAULT_PATH)
+                
+                # Check if filename contains 'investor' or 'investors'
+                if pattern.search(file):
+                    try:
+                        # Delete the file
+                        os.remove(file_path)
+                        stats["files_deleted"] += 1
+                        stats["deleted_files"].append(relative_path)
+                        
+                        # Track which folders had deletions
+                        if root not in stats["folders_with_deletions"]:
+                            stats["folders_with_deletions"].append(root)
+                            folder_has_matches = True
+                            # Print folder header when first deletion found
+                            print(f"\n  📁 Processing: {relative_path.split(os.sep)[0] if os.sep in relative_path else '.'}")
+                            print(f"     Path: {root}")
+                        
+                        print(f"     🗑️  DELETED: {file}")
+                        
+                    except Exception as e:
+                        error_msg = f"Error deleting {relative_path}: {str(e)}"
+                        print(f"     ❌ {error_msg}")
+                        stats["errors"].append(error_msg)
+                        stats["files_skipped"] += 1
+                        stats["skipped_files"].append({
+                            "name": relative_path,
+                            "reason": f"Error: {str(e)}"
+                        })
+                else:
+                    # File doesn't match pattern - only log if verbose mode is needed
+                    # Uncomment the line below for very verbose output
+                    # print(f"     ℹ️  Skipped (no match): {file}")
+                    stats["files_skipped"] += 1
+                    stats["skipped_files"].append({
+                        "name": relative_path,
+                        "reason": "No match"
+                    })
+            
+            # Print summary for this folder if it had matches
+            if folder_has_matches:
+                print(f"     ✅ Folder processed: {len([f for f in files if pattern.search(f)])} files deleted")
+        
+        stats["processing_success"] = True
+        
+        # ============================================================
+        # FINAL SUMMARY
+        # ============================================================
+        print("\n" + "="*70)
+        print(f"  DELETION SUMMARY")
+        print("="*70)
+        print(f"\n  📂 Base Path: {DEFAULT_PATH}")
+        print(f"  📁 Folders scanned: {stats['folders_scanned']}")
+        print(f"  📄 Total files scanned: {stats['files_scanned']}")
+        print(f"  🗑️  Files deleted: {stats['files_deleted']}")
+        print(f"  ℹ️  Files skipped: {stats['files_skipped']}")
+        print(f"  📁 Folders with deletions: {len(stats['folders_with_deletions'])}")
+        
+        if stats['files_deleted'] > 0:
+            print(f"\n  📋 Deleted files ({stats['files_deleted']}):")
+            # Group deleted files by folder for better readability
+            deleted_by_folder = {}
+            for filepath in stats['deleted_files']:
+                folder = os.path.dirname(filepath) if os.path.dirname(filepath) else "."
+                if folder not in deleted_by_folder:
+                    deleted_by_folder[folder] = []
+                deleted_by_folder[folder].append(os.path.basename(filepath))
+            
+            for folder, files in sorted(deleted_by_folder.items()):
+                print(f"\n     📁 {folder}:")
+                for file in files:
+                    print(f"        - {file}")
+        
+        if stats['errors']:
+            print(f"\n  ❌ Errors ({len(stats['errors'])}):")
+            for error in stats['errors']:
+                print(f"     - {error}")
+        
+        print(f"\n  ✅ Status : {'SUCCESS' if stats['processing_success'] else 'FAILED'}")
+        print(f"  🕐 Time   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("="*70)
+        
+        return stats
+        
+    except Exception as e:
+        print(f"\n{'='*70}")
+        print(f"   CRITICAL ERROR")
+        print(f"{'='*70}")
+        print(f"  Error Type : {type(e).__name__}")
+        print(f"  Message    : {str(e)}")
+        print(f"{'='*70}")
+        
+        import traceback
+        print(f"\n  📜 Full Traceback:")
+        traceback.print_exc()
+        
+        stats["processing_success"] = False
+        stats["errors"].append(f"Critical error: {str(e)}")
+        return stats
+   
 def work_only_in_specific_timerange():
     """
     Function: Checks if current time falls within any of the allowed work time ranges
@@ -50,6 +219,11 @@ def work_only_in_specific_timerange():
     If 'from' or 'to' values parse to 0 (e.g., "0", "0.00", "0:00 am", "00:00"), 
     it overrides all restrictions and assumes work is always allowed.
     
+    Features:
+    - Automatic backup of working hours data to workinghours_backup.txt
+    - Self-repair: If JSON is corrupted, restores from backup
+    - Maintains multiple backup versions
+    
     Returns:
         dict: Statistics about the time range check including whether function should work
     """
@@ -58,6 +232,7 @@ def work_only_in_specific_timerange():
     from datetime import datetime
     from pathlib import Path
     import json
+    import shutil
     
     print(f"\n{'='*10} ⏰ WORK TIME CHECK (Only work during specified hours) {'='*10}")
     
@@ -76,32 +251,159 @@ def work_only_in_specific_timerange():
         "time_windows": [],
         "errors": [],
         "config_path_checked": str(DEFAULT_ACCOUNTMANAGEMENT),
-        "json_structure_found": None
+        "json_structure_found": None,
+        "backup_restored": False,
+        "backup_created": False
     }
     
-    # Load default configuration
+    # Define backup file path (same directory as config)
+    config_path = Path(DEFAULT_ACCOUNTMANAGEMENT)
+    backup_path = config_path.parent / "workinghours_backup.txt"
+    temp_backup_path = config_path.parent / "workinghours_backup_temp.txt"
+    
+    # --- FUNCTION TO LOAD JSON WITH ERROR HANDLING ---
+    def load_json_config(file_path):
+        """Attempt to load JSON config, return (config_data, error)"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f), None
+        except json.JSONDecodeError as e:
+            return None, f"JSON decode error: {e}"
+        except Exception as e:
+            return None, f"File read error: {e}"
+    
+    # --- FUNCTION TO RESTORE FROM BACKUP ---
+    def restore_from_backup():
+        """Restore config from backup file. Returns (success, error_message)"""
+        try:
+            if not backup_path.exists():
+                return False, f"Backup file not found: {backup_path}"
+            
+            print(f"   🔧 Attempting to restore from backup: {backup_path}")
+            
+            # Read backup data
+            with open(backup_path, 'r', encoding='utf-8') as f:
+                backup_data = f.read()
+            
+            # Verify backup contains valid JSON
+            try:
+                backup_json = json.loads(backup_data)
+            except json.JSONDecodeError as e:
+                return False, f"Backup file contains invalid JSON: {e}"
+            
+            # Write backup data to config file
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.write(backup_data)
+            
+            print(f"   ✅ Config restored from backup successfully")
+            return True, None
+            
+        except Exception as e:
+            return False, f"Failed to restore from backup: {e}"
+    
+    # --- FUNCTION TO CREATE BACKUP ---
+    def create_backup(config_data):
+        """Create backup of current config. Returns (success, error_message)"""
+        try:
+            # Ensure backup directory exists
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Convert to JSON string with proper formatting
+            backup_content = json.dumps(config_data, indent=4, ensure_ascii=False)
+            
+            # Check if backup already exists
+            if backup_path.exists():
+                # Create temporary backup first (for safety)
+                shutil.copy2(backup_path, temp_backup_path)
+            
+            # Write new backup
+            with open(backup_path, 'w', encoding='utf-8') as f:
+                f.write(backup_content)
+            
+            # Remove temp backup if exists
+            if temp_backup_path.exists():
+                temp_backup_path.unlink()
+            
+            print(f"   ✅ Backup created: {backup_path}")
+            return True, None
+            
+        except Exception as e:
+            # Restore temp backup if it exists
+            if temp_backup_path.exists():
+                shutil.copy2(temp_backup_path, backup_path)
+                temp_backup_path.unlink()
+            return False, f"Failed to create backup: {e}"
+    
+    # --- LOAD CONFIGURATION WITH AUTO-REPAIR ---
     default_config = None
-    default_config_path = Path(DEFAULT_ACCOUNTMANAGEMENT)
     
-    if not default_config_path.exists():
-        print(f"    Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
-        stats["errors"].append(f"Default config not found: {DEFAULT_ACCOUNTMANAGEMENT}")
-        stats["processing_success"] = True  
-        stats["should_work"] = True  
-        stats["json_structure_found"] = "FILE_NOT_FOUND"
-        return stats
+    # Try to load config file
+    if not config_path.exists():
+        print(f"    Config file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+        stats["errors"].append(f"Config file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+        
+        # Try to restore from backup
+        restored, error = restore_from_backup()
+        if restored:
+            # Reload the restored config
+            default_config, load_error = load_json_config(config_path)
+            if default_config:
+                stats["backup_restored"] = True
+                stats["json_structure_found"] = "RESTORED_FROM_BACKUP"
+                print(f"   ✅ Config restored from backup successfully")
+            else:
+                stats["errors"].append(f"Failed to load restored config: {load_error}")
+                stats["processing_success"] = True
+                stats["should_work"] = True
+                stats["json_structure_found"] = "RESTORE_FAILED"
+                return stats
+        else:
+            stats["errors"].append(f"Backup restoration failed: {error}")
+            stats["processing_success"] = True
+            stats["should_work"] = True
+            stats["json_structure_found"] = "FILE_AND_BACKUP_NOT_FOUND"
+            return stats
+    else:
+        # Config exists, try to load it
+        default_config, load_error = load_json_config(config_path)
+        
+        if default_config is None:
+            # Config exists but is corrupted
+            print(f"    Config file corrupted: {load_error}")
+            stats["errors"].append(f"Config file corrupted: {load_error}")
+            
+            # Try to restore from backup
+            restored, restore_error = restore_from_backup()
+            if restored:
+                # Reload the restored config
+                default_config, reload_error = load_json_config(config_path)
+                if default_config:
+                    stats["backup_restored"] = True
+                    stats["json_structure_found"] = "RESTORED_FROM_BACKUP"
+                    print(f"   ✅ Config restored from backup successfully")
+                else:
+                    stats["errors"].append(f"Failed to load restored config: {reload_error}")
+                    stats["processing_success"] = True
+                    stats["should_work"] = True
+                    stats["json_structure_found"] = "RESTORE_LOAD_FAILED"
+                    return stats
+            else:
+                stats["errors"].append(f"Backup restoration failed: {restore_error}")
+                stats["processing_success"] = True
+                stats["should_work"] = True
+                stats["json_structure_found"] = "CORRUPTED_AND_NO_BACKUP"
+                return stats
     
-    try:
-        with open(default_config_path, 'r', encoding='utf-8') as f:
-            default_config = json.load(f)
-        print(f"   ✅ Config file loaded successfully")
-    except Exception as e:
-        print(f"    Error loading default config: {e}")
-        stats["errors"].append(f"Error loading default config: {e}")
-        stats["processing_success"] = True
-        stats["should_work"] = True  
-        stats["json_structure_found"] = "ERROR_LOADING"
-        return stats
+    # --- CREATE BACKUP IF CONFIG LOADED SUCCESSFULLY ---
+    if default_config is not None:
+        backup_success, backup_error = create_backup(default_config)
+        if backup_success:
+            stats["backup_created"] = True
+        else:
+            stats["errors"].append(f"Backup creation warning: {backup_error}")
+            print(f"   ⚠️ Backup creation failed: {backup_error}")
+    
+    print(f"   ✅ Config file loaded successfully")
     
     # --- DISPLAY JSON STRUCTURE FOUND ---
     print(f"\n   📋 JSON Structure Analysis:")
@@ -306,7 +608,10 @@ def work_only_in_specific_timerange():
     # --- FINAL SUMMARY ---
     print(f"\n{'='*10} 📊 SUMMARY {'='*10}")
     print(f"   Config path: {DEFAULT_ACCOUNTMANAGEMENT}")
+    print(f"   Backup path: {backup_path}")
     print(f"   JSON structure: {stats['json_structure_found']}")
+    print(f"   Backup restored: {stats.get('backup_restored', False)}")
+    print(f"   Backup created: {stats.get('backup_created', False)}")
     print(f"   Has time restriction: {has_time_restriction}")
     if has_time_restriction:
         print(f"   Total active windows: {len(time_windows_list)}")
@@ -319,6 +624,16 @@ def work_only_in_specific_timerange():
         else:
             print(f"   Within work window: {is_within_any_window} (Always allowed - no working_hours configured)")
     print(f"   Function should work: {is_within_any_window}")
+    
+    # --- DISPLAY BACKUP INFORMATION ---
+    if stats.get('backup_created', False):
+        print(f"   💾 Backup file: {backup_path}")
+        try:
+            if backup_path.exists():
+                size = backup_path.stat().st_size
+                print(f"   📊 Backup size: {size:,} bytes")
+        except:
+            pass
     
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
@@ -744,7 +1059,7 @@ def restore_missing_fields():
 def update_fresh_data_from_fetched_to_all_files():
     """
     Distribute fresh data from ALL_FETCHED_INVESTORS to all other files.
-    FIELD-BY-FIELD DISTRIBUTION: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED
+    FIELD-BY-FIELD DISTRIBUTION: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED, ALL_INVESTORS_BACKUP
     
     This function performs:
     1. Reads ALL_FETCHED_INVESTORS (the source of truth for fresh data)
@@ -754,6 +1069,7 @@ def update_fresh_data_from_fetched_to_all_files():
        - HARVHUB_FETCHED_INVESTORS
        - INVHARV_UPDATED_INVESTORS
        - HARVHUB_UPDATED_INVESTORS
+       - ALL_INVESTORS_BACKUP
     3. Field-by-field merging (source takes precedence for each field)
     4. Adds new records if they don't exist in target files
     5. Updates existing fields if values differ
@@ -769,6 +1085,7 @@ def update_fresh_data_from_fetched_to_all_files():
         - HARVHUB_FETCHED_INVESTORS
         - INVHARV_UPDATED_INVESTORS
         - HARVHUB_UPDATED_INVESTORS
+        - ALL_INVESTORS_BACKUP
     
     Returns:
         dict: Statistics about the distribution process
@@ -778,7 +1095,7 @@ def update_fresh_data_from_fetched_to_all_files():
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
-    print("  Direction: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED")
+    print("  Direction: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED, ALL_INVESTORS_BACKUP")
     print("  Mode     : FIELD-BY-FIELD DISTRIBUTION")
     print("="*70)
     
@@ -824,6 +1141,14 @@ def update_fresh_data_from_fetched_to_all_files():
             },
             HARVHUB_UPDATED_INVESTORS: {
                 "name": "HARVHUB_UPDATED_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            },
+            ALL_INVESTORS_BACKUP: {
+                "name": "ALL_INVESTORS_BACKUP",
                 "records_updated": 0,
                 "records_added": 0,
                 "fields_merged": 0,
@@ -1067,7 +1392,8 @@ def update_fresh_data_from_fetched_to_all_files():
             (INVHARV_FETCHED_INVESTORS, stats["targets"][INVHARV_FETCHED_INVESTORS]),
             (HARVHUB_FETCHED_INVESTORS, stats["targets"][HARVHUB_FETCHED_INVESTORS]),
             (INVHARV_UPDATED_INVESTORS, stats["targets"][INVHARV_UPDATED_INVESTORS]),
-            (HARVHUB_UPDATED_INVESTORS, stats["targets"][HARVHUB_UPDATED_INVESTORS])
+            (HARVHUB_UPDATED_INVESTORS, stats["targets"][HARVHUB_UPDATED_INVESTORS]),
+            (ALL_INVESTORS_BACKUP, stats["targets"][ALL_INVESTORS_BACKUP])
         ]
         
         for target_path, target_stats in targets_to_process:
@@ -1246,6 +1572,13 @@ def update_fresh_data_from_fetched_to_all_files():
         else:
             print(f"\n  ⚠️  HARVHUB_UPDATED_INVESTORS was NOT updated - check for issues")
         
+        # Special check for ALL_INVESTORS_BACKUP
+        backup_stats = stats["targets"][ALL_INVESTORS_BACKUP]
+        if backup_stats["modified"]:
+            print(f"\n  ✅ ALL_INVESTORS_BACKUP was successfully updated!")
+        else:
+            print(f"\n  ℹ️  ALL_INVESTORS_BACKUP - no changes needed")
+        
         if stats["warnings"]:
             print(f"\n  ⚠️  WARNINGS ({len(stats['warnings'])}):")
             for warning in stats["warnings"]:
@@ -1277,7 +1610,7 @@ def update_fresh_data_from_fetched_to_all_files():
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
-
+ 
 def restore_empty_investor_files():
     """
     Checks and synchronizes investor files between main and backup.
@@ -1477,7 +1810,7 @@ def restore_empty_investor_files():
     def get_backup_path(main_path):
         """Get backup path for a given main file"""
         if "fetched" in main_path.lower():
-            return ALL_FETCHED_INVESTORS_BACKUP
+            return ALL_INVESTORS_BACKUP
         else:
             # For updated files, we'll use fetched as source if needed
             return None
@@ -1510,19 +1843,19 @@ def restore_empty_investor_files():
                 result["warnings"].append(f"ALL_FETCHED_INVESTORS is empty: {reason}")
                 
                 # Scenario 1: Main is empty -> Restore from backup
-                backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
+                backup_exists = os.path.exists(ALL_INVESTORS_BACKUP)
                 result["fetched_backup_exists"] = backup_exists
                 
                 if backup_exists:
-                    backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
+                    backup_empty, backup_reason = is_file_empty(ALL_INVESTORS_BACKUP)
                     result["fetched_backup_empty"] = backup_empty
                     
                     if not backup_empty:
-                        backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
+                        backup_data = load_json_data(ALL_INVESTORS_BACKUP)
                         backup_count = len(backup_data) if backup_data else 0
                         result["fetched_backup_records"] = backup_count
                         
-                        print(f"   📄 Backup found: {ALL_FETCHED_INVESTORS_BACKUP}")
+                        print(f"   📄 Backup found: {ALL_INVESTORS_BACKUP}")
                         print(f"   📊 Backup records: {backup_count:,}")
                         
                         # Restore from backup
@@ -1544,18 +1877,18 @@ def restore_empty_investor_files():
                 print(f"   ✅ Main file has valid data")
                 
                 # Scenario 2: Main has data -> Check/update backup
-                backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
+                backup_exists = os.path.exists(ALL_INVESTORS_BACKUP)
                 result["fetched_backup_exists"] = backup_exists
                 
                 if backup_exists:
-                    backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
+                    backup_empty, backup_reason = is_file_empty(ALL_INVESTORS_BACKUP)
                     result["fetched_backup_empty"] = backup_empty
                     
-                    backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
+                    backup_data = load_json_data(ALL_INVESTORS_BACKUP)
                     backup_count = len(backup_data) if backup_data else 0
                     result["fetched_backup_records"] = backup_count
                     
-                    print(f"   📄 Backup exists: {ALL_FETCHED_INVESTORS_BACKUP}")
+                    print(f"   📄 Backup exists: {ALL_INVESTORS_BACKUP}")
                     print(f"   📊 Backup records: {backup_count:,}")
                     
                     # Compare and update backup if needed
@@ -1568,7 +1901,7 @@ def restore_empty_investor_files():
                             "fetched"
                         )
                         
-                        if save_json_data(ALL_FETCHED_INVESTORS_BACKUP, updated_backup):
+                        if save_json_data(ALL_INVESTORS_BACKUP, updated_backup):
                             print(f"   ✅ Backup updated successfully")
                             print(f"      📝 Records added: {records_added:,}")
                             print(f"      🔄 Records updated: {fields_updated:,}")
@@ -1586,7 +1919,7 @@ def restore_empty_investor_files():
                 else:
                     # Backup doesn't exist, create it
                     print(f"   📄 No backup exists, creating from main...")
-                    if save_json_data(ALL_FETCHED_INVESTORS_BACKUP, fetched_main_data):
+                    if save_json_data(ALL_INVESTORS_BACKUP, fetched_main_data):
                         print(f"   ✅ Created backup with {fetched_main_count:,} records")
                         result["fetched_backup_updated_from_main"] = True
                         result["fetched_synced"] = True
@@ -1598,19 +1931,19 @@ def restore_empty_investor_files():
             result["warnings"].append("ALL_FETCHED_INVESTORS does not exist")
             
             # Try to restore from backup
-            backup_exists = os.path.exists(ALL_FETCHED_INVESTORS_BACKUP)
+            backup_exists = os.path.exists(ALL_INVESTORS_BACKUP)
             result["fetched_backup_exists"] = backup_exists
             
             if backup_exists:
-                backup_empty, backup_reason = is_file_empty(ALL_FETCHED_INVESTORS_BACKUP)
+                backup_empty, backup_reason = is_file_empty(ALL_INVESTORS_BACKUP)
                 result["fetched_backup_empty"] = backup_empty
                 
                 if not backup_empty:
-                    backup_data = load_json_data(ALL_FETCHED_INVESTORS_BACKUP)
+                    backup_data = load_json_data(ALL_INVESTORS_BACKUP)
                     backup_count = len(backup_data) if backup_data else 0
                     result["fetched_backup_records"] = backup_count
                     
-                    print(f"   📄 Creating from backup: {ALL_FETCHED_INVESTORS_BACKUP}")
+                    print(f"   📄 Creating from backup: {ALL_INVESTORS_BACKUP}")
                     print(f"   📊 Backup records: {backup_count:,}")
                     
                     if save_json_data(ALL_FETCHED_INVESTORS, backup_data):
