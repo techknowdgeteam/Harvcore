@@ -21457,6 +21457,377 @@ def close_unauthorized_orders(inv_id=None):
     
     return global_stats
 
+def remove_existing_mt5orders_in_json(inv_id=None):
+    """
+    Remove JSON records that match existing MT5 pending orders OR open positions.
+    
+    STRICT RULE: Remove a JSON record if ALL of these match EITHER a pending order OR an open position:
+    1. Symbol (with suffix resolution)
+    2. Order type (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT for pending orders)
+       OR (BUY, SELL for positions)
+    3. Entry price
+    4. Volume
+    
+    Checks BOTH:
+    - Pending orders (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT)
+    - Open positions (BUY, SELL)
+    
+    If any record doesn't match exactly, it stays in the JSON.
+    NEVER remove records if no matching MT5 orders/positions exist.
+    NEVER clear files entirely just because no MT5 orders/positions exist.
+    """
+    import json
+    from pathlib import Path
+    
+    # --- CONSTANTS ---
+    SYMBOL_SUFFIXES = [
+        "", "+", ".m", "pro", ".pro", "c", ".c", "fx", ".fx", "e", ".e",
+        "std", ".std", "m", ".mini", "micro", ".micro", "-", ".-", "_",
+        "._", "ecn", ".ecn", "real", ".real", "demo", ".demo"
+    ]
+    
+    stats = {
+        'total_files_scanned': 0,
+        'total_signals_found': 0,
+        'total_signals_removed': 0,
+        'total_errors': 0,
+        'investors_processed': 0,
+        'pending_orders_found': 0,
+        'positions_found': 0,
+        'details': []
+    }
+    
+    def find_tradeable_symbol_with_retry(base_symbol, resolution_cache):
+        """Find tradeable symbol by trying suffixes."""
+        cache_key = f"tradeable_{base_symbol.lower()}"
+        if cache_key in resolution_cache:
+            cached_result = resolution_cache[cache_key]
+            if cached_result is None:
+                return None, None
+            return cached_result, resolution_cache.get(f"suffix_{base_symbol.lower()}", "")
+        
+        all_symbols = mt5.symbols_get()
+        if not all_symbols:
+            resolution_cache[cache_key] = None
+            return None, None
+        
+        symbols_lower_map = {s.name.lower(): s.name for s in all_symbols}
+        base_lower = base_symbol.lower()
+        
+        # Try direct match
+        if base_lower in symbols_lower_map:
+            exact_symbol = symbols_lower_map[base_lower]
+            if mt5.symbol_select(exact_symbol, True):
+                resolution_cache[cache_key] = exact_symbol
+                resolution_cache[f"suffix_{base_symbol.lower()}"] = ""
+                return exact_symbol, ""
+        
+        # Try suffixes
+        for suffix in SYMBOL_SUFFIXES:
+            test_symbol = base_symbol + suffix
+            test_lower = test_symbol.lower()
+            
+            symbol_cache_key = f"checked_{test_symbol.lower()}"
+            if symbol_cache_key in resolution_cache and not resolution_cache[symbol_cache_key]:
+                continue
+            
+            if test_lower in symbols_lower_map:
+                actual_symbol = symbols_lower_map[test_lower]
+                if mt5.symbol_select(actual_symbol, True):
+                    resolution_cache[cache_key] = actual_symbol
+                    resolution_cache[f"suffix_{base_symbol.lower()}"] = suffix
+                    resolution_cache[symbol_cache_key] = True
+                    return actual_symbol, suffix
+                else:
+                    resolution_cache[symbol_cache_key] = False
+        
+        resolution_cache[cache_key] = None
+        return None, None
+    
+    def extract_volume(signal_data):
+        """Extract volume from signal data dynamically."""
+        for key, value in signal_data.items():
+            if key.endswith('_volume'):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        return signal_data.get('volume', None)
+    
+    def get_mt5_order_type(order_type_str):
+        """Convert order type string to MT5 constant for pending orders."""
+        order_type_map = {
+            'buy_stop': mt5.ORDER_TYPE_BUY_STOP,
+            'sell_stop': mt5.ORDER_TYPE_SELL_STOP,
+            'buy_limit': mt5.ORDER_TYPE_BUY_LIMIT,
+            'sell_limit': mt5.ORDER_TYPE_SELL_LIMIT,
+            'buy': mt5.ORDER_TYPE_BUY,
+            'sell': mt5.ORDER_TYPE_SELL
+        }
+        return order_type_map.get(order_type_str.lower())
+    
+    def get_mt5_lookup(mt5_pending_orders, mt5_positions):
+        """
+        Create lookup dictionary for BOTH MT5 pending orders AND open positions.
+        Key: (symbol, order_type, entry_price, volume)
+        Value: ticket number
+        """
+        lookup = {}
+        
+        # Add pending orders to lookup
+        for order in mt5_pending_orders:
+            # Only include pending orders
+            if order.type not in [
+                mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP
+            ]:
+                continue
+            
+            key = (
+                order.symbol,
+                order.type,  # MT5 order type constant
+                round(order.price_open, 5),
+                round(order.volume_initial, 2)
+            )
+            lookup[key] = f"Pending Order #{order.ticket}"
+        
+        # Add open positions to lookup
+        for position in mt5_positions:
+            # Only include open positions (BUY or SELL)
+            if position.type not in [
+                mt5.ORDER_TYPE_BUY, 
+                mt5.ORDER_TYPE_SELL
+            ]:
+                continue
+            
+            key = (
+                position.symbol,
+                position.type,  # MT5 position type constant
+                round(position.price_open, 5),
+                round(position.volume, 2)
+            )
+            lookup[key] = f"Position #{position.ticket}"
+        
+        return lookup
+    
+    def process_investor(investor_root, stats):
+        """Process a single investor's limit_orders.json files."""
+        investor_stats = {
+            'investor_id': investor_root.name,
+            'files_scanned': 0,
+            'signals_found': 0,
+            'signals_removed': 0,
+            'errors': 0,
+            'files_modified': []
+        }
+        
+        # Find ALL limit_orders.json files
+        signals_files = list(investor_root.rglob("limit_orders.json"))
+        
+        if not signals_files:
+            return investor_stats
+        
+        # Get ALL MT5 pending orders AND open positions
+        mt5_pending_orders = mt5.orders_get() or []
+        mt5_positions = mt5.positions_get() or []
+        
+        # CRITICAL: If NO MT5 pending orders AND NO MT5 positions, do NOTHING
+        if not mt5_pending_orders and not mt5_positions:
+            print(f"  ℹ️ No MT5 pending orders or open positions found for {investor_root.name}")
+            print(f"     → Keeping all JSON records (no matches to remove)")
+            return investor_stats
+        
+        # Build combined lookup dictionary
+        mt5_lookup = get_mt5_lookup(mt5_pending_orders, mt5_positions)
+        
+        print(f"  📊 Found {len(mt5_pending_orders)} MT5 pending order(s) and {len(mt5_positions)} open position(s)")
+        print(f"  📊 Total {len(mt5_lookup)} unique entries in MT5 lookup")
+        
+        # Update global stats
+        stats['pending_orders_found'] += len(mt5_pending_orders)
+        stats['positions_found'] += len(mt5_positions)
+        
+        # Resolution cache for symbol lookups
+        resolution_cache = {}
+        
+        # Process each signals file
+        for signals_file in signals_files:
+            investor_stats['files_scanned'] += 1
+            
+            try:
+                with open(signals_file, 'r', encoding='utf-8') as f:
+                    signals = json.load(f)
+                
+                if not signals:
+                    continue
+                
+                investor_stats['signals_found'] += len(signals)
+                print(f"\n  📁 Processing {signals_file.name} ({len(signals)} signals)")
+                
+                # Remove signals that match EITHER pending orders OR positions
+                filtered_signals = []
+                removed_count = 0
+                removed_via = {'pending': 0, 'position': 0}
+                
+                for signal in signals:
+                    # Extract signal attributes
+                    raw_symbol = signal.get('symbol', '')
+                    order_type_str = signal.get('order_type', '').lower()
+                    entry_price = float(signal.get('entry', 0))
+                    volume = extract_volume(signal)
+                    
+                    # If missing any required field, KEEP the signal (can't match)
+                    if not raw_symbol or not order_type_str or entry_price == 0:
+                        filtered_signals.append(signal)
+                        continue
+                    
+                    if volume is None:
+                        filtered_signals.append(signal)
+                        continue
+                    
+                    # Find tradeable symbol
+                    tradeable_symbol, used_suffix = find_tradeable_symbol_with_retry(
+                        raw_symbol, resolution_cache
+                    )
+                    
+                    # If can't resolve symbol, KEEP the signal
+                    if not tradeable_symbol:
+                        filtered_signals.append(signal)
+                        continue
+                    
+                    # Get MT5 order type for comparison
+                    mt5_type = get_mt5_order_type(order_type_str)
+                    
+                    # If invalid order type, KEEP the signal
+                    if mt5_type is None:
+                        filtered_signals.append(signal)
+                        continue
+                    
+                    # Create key for lookup (symbol + type + entry + volume)
+                    key = (
+                        tradeable_symbol,
+                        mt5_type,
+                        round(entry_price, 5),
+                        round(volume, 2)
+                    )
+                    
+                    # ONLY remove if EXACT match found in MT5 (pending order OR position)
+                    if key in mt5_lookup:
+                        match_info = mt5_lookup[key]
+                        print(f"    🎯 EXACT MATCH FOUND: {order_type_str.upper()} {tradeable_symbol} @ {entry_price} vol {volume}")
+                        print(f"       → MT5: {match_info} - REMOVING JSON record")
+                        removed_count += 1
+                        
+                        # Track removal source
+                        if 'Pending' in match_info:
+                            removed_via['pending'] += 1
+                        elif 'Position' in match_info:
+                            removed_via['position'] += 1
+                        
+                        # Don't add to filtered_signals (remove it)
+                    else:
+                        # No match found - KEEP the signal
+                        filtered_signals.append(signal)
+                
+                # Update the file ONLY if records were removed
+                if removed_count > 0:
+                    with open(signals_file, 'w', encoding='utf-8') as f:
+                        json.dump(filtered_signals, f, indent=4)
+                    
+                    investor_stats['signals_removed'] += removed_count
+                    investor_stats['files_modified'].append(str(signals_file))
+                    
+                    print(f"    ✅ Removed {removed_count} matching signal(s) from {signals_file.name}")
+                    if removed_via['pending'] > 0:
+                        print(f"       - {removed_via['pending']} matched pending orders")
+                    if removed_via['position'] > 0:
+                        print(f"       - {removed_via['position']} matched open positions")
+                    print(f"    📊 {len(filtered_signals)} signal(s) remain (no MT5 match)")
+                else:
+                    print(f"    ℹ️ No matching signals found in {signals_file.name} - all records kept")
+                    
+            except json.JSONDecodeError as e:
+                investor_stats['errors'] += 1
+                print(f"    ❌ Invalid JSON in {signals_file}: {e}")
+            except Exception as e:
+                investor_stats['errors'] += 1
+                print(f"    ❌ Error processing {signals_file}: {e}")
+        
+        return investor_stats
+    
+    # --- MAIN EXECUTION ---
+    print("\n" + "="*80)
+    print("🗑️ REMOVING JSON RECORDS THAT MATCH MT5 ORDERS OR POSITIONS")
+    print("="*80)
+    print("📌 STRICT RULE: Remove JSON record ONLY IF ALL match EITHER:")
+    print("   A) Pending Order (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT)")
+    print("   B) Open Position (BUY, SELL)")
+    print("   1. Symbol (with suffix resolution)")
+    print("   2. Order type")
+    print("   3. Entry price")
+    print("   4. Volume")
+    print("="*80 + "\n")
+    
+    # Get investors to process
+    if inv_id:
+        investor_ids = [inv_id]
+    else:
+        investor_ids = list(usersdictionary.keys()) if 'usersdictionary' in globals() else []
+    
+    if not investor_ids:
+        print("⚠️ No investor IDs found to process")
+        return stats
+    
+    print(f"📋 Processing {len(investor_ids)} investor(s): {investor_ids}\n")
+    
+    for user_brokerid in investor_ids:
+        print(f"{'='*60}")
+        print(f"📋 INVESTOR: {user_brokerid}")
+        print(f"{'='*60}")
+        
+        investor_root = Path(INV_PATH) / user_brokerid
+        if not investor_root.exists():
+            print(f"   Investor root not found: {investor_root}")
+            continue
+        
+        investor_stats = process_investor(investor_root, stats)
+        
+        stats['investors_processed'] += 1
+        stats['total_files_scanned'] += investor_stats['files_scanned']
+        stats['total_signals_found'] += investor_stats['signals_found']
+        stats['total_signals_removed'] += investor_stats['signals_removed']
+        stats['total_errors'] += investor_stats['errors']
+        stats['details'].append(investor_stats)
+        
+        print(f"\n  └─ 📈 INVESTOR {user_brokerid} SUMMARY")
+        print(f"       • Files scanned: {investor_stats['files_scanned']}")
+        print(f"       • Signals found: {investor_stats['signals_found']}")
+        print(f"       • Signals removed: {investor_stats['signals_removed']}")
+        print(f"       • Files modified: {len(investor_stats['files_modified'])}")
+        if investor_stats['errors'] > 0:
+            print(f"       • Errors: {investor_stats['errors']}")
+    
+    # Final summary
+    print("\n" + "="*80)
+    print("  📊 FINAL SUMMARY".ljust(79) + "=")
+    print("="*80)
+    print(f"│  Investors processed:      {stats['investors_processed']}")
+    print(f"│  Files scanned:            {stats['total_files_scanned']}")
+    print(f"│  Total signals found:      {stats['total_signals_found']}")
+    print(f"│  Total signals removed:    {stats['total_signals_removed']}")
+    print(f"│  Total errors:             {stats['total_errors']}")
+    print(f"│  MT5 Pending Orders:       {stats['pending_orders_found']}")
+    print(f"│  MT5 Open Positions:       {stats['positions_found']}")
+    print("="*80)
+    
+    if stats['total_signals_removed'] > 0:
+        print(f"✅ Removed {stats['total_signals_removed']} JSON record(s) that match MT5 orders/positions")
+    else:
+        print("ℹ️ No JSON records matched MT5 orders/positions - all records kept")
+    print("="*80 + "\n")
+    
+    return stats
+
 def pending_orders_per_symbol_limitation(inv_id=None):
     """
     Apply pending order limitations per symbol based on accountmanagement.json settings.
@@ -28279,9 +28650,9 @@ def process_single_investor(inv_folder):
                 maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id) 
                 live_usd_risk_and_scaling(inv_id=inv_id)
                 apply_default_prices(inv_id=inv_id)
+                remove_existing_mt5orders_in_json(inv_id=inv_id)
                 martingale_system(inv_id=inv_id)
 
-                #clean_trades_history(inv_id=inv_id)
                 pending_orders_per_symbol_limitation(inv_id=inv_id)
                 place_usd_orders(inv_id=inv_id)
 

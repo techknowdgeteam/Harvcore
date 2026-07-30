@@ -21483,18 +21483,22 @@ def close_unauthorized_orders(inv_id=None):
 
 def remove_existing_mt5orders_in_json(inv_id=None):
     """
-    Remove JSON records that match existing MT5 pending orders.
+    Remove JSON records that match existing MT5 pending orders OR open positions.
     
-    STRICT RULE: Only remove a JSON record if ALL of these match:
+    STRICT RULE: Remove a JSON record if ALL of these match EITHER a pending order OR an open position:
     1. Symbol (with suffix resolution)
-    2. Order type (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT)
+    2. Order type (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT for pending orders)
+       OR (BUY, SELL for positions)
     3. Entry price
+    4. Volume
     
-    Volume is NOT considered for matching.
+    Checks BOTH:
+    - Pending orders (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT)
+    - Open positions (BUY, SELL)
     
     If any record doesn't match exactly, it stays in the JSON.
-    NEVER remove records if no matching MT5 order exists.
-    NEVER clear files entirely just because no MT5 orders exist.
+    NEVER remove records if no matching MT5 orders/positions exist.
+    NEVER clear files entirely just because no MT5 orders/positions exist.
     """
     import json
     from pathlib import Path
@@ -21512,6 +21516,8 @@ def remove_existing_mt5orders_in_json(inv_id=None):
         'total_signals_removed': 0,
         'total_errors': 0,
         'investors_processed': 0,
+        'pending_orders_found': 0,
+        'positions_found': 0,
         'details': []
     }
     
@@ -21562,24 +21568,38 @@ def remove_existing_mt5orders_in_json(inv_id=None):
         resolution_cache[cache_key] = None
         return None, None
     
+    def extract_volume(signal_data):
+        """Extract volume from signal data dynamically."""
+        for key, value in signal_data.items():
+            if key.endswith('_volume'):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        return signal_data.get('volume', None)
+    
     def get_mt5_order_type(order_type_str):
-        """Convert order type string to MT5 constant."""
+        """Convert order type string to MT5 constant for pending orders."""
         order_type_map = {
             'buy_stop': mt5.ORDER_TYPE_BUY_STOP,
             'sell_stop': mt5.ORDER_TYPE_SELL_STOP,
             'buy_limit': mt5.ORDER_TYPE_BUY_LIMIT,
             'sell_limit': mt5.ORDER_TYPE_SELL_LIMIT,
+            'buy': mt5.ORDER_TYPE_BUY,
+            'sell': mt5.ORDER_TYPE_SELL
         }
         return order_type_map.get(order_type_str.lower())
     
-    def get_pending_orders_lookup(mt5_orders):
+    def get_mt5_lookup(mt5_pending_orders, mt5_positions):
         """
-        Create lookup dictionary for MT5 pending orders.
-        Key: (symbol, order_type, entry_price) - volume EXCLUDED
+        Create lookup dictionary for BOTH MT5 pending orders AND open positions.
+        Key: (symbol, order_type, entry_price, volume)
+        Value: ticket number
         """
         lookup = {}
         
-        for order in mt5_orders:
+        # Add pending orders to lookup
+        for order in mt5_pending_orders:
             # Only include pending orders
             if order.type not in [
                 mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
@@ -21587,13 +21607,30 @@ def remove_existing_mt5orders_in_json(inv_id=None):
             ]:
                 continue
             
-            # KEY CHANGE: Volume is NOT included in the key
             key = (
                 order.symbol,
-                order.type,
-                round(order.price_open, 5)
+                order.type,  # MT5 order type constant
+                round(order.price_open, 5),
+                round(order.volume_initial, 2)
             )
-            lookup[key] = order.ticket
+            lookup[key] = f"Pending Order #{order.ticket}"
+        
+        # Add open positions to lookup
+        for position in mt5_positions:
+            # Only include open positions (BUY or SELL)
+            if position.type not in [
+                mt5.ORDER_TYPE_BUY, 
+                mt5.ORDER_TYPE_SELL
+            ]:
+                continue
+            
+            key = (
+                position.symbol,
+                position.type,  # MT5 position type constant
+                round(position.price_open, 5),
+                round(position.volume, 2)
+            )
+            lookup[key] = f"Position #{position.ticket}"
         
         return lookup
     
@@ -21614,18 +21651,25 @@ def remove_existing_mt5orders_in_json(inv_id=None):
         if not signals_files:
             return investor_stats
         
-        # Get all MT5 pending orders
-        mt5_orders = mt5.orders_get() or []
+        # Get ALL MT5 pending orders AND open positions
+        mt5_pending_orders = mt5.orders_get() or []
+        mt5_positions = mt5.positions_get() or []
         
-        # CRITICAL: If no MT5 pending orders, do NOTHING - keep all JSON records
-        if not mt5_orders:
-            print(f"  ℹ️ No MT5 pending orders found for {investor_root.name}")
+        # CRITICAL: If NO MT5 pending orders AND NO MT5 positions, do NOTHING
+        if not mt5_pending_orders and not mt5_positions:
+            print(f"  ℹ️ No MT5 pending orders or open positions found for {investor_root.name}")
             print(f"     → Keeping all JSON records (no matches to remove)")
             return investor_stats
         
-        # Build lookup dictionary for MT5 pending orders (volume excluded)
-        mt5_lookup = get_pending_orders_lookup(mt5_orders)
-        print(f"  📊 Found {len(mt5_orders)} MT5 pending order(s)")
+        # Build combined lookup dictionary
+        mt5_lookup = get_mt5_lookup(mt5_pending_orders, mt5_positions)
+        
+        print(f"  📊 Found {len(mt5_pending_orders)} MT5 pending order(s) and {len(mt5_positions)} open position(s)")
+        print(f"  📊 Total {len(mt5_lookup)} unique entries in MT5 lookup")
+        
+        # Update global stats
+        stats['pending_orders_found'] += len(mt5_pending_orders)
+        stats['positions_found'] += len(mt5_positions)
         
         # Resolution cache for symbol lookups
         resolution_cache = {}
@@ -21644,18 +21688,24 @@ def remove_existing_mt5orders_in_json(inv_id=None):
                 investor_stats['signals_found'] += len(signals)
                 print(f"\n  📁 Processing {signals_file.name} ({len(signals)} signals)")
                 
-                # ONLY remove signals that EXACTLY match MT5 orders (symbol + type + entry)
+                # Remove signals that match EITHER pending orders OR positions
                 filtered_signals = []
                 removed_count = 0
+                removed_via = {'pending': 0, 'position': 0}
                 
                 for signal in signals:
                     # Extract signal attributes
                     raw_symbol = signal.get('symbol', '')
                     order_type_str = signal.get('order_type', '').lower()
                     entry_price = float(signal.get('entry', 0))
+                    volume = extract_volume(signal)
                     
                     # If missing any required field, KEEP the signal (can't match)
                     if not raw_symbol or not order_type_str or entry_price == 0:
+                        filtered_signals.append(signal)
+                        continue
+                    
+                    if volume is None:
                         filtered_signals.append(signal)
                         continue
                     
@@ -21677,19 +21727,27 @@ def remove_existing_mt5orders_in_json(inv_id=None):
                         filtered_signals.append(signal)
                         continue
                     
-                    # Create key for lookup (symbol + type + entry ONLY - volume excluded)
+                    # Create key for lookup (symbol + type + entry + volume)
                     key = (
                         tradeable_symbol,
                         mt5_type,
-                        round(entry_price, 5)
+                        round(entry_price, 5),
+                        round(volume, 2)
                     )
                     
-                    # ONLY remove if EXACT match found in MT5 (volume NOT checked)
+                    # ONLY remove if EXACT match found in MT5 (pending order OR position)
                     if key in mt5_lookup:
-                        mt5_ticket = mt5_lookup[key]
-                        print(f"    🎯 EXACT MATCH FOUND: {order_type_str.upper()} {tradeable_symbol} @ {entry_price}")
-                        print(f"       → MT5 Ticket #{mt5_ticket} - REMOVING JSON record (volume ignored)")
+                        match_info = mt5_lookup[key]
+                        print(f"    🎯 EXACT MATCH FOUND: {order_type_str.upper()} {tradeable_symbol} @ {entry_price} vol {volume}")
+                        print(f"       → MT5: {match_info} - REMOVING JSON record")
                         removed_count += 1
+                        
+                        # Track removal source
+                        if 'Pending' in match_info:
+                            removed_via['pending'] += 1
+                        elif 'Position' in match_info:
+                            removed_via['position'] += 1
+                        
                         # Don't add to filtered_signals (remove it)
                     else:
                         # No match found - KEEP the signal
@@ -21704,6 +21762,10 @@ def remove_existing_mt5orders_in_json(inv_id=None):
                     investor_stats['files_modified'].append(str(signals_file))
                     
                     print(f"    ✅ Removed {removed_count} matching signal(s) from {signals_file.name}")
+                    if removed_via['pending'] > 0:
+                        print(f"       - {removed_via['pending']} matched pending orders")
+                    if removed_via['position'] > 0:
+                        print(f"       - {removed_via['position']} matched open positions")
                     print(f"    📊 {len(filtered_signals)} signal(s) remain (no MT5 match)")
                 else:
                     print(f"    ℹ️ No matching signals found in {signals_file.name} - all records kept")
@@ -21719,13 +21781,15 @@ def remove_existing_mt5orders_in_json(inv_id=None):
     
     # --- MAIN EXECUTION ---
     print("\n" + "="*80)
-    print("🗑️ REMOVING JSON RECORDS THAT MATCH MT5 PENDING ORDERS")
+    print("🗑️ REMOVING JSON RECORDS THAT MATCH MT5 ORDERS OR POSITIONS")
     print("="*80)
-    print("📌 STRICT RULE: Remove JSON record ONLY IF ALL match:")
+    print("📌 STRICT RULE: Remove JSON record ONLY IF ALL match EITHER:")
+    print("   A) Pending Order (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT)")
+    print("   B) Open Position (BUY, SELL)")
     print("   1. Symbol (with suffix resolution)")
-    print("   2. Order type (BUY_STOP, SELL_STOP, BUY_LIMIT, SELL_LIMIT)")
+    print("   2. Order type")
     print("   3. Entry price")
-    print("   ❌ Volume is IGNORED (not used for matching)")
+    print("   4. Volume")
     print("="*80 + "\n")
     
     # Get investors to process
@@ -21776,12 +21840,14 @@ def remove_existing_mt5orders_in_json(inv_id=None):
     print(f"│  Total signals found:      {stats['total_signals_found']}")
     print(f"│  Total signals removed:    {stats['total_signals_removed']}")
     print(f"│  Total errors:             {stats['total_errors']}")
+    print(f"│  MT5 Pending Orders:       {stats['pending_orders_found']}")
+    print(f"│  MT5 Open Positions:       {stats['positions_found']}")
     print("="*80)
     
     if stats['total_signals_removed'] > 0:
-        print(f"✅ Removed {stats['total_signals_removed']} JSON record(s) that match MT5 orders (volume ignored)")
+        print(f"✅ Removed {stats['total_signals_removed']} JSON record(s) that match MT5 orders/positions")
     else:
-        print("ℹ️ No JSON records matched MT5 orders - all records kept")
+        print("ℹ️ No JSON records matched MT5 orders/positions - all records kept")
     print("="*80 + "\n")
     
     return stats
