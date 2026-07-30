@@ -1,0 +1,24 @@
+{
+    "scripts": [
+        {
+            "name": "MARKET ANALYSIS",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\analysis.py"
+        },
+        {
+            "name": "INVHARV",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\Invharv.py"
+        },
+        {
+            "name": "HARVHUB",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\harvhub\\harvhub.py"
+        },
+        {
+            "name": "COMMUNICATOR",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\communicator.py"
+        },
+        {
+            "name": "SCREEN_AWAKE",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\screen_awake.py"
+        }
+    ]
+}
