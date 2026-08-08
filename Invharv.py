@@ -16480,16 +16480,15 @@ def martingale_system(inv_id=None):
 
 def recent_highest_balance_target(inv_id=None):
     """
-    Function: Manages recent_highest_balance tracking for investors.
+    Function: Manages recent_highest_balance tracking for investors (DAILY RESET).
     
-    This function:
-    1. Checks if recent_highest_balance field exists in investor record
-    2. If not, creates it and fills with current MT5 balance
-    3. If exists, compares current MT5 balance with recent_highest_balance
-    4. ONLY updates if current balance > recent_highest_balance (higher balance only)
-    5. Does NOT update if current balance <= recent_highest_balance
-    6. Raises alarm when a new higher balance is recorded
-    7. UPDATES ALL INVESTOR FILES (FETCHED_INVESTORS, UPDATED_INVESTORS, ALL_FETCHED_INVESTORS, ALL_UPDATED_INVESTORS)
+    This function implements a DAILY PROFIT LOCKER system:
+    1. If field doesn't exist → Initialize with current balance, date = YESTERDAY (trading allowed)
+    2. If date != today → Alarm OFF (new day, trading allowed)
+    3. If current balance > recorded high AND date != today → Update high, date = today, Alarm ON
+    4. If current balance > recorded high AND date == today → Update high, Alarm ON (new higher high)
+    5. If current balance <= recorded high AND date == today → Keep value, Alarm OFF
+    6. If current balance <= recorded high AND date != today → Keep value, Alarm OFF
     
     Args:
         inv_id: Optional specific investor ID to process. If None, processes all investors.
@@ -16501,7 +16500,7 @@ def recent_highest_balance_target(inv_id=None):
     
     import os
     import json
-    from datetime import datetime
+    from datetime import datetime, date, timedelta
     from pathlib import Path
     
     # Initialize global alert inside the function
@@ -16512,10 +16511,11 @@ def recent_highest_balance_target(inv_id=None):
         'new_balance': None,
         'difference': None,
         'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-        'action': None  # 'initialized', 'new_high', 'skipped_lower', 'unchanged'
+        'action': None,  # 'initialized', 'new_high', 'below_high', 'unchanged', 'new_day'
+        'last_update_date': None
     }
     
-    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE TARGET {'='*10}")
+    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE TARGET (DAILY RESET) {'='*10}")
     if inv_id:
         print(f" Investor: {inv_id}")
     
@@ -16526,6 +16526,7 @@ def recent_highest_balance_target(inv_id=None):
         "investors_skipped": 0,
         "new_high_alerts": 0,
         "field_created": 0,
+        "new_day_resets": 0,
         "errors": [],
         "current_time": datetime.now().strftime('%I:%M:%S %p'),
         "processing_success": False,
@@ -16665,13 +16666,13 @@ def recent_highest_balance_target(inv_id=None):
             return None
     
     # ================================================================
-    # LOAD ALL INVESTOR FILES (Like trades_analytics does)
+    # LOAD ALL INVESTOR FILES
     # ================================================================
     print("\n" + "─"*80)
     print(" 📁 LOADING INVESTOR FILES")
     print("─"*80)
     
-    # Load FETCHED_INVESTORS (legacy)
+    # Load FETCHED_INVESTORS
     fetched_data = {}
     if os.path.exists(FETCHED_INVESTORS):
         try:
@@ -16684,7 +16685,7 @@ def recent_highest_balance_target(inv_id=None):
     else:
         print(f" │ ⚠️ FETCHED_INVESTORS not found at: {FETCHED_INVESTORS}")
     
-    # Load UPDATED_INVESTORS (legacy)
+    # Load UPDATED_INVESTORS
     updated_data = {}
     if os.path.exists(UPDATED_INVESTORS):
         try:
@@ -16731,7 +16732,6 @@ def recent_highest_balance_target(inv_id=None):
         return stats
     
     # Determine which investors to process
-    # Combine all investor IDs from all files
     all_investor_ids = set()
     all_investor_ids.update(fetched_data.keys())
     all_investor_ids.update(updated_data.keys())
@@ -16751,6 +16751,8 @@ def recent_highest_balance_target(inv_id=None):
     
     # Track if any updates were made
     has_updates = False
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
     # Process each investor
     for inv_id in investors_to_process:
@@ -16766,7 +16768,7 @@ def recent_highest_balance_target(inv_id=None):
         
         print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
         
-        # Check each data source for recent_highest_balance
+        # Get existing recent balance and last update date from any source
         def get_recent_balance(data_dict, inv_id):
             """Get recent_highest_balance from a data dictionary"""
             if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
@@ -16778,8 +16780,16 @@ def recent_highest_balance_target(inv_id=None):
                         return None
             return None
         
-        # Get existing recent balance from any source (priority: updated_data first)
+        def get_last_update_date(data_dict, inv_id):
+            """Get recent_highest_balance_last_update from a data dictionary"""
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                val = data_dict[inv_id].get('recent_highest_balance_last_update')
+                if val:
+                    return str(val)
+            return None
+        
         existing_recent = None
+        existing_last_update = None
         source_name = None
         
         # Check UPDATED_INVESTORS first (most current)
@@ -16791,6 +16801,9 @@ def recent_highest_balance_target(inv_id=None):
                     source_name = "UPDATED_INVESTORS"
                 except:
                     pass
+            update_val = updated_data[inv_id].get('recent_highest_balance_last_update')
+            if update_val:
+                existing_last_update = str(update_val)
         
         # If not found, check ALL_UPDATED_INVESTORS
         if existing_recent is None and inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
@@ -16801,6 +16814,10 @@ def recent_highest_balance_target(inv_id=None):
                     source_name = "ALL_UPDATED_INVESTORS"
                 except:
                     pass
+            if not existing_last_update:
+                update_val = all_updated_data[inv_id].get('recent_highest_balance_last_update')
+                if update_val:
+                    existing_last_update = str(update_val)
         
         # If not found, check FETCHED_INVESTORS
         if existing_recent is None and inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
@@ -16811,6 +16828,10 @@ def recent_highest_balance_target(inv_id=None):
                     source_name = "FETCHED_INVESTORS"
                 except:
                     pass
+            if not existing_last_update:
+                update_val = fetched_data[inv_id].get('recent_highest_balance_last_update')
+                if update_val:
+                    existing_last_update = str(update_val)
         
         # If not found, check ALL_FETCHED_INVESTORS
         if existing_recent is None and inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
@@ -16821,36 +16842,43 @@ def recent_highest_balance_target(inv_id=None):
                     source_name = "ALL_FETCHED_INVESTORS"
                 except:
                     pass
+            if not existing_last_update:
+                update_val = all_fetched_data[inv_id].get('recent_highest_balance_last_update')
+                if update_val:
+                    existing_last_update = str(update_val)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Check if field exists and has value
+        # ============================================================
+        # CASE 1: Field doesn't exist - INITIALIZE with YESTERDAY's date
+        # ============================================================
         if existing_recent is None:
-            # First time - create field and set to current balance
             print(f"  📝 Recent broker balance field not set - creating with current balance")
             new_balance = current_balance
             action = "initialized"
             stats["field_created"] += 1
             stats["investors_updated"] += 1
             
-            # Set global alert for initialization
+            # Set date to YESTERDAY so alarm is OFF and trading works today
+            # Set global alert for initialization - Alarm OFF
             recent_highest_alert = {
-                'is_triggered': True,
+                'is_triggered': False,
                 'investor_id': inv_id,
                 'old_balance': None,
                 'new_balance': current_balance,
                 'difference': None,
                 'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                'action': 'initialized'
+                'action': 'initialized',
+                'last_update_date': yesterday_str  # ← Set to YESTERDAY!
             }
-            print(f"  🌐 GLOBAL ALERT: Recent balance tracking initialized for {inv_id}")
+            print(f"  ℹ️ Recent balance tracking initialized for {inv_id} (date set to YESTERDAY - {yesterday_str})")
+            print(f"  ✅ Alarm OFF - Trading allowed today")
             
             # Create notification message
-            message = f"💰 RECENT BALANCE TRACKING INITIALIZED: Starting balance of ${current_balance:.2f} recorded as baseline."
+            message = f"💰 RECENT BALANCE TRACKING INITIALIZED: Starting balance of ${current_balance:.2f} recorded as baseline. Date set to {yesterday_str} (trading allowed today)."
             exec_message = f"SERVER NOTIFICATION: Investor {inv_id} balance tracking initialized at ${current_balance:.2f}"
             
-            # Update notifications in ALL data sources (like trades_analytics)
-            # 1. Update FETCHED_INVESTORS
+            # Update notifications in ALL data sources
             if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
                 if 'notifications' not in fetched_data[inv_id]:
                     fetched_data[inv_id]['notifications'] = {}
@@ -16858,9 +16886,7 @@ def recent_highest_balance_target(inv_id=None):
                     fetched_data[inv_id]['executions_notification'] = {}
                 add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
                 add_execution_notification(fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                print(f"  ✅ Added notification to FETCHED_INVESTORS")
             
-            # 2. Update UPDATED_INVESTORS
             if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
                 if 'notifications' not in updated_data[inv_id]:
                     updated_data[inv_id]['notifications'] = {}
@@ -16868,9 +16894,7 @@ def recent_highest_balance_target(inv_id=None):
                     updated_data[inv_id]['executions_notification'] = {}
                 add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
                 add_execution_notification(updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                print(f"  ✅ Added notification to UPDATED_INVESTORS")
             
-            # 3. Update ALL_FETCHED_INVESTORS
             if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
                 if 'notifications' not in all_fetched_data[inv_id]:
                     all_fetched_data[inv_id]['notifications'] = {}
@@ -16878,9 +16902,7 @@ def recent_highest_balance_target(inv_id=None):
                     all_fetched_data[inv_id]['executions_notification'] = {}
                 add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
                 add_execution_notification(all_fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                print(f"  ✅ Added notification to ALL_FETCHED_INVESTORS")
             
-            # 4. Update ALL_UPDATED_INVESTORS
             if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
                 if 'notifications' not in all_updated_data[inv_id]:
                     all_updated_data[inv_id]['notifications'] = {}
@@ -16888,193 +16910,351 @@ def recent_highest_balance_target(inv_id=None):
                     all_updated_data[inv_id]['executions_notification'] = {}
                 add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
                 add_execution_notification(all_updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                print(f"  ✅ Added notification to ALL_UPDATED_INVESTORS")
             
             stats["details"].append({
                 "investor_id": inv_id,
                 "action": "initialized",
                 "balance": current_balance,
-                "timestamp": timestamp
+                "timestamp": timestamp,
+                "update_date": yesterday_str
             })
             
-        else:
-            # Field exists - check if current balance is higher
-            print(f"  📊 Existing recent balance: ${existing_recent:.2f} (from {source_name})")
+            # Set new_balance for the update section below
+            new_balance = current_balance
             
-            if current_balance > existing_recent:
-                # New higher balance - update!
-                difference = current_balance - existing_recent
-                print(f"  🚀 NEW HIGHER BALANCE DETECTED: ${difference:.2f} increase")
-                print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
+        # ============================================================
+        # CASE 2: Field exists
+        # ============================================================
+        else:
+            print(f"  📊 Existing recent balance: ${existing_recent:.2f} (from {source_name})")
+            print(f"  📅 Last update date: {existing_last_update}")
+            print(f"  📅 Today's date: {today_str}")
+            
+            # ============================================================
+            # CHECK: Is date different from today?
+            # ============================================================
+            if existing_last_update is None or str(existing_last_update) != today_str:
+                print(f"  🔄 Date != today - New day or no high recorded today")
                 
-                new_balance = current_balance
-                action = "new_high"
-                stats["investors_updated"] += 1
-                stats["new_high_alerts"] += 1
+                # Check if current balance > existing high
+                if current_balance > existing_recent:
+                    # NEW HIGH! Date is not today, so this is the first high of the day
+                    difference = current_balance - existing_recent
+                    print(f"  🚀 NEW HIGHER BALANCE DETECTED: ${difference:.2f} increase")
+                    print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
+                    print(f"  📅 Setting date to TODAY: {today_str}")
+                    print(f"  🚨 ALARM ACTIVATED: New daily record balance for {inv_id}!")
+                    
+                    new_balance = current_balance
+                    action = "new_high"
+                    stats["investors_updated"] += 1
+                    stats["new_high_alerts"] += 1
+                    
+                    # Alarm ON - New high recorded today!
+                    recent_highest_alert = {
+                        'is_triggered': True,
+                        'investor_id': inv_id,
+                        'old_balance': existing_recent,
+                        'new_balance': current_balance,
+                        'difference': difference,
+                        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                        'action': 'new_high',
+                        'last_update_date': today_str  # ← Set to TODAY!
+                    }
+                    print(f"  🚨 ALARM ACTIVATED: Trading suspended!")
+                    
+                    # Create notification
+                    message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). TRADING SUSPENDED until balance drops or next day."
+                    exec_message = f"🚨 SERVER ALERT: {inv_id} new daily high ${current_balance:.2f} - Trading SUSPENDED"
+                    
+                    # Update notifications in ALL data sources
+                    if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                        if 'notifications' not in fetched_data[inv_id]:
+                            fetched_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in fetched_data[inv_id]:
+                            fetched_data[inv_id]['executions_notification'] = {}
+                        add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                        if 'notifications' not in updated_data[inv_id]:
+                            updated_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in updated_data[inv_id]:
+                            updated_data[inv_id]['executions_notification'] = {}
+                        add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                        if 'notifications' not in all_fetched_data[inv_id]:
+                            all_fetched_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in all_fetched_data[inv_id]:
+                            all_fetched_data[inv_id]['executions_notification'] = {}
+                        add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(all_fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                        if 'notifications' not in all_updated_data[inv_id]:
+                            all_updated_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in all_updated_data[inv_id]:
+                            all_updated_data[inv_id]['executions_notification'] = {}
+                        add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(all_updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    stats["details"].append({
+                        "investor_id": inv_id,
+                        "action": "new_high",
+                        "old_balance": existing_recent,
+                        "new_balance": current_balance,
+                        "difference": difference,
+                        "timestamp": timestamp,
+                        "update_date": today_str
+                    })
+                    
+                else:
+                    # Current balance <= existing high, and date != today
+                    # This means no new high today - Alarm OFF
+                    print(f"  📉 No new high today. Current balance: ${current_balance:.2f} <= High: ${existing_recent:.2f}")
+                    print(f"  ✅ ALARM OFF - Trading allowed")
+                    stats["investors_skipped"] += 1
+                    
+                    # Determine if it's a new day or just below high
+                    if existing_last_update is None or existing_last_update != today_str:
+                        action = "new_day"
+                        stats["new_day_resets"] += 1
+                        print(f"  🔄 New day - Trading resumed")
+                    else:
+                        action = "below_high"
+                        print(f"  📉 Below today's high - Trading allowed")
+                    
+                    recent_highest_alert = {
+                        'is_triggered': False,
+                        'investor_id': inv_id,
+                        'old_balance': existing_recent,
+                        'new_balance': current_balance,
+                        'difference': existing_recent - current_balance if current_balance < existing_recent else None,
+                        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                        'action': action,
+                        'last_update_date': existing_last_update  # Keep existing date
+                    }
+                    
+                    # Add info notification
+                    if action == "new_day":
+                        message = f"🔄 NEW DAY: {today_str} - Previous high of ${existing_recent:.2f} preserved. Trading can resume."
+                    else:
+                        message = f"📉 CURRENT BALANCE BELOW HIGH: ${current_balance:.2f} < ${existing_recent:.2f}. Trading can resume."
+                    
+                    if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                        if 'notifications' not in fetched_data[inv_id]:
+                            fetched_data[inv_id]['notifications'] = {}
+                        add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'info', timestamp)
+                    
+                    if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                        if 'notifications' not in updated_data[inv_id]:
+                            updated_data[inv_id]['notifications'] = {}
+                        add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'info', timestamp)
+                    
+                    if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                        if 'notifications' not in all_fetched_data[inv_id]:
+                            all_fetched_data[inv_id]['notifications'] = {}
+                        add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'info', timestamp)
+                    
+                    if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                        if 'notifications' not in all_updated_data[inv_id]:
+                            all_updated_data[inv_id]['notifications'] = {}
+                        add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'info', timestamp)
+                    
+                    stats["details"].append({
+                        "investor_id": inv_id,
+                        "action": action,
+                        "recent_high": existing_recent,
+                        "current_balance": current_balance,
+                        "difference": existing_recent - current_balance if current_balance < existing_recent else None,
+                        "timestamp": timestamp,
+                        "update_date": existing_last_update
+                    })
+                    
+                    # Skip updating files (no change needed)
+                    stats["investors_checked"] += 1
+                    continue
                 
-                # Set global alert for new high
-                recent_highest_alert = {
-                    'is_triggered': True,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': difference,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'new_high'
-                }
-                print(f"  🌐 GLOBAL ALERT: New record balance for {inv_id}!")
-                
-                # Create notification messages
-                message = f"🚀 NEW RECORD BALANCE ACHIEVED: Your broker balance has reached a new high of ${current_balance:.2f}, an increase of ${difference:.2f} from the previous high of ${existing_recent:.2f}!"
-                exec_message = f"SERVER NOTIFICATION: Investor {inv_id} reached new balance high of ${current_balance:.2f} (increase of ${difference:.2f})"
-                
-                # Update notifications in ALL data sources
-                # 1. Update FETCHED_INVESTORS
-                if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
-                    if 'notifications' not in fetched_data[inv_id]:
-                        fetched_data[inv_id]['notifications'] = {}
-                    if 'executions_notification' not in fetched_data[inv_id]:
-                        fetched_data[inv_id]['executions_notification'] = {}
-                    add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
-                    add_execution_notification(fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                
-                # 2. Update UPDATED_INVESTORS
-                if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
-                    if 'notifications' not in updated_data[inv_id]:
-                        updated_data[inv_id]['notifications'] = {}
-                    if 'executions_notification' not in updated_data[inv_id]:
-                        updated_data[inv_id]['executions_notification'] = {}
-                    add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
-                    add_execution_notification(updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                
-                # 3. Update ALL_FETCHED_INVESTORS
-                if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
-                    if 'notifications' not in all_fetched_data[inv_id]:
-                        all_fetched_data[inv_id]['notifications'] = {}
-                    if 'executions_notification' not in all_fetched_data[inv_id]:
-                        all_fetched_data[inv_id]['executions_notification'] = {}
-                    add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
-                    add_execution_notification(all_fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                
-                # 4. Update ALL_UPDATED_INVESTORS
-                if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
-                    if 'notifications' not in all_updated_data[inv_id]:
-                        all_updated_data[inv_id]['notifications'] = {}
-                    if 'executions_notification' not in all_updated_data[inv_id]:
-                        all_updated_data[inv_id]['executions_notification'] = {}
-                    add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
-                    add_execution_notification(all_updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
-                
-                print(f"  ✅ Added notifications to all data sources")
-                
-                stats["details"].append({
-                    "investor_id": inv_id,
-                    "action": "new_high",
-                    "old_balance": existing_recent,
-                    "new_balance": current_balance,
-                    "difference": difference,
-                    "timestamp": timestamp
-                })
-                
-            elif current_balance < existing_recent:
-                # Current balance is lower - do NOT update
-                difference = existing_recent - current_balance
-                print(f"  📉 Current balance is LOWER: ${difference:.2f} decrease - NOT updating")
-                stats["investors_skipped"] += 1
-                
-                # Set global alert for lower balance
-                recent_highest_alert = {
-                    'is_triggered': True,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': difference,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'skipped_lower'
-                }
-                
-                # Add info notification (warning) to ALL data sources
-                message = f"📉 CURRENT BALANCE BELOW RECORD: Your current balance is ${current_balance:.2f}, which is below the recent high of ${existing_recent:.2f}. Only higher balances are recorded."
-                
-                # Update notifications in ALL data sources
-                if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
-                    if 'notifications' not in fetched_data[inv_id]:
-                        fetched_data[inv_id]['notifications'] = {}
-                    add_notification(fetched_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
-                
-                if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
-                    if 'notifications' not in updated_data[inv_id]:
-                        updated_data[inv_id]['notifications'] = {}
-                    add_notification(updated_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
-                
-                if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
-                    if 'notifications' not in all_fetched_data[inv_id]:
-                        all_fetched_data[inv_id]['notifications'] = {}
-                    add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
-                
-                if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
-                    if 'notifications' not in all_updated_data[inv_id]:
-                        all_updated_data[inv_id]['notifications'] = {}
-                    add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
-                
-                print(f"  ✅ Added lower balance notifications to all data sources")
-                
-                stats["details"].append({
-                    "investor_id": inv_id,
-                    "action": "skipped_lower",
-                    "recent_high": existing_recent,
-                    "current_balance": current_balance,
-                    "difference": difference,
-                    "timestamp": timestamp
-                })
-                
-                # Skip updating the main files (no change needed)
-                stats["investors_checked"] += 1
-                continue
-                
+            # ============================================================
+            # Date IS today - Check if current balance > high
+            # ============================================================
             else:
-                # Equal - no change
-                print(f"  ℹ️ Balance unchanged: ${current_balance:.2f}")
-                stats["investors_skipped"] += 1
+                print(f"  📅 Date IS today - High recorded today: ${existing_recent:.2f}")
                 
-                # Set global alert for unchanged
-                recent_highest_alert = {
-                    'is_triggered': False,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': 0,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'unchanged'
-                }
-                
-                stats["details"].append({
-                    "investor_id": inv_id,
-                    "action": "unchanged",
-                    "balance": current_balance,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
-                
-                stats["investors_checked"] += 1
-                continue
+                if current_balance > existing_recent:
+                    # NEW HIGHER HIGH TODAY!
+                    difference = current_balance - existing_recent
+                    print(f"  🚀 NEW HIGHER BALANCE TODAY: ${difference:.2f} increase")
+                    print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
+                    
+                    new_balance = current_balance
+                    action = "new_high"
+                    stats["investors_updated"] += 1
+                    stats["new_high_alerts"] += 1
+                    
+                    # Alarm ON - Even higher high today!
+                    recent_highest_alert = {
+                        'is_triggered': True,
+                        'investor_id': inv_id,
+                        'old_balance': existing_recent,
+                        'new_balance': current_balance,
+                        'difference': difference,
+                        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                        'action': 'new_high',
+                        'last_update_date': today_str
+                    }
+                    print(f"  🚨 ALARM ACTIVATED: New higher daily record balance for {inv_id}! Trading suspended!")
+                    
+                    # Create notification
+                    message = f"🚨 NEW HIGHER RECORD TODAY: ${current_balance:.2f} (↑${difference:.2f}). TRADING SUSPENDED."
+                    exec_message = f"🚨 SERVER ALERT: {inv_id} new higher high ${current_balance:.2f} - Trading SUSPENDED"
+                    
+                    # Update notifications in ALL data sources
+                    if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                        if 'notifications' not in fetched_data[inv_id]:
+                            fetched_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in fetched_data[inv_id]:
+                            fetched_data[inv_id]['executions_notification'] = {}
+                        add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                        if 'notifications' not in updated_data[inv_id]:
+                            updated_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in updated_data[inv_id]:
+                            updated_data[inv_id]['executions_notification'] = {}
+                        add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                        if 'notifications' not in all_fetched_data[inv_id]:
+                            all_fetched_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in all_fetched_data[inv_id]:
+                            all_fetched_data[inv_id]['executions_notification'] = {}
+                        add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(all_fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                        if 'notifications' not in all_updated_data[inv_id]:
+                            all_updated_data[inv_id]['notifications'] = {}
+                        if 'executions_notification' not in all_updated_data[inv_id]:
+                            all_updated_data[inv_id]['executions_notification'] = {}
+                        add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'danger', timestamp)
+                        add_execution_notification(all_updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'danger', timestamp)
+                    
+                    stats["details"].append({
+                        "investor_id": inv_id,
+                        "action": "new_high",
+                        "old_balance": existing_recent,
+                        "new_balance": current_balance,
+                        "difference": difference,
+                        "timestamp": timestamp,
+                        "update_date": today_str
+                    })
+                    
+                elif current_balance < existing_recent:
+                    # Below today's high - Alarm OFF
+                    difference = existing_recent - current_balance
+                    print(f"  📉 Current balance is LOWER than today's high: ${difference:.2f} decrease")
+                    print(f"  ✅ ALARM DEACTIVATED - Trading can resume")
+                    stats["investors_skipped"] += 1
+                    
+                    recent_highest_alert = {
+                        'is_triggered': False,
+                        'investor_id': inv_id,
+                        'old_balance': existing_recent,
+                        'new_balance': current_balance,
+                        'difference': difference,
+                        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                        'action': 'below_high',
+                        'last_update_date': today_str
+                    }
+                    
+                    # Add info notification
+                    message = f"📉 CURRENT BALANCE BELOW TODAY'S HIGH: ${current_balance:.2f} < ${existing_recent:.2f}. Trading can resume."
+                    
+                    if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                        if 'notifications' not in fetched_data[inv_id]:
+                            fetched_data[inv_id]['notifications'] = {}
+                        add_notification(fetched_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'info', timestamp)
+                    
+                    if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                        if 'notifications' not in updated_data[inv_id]:
+                            updated_data[inv_id]['notifications'] = {}
+                        add_notification(updated_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'info', timestamp)
+                    
+                    if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                        if 'notifications' not in all_fetched_data[inv_id]:
+                            all_fetched_data[inv_id]['notifications'] = {}
+                        add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'info', timestamp)
+                    
+                    if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                        if 'notifications' not in all_updated_data[inv_id]:
+                            all_updated_data[inv_id]['notifications'] = {}
+                        add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'info', timestamp)
+                    
+                    stats["details"].append({
+                        "investor_id": inv_id,
+                        "action": "below_high",
+                        "recent_high": existing_recent,
+                        "current_balance": current_balance,
+                        "difference": difference,
+                        "timestamp": timestamp,
+                        "update_date": today_str
+                    })
+                    
+                    # Skip updating files (no change needed)
+                    stats["investors_checked"] += 1
+                    continue
+                    
+                else:
+                    # Equal - no change
+                    print(f"  ℹ️ Balance unchanged at today's high: ${current_balance:.2f}")
+                    stats["investors_skipped"] += 1
+                    
+                    recent_highest_alert = {
+                        'is_triggered': False,
+                        'investor_id': inv_id,
+                        'old_balance': existing_recent,
+                        'new_balance': current_balance,
+                        'difference': 0,
+                        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                        'action': 'unchanged',
+                        'last_update_date': today_str
+                    }
+                    
+                    stats["details"].append({
+                        "investor_id": inv_id,
+                        "action": "unchanged",
+                        "balance": current_balance,
+                        "timestamp": timestamp,
+                        "update_date": today_str
+                    })
+                    
+                    stats["investors_checked"] += 1
+                    continue
         
         # ================================================================
-        # UPDATE ALL INVESTOR FILES WITH THE NEW BALANCE
+        # UPDATE ALL INVESTOR FILES (Only when initialized or new high)
         # ================================================================
-        print(f"\n  📝 Updating all investor files with new recent_highest_balance: ${new_balance:.2f}")
+        print(f"\n  📝 Updating all investor files with new daily high: ${new_balance:.2f} for {today_str}")
         
-        # Convert to string for storage
         new_balance_str = str(round(new_balance, 2))
+        update_date_str = today_str if action == "new_high" else yesterday_str if action == "initialized" else today_str
         
         # 1. Update FETCHED_INVESTORS
         if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
             fetched_data[inv_id]['recent_highest_balance'] = new_balance_str
             fetched_data[inv_id]['recent_broker_balance'] = new_balance_str
-            print(f"  ✅ Updated FETCHED_INVESTORS[{inv_id}]['recent_highest_balance']")
+            fetched_data[inv_id]['recent_highest_balance_last_update'] = update_date_str
+            print(f"  ✅ Updated FETCHED_INVESTORS[{inv_id}]")
         else:
             fetched_data[inv_id] = {
                 'recent_highest_balance': new_balance_str,
-                'recent_broker_balance': new_balance_str
+                'recent_broker_balance': new_balance_str,
+                'recent_highest_balance_last_update': update_date_str
             }
             print(f"  ➕ Created FETCHED_INVESTORS[{inv_id}]")
         
@@ -17082,11 +17262,13 @@ def recent_highest_balance_target(inv_id=None):
         if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
             updated_data[inv_id]['recent_highest_balance'] = new_balance_str
             updated_data[inv_id]['recent_broker_balance'] = new_balance_str
-            print(f"  ✅ Updated UPDATED_INVESTORS[{inv_id}]['recent_highest_balance']")
+            updated_data[inv_id]['recent_highest_balance_last_update'] = update_date_str
+            print(f"  ✅ Updated UPDATED_INVESTORS[{inv_id}]")
         else:
             updated_data[inv_id] = {
                 'recent_highest_balance': new_balance_str,
-                'recent_broker_balance': new_balance_str
+                'recent_broker_balance': new_balance_str,
+                'recent_highest_balance_last_update': update_date_str
             }
             print(f"  ➕ Created UPDATED_INVESTORS[{inv_id}]")
         
@@ -17094,11 +17276,13 @@ def recent_highest_balance_target(inv_id=None):
         if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
             all_fetched_data[inv_id]['recent_highest_balance'] = new_balance_str
             all_fetched_data[inv_id]['recent_broker_balance'] = new_balance_str
-            print(f"  ✅ Updated ALL_FETCHED_INVESTORS[{inv_id}]['recent_highest_balance']")
+            all_fetched_data[inv_id]['recent_highest_balance_last_update'] = update_date_str
+            print(f"  ✅ Updated ALL_FETCHED_INVESTORS[{inv_id}]")
         else:
             all_fetched_data[inv_id] = {
                 'recent_highest_balance': new_balance_str,
-                'recent_broker_balance': new_balance_str
+                'recent_broker_balance': new_balance_str,
+                'recent_highest_balance_last_update': update_date_str
             }
             print(f"  ➕ Created ALL_FETCHED_INVESTORS[{inv_id}]")
         
@@ -17106,11 +17290,13 @@ def recent_highest_balance_target(inv_id=None):
         if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
             all_updated_data[inv_id]['recent_highest_balance'] = new_balance_str
             all_updated_data[inv_id]['recent_broker_balance'] = new_balance_str
-            print(f"  ✅ Updated ALL_UPDATED_INVESTORS[{inv_id}]['recent_highest_balance']")
+            all_updated_data[inv_id]['recent_highest_balance_last_update'] = update_date_str
+            print(f"  ✅ Updated ALL_UPDATED_INVESTORS[{inv_id}]")
         else:
             all_updated_data[inv_id] = {
                 'recent_highest_balance': new_balance_str,
-                'recent_broker_balance': new_balance_str
+                'recent_broker_balance': new_balance_str,
+                'recent_highest_balance_last_update': update_date_str
             }
             print(f"  ➕ Created ALL_UPDATED_INVESTORS[{inv_id}]")
         
@@ -17118,7 +17304,7 @@ def recent_highest_balance_target(inv_id=None):
         stats["investors_checked"] += 1
     
     # ================================================================
-    # SAVE ALL UPDATES BACK TO DISK (Like trades_analytics)
+    # SAVE ALL UPDATES BACK TO DISK
     # ================================================================
     if has_updates:
         print("\n" + "─"*80)
@@ -17164,29 +17350,39 @@ def recent_highest_balance_target(inv_id=None):
         stats["processing_success"] = True
     
     # Summary
-    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
+    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY (DAILY RESET) {'='*10}")
     print(f"  Investors checked: {stats['investors_checked']}")
     print(f"  Field created: {stats['field_created']}")
-    print(f"  New high records: {stats['new_high_alerts']}")
+    print(f"  New day resets: {stats['new_day_resets']}")
+    print(f"  New high alerts (today): {stats['new_high_alerts']}")
     print(f"  Investors updated: {stats['investors_updated']}")
     print(f"  Investors skipped: {stats['investors_skipped']}")
-    print(f"  Files updated: FETCHED_INVESTORS, UPDATED_INVESTORS, ALL_FETCHED_INVESTORS, ALL_UPDATED_INVESTORS")
     
     if stats['new_high_alerts'] > 0:
-        print(f"\n  🚀 ALERT: {stats['new_high_alerts']} investor(s) reached new balance highs!")
+        print(f"\n  🚨 ALARM: {stats['new_high_alerts']} investor(s) reached new daily balance highs!")
+        print(f"  ⚠️ Trading SUSPENDED until balance drops or next day begins.")
         for detail in stats['details']:
             if detail.get('action') == 'new_high':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f})")
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) 🔴")
+    
+    if stats['new_day_resets'] > 0:
+        print(f"\n  🔄 NEW DAY: {stats['new_day_resets']} investor(s) - Trading resumed.")
+        for detail in stats['details']:
+            if detail.get('action') == 'new_day':
+                print(f"     • {detail['investor_id']}: New day, high preserved: ${detail['recent_high']:.2f}")
     
     if recent_highest_alert['is_triggered']:
-        print(f"\n  🌐 GLOBAL ALERT ACTIVE:")
+        print(f"\n  🚨 ALARM ACTIVE:")
         print(f"     Investor: {recent_highest_alert['investor_id']}")
         print(f"     Action: {recent_highest_alert['action']}")
+        print(f"     Date: {recent_highest_alert.get('last_update_date', 'Unknown')}")
+        print(f"     ⚠️ Trading SUSPENDED")
         if recent_highest_alert['action'] == 'new_high':
             print(f"     Old Balance: ${recent_highest_alert['old_balance']:.2f}")
             print(f"     New Balance: ${recent_highest_alert['new_balance']:.2f}")
             print(f"     Increase: ${recent_highest_alert['difference']:.2f}")
-        print(f"     Time: {recent_highest_alert['timestamp']}")
+    else:
+        print(f"\n  ✅ ALARM INACTIVE - Trading allowed")
     
     if stats['errors']:
         print(f"\n  ⚠️ Errors encountered: {len(stats['errors'])}")
