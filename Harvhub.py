@@ -13179,16 +13179,16 @@ def martingale_system(inv_id=None):
         def get_starting_balance_and_drawdown():
             """
             Get starting balance based on martingale type:
-            - loss_streak: Uses activities.json broker_balance (original behavior)
-            - balance_based: Uses broker_balance from investor data
+            - loss_streak: Uses activities.json recent_highest_balance (original behavior)
+            - balance_based: Uses recent_highest_balance from investor data
             """
             
             activities_path = inv_root / "activities.json"
             starting_balance = current_balance
             
-            # NEW: For balance_based mode - get broker_balance from investor data
+            # NEW: For balance_based mode - get recent_highest_balance from investor data
             if martingale_type == "balance_based":
-                broker_balance_from_investor = None
+                recent_highest_balance_from_investor = None
                 
                 if FETCHED_INVESTORS:
                     try:
@@ -13197,20 +13197,20 @@ def martingale_system(inv_id=None):
                         
                         investor_cfg = investor_users.get(user_brokerid)
                         if investor_cfg:
-                            broker_balance_from_investor = investor_cfg.get('broker_balance')
-                            print(f"  │ Investor broker_balance: {broker_balance_from_investor}")
+                            recent_highest_balance_from_investor = investor_cfg.get('recent_highest_balance')
+                            print(f"  │ Investor recent_highest_balance: {recent_highest_balance_from_investor}")
                     except Exception as e:
                         print(f"  │ Could not load investor data: {e}")
                 
-                if broker_balance_from_investor is not None:
+                if recent_highest_balance_from_investor is not None:
                     try:
-                        starting_balance = float(broker_balance_from_investor)
-                        print(f"  │ Using broker_balance: ${starting_balance:.2f}")
+                        starting_balance = float(recent_highest_balance_from_investor)
+                        print(f"  │ Using recent_highest_balance: ${starting_balance:.2f}")
                     except (ValueError, TypeError):
-                        print(f"  │ Could not parse broker_balance, using current balance")
+                        print(f"  │ Could not parse recent_highest_balance, using current balance")
                         starting_balance = current_balance
                 else:
-                    print(f"  │ No broker_balance found, using current balance")
+                    print(f"  │ No recent_highest_balance found, using current balance")
                     starting_balance = current_balance
             
             else:
@@ -13220,16 +13220,16 @@ def martingale_system(inv_id=None):
                         with open(activities_path, 'r', encoding='utf-8') as f:
                             activities = json.load(f)
                         
-                        broker_balance = activities.get('broker_balance')
-                        if broker_balance is not None:
+                        recent_highest_balance = activities.get('recent_highest_balance')
+                        if recent_highest_balance is not None:
                             try:
-                                starting_balance = float(broker_balance)
+                                starting_balance = float(recent_highest_balance)
                                 print(f"  │ Starting balance from activities.json: ${starting_balance:.2f}")
                             except (ValueError, TypeError):
-                                print(f"  │ Could not parse broker_balance, using current balance")
+                                print(f"  │ Could not parse recent_highest_balance, using current balance")
                                 starting_balance = current_balance
                         else:
-                            print(f"  │ No broker_balance in activities.json, using current balance")
+                            print(f"  │ No recent_highest_balance in activities.json, using current balance")
                             starting_balance = current_balance
                         
                     except Exception as e:
@@ -13274,7 +13274,7 @@ def martingale_system(inv_id=None):
             stats["losing_trades_count"] = 0
             
             print(f"\n  📉 Drawdown Analysis (Balance-Based):")
-            print(f"  │ Starting balance (broker_balance): ${execution_start_balance:.2f}")
+            print(f"  │ Starting balance (recent_highest_balance): ${execution_start_balance:.2f}")
             print(f"  │ Current balance: ${current_balance:.2f}")
             print(f"  │ Total drawdown: ${total_drawdown:.2f}")
             
@@ -13305,16 +13305,16 @@ def martingale_system(inv_id=None):
                         with open(activities_path, 'r', encoding='utf-8') as f:
                             activities = json.load(f)
                         
-                        broker_balance = activities.get('broker_balance')
-                        if broker_balance is not None:
+                        recent_highest_balance = activities.get('recent_highest_balance')
+                        if recent_highest_balance is not None:
                             try:
-                                starting_balance = float(broker_balance)
+                                starting_balance = float(recent_highest_balance)
                                 print(f"  │ Starting balance from activities.json: ${starting_balance:.2f}")
                             except (ValueError, TypeError):
-                                print(f"  │ Could not parse broker_balance, using current balance")
+                                print(f"  │ Could not parse recent_highest_balance, using current balance")
                                 starting_balance = current_balance
                         else:
-                            print(f"  │ No broker_balance in activities.json, using current balance")
+                            print(f"  │ No recent_highest_balance in activities.json, using current balance")
                             starting_balance = current_balance
                         
                     except Exception as e:
@@ -16501,6 +16501,725 @@ def martingale_system(inv_id=None):
 # MARTINGALE #
 
 
+def recent_highest_balance_target(inv_id=None):
+    """
+    Function: Manages recent_highest_balance tracking for investors.
+    
+    This function:
+    1. Checks if recent_highest_balance field exists in investor record
+    2. If not, creates it and fills with current MT5 balance
+    3. If exists, compares current MT5 balance with recent_highest_balance
+    4. ONLY updates if current balance > recent_highest_balance (higher balance only)
+    5. Does NOT update if current balance <= recent_highest_balance
+    6. Raises alarm when a new higher balance is recorded
+    7. UPDATES ALL INVESTOR FILES (FETCHED_INVESTORS, UPDATED_INVESTORS, ALL_FETCHED_INVESTORS, ALL_UPDATED_INVESTORS)
+    
+    Args:
+        inv_id: Optional specific investor ID to process. If None, processes all investors.
+        
+    Returns:
+        dict: Statistics about the recent broker balance check
+    """
+    global recent_highest_alert
+    
+    import os
+    import json
+    from datetime import datetime
+    from pathlib import Path
+    
+    # Initialize global alert inside the function
+    recent_highest_alert = {
+        'is_triggered': False,
+        'investor_id': inv_id if inv_id else "all",
+        'old_balance': None,
+        'new_balance': None,
+        'difference': None,
+        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+        'action': None  # 'initialized', 'new_high', 'skipped_lower', 'unchanged'
+    }
+    
+    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE TARGET {'='*10}")
+    if inv_id:
+        print(f" Investor: {inv_id}")
+    
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_checked": 0,
+        "investors_updated": 0,
+        "investors_skipped": 0,
+        "new_high_alerts": 0,
+        "field_created": 0,
+        "errors": [],
+        "current_time": datetime.now().strftime('%I:%M:%S %p'),
+        "processing_success": False,
+        "details": []
+    }
+    
+    # Helper function to get the last message for a specific section
+    def get_last_message(notifications_dict, section_key):
+        """Get the most recent message for a specific section"""
+        if not notifications_dict:
+            return None
+        
+        latest_message = None
+        latest_time = None
+        latest_id = None
+        
+        for msg_id, msg_data in notifications_dict.items():
+            if isinstance(msg_data, dict) and msg_data.get('section') == section_key:
+                try:
+                    msg_time = datetime.strptime(msg_data['time'], "%Y-%m-%d %H:%M:%S")
+                    if latest_time is None or msg_time > latest_time:
+                        latest_time = msg_time
+                        latest_message = msg_data
+                        latest_id = msg_id
+                except:
+                    pass
+        
+        if latest_message:
+            return {
+                'type': latest_message.get('type'),
+                'time': latest_time,
+                'id': latest_id,
+                'data': latest_message
+            }
+        return None
+    
+    # Helper function to add notification with individual section tracking
+    def add_notification(notifications_dict, section_key, message, message_type, timestamp=None):
+        """
+        Add notification with individual section tracking.
+        Only adds if the message type is different from the last message type for that section.
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        last_msg = get_last_message(notifications_dict, section_key)
+        
+        # Check if we should add this notification
+        should_add = False
+        if last_msg is None:
+            # No message exists for this section, add it
+            should_add = True
+        else:
+            # Only add if the type is different from the last message type
+            if last_msg['type'] != message_type:
+                should_add = True
+        
+        if not should_add:
+            return False
+        
+        # Find next available ID
+        next_id = 1
+        if notifications_dict:
+            try:
+                existing_ids = [int(k) for k in notifications_dict.keys() if k.isdigit()]
+                next_id = max(existing_ids) + 1 if existing_ids else 1
+            except:
+                next_id = len(notifications_dict) + 1
+        
+        notifications_dict[str(next_id)] = {
+            "section": section_key,
+            "message": message,
+            "time": timestamp,
+            "type": message_type,
+            "update": "new"
+        }
+        return True
+    
+    # Helper function to add execution notification with individual section tracking
+    def add_execution_notification(executions_dict, section_key, message, message_type, timestamp=None):
+        """
+        Add execution notification with individual section tracking.
+        Only adds if the message type is different from the last message type for that section.
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        last_msg = get_last_message(executions_dict, section_key)
+        
+        # Check if we should add this notification
+        should_add = False
+        if last_msg is None:
+            # No message exists for this section, add it
+            should_add = True
+        else:
+            # Only add if the type is different from the last message type
+            if last_msg['type'] != message_type:
+                should_add = True
+        
+        if not should_add:
+            return False
+        
+        # Find next available ID
+        next_id = 1
+        if executions_dict:
+            try:
+                existing_ids = [int(k) for k in executions_dict.keys() if k.isdigit()]
+                next_id = max(existing_ids) + 1 if existing_ids else 1
+            except:
+                next_id = len(executions_dict) + 1
+        
+        executions_dict[str(next_id)] = {
+            "section": section_key,
+            "message": message,
+            "time": timestamp,
+            "type": message_type,
+            "update": "new"
+        }
+        return True
+    
+    # Helper function to get current MT5 balance
+    def get_mt5_balance(investor_id):
+        """Get current MT5 account balance"""
+        try:
+            if not mt5.terminal_info():
+                print(f"  MT5 not connected")
+                return None
+            
+            account_info = mt5.account_info()
+            if account_info:
+                return account_info.balance
+            else:
+                print(f"  Could not get account info for {investor_id}")
+                return None
+        except Exception as e:
+            print(f"  Error getting MT5 balance for {investor_id}: {e}")
+            return None
+    
+    # ================================================================
+    # LOAD ALL INVESTOR FILES (Like trades_analytics does)
+    # ================================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR FILES")
+    print("─"*80)
+    
+    # Load FETCHED_INVESTORS (legacy)
+    fetched_data = {}
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load FETCHED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ FETCHED_INVESTORS not found at: {FETCHED_INVESTORS}")
+    
+    # Load UPDATED_INVESTORS (legacy)
+    updated_data = {}
+    if os.path.exists(UPDATED_INVESTORS):
+        try:
+            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                updated_data = json.load(f)
+            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load UPDATED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ UPDATED_INVESTORS not found at: {UPDATED_INVESTORS}")
+    
+    # Load ALL_FETCHED_INVESTORS
+    all_fetched_data = {}
+    if os.path.exists(ALL_FETCHED_INVESTORS):
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load ALL_FETCHED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ ALL_FETCHED_INVESTORS not found at: {ALL_FETCHED_INVESTORS}")
+    
+    # Load ALL_UPDATED_INVESTORS
+    all_updated_data = {}
+    if os.path.exists(ALL_UPDATED_INVESTORS):
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_updated_data = json.load(f)
+            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load ALL_UPDATED_INVESTORS: {e}")
+    else:
+        print(f" │ ⚠️ ALL_UPDATED_INVESTORS not found at: {ALL_UPDATED_INVESTORS}")
+    
+    print("─"*80)
+    
+    if not fetched_data and not updated_data and not all_fetched_data and not all_updated_data:
+        print(" ⚠️ No investor data found in any file!")
+        stats["errors"].append("No investor data found")
+        return stats
+    
+    # Determine which investors to process
+    # Combine all investor IDs from all files
+    all_investor_ids = set()
+    all_investor_ids.update(fetched_data.keys())
+    all_investor_ids.update(updated_data.keys())
+    all_investor_ids.update(all_fetched_data.keys())
+    all_investor_ids.update(all_updated_data.keys())
+    
+    if inv_id:
+        investors_to_process = [inv_id] if inv_id in all_investor_ids else []
+        if not investors_to_process:
+            print(f" ⚠️ Investor {inv_id} not found in any data file!")
+            stats["errors"].append(f"Investor {inv_id} not found")
+            return stats
+    else:
+        investors_to_process = list(all_investor_ids)
+    
+    print(f"\n 📋 Processing {len(investors_to_process)} investors...")
+    
+    # Track if any updates were made
+    has_updates = False
+    
+    # Process each investor
+    for inv_id in investors_to_process:
+        print(f"\n[{stats['investors_checked'] + 1}/{len(investors_to_process)}] 📊 Investor: {inv_id}")
+        
+        # Get current MT5 balance
+        current_balance = get_mt5_balance(inv_id)
+        if current_balance is None:
+            print(f"  ⚠️ Could not get MT5 balance for {inv_id}")
+            stats["errors"].append(f"Could not get MT5 balance for {inv_id}")
+            stats["investors_skipped"] += 1
+            continue
+        
+        print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
+        
+        # Check each data source for recent_highest_balance
+        def get_recent_balance(data_dict, inv_id):
+            """Get recent_highest_balance from a data dictionary"""
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                val = data_dict[inv_id].get('recent_highest_balance')
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        return None
+            return None
+        
+        # Get existing recent balance from any source (priority: updated_data first)
+        existing_recent = None
+        source_name = None
+        
+        # Check UPDATED_INVESTORS first (most current)
+        if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+            val = updated_data[inv_id].get('recent_highest_balance')
+            if val is not None:
+                try:
+                    existing_recent = float(val)
+                    source_name = "UPDATED_INVESTORS"
+                except:
+                    pass
+        
+        # If not found, check ALL_UPDATED_INVESTORS
+        if existing_recent is None and inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+            val = all_updated_data[inv_id].get('recent_highest_balance')
+            if val is not None:
+                try:
+                    existing_recent = float(val)
+                    source_name = "ALL_UPDATED_INVESTORS"
+                except:
+                    pass
+        
+        # If not found, check FETCHED_INVESTORS
+        if existing_recent is None and inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+            val = fetched_data[inv_id].get('recent_highest_balance')
+            if val is not None:
+                try:
+                    existing_recent = float(val)
+                    source_name = "FETCHED_INVESTORS"
+                except:
+                    pass
+        
+        # If not found, check ALL_FETCHED_INVESTORS
+        if existing_recent is None and inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+            val = all_fetched_data[inv_id].get('recent_highest_balance')
+            if val is not None:
+                try:
+                    existing_recent = float(val)
+                    source_name = "ALL_FETCHED_INVESTORS"
+                except:
+                    pass
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Check if field exists and has value
+        if existing_recent is None:
+            # First time - create field and set to current balance
+            print(f"  📝 Recent broker balance field not set - creating with current balance")
+            new_balance = current_balance
+            action = "initialized"
+            stats["field_created"] += 1
+            stats["investors_updated"] += 1
+            
+            # Set global alert for initialization
+            recent_highest_alert = {
+                'is_triggered': True,
+                'investor_id': inv_id,
+                'old_balance': None,
+                'new_balance': current_balance,
+                'difference': None,
+                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'initialized'
+            }
+            print(f"  🌐 GLOBAL ALERT: Recent balance tracking initialized for {inv_id}")
+            
+            # Create notification message
+            message = f"💰 RECENT BALANCE TRACKING INITIALIZED: Starting balance of ${current_balance:.2f} recorded as baseline."
+            exec_message = f"SERVER NOTIFICATION: Investor {inv_id} balance tracking initialized at ${current_balance:.2f}"
+            
+            # Update notifications in ALL data sources (like trades_analytics)
+            # 1. Update FETCHED_INVESTORS
+            if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                if 'notifications' not in fetched_data[inv_id]:
+                    fetched_data[inv_id]['notifications'] = {}
+                if 'executions_notification' not in fetched_data[inv_id]:
+                    fetched_data[inv_id]['executions_notification'] = {}
+                add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                add_execution_notification(fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                print(f"  ✅ Added notification to FETCHED_INVESTORS")
+            
+            # 2. Update UPDATED_INVESTORS
+            if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                if 'notifications' not in updated_data[inv_id]:
+                    updated_data[inv_id]['notifications'] = {}
+                if 'executions_notification' not in updated_data[inv_id]:
+                    updated_data[inv_id]['executions_notification'] = {}
+                add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                add_execution_notification(updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                print(f"  ✅ Added notification to UPDATED_INVESTORS")
+            
+            # 3. Update ALL_FETCHED_INVESTORS
+            if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                if 'notifications' not in all_fetched_data[inv_id]:
+                    all_fetched_data[inv_id]['notifications'] = {}
+                if 'executions_notification' not in all_fetched_data[inv_id]:
+                    all_fetched_data[inv_id]['executions_notification'] = {}
+                add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                add_execution_notification(all_fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                print(f"  ✅ Added notification to ALL_FETCHED_INVESTORS")
+            
+            # 4. Update ALL_UPDATED_INVESTORS
+            if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                if 'notifications' not in all_updated_data[inv_id]:
+                    all_updated_data[inv_id]['notifications'] = {}
+                if 'executions_notification' not in all_updated_data[inv_id]:
+                    all_updated_data[inv_id]['executions_notification'] = {}
+                add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                add_execution_notification(all_updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                print(f"  ✅ Added notification to ALL_UPDATED_INVESTORS")
+            
+            stats["details"].append({
+                "investor_id": inv_id,
+                "action": "initialized",
+                "balance": current_balance,
+                "timestamp": timestamp
+            })
+            
+        else:
+            # Field exists - check if current balance is higher
+            print(f"  📊 Existing recent balance: ${existing_recent:.2f} (from {source_name})")
+            
+            if current_balance > existing_recent:
+                # New higher balance - update!
+                difference = current_balance - existing_recent
+                print(f"  🚀 NEW HIGHER BALANCE DETECTED: ${difference:.2f} increase")
+                print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
+                
+                new_balance = current_balance
+                action = "new_high"
+                stats["investors_updated"] += 1
+                stats["new_high_alerts"] += 1
+                
+                # Set global alert for new high
+                recent_highest_alert = {
+                    'is_triggered': True,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': difference,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'new_high'
+                }
+                print(f"  🌐 GLOBAL ALERT: New record balance for {inv_id}!")
+                
+                # Create notification messages
+                message = f"🚀 NEW RECORD BALANCE ACHIEVED: Your broker balance has reached a new high of ${current_balance:.2f}, an increase of ${difference:.2f} from the previous high of ${existing_recent:.2f}!"
+                exec_message = f"SERVER NOTIFICATION: Investor {inv_id} reached new balance high of ${current_balance:.2f} (increase of ${difference:.2f})"
+                
+                # Update notifications in ALL data sources
+                # 1. Update FETCHED_INVESTORS
+                if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                    if 'notifications' not in fetched_data[inv_id]:
+                        fetched_data[inv_id]['notifications'] = {}
+                    if 'executions_notification' not in fetched_data[inv_id]:
+                        fetched_data[inv_id]['executions_notification'] = {}
+                    add_notification(fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                    add_execution_notification(fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                
+                # 2. Update UPDATED_INVESTORS
+                if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                    if 'notifications' not in updated_data[inv_id]:
+                        updated_data[inv_id]['notifications'] = {}
+                    if 'executions_notification' not in updated_data[inv_id]:
+                        updated_data[inv_id]['executions_notification'] = {}
+                    add_notification(updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                    add_execution_notification(updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                
+                # 3. Update ALL_FETCHED_INVESTORS
+                if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                    if 'notifications' not in all_fetched_data[inv_id]:
+                        all_fetched_data[inv_id]['notifications'] = {}
+                    if 'executions_notification' not in all_fetched_data[inv_id]:
+                        all_fetched_data[inv_id]['executions_notification'] = {}
+                    add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                    add_execution_notification(all_fetched_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                
+                # 4. Update ALL_UPDATED_INVESTORS
+                if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                    if 'notifications' not in all_updated_data[inv_id]:
+                        all_updated_data[inv_id]['notifications'] = {}
+                    if 'executions_notification' not in all_updated_data[inv_id]:
+                        all_updated_data[inv_id]['executions_notification'] = {}
+                    add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalance', message, 'success', timestamp)
+                    add_execution_notification(all_updated_data[inv_id]['executions_notification'], 'RecentBalance', exec_message, 'success', timestamp)
+                
+                print(f"  ✅ Added notifications to all data sources")
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": "new_high",
+                    "old_balance": existing_recent,
+                    "new_balance": current_balance,
+                    "difference": difference,
+                    "timestamp": timestamp
+                })
+                
+            elif current_balance < existing_recent:
+                # Current balance is lower - do NOT update
+                difference = existing_recent - current_balance
+                print(f"  📉 Current balance is LOWER: ${difference:.2f} decrease - NOT updating")
+                stats["investors_skipped"] += 1
+                
+                # Set global alert for lower balance
+                recent_highest_alert = {
+                    'is_triggered': True,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': difference,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'skipped_lower'
+                }
+                
+                # Add info notification (warning) to ALL data sources
+                message = f"📉 CURRENT BALANCE BELOW RECORD: Your current balance is ${current_balance:.2f}, which is below the recent high of ${existing_recent:.2f}. Only higher balances are recorded."
+                
+                # Update notifications in ALL data sources
+                if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+                    if 'notifications' not in fetched_data[inv_id]:
+                        fetched_data[inv_id]['notifications'] = {}
+                    add_notification(fetched_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
+                
+                if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+                    if 'notifications' not in updated_data[inv_id]:
+                        updated_data[inv_id]['notifications'] = {}
+                    add_notification(updated_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
+                
+                if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+                    if 'notifications' not in all_fetched_data[inv_id]:
+                        all_fetched_data[inv_id]['notifications'] = {}
+                    add_notification(all_fetched_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
+                
+                if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+                    if 'notifications' not in all_updated_data[inv_id]:
+                        all_updated_data[inv_id]['notifications'] = {}
+                    add_notification(all_updated_data[inv_id]['notifications'], 'RecentBalanceLow', message, 'warning', timestamp)
+                
+                print(f"  ✅ Added lower balance notifications to all data sources")
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": "skipped_lower",
+                    "recent_high": existing_recent,
+                    "current_balance": current_balance,
+                    "difference": difference,
+                    "timestamp": timestamp
+                })
+                
+                # Skip updating the main files (no change needed)
+                stats["investors_checked"] += 1
+                continue
+                
+            else:
+                # Equal - no change
+                print(f"  ℹ️ Balance unchanged: ${current_balance:.2f}")
+                stats["investors_skipped"] += 1
+                
+                # Set global alert for unchanged
+                recent_highest_alert = {
+                    'is_triggered': False,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': 0,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'unchanged'
+                }
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": "unchanged",
+                    "balance": current_balance,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                
+                stats["investors_checked"] += 1
+                continue
+        
+        # ================================================================
+        # UPDATE ALL INVESTOR FILES WITH THE NEW BALANCE
+        # ================================================================
+        print(f"\n  📝 Updating all investor files with new recent_highest_balance: ${new_balance:.2f}")
+        
+        # Convert to string for storage
+        new_balance_str = str(round(new_balance, 2))
+        
+        # 1. Update FETCHED_INVESTORS
+        if inv_id in fetched_data and isinstance(fetched_data[inv_id], dict):
+            fetched_data[inv_id]['recent_highest_balance'] = new_balance_str
+            fetched_data[inv_id]['recent_broker_balance'] = new_balance_str
+            print(f"  ✅ Updated FETCHED_INVESTORS[{inv_id}]['recent_highest_balance']")
+        else:
+            fetched_data[inv_id] = {
+                'recent_highest_balance': new_balance_str,
+                'recent_broker_balance': new_balance_str
+            }
+            print(f"  ➕ Created FETCHED_INVESTORS[{inv_id}]")
+        
+        # 2. Update UPDATED_INVESTORS
+        if inv_id in updated_data and isinstance(updated_data[inv_id], dict):
+            updated_data[inv_id]['recent_highest_balance'] = new_balance_str
+            updated_data[inv_id]['recent_broker_balance'] = new_balance_str
+            print(f"  ✅ Updated UPDATED_INVESTORS[{inv_id}]['recent_highest_balance']")
+        else:
+            updated_data[inv_id] = {
+                'recent_highest_balance': new_balance_str,
+                'recent_broker_balance': new_balance_str
+            }
+            print(f"  ➕ Created UPDATED_INVESTORS[{inv_id}]")
+        
+        # 3. Update ALL_FETCHED_INVESTORS
+        if inv_id in all_fetched_data and isinstance(all_fetched_data[inv_id], dict):
+            all_fetched_data[inv_id]['recent_highest_balance'] = new_balance_str
+            all_fetched_data[inv_id]['recent_broker_balance'] = new_balance_str
+            print(f"  ✅ Updated ALL_FETCHED_INVESTORS[{inv_id}]['recent_highest_balance']")
+        else:
+            all_fetched_data[inv_id] = {
+                'recent_highest_balance': new_balance_str,
+                'recent_broker_balance': new_balance_str
+            }
+            print(f"  ➕ Created ALL_FETCHED_INVESTORS[{inv_id}]")
+        
+        # 4. Update ALL_UPDATED_INVESTORS
+        if inv_id in all_updated_data and isinstance(all_updated_data[inv_id], dict):
+            all_updated_data[inv_id]['recent_highest_balance'] = new_balance_str
+            all_updated_data[inv_id]['recent_broker_balance'] = new_balance_str
+            print(f"  ✅ Updated ALL_UPDATED_INVESTORS[{inv_id}]['recent_highest_balance']")
+        else:
+            all_updated_data[inv_id] = {
+                'recent_highest_balance': new_balance_str,
+                'recent_broker_balance': new_balance_str
+            }
+            print(f"  ➕ Created ALL_UPDATED_INVESTORS[{inv_id}]")
+        
+        has_updates = True
+        stats["investors_checked"] += 1
+    
+    # ================================================================
+    # SAVE ALL UPDATES BACK TO DISK (Like trades_analytics)
+    # ================================================================
+    if has_updates:
+        print("\n" + "─"*80)
+        print(" 💾 SAVING ALL UPDATED FILES")
+        print("─"*80)
+        
+        try:
+            with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(fetched_data, f, indent=4)
+            print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save FETCHED_INVESTORS: {e}")
+        
+        try:
+            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(updated_data, f, indent=4)
+            print(f" │ ✅ Updated: {UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save UPDATED_INVESTORS: {e}")
+        
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_fetched_data, f, indent=4)
+            print(f" │ ✅ Updated: {ALL_FETCHED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save ALL_FETCHED_INVESTORS: {e}")
+        
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_updated_data, f, indent=4)
+            print(f" │ ✅ Updated: {ALL_UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save ALL_UPDATED_INVESTORS: {e}")
+        
+        print(f"\n │ ✅ All files updated successfully.")
+        stats["processing_success"] = True
+    else:
+        print("\n │ ℹ️ No updates needed. All files are up to date.")
+        stats["processing_success"] = True
+    
+    # Summary
+    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
+    print(f"  Investors checked: {stats['investors_checked']}")
+    print(f"  Field created: {stats['field_created']}")
+    print(f"  New high records: {stats['new_high_alerts']}")
+    print(f"  Investors updated: {stats['investors_updated']}")
+    print(f"  Investors skipped: {stats['investors_skipped']}")
+    print(f"  Files updated: FETCHED_INVESTORS, UPDATED_INVESTORS, ALL_FETCHED_INVESTORS, ALL_UPDATED_INVESTORS")
+    
+    if stats['new_high_alerts'] > 0:
+        print(f"\n  🚀 ALERT: {stats['new_high_alerts']} investor(s) reached new balance highs!")
+        for detail in stats['details']:
+            if detail.get('action') == 'new_high':
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f})")
+    
+    if recent_highest_alert['is_triggered']:
+        print(f"\n  🌐 GLOBAL ALERT ACTIVE:")
+        print(f"     Investor: {recent_highest_alert['investor_id']}")
+        print(f"     Action: {recent_highest_alert['action']}")
+        if recent_highest_alert['action'] == 'new_high':
+            print(f"     Old Balance: ${recent_highest_alert['old_balance']:.2f}")
+            print(f"     New Balance: ${recent_highest_alert['new_balance']:.2f}")
+            print(f"     Increase: ${recent_highest_alert['difference']:.2f}")
+        print(f"     Time: {recent_highest_alert['timestamp']}")
+    
+    if stats['errors']:
+        print(f"\n  ⚠️ Errors encountered: {len(stats['errors'])}")
+        for error in stats['errors']:
+            print(f"     • {error}")
+    
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+    
+    return stats
+
 def daily_target_check(inv_id=None):
     """
     Function: Checks if today's profit/loss has reached the daily target limits.
@@ -17142,6 +17861,7 @@ def daily_target_check(inv_id=None):
 def get_normalized_symbol(record_symbol, risk_keys=None):
     """
     Standardizes symbols with a 'Broker-First' priority.
+    First tries the original clean matching, then falls back to case-insensitive matching.
     If 'US OIL' is passed, it finds the USOIL family, then checks if the broker
     uses USOUSD, USOIL, or WTI.
     """
@@ -17150,6 +17870,14 @@ def get_normalized_symbol(record_symbol, risk_keys=None):
     
     def clean(s): 
         return str(s).replace(" ", "").replace("_", "").replace("/", "").replace(".", "").upper()
+
+    def clean_preserve_case(s):
+        # Remove special characters but DON'T convert to uppercase
+        return str(s).replace(" ", "").replace("_", "").replace("/", "").replace(".", "").replace("(", "").replace(")", "")
+
+    def clean_upper_preserve(s):
+        # For comparison purposes only - remove special chars AND uppercase
+        return clean_preserve_case(s).upper()
 
     search_term = clean(record_symbol)
     
@@ -17165,7 +17893,7 @@ def get_normalized_symbol(record_symbol, risk_keys=None):
         except: 
             pass
 
-    # 2. Find the "Family"
+    # 2. Find the "Family" (Original logic)
     target_family_key = None
     all_family_variants = []
     
@@ -17176,7 +17904,7 @@ def get_normalized_symbol(record_symbol, risk_keys=None):
             all_family_variants = family_variants
             break
 
-    # 3. IF RISK_KEYS ARE PROVIDED (For Risk Enforcement)
+    # 3. IF RISK_KEYS ARE PROVIDED (For Risk Enforcement) - Original logic
     if risk_keys:
         clean_risk_map = {clean(k): k for k in risk_keys}
         if target_family_key and clean(target_family_key) in clean_risk_map:
@@ -17186,22 +17914,99 @@ def get_normalized_symbol(record_symbol, risk_keys=None):
                 return clean_risk_map[v]
 
     # 4. IF NO RISK_KEYS (For Populating Order Fields / MT5 Specs)
-    # Check what the broker actually has in MarketWatch
+    # Check what the broker actually has in MarketWatch - ORIGINAL LOGIC FIRST
     all_symbols = mt5.symbols_get()
     if all_symbols:
         broker_symbols = {clean(s.name): s.name for s in all_symbols}
         
-        # Try to find which variant the broker uses
+        # Try to find which variant the broker uses (Original logic)
         for v in all_family_variants:
             if v in broker_symbols:
+                print(f"        ✓ Found broker symbol: {broker_symbols[v]} (via original clean match)")
                 return broker_symbols[v]
             # Handle suffixes (e.g., USOIL.m)
             for b_clean, b_raw in broker_symbols.items():
                 if b_clean.startswith(v):
+                    print(f"        ✓ Found broker symbol: {b_raw} (via original suffix match)")
                     return b_raw
 
-    # Fallback
-    return target_family_key if target_family_key else record_symbol.upper()
+    # ============================================================
+    # FALLBACK: CASE-INSENSITIVE MATCHING WITH PARENTHESES HANDLING
+    # ============================================================
+    print(f"        🔄 Original matching failed, trying case-insensitive fallback...")
+    
+    # Re-build broker maps with case preservation
+    if all_symbols:
+        broker_map_upper = {}
+        broker_map_original = {}
+        
+        for s in all_symbols:
+            # Store cleaned uppercase version for matching
+            cleaned_upper = clean_upper_preserve(s.name)
+            broker_map_upper[cleaned_upper] = s.name  # Store the ORIGINAL case version!
+            
+            # Also store the original name lowercased for case-insensitive matching
+            broker_map_original[s.name.lower()] = s.name
+        
+        # Try the search term with parentheses removed (but case preserved for comparison)
+        search_term_fallback = clean_upper_preserve(record_symbol)
+        
+        # Try the cleaned search term
+        if search_term_fallback in broker_map_upper:
+            found_symbol = broker_map_upper[search_term_fallback]
+            print(f"        ✓ Found broker symbol: {found_symbol} (via fallback cleaned match)")
+            return found_symbol
+        
+        # Try each family variant with parentheses removed
+        for v in all_family_variants:
+            v_clean_upper = clean_upper_preserve(v)
+            if v_clean_upper in broker_map_upper:
+                found_symbol = broker_map_upper[v_clean_upper]
+                print(f"        ✓ Found broker symbol: {found_symbol} (via fallback family variant)")
+                return found_symbol
+        
+        # Try partial matching on broker symbols
+        for v in all_family_variants:
+            v_clean_upper = clean_upper_preserve(v)
+            for cleaned, original in broker_map_upper.items():
+                if v_clean_upper in cleaned or cleaned in v_clean_upper:
+                    found_symbol = original
+                    print(f"        ✓ Found broker symbol: {found_symbol} (via fallback partial match)")
+                    return found_symbol
+        
+        # Try case-insensitive direct match
+        if record_symbol.lower() in broker_map_original:
+            found_symbol = broker_map_original[record_symbol.lower()]
+            print(f"        ✓ Found broker symbol: {found_symbol} (via fallback case-insensitive match)")
+            return found_symbol
+
+    # 5. Try direct MT5 symbol_info (case-sensitive)
+    if mt5.symbol_info(record_symbol):
+        print(f"        ✓ Found broker symbol: {record_symbol} (via direct MT5 match)")
+        return record_symbol
+    
+    # 6. Try MT5 symbol_info with case-insensitive
+    if all_symbols:
+        for s in all_symbols:
+            if s.name.lower() == record_symbol.lower():
+                print(f"        ✓ Found broker symbol: {s.name} (via case-insensitive MT5 lookup)")
+                return s.name
+
+    # 7. Final fallback
+    if target_family_key:
+        # Check if target_family_key exists in broker symbols
+        if all_symbols:
+            for s in all_symbols:
+                if clean_upper_preserve(s.name) == clean_upper_preserve(target_family_key):
+                    return s.name
+        
+        # Return the standard key from normalization map
+        print(f"        ⚠️ Using normalization key: {target_family_key}")
+        return target_family_key
+    
+    # If all else fails, return the original symbol
+    print(f"        ⚠️ No match found, returning: {record_symbol}")
+    return record_symbol
 
 def deduplicate_orders(inv_id=None):
     """
@@ -26610,6 +27415,11 @@ def trades_analytics(inv_id=None):
     
     Reconciles missing profiles and fields between ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS.
     Also tracks unauthorized actions and updates the unauthorized_actions flag.
+    
+    NEW: Daily trades record now includes all_trades with detailed trade information.
+    NEW: Risk reward is extracted from trade comments (highest RR found).
+    FIXED: all_trades field is ALWAYS included in daily records, even if empty.
+    FIXED: take_profit is now properly included in trade details.
     """
     
     print("\n" + "="*80)
@@ -26723,79 +27533,142 @@ def trades_analytics(inv_id=None):
     # Dictionary to keep track of generated analytics structures for synchronization later
     generated_analytics_registry = {}
     
-    # Helper function to calculate recent risk reward
+    # ========================================================================
+    # HELPER FUNCTION: Extract risk reward from trade comment
+    # ========================================================================
+    def extract_risk_reward_from_comment(comment):
+        """
+        Extract risk reward value from trade comment.
+        Comment format examples:
+        - "strategy|H0G0|R2" -> returns 2
+        - "strategy|H0G0|R1.5" -> returns 1.5
+        - "strategy|H0G0|Sbu|L2|R3" -> returns 3
+        
+        Returns 0 if no R value found.
+        """
+        if not comment or not isinstance(comment, str):
+            return 0
+        
+        # Look for pattern R followed by number (with optional decimal)
+        import re
+        match = re.search(r'R([0-9]+(?:\.[0-9]+)?)', comment)
+        if match:
+            try:
+                return float(match.group(1))
+            except (ValueError, TypeError):
+                return 0
+        return 0
+    
+    # ========================================================================
+    # HELPER FUNCTION: Calculate daily trades record with detailed trades
+    # ========================================================================
+    def calculate_daily_trades_record(trades_pool):
+        """
+        Calculate daily trades record with:
+        - trades_count per day
+        - trade_summary per symbol (PNL per symbol)
+        - all_trades with detailed trade info per symbol (ALWAYS INCLUDED)
+        - profit_and_loss for the day
+        
+        CRITICAL FIX: all_trades field is ALWAYS included, even if empty.
+        FIXED: take_profit is now included in trade details.
+        """
+        if not trades_pool:
+            return {}
+        
+        daily_records = {}
+        
+        # Group trades by date
+        trades_by_date = {}
+        for t in trades_pool:
+            trade_date = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
+            if trade_date not in trades_by_date:
+                trades_by_date[trade_date] = []
+            trades_by_date[trade_date].append(t)
+        
+        # Process each day
+        for date, trades in trades_by_date.items():
+            # Count trades for the day
+            trades_count = len(trades)
+            
+            # Calculate P&L per symbol and collect detailed trades
+            symbol_pnl = {}
+            symbol_trades = {}
+            total_daily_pnl = 0.0
+            
+            for t in trades:
+                symbol = t["symbol"]
+                pnl = t["total_pnl"]
+                
+                # Accumulate P&L per symbol
+                symbol_pnl[symbol] = symbol_pnl.get(symbol, 0.0) + pnl
+                total_daily_pnl += pnl
+                
+                # Initialize symbol trade list if not exists
+                if symbol not in symbol_trades:
+                    symbol_trades[symbol] = []
+                
+                # Add detailed trade info with ALL fields
+                trade_detail = {
+                    "order_type": t.get("type", "UNKNOWN"),
+                    "volume": t.get("volume", 0),
+                    "pnl": round(pnl, 2),
+                    "entry_price": t.get("entry_price", 0),
+                    "exit_price": t.get("exit_price", 0) if "exit_price" in t else 0,
+                    "ticket": t.get("ticket", 0),
+                    "risk_reward": t.get("risk_reward", 0),
+                    "time_open": t.get("time_open", ""),
+                    "time_close": t.get("time_close", ""),
+                    "take_profit": t.get("take_profit", 0),  # FIXED: Include take_profit
+                    "tp": t.get("take_profit", 0),  # Also include as 'tp' for compatibility
+                    "stoploss": t.get("stoploss", 0)  # Also include stoploss
+                }
+                symbol_trades[symbol].append(trade_detail)
+            
+            # Round symbol P&L values
+            for symbol in symbol_pnl:
+                symbol_pnl[symbol] = round(symbol_pnl[symbol], 2)
+            
+            # CRITICAL FIX: ALWAYS include all_trades field, even if empty
+            daily_records[date] = {
+                "trades_count": trades_count,
+                "trade_summary": symbol_pnl,
+                "all_trades": symbol_trades,  # ALWAYS included
+                "profit_and_loss": round(total_daily_pnl, 2)
+            }
+        
+        return daily_records
+    
+    # ========================================================================
+    # HELPER FUNCTION: Calculate recent risk reward from trade comments
+    # ========================================================================
     def calculate_recent_risk_reward(trades_pool):
         """
-        Calculate recent risk-reward ratio using the latest loss trade and latest profit trade.
-        Returns an approximate whole number (1, 2, 3, etc.) based on the ratio.
+        Calculate recent risk-reward ratio by extracting R values from trade comments.
+        Returns the highest risk reward value found across all trades.
         
-        If no loss trade exists, returns 0.
-        If no profit trade exists or ratio is very low, returns 1 (minimum).
+        If no R value found, returns 0.
         """
         if not trades_pool:
             return 0
         
-        # Sort trades by close time (newest first)
-        sorted_trades = sorted(trades_pool, key=lambda x: x["raw_close_time"], reverse=True)
+        highest_rr = 0
         
-        # Find the latest loss trade (most recent trade with negative P&L)
-        latest_loss = None
-        for trade in sorted_trades:
-            if trade["total_pnl"] < 0:
-                latest_loss = trade
-                break
+        for trade in trades_pool:
+            # Get comment from trade data
+            comment = trade.get("comment", "")
+            if not comment:
+                continue
+            
+            # Extract risk reward from comment
+            rr = extract_risk_reward_from_comment(comment)
+            
+            # Track the highest RR found
+            if rr > highest_rr:
+                highest_rr = rr
         
-        # If no loss trade found, return 0
-        if not latest_loss:
-            return 0
-        
-        # Find the latest profit trade (most recent trade with positive P&L)
-        # Look for a profit trade that is NOT the same as the loss trade
-        latest_profit = None
-        for trade in sorted_trades:
-            if trade["total_pnl"] > 0 and trade["ticket"] != latest_loss["ticket"]:
-                latest_profit = trade
-                break
-        
-        # If no profit trade found, return 1 (minimum)
-        if not latest_profit:
-            return 1
-        
-        # Calculate risk-reward ratio
-        loss_amount = abs(latest_loss["total_pnl"])
-        profit_amount = latest_profit["total_pnl"]
-        
-        # If loss amount is 0, return 0
-        if loss_amount == 0:
-            return 0
-        
-        # Calculate raw ratio
-        ratio = profit_amount / loss_amount
-        
-        # Approximate to nearest whole or even number
-        # If ratio is less than 1.0, round up to 1
-        if ratio < 1.0:
-            return 1
-        # If ratio is between 1.0 and 1.5, return 1
-        elif 1.0 <= ratio < 1.5:
-            return 1
-        # If ratio is between 1.5 and 2.5, return 2
-        elif 1.5 <= ratio < 2.5:
-            return 2
-        # If ratio is between 2.5 and 3.5, return 3
-        elif 2.5 <= ratio < 3.5:
-            return 3
-        # If ratio is between 3.5 and 4.5, return 4
-        elif 3.5 <= ratio < 4.5:
-            return 4
-        # If ratio is between 4.5 and 5.5, return 5
-        elif 4.5 <= ratio < 5.5:
-            return 5
-        # For higher ratios, use rounding
-        else:
-            rounded = round(ratio)
-            # Ensure we don't return 0
-            return max(1, rounded)
+        # If no RR found, return 0
+        return highest_rr
     
     # Iterate System Investors
     for user_brokerid in investor_ids:
@@ -26932,6 +27805,9 @@ def trades_analytics(inv_id=None):
             print(f" │ ℹ️ Zero closed trade records detected on account terminal layer history.")
             continue
         
+        # NEW: Also fetch history orders to get comments
+        history_orders = mt5.history_orders_get(start_datetime, end_datetime)
+        
         deals_by_position = {}
         for deal in history_deals:
             if deal.type in [0, 1]:
@@ -26943,6 +27819,13 @@ def trades_analytics(inv_id=None):
         master_flat_processed_trades = []
         unauthorized_trades_detected = False  # Track if any unauthorized trades are found
         total_profit_loss = 0.0  # Track total P&L for profitandloss field
+        
+        # Create a map of position_id to order comment
+        order_comments = {}
+        if history_orders:
+            for order in history_orders:
+                if order.position_id not in order_comments:
+                    order_comments[order.position_id] = order.comment
         
         # EVALUATE INDIVIDUAL POSITION RECORDS
         for position_id, deals in deals_by_position.items():
@@ -26974,6 +27857,7 @@ def trades_analytics(inv_id=None):
             mt5_action = mt5.ORDER_TYPE_BUY if entry_deal.type == 0 else mt5.ORDER_TYPE_SELL
             total_volume = entry_deal.volume
             entry_price = entry_deal.price
+            exit_price = exit_deal.price if exit_deal else 0
             
             stoploss = getattr(entry_deal, 'sl', 0.0)
             takeprofit = getattr(entry_deal, 'tp', 0.0)
@@ -26988,7 +27872,7 @@ def trades_analytics(inv_id=None):
                             takeprofit = order.tp
             
             trade_risk = 0.0
-            risk_reward = "N/A"
+            risk_reward = 0  # Changed to numeric value
             
             if stoploss > 0.0:
                 calculated_risk_pnl = mt5.order_calc_profit(mt5_action, entry_deal.symbol, total_volume, entry_price, stoploss)
@@ -27008,11 +27892,21 @@ def trades_analytics(inv_id=None):
 
             is_within_risk = (0.0 < resolved_risk <= max_allowable_risk_threshold)
             
+            # Get comment from order if available
+            comment = order_comments.get(position_id, "")
+            
+            # If risk_reward is still 0, try to extract from comment
+            if risk_reward == 0 and comment:
+                extracted_rr = extract_risk_reward_from_comment(comment)
+                if extracted_rr > 0:
+                    risk_reward = extracted_rr
+            
             trade_record = {
                 "ticket": position_id,
                 "symbol": entry_deal.symbol,
                 "type": trade_type,
                 "entry_price": round(entry_price, 5),
+                "exit_price": round(exit_price, 5),
                 "stoploss": round(stoploss, 5),
                 "take_profit": round(takeprofit, 5),
                 "trade_risk": resolved_risk,
@@ -27025,7 +27919,8 @@ def trades_analytics(inv_id=None):
                 "state": "CLOSED",
                 "raw_close_time": exit_deal.time,
                 "is_within_risk": is_within_risk,
-                "auth_group": auth_group
+                "auth_group": auth_group,
+                "comment": comment  # ADDED: Store comment for RR extraction
             }
             master_flat_processed_trades.append(trade_record)
 
@@ -27199,54 +28094,6 @@ def trades_analytics(inv_id=None):
                 "average_trade_dates": average_dates
             }
         
-        # NEW FUNCTION: Calculate daily trades record
-        def calculate_daily_trades_record(trades_pool):
-            """
-            Calculate daily trades record with:
-            - trades_count per day
-            - trade_summary per symbol (PNL per symbol)
-            - profit_and_loss for the day
-            """
-            if not trades_pool:
-                return {}
-            
-            daily_records = {}
-            
-            # Group trades by date
-            trades_by_date = {}
-            for t in trades_pool:
-                trade_date = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
-                if trade_date not in trades_by_date:
-                    trades_by_date[trade_date] = []
-                trades_by_date[trade_date].append(t)
-            
-            # Process each day
-            for date, trades in trades_by_date.items():
-                # Count trades for the day
-                trades_count = len(trades)
-                
-                # Calculate P&L per symbol
-                symbol_pnl = {}
-                total_daily_pnl = 0.0
-                
-                for t in trades:
-                    symbol = t["symbol"]
-                    pnl = t["total_pnl"]
-                    symbol_pnl[symbol] = symbol_pnl.get(symbol, 0.0) + pnl
-                    total_daily_pnl += pnl
-                
-                # Round symbol P&L values
-                for symbol in symbol_pnl:
-                    symbol_pnl[symbol] = round(symbol_pnl[symbol], 2)
-                
-                daily_records[date] = {
-                    "trades_count": trades_count,
-                    "trade_summary": symbol_pnl,
-                    "profit_and_loss": round(total_daily_pnl, 2)
-                }
-            
-            return daily_records
-        
         # Helper function to calculate revenue metrics
         def calculate_revenue_metrics(daily_trades_record, recent_risk_reward=0):
             """
@@ -27328,10 +28175,10 @@ def trades_analytics(inv_id=None):
             # Calculate trade metrics using the helper function
             trade_metrics = calculate_trade_metrics(trades_pool)
             
-            # Calculate daily trades record
+            # Calculate daily trades record with detailed trades
             daily_trades_record = calculate_daily_trades_record(trades_pool)
             
-            # Calculate recent risk reward
+            # Calculate recent risk reward from trade comments (highest RR found)
             recent_risk_reward = calculate_recent_risk_reward(trades_pool)
             
             # Calculate revenue metrics with recent risk reward adjustment
@@ -27401,6 +28248,7 @@ def trades_analytics(inv_id=None):
                                 clean_trade.pop("raw_close_time", None)
                                 clean_trade.pop("is_within_risk", None)
                                 clean_trade.pop("auth_group", None)
+                                clean_trade.pop("comment", None)
                                 streak_trades.append(clean_trade)
                             hi_losses = {
                                 "consecutive_losses_count": len(curr_streak), 
@@ -27419,6 +28267,7 @@ def trades_analytics(inv_id=None):
                         clean_trade.pop("raw_close_time", None)
                         clean_trade.pop("is_within_risk", None)
                         clean_trade.pop("auth_group", None)
+                        clean_trade.pop("comment", None)
                         streak_trades.append(clean_trade)
                     hi_losses = {
                         "consecutive_losses_count": len(curr_streak), 
@@ -27455,6 +28304,7 @@ def trades_analytics(inv_id=None):
                                 clean_trade.pop("raw_close_time", None)
                                 clean_trade.pop("is_within_risk", None)
                                 clean_trade.pop("auth_group", None)
+                                clean_trade.pop("comment", None)
                                 clean_trades.append(clean_trade)
                             days_data[d] = clean_trades
                         hi_days = {
@@ -27990,7 +28840,7 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -28275,7 +29125,7 @@ def process_single_investor_(inv_folder):
         # =====================================================================
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
-        martingale_system(inv_id=inv_id)
+        recent_highest_balance_target(inv_id=inv_id)
         
         mt5.shutdown()
         
@@ -28290,7 +29140,7 @@ def process_single_investor_(inv_folder):
     
     return account_stats
 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -28601,11 +29451,18 @@ def process_single_investor(inv_folder):
         # CONDITION A: NO RESTRICTIONS - EXECUTE ALL ENGINES
         # =====================================================================
         
-        
         if not is_restricted_day and not is_restricted_time:
             print(f"✅ [{inv_id}] No restrictions active - Running full trading logic...")
+            
+            # ================================================================
+            # CHECK DAILY TARGET AND RECENT HIGHEST BALANCE
+            # ================================================================
             daily_target_stats = daily_target_check(inv_id=inv_id)
             daily_target_hit = False
+            recent_highest_stats = recent_highest_balance_target(inv_id=inv_id)
+            recent_highest_hit = recent_highest_alert['is_triggered'] if recent_highest_alert else False
+
+            # Check daily target alerts
             if daily_target_alert and daily_target_alert.get('investor_id') == inv_id:
                 if daily_target_alert.get('is_triggered', False):
                     daily_target_hit = True
@@ -28615,7 +29472,22 @@ def process_single_investor(inv_folder):
                     if hit_details.get('loss_limit_hit', False):
                         print(f"  🚨 LOSS LIMIT REACHED IN {inv_id}'S ACCOUNT - No further trading today")
 
-            if not daily_target_hit:
+            # Check recent highest balance alerts
+            if recent_highest_hit:
+                if recent_highest_alert.get('action') == 'new_high':
+                    print(f"  🚀 NEW RECORD BALANCE ACHIEVED IN {inv_id}'S ACCOUNT: ${recent_highest_alert['old_balance']:.2f} → ${recent_highest_alert['new_balance']:.2f} (+${recent_highest_alert['difference']:.2f})")
+                elif recent_highest_alert.get('action') == 'initialized':
+                    print(f"  💰 RECENT BALANCE TRACKING INITIALIZED FOR {inv_id}: ${recent_highest_alert['new_balance']:.2f}")
+                elif recent_highest_alert.get('action') == 'skipped_lower':
+                    print(f"  📉 CURRENT BALANCE BELOW RECORD IN {inv_id}'S ACCOUNT: ${recent_highest_alert['new_balance']:.2f} (High: ${recent_highest_alert['old_balance']:.2f})")
+
+            # ================================================================
+            # CHECK IF TRADING IS ALLOWED (BOTH CONDITIONS MUST BE FALSE)
+            # ================================================================
+            if not daily_target_hit and not recent_highest_hit:
+                # ✅ BOTH are NOT hit → ALLOW trading
+                print(f"  ✅ Trading allowed for {inv_id}")
+                
                 # =================================================================
                 # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
                 # =================================================================
@@ -28701,16 +29573,21 @@ def process_single_investor(inv_folder):
                 
                 account_stats["success"] = True
                 print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
-            elif daily_target_hit:
-                daily_target_hit = False
-                if daily_target_alert and daily_target_alert.get('investor_id') == inv_id:
-                    if daily_target_alert.get('is_triggered', False):
-                        daily_target_hit = True
-                        hit_details = daily_target_alert.get('hit_details', {}).get(inv_id, {})
-                        if hit_details.get('profit_limit_hit', False):
-                            print(f"  🚨 PROFIT TARGET REACHED IN {inv_id}'S ACCOUNT - No further trading today")
-                        if hit_details.get('loss_limit_hit', False):
-                            print(f"  🚨 LOSS LIMIT REACHED IN {inv_id}'S ACCOUNT - No further trading today")
+                
+            else:
+                # ❌ EITHER one is hit → STOP trading
+                print(f"  ⛔ Trading suspended for {inv_id}")
+                
+                # Print which condition(s) caused the stop
+                if daily_target_hit and recent_highest_hit:
+                    print(f"  ⚠️ BOTH Daily Target AND Recent Highest Balance alerts triggered")
+                elif daily_target_hit:
+                    print(f"  ⚠️ Daily Target alert triggered")
+                elif recent_highest_hit:
+                    print(f"  ⚠️ Recent Highest Balance alert triggered")
+                
+                account_stats["success"] = False
+                account_stats["skip_reason"] = "Trading suspended due to daily target or recent highest balance alert"
 
         # =====================================================================
         # CONDITION B: DAY RESTRICTED - NO TRADING ALLOWED (CLEANUP ONLY)
@@ -28729,6 +29606,8 @@ def process_single_investor(inv_folder):
             delete_all_orders_and_positions(inv_id=inv_id)
             
             print(f"   ✅ Cleanup complete for day-restricted investor {inv_id}")
+            account_stats["success"] = True
+            account_stats["restricted_timerange_purge"] = True
         
         # =====================================================================
         # CONDITION C: TIME RESTRICTED - NO TRADING ALLOWED (CLEANUP ONLY)
@@ -28748,6 +29627,8 @@ def process_single_investor(inv_folder):
             delete_all_orders_and_positions(inv_id=inv_id)
             
             print(f"   ✅ Cleanup complete for time-restricted investor {inv_id}")
+            account_stats["success"] = True
+            account_stats["restricted_timerange_purge"] = True
         
         mt5.shutdown()
         
