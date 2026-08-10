@@ -1,5 +1,8 @@
-# HARVEX TRADING SUITE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER (FIXED)
+# HARVEX TRADING SUITE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER
 # Save as: HARVCORE.ps1
+
+# Load required assemblies
+Add-Type -AssemblyName System.Windows.Forms
 
 # Load scripts from JSON file
 $jsonPath = "C:\xampp\htdocs\harvcore\scripts.json"
@@ -16,6 +19,10 @@ $processMap = @{}
 $deadWindows = @{}  # Track dead windows
 $scriptWindowTitles = @{}  # Store actual window titles for each script
 $windowDetails = @{}  # Store detailed window info
+
+# Screen awake variables
+$keepScreenAwake = $true
+$lastActivityTime = [DateTime]::Now
 
 foreach ($script in $scripts) {
     $retryCount[$script.name] = 0
@@ -58,6 +65,204 @@ function Write-Log-Detail {
 function Write-Log-Duplicate {
     param([string]$Message)
     Write-Host ("[" + (Get-Date -Format 'HH:mm:ss') + "] DUPLICATE " + $Message) -ForegroundColor Yellow -BackgroundColor DarkRed
+}
+
+function Write-Log-ScreenAwake {
+    param([string]$Message)
+    Write-Host ("[" + (Get-Date -Format 'HH:mm:ss') + "] SCREEN " + $Message) -ForegroundColor Magenta
+}
+
+function Start-ScreenAwake {
+    Write-Log-ScreenAwake "Starting screen awake functionality..."
+    
+    try {
+        # Method 1: Use Windows API to prevent screen timeout (SetThreadExecutionState is in kernel32.dll)
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public class ScreenSaver {
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern uint SetThreadExecutionState(uint esFlags);
+    
+    public const uint ES_SYSTEM_REQUIRED = 0x00000001;
+    public const uint ES_DISPLAY_REQUIRED = 0x00000002;
+    public const uint ES_CONTINUOUS = 0x80000000;
+    
+    public static void KeepAwake() {
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+    }
+    
+    public static void ResetAwake() {
+        SetThreadExecutionState(ES_CONTINUOUS);
+    }
+}
+"@ -Language CSharp -ErrorAction SilentlyContinue
+        
+        # Start the screen awake thread
+        $script:screenAwakeRunning = $true
+        [ScreenSaver]::KeepAwake()
+        Write-Log-ScreenAwake "Screen awake started successfully via Windows API"
+        
+        # Start a background job to keep resetting the awake state
+        $script:screenAwakeJob = Start-Job -ScriptBlock {
+            param($scriptDir)
+            
+            # Load the same type definition in the job
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public class ScreenSaver {
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern uint SetThreadExecutionState(uint esFlags);
+    
+    public const uint ES_SYSTEM_REQUIRED = 0x00000001;
+    public const uint ES_DISPLAY_REQUIRED = 0x00000002;
+    public const uint ES_CONTINUOUS = 0x80000000;
+    
+    public static void KeepAwake() {
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+    }
+    
+    public static void ResetAwake() {
+        SetThreadExecutionState(ES_CONTINUOUS);
+    }
+}
+"@ -Language CSharp -ErrorAction SilentlyContinue
+            
+            while ($true) {
+                try {
+                    [ScreenSaver]::KeepAwake()
+                    Start-Sleep -Seconds 30
+                } catch {
+                    # Silently continue
+                    Start-Sleep -Seconds 10
+                }
+            }
+        } -ArgumentList $scriptDir
+        
+        Write-Log-ScreenAwake "Screen awake background job started"
+        
+        # Also use mouse movement method as backup
+        Start-ScreenAwakeMouseMethod
+        
+        return $true
+    } catch {
+        Write-Log-Warning "Failed to start screen awake via API: $_"
+        # Fall back to mouse movement method
+        Write-Log-ScreenAwake "Falling back to mouse movement method..."
+        Start-ScreenAwakeMouseMethod
+        return $false
+    }
+}
+
+function Start-ScreenAwakeMouseMethod {
+    Write-Log-ScreenAwake "Starting mouse movement method for screen awake..."
+    
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public class MouseMover {
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+    
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+    
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+    
+    public static void MoveMouseSlightly() {
+        POINT currentPos;
+        GetCursorPos(out currentPos);
+        // Move mouse by 1 pixel and back
+        SetCursorPos(currentPos.X + 1, currentPos.Y);
+        System.Threading.Thread.Sleep(10);
+        SetCursorPos(currentPos.X, currentPos.Y);
+    }
+}
+"@ -Language CSharp -ErrorAction SilentlyContinue
+        
+        $script:mouseMoveJob = Start-Job -ScriptBlock {
+            param($scriptDir)
+            
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public class MouseMover {
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+    
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+    
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+    
+    public static void MoveMouseSlightly() {
+        POINT currentPos;
+        GetCursorPos(out currentPos);
+        SetCursorPos(currentPos.X + 1, currentPos.Y);
+        System.Threading.Thread.Sleep(10);
+        SetCursorPos(currentPos.X, currentPos.Y);
+    }
+}
+"@ -Language CSharp -ErrorAction SilentlyContinue
+            
+            while ($true) {
+                try {
+                    [MouseMover]::MoveMouseSlightly()
+                    Start-Sleep -Seconds 60
+                } catch {
+                    Start-Sleep -Seconds 30
+                }
+            }
+        } -ArgumentList $scriptDir
+        
+        Write-Log-ScreenAwake "Mouse movement method started"
+        return $true
+    } catch {
+        Write-Log-Warning "Failed to start mouse movement: $_"
+        return $false
+    }
+}
+
+function Stop-ScreenAwake {
+    Write-Log-ScreenAwake "Stopping screen awake..."
+    
+    try {
+        # Stop the jobs
+        if ($script:screenAwakeJob) {
+            Stop-Job -Job $script:screenAwakeJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $script:screenAwakeJob -ErrorAction SilentlyContinue
+            $script:screenAwakeJob = $null
+        }
+        
+        if ($script:mouseMoveJob) {
+            Stop-Job -Job $script:mouseMoveJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $script:mouseMoveJob -ErrorAction SilentlyContinue
+            $script:mouseMoveJob = $null
+        }
+        
+        # Reset the screen state
+        try {
+            [ScreenSaver]::ResetAwake()
+        } catch {}
+        
+        Write-Log-ScreenAwake "Screen awake stopped"
+        return $true
+    } catch {
+        Write-Log-Warning "Failed to stop screen awake: $_"
+        return $false
+    }
 }
 
 function Get-All-Windows {
@@ -817,7 +1022,12 @@ Write-Log "  HARVCORE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER
 Write-Log "============================================================"
 Write-Log ""
 
+# Start screen awake functionality
+Write-Log "STEP 0: Starting screen awake..."
+Start-ScreenAwake
+
 # First, detect and fix dead windows
+Write-Log ""
 Write-Log "STEP 1: Detecting and fixing dead windows..."
 $deadWindowsList = Detect-And-Fix-Dead-Windows
 
@@ -860,6 +1070,7 @@ if ($existingWindows.Count -gt 0) {
 Write-Log ""
 Write-Log "All components ready!"
 Write-Log "Monitoring for crashes, duplicates, and auto-relaunching..."
+Write-Log "Screen awake is running in the background..."
 Write-Log "Switching windows every $switchInterval seconds"
 Write-Log "Max retries per script: $maxRetries"
 Write-Log ""
@@ -870,58 +1081,71 @@ $cycleCount = 0
 $healthCheckInterval = 6  # Check for dead windows every 6 cycles
 $duplicateCheckInterval = 12  # Check for duplicates every 12 cycles
 
-while ($true) {
-    $cycleCount++
-    
-    # Run dead window detection and fixing periodically
-    if ($cycleCount % $healthCheckInterval -eq 0) {
-        Write-Log "Running dead window detection and cleanup..."
-        $deadFound = Detect-And-Fix-Dead-Windows
-    }
-    
-    # Run duplicate detection and fixing periodically (less frequently)
-    if ($cycleCount % $duplicateCheckInterval -eq 0) {
-        Write-Log "Running duplicate window detection and cleanup..."
-        $duplicateFound = Detect-And-Fix-Duplicate-Windows
-    }
-    
-    foreach ($script in $scripts) {
-        $scriptName = $script.name
+try {
+    while ($true) {
+        $cycleCount++
         
-        # Show detailed detection info for this script
-        Show-Window-Details -ScriptName $scriptName
-        
-        # Skip dead windows when focusing
-        if ($deadWindows[$scriptName] -eq $true) {
-            Write-Log "Skipping focus: $scriptName (marked as dead)"
-            continue
+        # Keep screen awake (additional keep-alive)
+        if ($cycleCount % 3 -eq 0) {
+            try {
+                [ScreenSaver]::KeepAwake()
+            } catch {}
         }
         
-        Write-Log "Focusing: $scriptName"
-        $focused = Focus-Window -WindowTitle $scriptName
+        # Run dead window detection and fixing periodically
+        if ($cycleCount % $healthCheckInterval -eq 0) {
+            Write-Log "Running dead window detection and cleanup..."
+            $deadFound = Detect-And-Fix-Dead-Windows
+        }
         
-        if ($focused) {
-            Write-Log-Success "  Window focused successfully"
+        # Run duplicate detection and fixing periodically (less frequently)
+        if ($cycleCount % $duplicateCheckInterval -eq 0) {
+            Write-Log "Running duplicate window detection and cleanup..."
+            $duplicateFound = Detect-And-Fix-Duplicate-Windows
+        }
+        
+        foreach ($script in $scripts) {
+            $scriptName = $script.name
+            
+            # Show detailed detection info for this script
+            Show-Window-Details -ScriptName $scriptName
+            
+            # Skip dead windows when focusing
+            if ($deadWindows[$scriptName] -eq $true) {
+                Write-Log "Skipping focus: $scriptName (marked as dead)"
+                continue
+            }
+            
+            Write-Log "Focusing: $scriptName"
+            $focused = Focus-Window -WindowTitle $scriptName
+            
+            if ($focused) {
+                Write-Log-Success "  Window focused successfully"
+            } else {
+                Write-Log-Warning "  Could not focus window"
+            }
+            
+            Write-Log "  Waiting $switchInterval seconds..."
+            Start-Sleep -Seconds $switchInterval
+            Write-Log ""
+        }
+        
+        # Focus launcher with details
+        Write-Log "Focusing: LAUNCHER"
+        $focused = Maximize-Window -WindowTitle $launcherTitle
+        
+        $wshell = New-Object -ComObject wscript.shell
+        if ($wshell.AppActivate($launcherTitle)) {
+            Write-Log-Success "  LAUNCHER - Focused"
         } else {
-            Write-Log-Warning "  Could not focus window"
+            Write-Log-Warning "  LAUNCHER - Not found"
         }
-        
         Write-Log "  Waiting $switchInterval seconds..."
         Start-Sleep -Seconds $switchInterval
         Write-Log ""
     }
-    
-    # Focus launcher with details
-    Write-Log "Focusing: LAUNCHER"
-    $focused = Maximize-Window -WindowTitle $launcherTitle
-    
-    $wshell = New-Object -ComObject wscript.shell
-    if ($wshell.AppActivate($launcherTitle)) {
-        Write-Log-Success "  LAUNCHER - Focused"
-    } else {
-        Write-Log-Warning "  LAUNCHER - Not found"
-    }
-    Write-Log "  Waiting $switchInterval seconds..."
-    Start-Sleep -Seconds $switchInterval
-    Write-Log ""
+} finally {
+    # Clean up screen awake on exit
+    Write-Log "Cleaning up screen awake..."
+    Stop-ScreenAwake
 }

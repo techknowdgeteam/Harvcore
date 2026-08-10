@@ -1,6 +1,14 @@
 {
     "scripts": [
         {
+            "name": "MARKET ANALYSIS",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\analysis.py"
+        },
+        {
+            "name": "INVHARV",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\Invharv.py"
+        },
+        {
             "name": "HARVHUB",
             "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\harvhub\\harvhub.py"
         },

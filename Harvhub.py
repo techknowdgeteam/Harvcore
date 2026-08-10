@@ -13073,10 +13073,9 @@ def martingale_system(inv_id=None):
                 if highest_risk_retention_str:
                     try:
                         retention_percentage = float(highest_risk_retention_str.replace('%', ''))
-                        # Reverse: retention becomes the amount to keep
-                        # So retention = 100 - retention
-                        highest_risk_retention_percentage = max(0, 100 - retention_percentage)
-                        print(f"  │ Highest risk: {retention_percentage}% retention → {highest_risk_retention_percentage}% retention")
+                        # DIRECT: retention IS the amount to keep
+                        highest_risk_retention_percentage = retention_percentage
+                        print(f"  │ Highest risk: Keeping {retention_percentage}% of risk")
                     except:
                         highest_risk_retention_percentage = 0
 
@@ -13084,10 +13083,9 @@ def martingale_system(inv_id=None):
                 if expected_loss_retention_str:
                     try:
                         retention_percentage = float(expected_loss_retention_str.replace('%', ''))
-                        # Reverse: retention becomes the amount to keep
-                        # So retention = 100 - retention
-                        expected_loss_retention_percentage = max(0, 100 - retention_percentage)
-                        print(f"  │ Expected loss: {retention_percentage}% retention → {expected_loss_retention_percentage}% retention")
+                        # DIRECT: retention IS the amount to keep
+                        expected_loss_retention_percentage = retention_percentage
+                        print(f"  │ Expected loss: Keeping {retention_percentage}% of risk")
                     except:
                         expected_loss_retention_percentage = 0
                 
@@ -15099,20 +15097,32 @@ def martingale_system(inv_id=None):
                             if martingale_pre_scale_highest_risk_adder:
                                 highest_risk_adder = actual_risk
                                 base_risk += highest_risk_adder
-                            
-                            # Step 2: Apply highest risk retention (reduce the highest risk adder)
+
+                            # Step 2: Apply highest risk retention (KEEP the retention percentage)
                             risk_after_highest_retention = base_risk
                             if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
-                                applied_highest_retention = highest_risk_adder * (highest_risk_retention_percentage / 100)
-                                risk_after_highest_retention = base_risk - applied_highest_retention
+                                # Calculate how much to KEEP (not remove)
+                                kept_highest_risk = highest_risk_adder * (highest_risk_retention_percentage / 100)
+                                # Remove the amount we DON'T want to keep
+                                removed_highest_risk = highest_risk_adder - kept_highest_risk
+                                risk_after_highest_retention = base_risk - removed_highest_risk
+                                applied_highest_retention = removed_highest_risk
+                                print(f"  │   ├─ Keeping {highest_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
+                                print(f"  │   └─ Removing {100 - highest_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
                             else:
                                 risk_after_highest_retention = base_risk
-                            
-                            # Step 3: Apply expected loss retention (only if open position exists)
+
+                            # Step 3: Apply expected loss retention (KEEP the retention percentage)
                             risk_after_expected_retention = risk_after_highest_retention
                             if martingale_pre_scale_expected_loss_adder and expected_loss_retention_percentage > 0:
-                                applied_expected_retention = 0
-                                risk_after_expected_retention = risk_after_highest_retention
+                                # Calculate how much to KEEP (not remove)
+                                kept_expected_loss = expected_loss_value * (expected_loss_retention_percentage / 100)
+                                # Remove the amount we DON'T want to keep
+                                removed_expected_loss = expected_loss_value - kept_expected_loss
+                                risk_after_expected_retention = risk_after_highest_retention - removed_expected_loss
+                                applied_expected_retention = removed_expected_loss
+                                print(f"  │   ├─ Keeping {expected_loss_retention_percentage}% of expected loss: ${kept_expected_loss:.2f}")
+                                print(f"  │   └─ Removing {100 - expected_loss_retention_percentage}%: -${removed_expected_loss:.2f}")
                             else:
                                 risk_after_expected_retention = risk_after_highest_retention
                             
@@ -15132,7 +15142,8 @@ def martingale_system(inv_id=None):
                             print(f"      ├─ Base risk: ${base_risk:.2f}")
                             
                             if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
-                                print(f"      ├─ Highest risk retention ({highest_risk_retention_percentage}%): -${applied_highest_retention:.2f}")
+                                removed_percentage = 100 - highest_risk_retention_percentage
+                                print(f"      ├─ Keeping {highest_risk_retention_percentage}% of highest risk (removing {removed_percentage}%): -${applied_highest_retention:.2f}")
                                 print(f"      │   └─ After retention: ${risk_after_highest_retention:.2f}")
                             
                             if recovery_adder_percentage > 0:
@@ -16488,16 +16499,16 @@ def recent_highest_balance_target(inv_id=None):
     Function: Manages recent_highest_balance tracking for investors.
     
     FLOW:
-    1. If recent_highest_balance doesn't exist → Initialize with current MT5 balance, date = YESTERDAY (alarm OFF)
+    1. If recent_highest_balance doesn't exist in activities.json → Initialize with current MT5 balance, date = YESTERDAY (alarm OFF)
     2. Get current MT5 balance
     3. If current MT5 balance > stored recent_highest_balance:
        a. Get default risk from account_balance_default_risk_management
-       b. Calculate profit = current MT5 balance - stored recent_highest_balance
-       c. If profit >= default risk → Record new high, set date to TODAY, ALARM ON
-       d. If profit < default risk → Record new high ONLY, DON'T update date, ALARM OFF
+       b. Check today's profit from MT5 history
+       c. If today's profit >= default risk → Record new high, set date to TODAY, ALARM ON
+       d. If today's profit < default risk → Record new high ONLY, DON'T update date, ALARM OFF
     4. If current MT5 balance <= stored high → No change, ALARM OFF
     
-    NEW: Also updates activities.json with recent_highest_balance field
+    NEW: Uses activities.json as source of truth but saves to ALL files
     
     Args:
         inv_id: Optional specific investor ID to process.
@@ -16652,6 +16663,40 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  Error getting MT5 balance: {e}")
             return None
     
+    def get_today_profit_from_history():
+        """
+        Get today's profit from MT5 history.
+        Returns: total profit for today (float)
+        """
+        try:
+            if not mt5.terminal_info():
+                print(f"  MT5 not connected")
+                return 0.0
+            
+            # Get today's date range
+            today = datetime.now()
+            start_of_day = datetime(today.year, today.month, today.day, 0, 0, 0)
+            
+            # Get history deals from today
+            deals = mt5.history_deals_get(start_of_day, datetime.now())
+            
+            if deals is None or len(deals) == 0:
+                print(f"  No deals found for today")
+                return 0.0
+            
+            # Calculate total profit from all deals today
+            total_profit = 0.0
+            for deal in deals:
+                if deal.profit is not None:
+                    total_profit += deal.profit
+            
+            print(f"  Today's total profit from MT5 history: ${total_profit:.2f}")
+            return total_profit
+            
+        except Exception as e:
+            print(f"  Error getting today's profit from MT5 history: {e}")
+            return 0.0
+    
     def get_default_risk_from_all_fetched(investor_id):
         """
         Get default risk from account_balance_default_risk_management in ALL_FETCHED_INVESTORS.
@@ -16707,20 +16752,39 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  ⚠️ Error loading ALL_FETCHED_INVESTORS: {e}")
             return None
     
-    def get_recent_balance_and_date(data_dict, inv_id):
-        """Get recent_highest_balance and last_update_date"""
-        if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-            val = data_dict[inv_id].get('recent_highest_balance')
-            date_val = data_dict[inv_id].get('recent_highest_balance_last_update')
-            if val is not None:
+    def get_recent_balance_from_activities(inv_id):
+        """
+        Get recent_highest_balance from activities.json (SOURCE OF TRUTH)
+        Returns: (balance, date) or (None, None)
+        """
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            activities_path = inv_root / "activities.json"
+            
+            if not activities_path.exists():
+                print(f"  ℹ️ activities.json not found for {inv_id}")
+                return None, None
+            
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities = json.load(f)
+            
+            balance = activities.get('recent_highest_balance')
+            date = activities.get('recent_highest_balance_last_update')
+            
+            if balance is not None:
                 try:
-                    return float(val), str(date_val) if date_val else None
+                    return float(balance), str(date) if date else None
                 except (ValueError, TypeError):
                     return None, None
-        return None, None
+            
+            return None, None
+            
+        except Exception as e:
+            print(f"  ⚠️ Error reading activities.json for {inv_id}: {e}")
+            return None, None
     
     def update_investor_data(data_dict, inv_id, new_balance, update_date):
-        """Update recent_highest_balance and date"""
+        """Update recent_highest_balance and date in a data dictionary"""
         if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
             data_dict[inv_id]['recent_highest_balance'] = str(round(new_balance, 2))
             data_dict[inv_id]['recent_highest_balance_last_update'] = update_date
@@ -16730,37 +16794,85 @@ def recent_highest_balance_target(inv_id=None):
                 'recent_highest_balance_last_update': update_date
             }
     
-    def update_activities_json(inv_id, recent_high):
+    def update_activities_json(inv_id, new_balance, update_date):
         """
-        NEW: Update activities.json with recent_highest_balance field only.
-        Preserves all other fields in activities.json.
+        Update activities.json with recent_highest_balance and date.
+        This is the SOURCE OF TRUTH.
         """
         try:
             inv_root = Path(INV_PATH) / inv_id
             activities_path = inv_root / "activities.json"
             
-            if not activities_path.exists():
-                print(f"  ⚠️ activities.json not found for {inv_id} - skipping")
-                return False
+            # Load or create activities
+            if activities_path.exists():
+                with open(activities_path, 'r', encoding='utf-8') as f:
+                    activities = json.load(f)
+            else:
+                activities = {}
+                print(f"  📝 Creating new activities.json for {inv_id}")
             
-            # Load existing activities
-            with open(activities_path, 'r', encoding='utf-8') as f:
-                activities = json.load(f)
-            
-            # Update only the recent_highest_balance field
-            activities['recent_highest_balance'] = str(round(recent_high, 2))
+            # Update recent_highest_balance fields
+            activities['recent_highest_balance'] = str(round(new_balance, 2))
+            activities['recent_highest_balance_last_update'] = update_date
             
             # Save back to file
             with open(activities_path, 'w', encoding='utf-8') as f:
                 json.dump(activities, f, indent=4)
             
-            print(f"  ✅ Updated activities.json with recent_highest_balance: ${recent_high:.2f}")
+            print(f"  ✅ Updated activities.json (SOURCE OF TRUTH): ${new_balance:.2f} (date: {update_date})")
             return True
             
         except Exception as e:
             print(f"  ❌ Failed to update activities.json: {e}")
             stats["errors"].append(f"Failed to update activities.json for {inv_id}: {e}")
             return False
+    
+    def get_recent_balance_from_all_files(inv_id):
+        """
+        Fallback: Get recent_highest_balance from all files if not in activities.json
+        Returns: (balance, date, source_name)
+        """
+        # Check updated_data first
+        if inv_id in updated_data:
+            val = updated_data[inv_id].get('recent_highest_balance')
+            date = updated_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "UPDATED_INVESTORS"
+                except:
+                    pass
+        
+        # Check all_updated_data
+        if inv_id in all_updated_data:
+            val = all_updated_data[inv_id].get('recent_highest_balance')
+            date = all_updated_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "ALL_UPDATED_INVESTORS"
+                except:
+                    pass
+        
+        # Check fetched_data
+        if inv_id in fetched_data:
+            val = fetched_data[inv_id].get('recent_highest_balance')
+            date = fetched_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "FETCHED_INVESTORS"
+                except:
+                    pass
+        
+        # Check all_fetched_data
+        if inv_id in all_fetched_data:
+            val = all_fetched_data[inv_id].get('recent_highest_balance')
+            date = all_fetched_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "ALL_FETCHED_INVESTORS"
+                except:
+                    pass
+        
+        return None, None, None
     
     # ================================================================
     # LOAD ALL INVESTOR FILES
@@ -16812,12 +16924,21 @@ def recent_highest_balance_target(inv_id=None):
     
     print("─"*80)
     
-    if not fetched_data and not updated_data and not all_fetched_data and not all_updated_data:
-        print(" ⚠️ No investor data found in any file!")
-        stats["errors"].append("No investor data found")
-        return stats
+    # Get list of investors from activities.json (SOURCE OF TRUTH)
+    investors_from_activities = set()
+    try:
+        if os.path.exists(INV_PATH):
+            for inv_folder in os.listdir(INV_PATH):
+                activities_path = Path(INV_PATH) / inv_folder / "activities.json"
+                if activities_path.exists():
+                    investors_from_activities.add(inv_folder)
+        print(f" │ Found {len(investors_from_activities)} investors with activities.json")
+    except Exception as e:
+        print(f" │ Error scanning activities.json files: {e}")
     
+    # Combine with other files for complete list
     all_investor_ids = set()
+    all_investor_ids.update(investors_from_activities)
     all_investor_ids.update(fetched_data.keys())
     all_investor_ids.update(updated_data.keys())
     all_investor_ids.update(all_fetched_data.keys())
@@ -16845,44 +16966,22 @@ def recent_highest_balance_target(inv_id=None):
         current_balance = get_mt5_balance()
         if current_balance is None:
             print(f"  ⚠️ Could not get MT5 balance")
-            stats["errors"].append(f"Could not get MT5 balance")
+            stats["errors"].append(f"Could not get MT5 balance for {inv_id}")
             stats["investors_skipped"] += 1
             continue
         
         print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
         
-        # STEP 2: Get stored recent_highest_balance (check all files, priority order)
-        existing_recent = None
-        existing_last_update = None
-        source_name = None
+        # STEP 2: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
+        existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
+        source_name = "activities.json (SOURCE OF TRUTH)"
         
-        if inv_id in updated_data:
-            bal, date = get_recent_balance_and_date(updated_data, inv_id)
-            if bal is not None:
-                existing_recent = bal
-                existing_last_update = date
-                source_name = "UPDATED_INVESTORS"
-        
-        if existing_recent is None and inv_id in all_updated_data:
-            bal, date = get_recent_balance_and_date(all_updated_data, inv_id)
-            if bal is not None:
-                existing_recent = bal
-                existing_last_update = date
-                source_name = "ALL_UPDATED_INVESTORS"
-        
-        if existing_recent is None and inv_id in fetched_data:
-            bal, date = get_recent_balance_and_date(fetched_data, inv_id)
-            if bal is not None:
-                existing_recent = bal
-                existing_last_update = date
-                source_name = "FETCHED_INVESTORS"
-        
-        if existing_recent is None and inv_id in all_fetched_data:
-            bal, date = get_recent_balance_and_date(all_fetched_data, inv_id)
-            if bal is not None:
-                existing_recent = bal
-                existing_last_update = date
-                source_name = "ALL_FETCHED_INVESTORS"
+        # If not in activities.json, try to get from other files (migration)
+        if existing_recent is None:
+            existing_recent, existing_last_update, fallback_source = get_recent_balance_from_all_files(inv_id)
+            if existing_recent is not None:
+                source_name = f"{fallback_source} (FALLBACK - will migrate to activities.json)"
+                print(f"  📝 Found existing data in {fallback_source}, will migrate to activities.json")
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -16909,18 +17008,18 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  ℹ️ Initialized with MT5 balance: ${current_balance:.2f} (date set to YESTERDAY - {yesterday_str})")
             print(f"  ✅ Alarm OFF - Trading allowed")
             
-            # Update all investor files
+            # Update activities.json (SOURCE OF TRUTH)
+            activities_updated = update_activities_json(inv_id, current_balance, yesterday_str)
+            if activities_updated:
+                stats["activities_updated"] += 1
+                stats["field_created"] += 1
+            
+            # Update ALL investor files
             update_investor_data(fetched_data, inv_id, current_balance, yesterday_str)
             update_investor_data(updated_data, inv_id, current_balance, yesterday_str)
             update_investor_data(all_fetched_data, inv_id, current_balance, yesterday_str)
             update_investor_data(all_updated_data, inv_id, current_balance, yesterday_str)
             
-            # NEW: Update activities.json with recent_highest_balance
-            activities_updated = update_activities_json(inv_id, current_balance)
-            if activities_updated:
-                stats["activities_updated"] += 1
-            
-            stats["field_created"] += 1
             stats["investors_updated"] += 1
             stats["investors_checked"] += 1
             has_updates = True
@@ -16940,18 +17039,18 @@ def recent_highest_balance_target(inv_id=None):
             # STEP 3: Get default risk from ALL_FETCHED_INVESTORS
             default_risk = get_default_risk_from_all_fetched(inv_id)
             
-            # STEP 4: Calculate profit from the stored high
-            profit = current_balance - existing_recent
-            print(f"  📊 Profit from stored high: ${profit:.2f}")
+            # STEP 4: Get today's profit from MT5 history
+            today_profit = get_today_profit_from_history()
+            print(f"  📊 Today's profit from MT5 history: ${today_profit:.2f}")
             
-            # STEP 5: Check if profit >= default risk
+            # STEP 5: Check if today's profit >= default risk
             profit_met_risk_threshold = False
             if default_risk is not None:
-                if profit >= default_risk:
+                if today_profit >= default_risk:
                     profit_met_risk_threshold = True
-                    print(f"  ✅ Profit (${profit:.2f}) >= default risk (${default_risk:.2f}) - ALARM CAN TRIGGER")
+                    print(f"  ✅ Today's profit (${today_profit:.2f}) >= default risk (${default_risk:.2f}) - ALARM CAN TRIGGER")
                 else:
-                    print(f"  ⚠️ Profit (${profit:.2f}) < default risk (${default_risk:.2f}) - ALARM BLOCKED")
+                    print(f"  ⚠️ Today's profit (${today_profit:.2f}) < default risk (${default_risk:.2f}) - ALARM BLOCKED")
             else:
                 print(f"  ⚠️ No default risk found - ALARM BLOCKED")
                 default_risk = 0  # Set to 0 so it doesn't block
@@ -16975,19 +17074,19 @@ def recent_highest_balance_target(inv_id=None):
                     'timestamp': datetime.now().strftime('%I:%M:%S %p'),
                     'action': 'new_high',
                     'last_update_date': today_str,
-                    'today_profit': profit,
+                    'today_profit': today_profit,
                     'default_risk': default_risk,
                     'profit_met_risk_threshold': True,
                     'alarm_blocked_reason': None
                 }
-                print(f"  🚨 ALARM ACTIVATED: New high AND profit >= risk! Trading SUSPENDED!")
+                print(f"  🚨 ALARM ACTIVATED: New high AND today's profit >= risk! Trading SUSPENDED!")
                 
-                message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Profit: ${profit:.2f} >= Risk: ${default_risk:.2f}. TRADING SUSPENDED!"
+                message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Today's Profit: ${today_profit:.2f} >= Risk: ${default_risk:.2f}. TRADING SUSPENDED!"
                 exec_message = f"🚨 SERVER ALERT: {inv_id} new daily high ${current_balance:.2f} - Trading SUSPENDED"
                 msg_type = 'danger'
                 
             else:
-                # New high BUT profit < risk: Record only, DON'T update date
+                # New high BUT today's profit < risk: Record only, DON'T update date
                 action = "new_high_recorded_only"
                 update_date = existing_last_update if existing_last_update else yesterday_str
                 
@@ -17000,18 +17099,23 @@ def recent_highest_balance_target(inv_id=None):
                     'timestamp': datetime.now().strftime('%I:%M:%S %p'),
                     'action': 'new_high_recorded_only',
                     'last_update_date': update_date,
-                    'today_profit': profit,
+                    'today_profit': today_profit,
                     'default_risk': default_risk,
                     'profit_met_risk_threshold': False,
-                    'alarm_blocked_reason': f"Profit (${profit:.2f}) < default risk (${default_risk:.2f})" if default_risk else "No default risk found"
+                    'alarm_blocked_reason': f"Today's profit (${today_profit:.2f}) < default risk (${default_risk:.2f})" if default_risk else "No default risk found"
                 }
                 print(f"  🟡 NEW HIGH RECORDED ONLY - Alarm BLOCKED")
                 print(f"  📅 Date NOT updated - kept as: {update_date}")
                 print(f"  ✅ Alarm OFF - Trading continues")
                 
-                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM NOT TRIGGERED: Profit (${profit:.2f}) < Risk (${default_risk:.2f}). Trading continues."
-                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but profit below risk - Trading continues"
+                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM NOT TRIGGERED: Today's Profit (${today_profit:.2f}) < Risk (${default_risk:.2f}). Trading continues."
+                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but today's profit below risk - Trading continues"
                 msg_type = 'info'
+            
+            # Update activities.json (SOURCE OF TRUTH)
+            activities_updated = update_activities_json(inv_id, current_balance, update_date)
+            if activities_updated:
+                stats["activities_updated"] += 1
             
             # Update ALL investor files with new balance (and date if alarm triggered)
             update_investor_data(fetched_data, inv_id, current_balance, update_date)
@@ -17019,12 +17123,7 @@ def recent_highest_balance_target(inv_id=None):
             update_investor_data(all_fetched_data, inv_id, current_balance, update_date)
             update_investor_data(all_updated_data, inv_id, current_balance, update_date)
             
-            # NEW: Update activities.json with recent_highest_balance
-            activities_updated = update_activities_json(inv_id, current_balance)
-            if activities_updated:
-                stats["activities_updated"] += 1
-            
-            # Add notifications
+            # Add notifications to ALL files
             for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
                 if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
                     if 'notifications' not in data_dict[inv_id]:
@@ -17042,7 +17141,7 @@ def recent_highest_balance_target(inv_id=None):
                 "difference": difference,
                 "timestamp": timestamp,
                 "update_date": update_date,
-                "profit": profit,
+                "today_profit": today_profit,
                 "default_risk": default_risk,
                 "profit_met_risk_threshold": profit_met_risk_threshold,
                 "alarm_triggered": profit_met_risk_threshold
@@ -17134,7 +17233,7 @@ def recent_highest_balance_target(inv_id=None):
             stats["errors"].append(f"Failed to save ALL_UPDATED_INVESTORS: {e}")
         
         print(f"\n │ ✅ All investor files updated successfully.")
-        print(f" │ ✅ activities.json updated for {stats['activities_updated']} investor(s)")
+        print(f" │ ✅ activities.json (SOURCE OF TRUTH) updated for {stats['activities_updated']} investor(s)")
         stats["processing_success"] = True
     else:
         print("\n │ ℹ️ No updates needed. All files are up to date.")
@@ -17162,7 +17261,7 @@ def recent_highest_balance_target(inv_id=None):
         print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (profit < risk)")
         for detail in stats['details']:
             if detail.get('action') == 'new_high_recorded_only':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Profit ${detail['profit']:.2f} < Risk ${detail['default_risk']:.2f} 🟡")
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Today's Profit ${detail['today_profit']:.2f} < Risk ${detail['default_risk']:.2f} 🟡")
     
     if recent_highest_alert['is_triggered']:
         print(f"\n  🚨 ALARM ACTIVE: {recent_highest_alert['investor_id']} - Trading SUSPENDED")
