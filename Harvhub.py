@@ -1903,15 +1903,20 @@ def sync_and_distribute_investors():
     """
     Synchronizes and distributes investors between invharv and harvhub files.
     
-    This function performs three main tasks:
-    1. For existing investors in both files:
+    This function performs four main tasks:
+    1. Sync ALL_FETCHED_INVESTORS with ALL_FETCHED_INVESTORS_BACKUP:
+       - Adds missing user records from backup to main
+       - Adds missing user records from main to backup
+       - NO merging of existing user data - only adds missing records
+       - Ensures both files have the same set of user IDs
+    2. For existing investors in both files:
        - Updates missing fields in invharv/harvhub from ALL files
        - Updates ALL files with new data from invharv/harvhub
        - Filters grid traders to HARVHUB and non-grid traders to INVHARV
-    2. For new investors not yet distributed:
+    3. For new investors not yet distributed:
        - Copies grid traders to harvhub with complete data
        - Copies non-grid traders to invharv with complete data
-    3. Validation and cleanup:
+    4. Validation and cleanup:
        - Removes any investors from incorrect files
        - Ensures grid traders are only in HARVHUB
        - Ensures non-grid traders are only in INVHARV
@@ -1920,7 +1925,7 @@ def sync_and_distribute_investors():
     - First process fetched files to get the latest data
     - Then apply fetched data to updated files (override)
     
-    Uses ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS as the source of truth.
+    Uses ALL_FETCHED_INVESTORS, ALL_FETCHED_INVESTORS_BACKUP, and ALL_UPDATED_INVESTORS as the source of truth.
     """
     
     print(f"\n{'='*70}")
@@ -1929,10 +1934,19 @@ def sync_and_distribute_investors():
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
     print("  PRIORITY: FETCHED data takes precedence over UPDATED data")
+    print("  BACKUP SYNC: Missing records synced between main and backup")
     print("="*70)
     
     stats = {
         "processing_success": False,
+        "backup_sync": {
+            "main_to_backup": {"users_added": 0, "ids": []},
+            "backup_to_main": {"users_added": 0, "ids": []},
+            "main_count_before": 0,
+            "backup_count_before": 0,
+            "main_count_after": 0,
+            "backup_count_after": 0
+        },
         "fetched": {
             "existing_investors": {"processed": 0, "fields_filled": 0, "fields_updated": 0},
             "grid_traders_moved_to_harvhub": 0,
@@ -2012,6 +2026,105 @@ def sync_and_distribute_investors():
         except Exception as e:
             print(f"   ❌ Write error to {filepath}: {e}")
             return False
+    
+    def sync_backup_files(main_data, backup_data):
+        """
+        Synchronize main and backup files by adding missing records.
+        NO merging of existing data - only adds new records.
+        
+        Args:
+            main_data: Main file data (ALL_FETCHED_INVESTORS)
+            backup_data: Backup file data (ALL_FETCHED_INVESTORS_BACKUP)
+        
+        Returns:
+            tuple: (updated_main, updated_backup, sync_stats)
+        """
+        print("\n🔄 SYNCING MAIN ↔ BACKUP FILES")
+        print("-"*40)
+        
+        sync_stats = {
+            "main_to_backup": {"users_added": 0, "ids": []},
+            "backup_to_main": {"users_added": 0, "ids": []},
+            "main_count_before": len(main_data),
+            "backup_count_before": len(backup_data)
+        }
+        
+        # Get sets of IDs
+        main_ids = set(main_data.keys()) if main_data else set()
+        backup_ids = set(backup_data.keys()) if backup_data else set()
+        
+        print(f"   📊 Before sync:")
+        print(f"      MAIN: {len(main_ids):,} records")
+        print(f"      BACKUP: {len(backup_ids):,} records")
+        
+        # Create working copies
+        working_main = main_data.copy() if main_data else {}
+        working_backup = backup_data.copy() if backup_data else {}
+        
+        # STEP 1: Add missing records from backup to main
+        missing_in_main = backup_ids - main_ids
+        if missing_in_main:
+            print(f"\n   📥 Adding {len(missing_in_main):,} missing records from BACKUP → MAIN...")
+            for user_id in missing_in_main:
+                if user_id in working_backup:
+                    # Only add the record if it doesn't exist in main
+                    if user_id not in working_main:
+                        working_main[user_id] = working_backup[user_id].copy()
+                        sync_stats["backup_to_main"]["users_added"] += 1
+                        sync_stats["backup_to_main"]["ids"].append(user_id)
+                        print(f"      ➕ Added user {user_id} from BACKUP to MAIN")
+        
+        # STEP 2: Add missing records from main to backup
+        missing_in_backup = main_ids - backup_ids
+        if missing_in_backup:
+            print(f"\n   📤 Adding {len(missing_in_backup):,} missing records from MAIN → BACKUP...")
+            for user_id in missing_in_backup:
+                if user_id in working_main:
+                    # Only add the record if it doesn't exist in backup
+                    if user_id not in working_backup:
+                        working_backup[user_id] = working_main[user_id].copy()
+                        sync_stats["main_to_backup"]["users_added"] += 1
+                        sync_stats["main_to_backup"]["ids"].append(user_id)
+                        print(f"      ➕ Added user {user_id} from MAIN to BACKUP")
+        
+        # Verify both files now have the same records
+        final_main_ids = set(working_main.keys())
+        final_backup_ids = set(working_backup.keys())
+        
+        # If they're still different, add any remaining missing records
+        if final_main_ids != final_backup_ids:
+            print(f"\n   ⚠️ Files still differ, performing final reconciliation...")
+            
+            # Add any remaining missing records from main to backup
+            still_missing_in_backup = final_main_ids - final_backup_ids
+            for user_id in still_missing_in_backup:
+                if user_id in working_main:
+                    working_backup[user_id] = working_main[user_id].copy()
+                    sync_stats["main_to_backup"]["users_added"] += 1
+                    sync_stats["main_to_backup"]["ids"].append(user_id)
+                    print(f"      🔄 Final sync: Added user {user_id} from MAIN to BACKUP")
+            
+            # Add any remaining missing records from backup to main
+            still_missing_in_main = final_backup_ids - final_main_ids
+            for user_id in still_missing_in_main:
+                if user_id in working_backup:
+                    working_main[user_id] = working_backup[user_id].copy()
+                    sync_stats["backup_to_main"]["users_added"] += 1
+                    sync_stats["backup_to_main"]["ids"].append(user_id)
+                    print(f"      🔄 Final sync: Added user {user_id} from BACKUP to MAIN")
+        
+        # Update stats
+        sync_stats["main_count_after"] = len(working_main)
+        sync_stats["backup_count_after"] = len(working_backup)
+        
+        print(f"\n   📊 After sync:")
+        print(f"      MAIN: {sync_stats['main_count_after']:,} records")
+        print(f"      BACKUP: {sync_stats['backup_count_after']:,} records")
+        print(f"\n   📈 Sync summary:")
+        print(f"      BACKUP → MAIN: {sync_stats['backup_to_main']['users_added']:,} users added")
+        print(f"      MAIN → BACKUP: {sync_stats['main_to_backup']['users_added']:,} users added")
+        
+        return working_main, working_backup, sync_stats
     
     def deep_merge(base_dict, override_dict, prefer_override=True):
         """
@@ -2537,10 +2650,12 @@ def sync_and_distribute_investors():
         
         # Load fetched files
         all_fetched = safe_json_load(ALL_FETCHED_INVESTORS)
+        all_fetched_backup = safe_json_load(ALL_FETCHED_INVESTORS_BACKUP)
         invharv_fetched = safe_json_load(INVHARV_FETCHED_INVESTORS)
         harvhub_fetched = safe_json_load(HARVHUB_FETCHED_INVESTORS)
         
         print(f"   ✅ Loaded ALL fetched: {len(all_fetched):,} records")
+        print(f"   ✅ Loaded ALL fetched backup: {len(all_fetched_backup):,} records")
         print(f"   ✅ Loaded INVHARV fetched: {len(invharv_fetched):,} records")
         print(f"   ✅ Loaded HARVHUB fetched: {len(harvhub_fetched):,} records")
         
@@ -2554,15 +2669,29 @@ def sync_and_distribute_investors():
         print(f"   ✅ Loaded HARVHUB updated: {len(harvhub_updated):,} records")
         
         # ============================================
+        # SYNC MAIN AND BACKUP FILES
+        # ============================================
+        
+        print("\n" + "="*70)
+        print("STEP 1: SYNCING MAIN AND BACKUP FILES".center(70))
+        print("="*70)
+        
+        synced_all_fetched, synced_all_fetched_backup, backup_sync_stats = sync_backup_files(
+            all_fetched, all_fetched_backup
+        )
+        
+        stats["backup_sync"] = backup_sync_stats
+        
+        # ============================================
         # PROCESS FETCHED FILES
         # ============================================
         
         print("\n" + "="*70)
-        print("STEP 1: PROCESSING FETCHED FILES".center(70))
+        print("STEP 2: PROCESSING FETCHED FILES".center(70))
         print("="*70)
         
         updated_invharv_fetched, updated_harvhub_fetched, updated_all_fetched, fetched_stats = process_category(
-            all_fetched, invharv_fetched, harvhub_fetched, "FETCHED", "fetched"
+            synced_all_fetched, invharv_fetched, harvhub_fetched, "FETCHED", "fetched"
         )
         
         stats["fetched"]["existing_investors"]["processed"] = fetched_stats["existing_processed"]
@@ -2589,7 +2718,7 @@ def sync_and_distribute_investors():
         # ============================================
         
         print("\n" + "="*70)
-        print("STEP 2: PROCESSING UPDATED FILES".center(70))
+        print("STEP 3: PROCESSING UPDATED FILES".center(70))
         print("="*70)
         
         # Process updated files using fetched data as the source
@@ -2621,7 +2750,7 @@ def sync_and_distribute_investors():
         # ============================================
         
         print("\n" + "="*70)
-        print("STEP 3: SYNCING FETCHED → UPDATED (FETCHED PRIORITY)".center(70))
+        print("STEP 4: SYNCING FETCHED → UPDATED (FETCHED PRIORITY)".center(70))
         print("="*70)
         
         synced_invharv_updated, synced_harvhub_updated, sync_stats = sync_fetched_to_updated(
@@ -2667,10 +2796,13 @@ def sync_and_distribute_investors():
         print("\n💾 Saving files...")
         print("-"*40)
         
-        # Save fetched files
+        # Save fetched files (main and backup)
         if safe_json_write(ALL_FETCHED_INVESTORS, cleaned_all_fetched):
             print(f"   ✅ Saved ALL fetched: {len(cleaned_all_fetched):,} records")
             stats["fetched"]["all_count"] = len(cleaned_all_fetched)
+        
+        if safe_json_write(ALL_FETCHED_INVESTORS_BACKUP, synced_all_fetched_backup):
+            print(f"   ✅ Saved ALL fetched backup: {len(synced_all_fetched_backup):,} records")
         
         if safe_json_write(INVHARV_FETCHED_INVESTORS, cleaned_invharv_fetched):
             print(f"   ✅ Saved INVHARV fetched: {len(cleaned_invharv_fetched):,} records")
@@ -2702,6 +2834,25 @@ def sync_and_distribute_investors():
         print("\n" + "="*70)
         print(f"SYNC AND DISTRIBUTION SUMMARY".center(70))
         print("="*70)
+        
+        print(f"\n🔄 BACKUP SYNC SUMMARY:")
+        print(f"   📊 Before sync:")
+        print(f"      MAIN: {stats['backup_sync']['main_count_before']:,} records")
+        print(f"      BACKUP: {stats['backup_sync']['backup_count_before']:,} records")
+        print(f"   📈 Sync operations:")
+        print(f"      BACKUP → MAIN: {stats['backup_sync']['backup_to_main']['users_added']:,} users added")
+        if stats['backup_sync']['backup_to_main']['ids']:
+            print(f"         IDs: {', '.join(stats['backup_sync']['backup_to_main']['ids'][:10])}")
+            if len(stats['backup_sync']['backup_to_main']['ids']) > 10:
+                print(f"         ... and {len(stats['backup_sync']['backup_to_main']['ids']) - 10} more")
+        print(f"      MAIN → BACKUP: {stats['backup_sync']['main_to_backup']['users_added']:,} users added")
+        if stats['backup_sync']['main_to_backup']['ids']:
+            print(f"         IDs: {', '.join(stats['backup_sync']['main_to_backup']['ids'][:10])}")
+            if len(stats['backup_sync']['main_to_backup']['ids']) > 10:
+                print(f"         ... and {len(stats['backup_sync']['main_to_backup']['ids']) - 10} more")
+        print(f"   📊 After sync:")
+        print(f"      MAIN: {stats['backup_sync']['main_count_after']:,} records")
+        print(f"      BACKUP: {stats['backup_sync']['backup_count_after']:,} records")
         
         print(f"\n📥 FETCHED FILES SUMMARY:")
         print(f"   🔄 Existing investors processed: {stats['fetched']['existing_investors']['processed']:,}")
@@ -2791,7 +2942,7 @@ def sync_and_distribute_investors():
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
-
+ 
 def move_fetched_investors():
     """
     Moves verified investors from fetched_investors.json to:

@@ -3477,8 +3477,32 @@ def fetch_database():
         
         return False  # Should not reach here
     
-    def write_all_to_file(file_path, data, first_record_status):
-        """Write all records to a file"""
+    def move_temp_to_final(temp_file_path, final_file_path):
+        """
+        Move a temporary file to its final destination.
+        Handles cases where the final file may not exist.
+        """
+        # REMOVED: delete_investor_files() - This was deleting files after they were moved!
+        try:
+            # Ensure the final directory exists
+            os.makedirs(os.path.dirname(final_file_path), exist_ok=True)
+            
+            # If the final file already exists, remove it first (Windows requires this)
+            if os.path.exists(final_file_path):
+                os.remove(final_file_path)
+                print(f"    🗑️ Removed existing file: {os.path.basename(final_file_path)}")
+            
+            # Move the temp file to the final location
+            shutil.move(temp_file_path, final_file_path)
+            print(f"    ✅ Moved: {os.path.basename(temp_file_path)} → {os.path.basename(final_file_path)}")
+            return True
+            
+        except Exception as e:
+            print(f"    ❌ Error moving file: {str(e)}")
+            return False
+    
+    def write_all_to_file(temp_file_path, data, first_record_status):
+        """Write all records to a temporary file"""
         if not data:
             return first_record_status, 0
         
@@ -3514,9 +3538,9 @@ def fetch_database():
             bytes_written += len(line.encode('utf-8'))
             first_record_status = False
         
-        # Write everything at once
+        # Write everything at once to temp file
         content = ''.join(content_parts)
-        safe_write_file(file_path, 'a', content)
+        safe_write_file(temp_file_path, 'a', content)
         
         return first_record_status, bytes_written
     
@@ -3616,6 +3640,15 @@ def fetch_database():
         
         print(f"\n  ✅ Using identifier: {identification_method}")
         print(f"  📋 User IDs to fetch: {user_ids_to_fetch[:20]}{'...' if len(user_ids_to_fetch) > 20 else ''}")
+        
+        # ===== DELETE OLD FILES BEFORE WRITING NEW DATA =====
+        print(f"\n🗑️ Cleaning up old files before writing new data...")
+        try:
+            delete_investor_files()
+            print(f"   ✅ Old files deleted successfully")
+        except Exception as e:
+            print(f"   ⚠️ Error deleting old files: {str(e)}")
+            print(f"   Continuing anyway...")
         
         # ===== NEW: Fetch and write accountmanagement to DEFAULT_ACCOUNTMANAGEMENT =====
         print(f"\n📝 [NEW] Fetching Account Management from server_account...")
@@ -3837,14 +3870,21 @@ def fetch_database():
             ALL_UPDATED_INVESTORS
         ]
         
-        # Create directories and initialize files with permission handling
+        # Create temporary file paths (same directory, .temp extension)
+        temp_files = []
         for file_path in output_files:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            # Write opening brace to each file with permission handling
-            safe_write_file(file_path, 'overwrite', None)
-            print(f"   Initialized: {file_path}")
+            temp_path = file_path + '.temp'
+            temp_files.append(temp_path)
+            
+            # Create directories for temp files
+            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+            
+            # Initialize temp file with opening brace
+            safe_write_file(temp_path, 'overwrite', None)
+            print(f"   Initialized temp file: {os.path.basename(temp_path)}")
         
         print(f"   Both output directories ready")
+        print(f"   📝 Using temporary files before moving to final location")
         
         # Step 6: Fetch ALL Insiders Data in One Query
         print(f"\n📥 [6/6] Fetching ALL Insiders Records in One Query...")
@@ -3855,7 +3895,7 @@ def fetch_database():
         print(f"  🔧 AccountManagement: Wrapper keys extracted to 'configuration_title' field (view only)")
         print(f"  🔧 Gmail Path Normalization: Converting \\at\\gmail\\dot\\com to _at_gmail_dot_com")
         print(f"  🛑  IMPORTANT: server_account.accountmanagement is NOT modified")
-        print(f"  📁 Writing to: 2 separate files simultaneously")
+        print(f"  📁 Writing to temp files first, then moving to final destinations")
         print("-"*70)
         
         start_time = datetime.now()
@@ -3876,11 +3916,10 @@ def fetch_database():
         print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs")
         print(f"  🚀 Fetching ALL records in a single query (no batch division)...")
         
-        # Track first record status for each file
-        first_record_status = {
-            ALL_FETCHED_INVESTORS: True,
-            ALL_UPDATED_INVESTORS: True
-        }
+        # Track first record status for each temp file
+        first_record_status = {}
+        for temp_path in temp_files:
+            first_record_status[temp_path] = True
         
         # Fetch ALL records in one query (no LIMIT/OFFSET)
         query = f"""
@@ -3902,7 +3941,7 @@ def fetch_database():
             print(f"    No rows returned. Stopping.")
             return
         
-        print(f"  ✅ Retrieved {len(rows):,} records. Processing and writing to files...")
+        print(f"  ✅ Retrieved {len(rows):,} records. Processing and writing to temp files...")
         
         # Process all rows
         all_records = []
@@ -3936,21 +3975,40 @@ def fetch_database():
             
             all_records.append(cleaned_row)
         
-        # Write ALL records to both files
-        print(f"  ✍️ Writing {len(all_records):,} records to both files...")
+        # Write ALL records to both temp files
+        print(f"  ✍️ Writing {len(all_records):,} records to temp files...")
         
-        # Write to BOTH files
-        for file_path in output_files:
-            print(f"    Writing to: {os.path.basename(file_path)}")
-            first_record_status[file_path], bytes_written = write_all_to_file(
-                file_path, all_records, first_record_status[file_path]
+        # Write to BOTH temp files
+        for i, temp_path in enumerate(temp_files):
+            print(f"    Writing to temp file: {os.path.basename(temp_path)}")
+            first_record_status[temp_path], bytes_written = write_all_to_file(
+                temp_path, all_records, first_record_status[temp_path]
             )
             total_bytes_written += bytes_written
         
-        # Close JSON objects in both files
-        for file_path in output_files:
-            safe_write_file(file_path, 'a', '\n}')
-            print(f"  ✅ Closed: {file_path}")
+        # Close JSON objects in both temp files
+        for temp_path in temp_files:
+            safe_write_file(temp_path, 'a', '\n}')
+            print(f"  ✅ Closed temp file: {os.path.basename(temp_path)}")
+        
+        # ===== NEW: Move temp files to final destinations =====
+        print(f"\n📦 Moving temp files to final destinations...")
+        move_success = True
+        
+        for i, temp_path in enumerate(temp_files):
+            final_path = output_files[i]
+            print(f"  🔄 Moving: {os.path.basename(temp_path)} → {os.path.basename(final_path)}")
+            
+            if move_temp_to_final(temp_path, final_path):
+                print(f"    ✅ Successfully moved {os.path.basename(temp_path)} to {os.path.basename(final_path)}")
+            else:
+                move_success = False
+                print(f"    ❌ Failed to move {os.path.basename(temp_path)} to {os.path.basename(final_path)}")
+        
+        if not move_success:
+            print(f"  ⚠️ Some files failed to move. Temp files may remain.")
+        else:
+            print(f"  ✅ All temp files moved successfully!")
         
         # NO METADATA SAVING - READ ONLY APPROACH
         
@@ -3992,7 +4050,12 @@ def fetch_database():
         print("="*70)
         print(f"  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
-        update_fresh_data_from_fetched_to_all_files()
+        
+        # Now call the update function - the files should exist
+        if os.path.exists(ALL_FETCHED_INVESTORS) and os.path.getsize(ALL_FETCHED_INVESTORS) > 0:
+            update_fresh_data_from_fetched_to_all_files()
+        else:
+            print(f"  ⚠️ Skipping update_fresh_data: {ALL_FETCHED_INVESTORS} not available or empty")
         
         
     except PermissionError as e:
