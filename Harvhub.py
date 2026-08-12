@@ -35,6 +35,7 @@ INVHARV_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\updated_in
 HARVHUB_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_harvhub_investors.json"
 HARVHUB_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
 ALL_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
+ALL_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\all_investors.json"
 ALL_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\updated_investors.json"
 ALL_FETCHED_INVESTORS_BACKUP = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors_backup.json"
 ISSUES_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\issues_harvhub_investors.json"
@@ -1899,6 +1900,125 @@ def manage_accountmanagement_and_activities_jsons():
     
     return stats
 
+def share_investors():
+    """
+    Sync investors between ALL_FETCHED_INVESTORS and ALL_INVESTORS.
+    Automatically creates missing files and syncs data between them.
+    """
+    # Helper to load or create JSON file
+    def load_or_create_json(filepath):
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                print(f"Warning: {filepath} is corrupted. Creating empty file.")
+                with open(filepath, 'w') as f:
+                    json.dump({}, f, indent=2)
+                return {}
+        else:
+            print(f"Creating new file: {filepath}")
+            with open(filepath, 'w') as f:
+                json.dump({}, f, indent=2)
+            return {}
+    
+    # Load both files (create if missing)
+    fetched_data = load_or_create_json(ALL_FETCHED_INVESTORS)
+    all_data = load_or_create_json(ALL_INVESTORS)
+    
+    # Ensure both are dictionaries
+    if not isinstance(fetched_data, dict):
+        fetched_data = {}
+    if not isinstance(all_data, dict):
+        all_data = {}
+    
+    fetched_count = len(fetched_data)
+    all_count = len(all_data)
+    
+    print(f"Fetched investors count: {fetched_count}")
+    print(f"All investors count: {all_count}")
+    
+    # Determine which has more users
+    if fetched_count > all_count:
+        print("Fetched investors has more users. Syncing to all_investors...")
+        source = (ALL_FETCHED_INVESTORS, fetched_data, fetched_count)
+        dest = (ALL_INVESTORS, all_data, all_count)
+        dest_name = "all_investors"
+    elif all_count > fetched_count:
+        print("All investors has more users. Syncing to fetched_investors...")
+        source = (ALL_INVESTORS, all_data, all_count)
+        dest = (ALL_FETCHED_INVESTORS, fetched_data, fetched_count)
+        dest_name = "fetched_investors"
+    else:
+        print("Both files have same number of users. Checking for missing users...")
+        # Even if counts are equal, there might be different users
+        fetched_ids = set(fetched_data.keys())
+        all_ids = set(all_data.keys())
+        
+        if fetched_ids == all_ids:
+            print("Both files have exactly the same users. No sync needed.")
+            return {"status": "same", "count": fetched_count}
+        
+        # If counts are equal but users differ, sync from the one with more unique users
+        if len(fetched_ids - all_ids) > len(all_ids - fetched_ids):
+            print("Fetched has more unique users. Syncing to all_investors...")
+            source = (ALL_FETCHED_INVESTORS, fetched_data, fetched_count)
+            dest = (ALL_INVESTORS, all_data, all_count)
+            dest_name = "all_investors"
+        else:
+            print("All has more unique users. Syncing to fetched_investors...")
+            source = (ALL_INVESTORS, all_data, all_count)
+            dest = (ALL_FETCHED_INVESTORS, fetched_data, fetched_count)
+            dest_name = "fetched_investors"
+    
+    source_file, source_data, source_count = source
+    dest_file, dest_data, dest_count = dest
+    
+    # Find users to copy
+    dest_ids = set(dest_data.keys())
+    users_to_copy = {uid: data for uid, data in source_data.items() if uid not in dest_ids}
+    
+    if not users_to_copy:
+        print("No new users to copy. Files are already in sync.")
+        return {
+            "status": "already_synced",
+            "fetched_count": fetched_count,
+            "all_count": all_count,
+            "copied": 0
+        }
+    
+    # Copy users
+    print(f"Copying {len(users_to_copy)} new user(s) to {dest_name}...")
+    for uid, data in users_to_copy.items():
+        dest_data[uid] = data
+        fullname = data.get('fullname', 'N/A')
+        print(f"  Copied user {uid}: {fullname}")
+    
+    # Save destination
+    try:
+        with open(dest_file, 'w') as f:
+            json.dump(dest_data, f, indent=2)
+        print(f"✓ Successfully updated {dest_file}")
+    except Exception as e:
+        print(f"✗ Error saving {dest_file}: {str(e)}")
+        return None
+    
+    result = {
+        "status": "success",
+        "source_file": source_file,
+        "destination_file": dest_file,
+        "source_count": source_count,
+        "dest_count_before": dest_count,
+        "dest_count_after": len(dest_data),
+        "copied": len(users_to_copy),
+        "copied_ids": list(users_to_copy.keys())
+    }
+    
+    print(f"\nSync complete: {len(users_to_copy)} users copied")
+    print(f"  {dest_name} now has {len(dest_data)} users")
+    
+    return result
+
 def sync_and_distribute_investors():
     """
     Synchronizes and distributes investors between invharv and harvhub files.
@@ -1927,7 +2047,7 @@ def sync_and_distribute_investors():
     
     Uses ALL_FETCHED_INVESTORS, ALL_FETCHED_INVESTORS_BACKUP, and ALL_UPDATED_INVESTORS as the source of truth.
     """
-    
+    share_investors()
     print(f"\n{'='*70}")
     print(f"SYNC AND DISTRIBUTE INVESTORS".center(70))
     print(f"{'='*70}")
@@ -13212,21 +13332,18 @@ def martingale_system(inv_id=None):
                     except:
                         recovery_adder_percentage = 0
                 
-                # ========== NEW REVERSE LOGIC FOR PERCENTAGES ==========
-                # The percentage now represents RETENTION (how much to KEEP)
-                # Convert to retention: retention = 100 - retention
-                
-                # ========== NEW REVERSE LOGIC FOR PERCENTAGES ==========
-                # The percentage now represents RETENTION (how much to KEEP)
-                # Convert to retention: retention = 100 - retention
-
+                # CORRECT RETENTION LOGIC:
+                # retention percentage = how much to KEEP
+                # 100% = keep all, remove 0%
+                # 90% = keep 90%, remove 10%
+                # 0% = keep 0%, remove 100%
                 highest_risk_retention_percentage = 0
                 if highest_risk_retention_str:
                     try:
                         retention_percentage = float(highest_risk_retention_str.replace('%', ''))
-                        # DIRECT: retention IS the amount to keep
+                        # Store directly - this IS the amount to keep
                         highest_risk_retention_percentage = retention_percentage
-                        print(f"  │ Highest risk: Keeping {retention_percentage}% of risk")
+                        print(f"  │ Highest risk: Keeping {retention_percentage}% of risk (removing {100 - retention_percentage}%)")
                     except:
                         highest_risk_retention_percentage = 0
 
@@ -13234,9 +13351,9 @@ def martingale_system(inv_id=None):
                 if expected_loss_retention_str:
                     try:
                         retention_percentage = float(expected_loss_retention_str.replace('%', ''))
-                        # DIRECT: retention IS the amount to keep
+                        # Store directly - this IS the amount to keep
                         expected_loss_retention_percentage = retention_percentage
-                        print(f"  │ Expected loss: Keeping {retention_percentage}% of risk")
+                        print(f"  │ Expected loss: Keeping {retention_percentage}% of risk (removing {100 - retention_percentage}%)")
                     except:
                         expected_loss_retention_percentage = 0
                 
@@ -14525,6 +14642,13 @@ def martingale_system(inv_id=None):
                     json.dump(data, f, indent=2, ensure_ascii=False)
 
             def analyze_highest_risk_from_limit_orders(limit_orders_data):
+                """
+                Analyze highest risk from limit orders.
+                Retention logic: 
+                - 100% retention = keep 100%, remove 0%
+                - 90% retention = keep 90%, remove 10%
+                - 0% retention = keep 0%, remove 100%
+                """
                 highest_risk_orders = {}
                 
                 if not limit_orders_data or not isinstance(limit_orders_data, list):
@@ -14569,12 +14693,22 @@ def martingale_system(inv_id=None):
                                     }
                     
                     if highest_risk_order_info:
-                        # Apply highest risk retention to the highest risk value
+                        # CORRECT RETENTION LOGIC:
+                        # retention_percentage = how much to KEEP
+                        # 100% = keep all, remove 0%
+                        # 90% = keep 90%, remove 10%
+                        # 0% = keep 0%, remove 100%
                         if highest_risk_retention_percentage > 0:
-                            retention_amount = highest_risk * (highest_risk_retention_percentage / 100)
-                            highest_risk = highest_risk - retention_amount
+                            # Calculate how much to KEEP
+                            kept_amount = highest_risk * (highest_risk_retention_percentage / 100)
+                            # The risk becomes the kept amount (not highest_risk - kept_amount)
+                            highest_risk = kept_amount
                             highest_risk_order_info['risk'] = highest_risk
-                            highest_risk_order_info['retention_applied'] = retention_amount
+                            # Calculate how much was REMOVED (for display)
+                            removed_amount = highest_risk_order_info['original_risk'] - kept_amount
+                            highest_risk_order_info['retention_applied'] = removed_amount
+                            highest_risk_order_info['kept'] = kept_amount
+                            highest_risk_order_info['retention_percentage'] = highest_risk_retention_percentage
                         
                         highest_risk_orders[symbol] = highest_risk_order_info
                 
@@ -15248,39 +15382,59 @@ def martingale_system(inv_id=None):
                             if martingale_pre_scale_highest_risk_adder:
                                 highest_risk_adder = actual_risk
                                 base_risk += highest_risk_adder
-
-                            # Step 2: Apply highest risk retention (KEEP the retention percentage)
+                                print(f"      ├─ Highest risk adder: +${highest_risk_adder:.2f}")
+                            
+                            # Step 2: Apply highest risk retention
+                            # CORRECT LOGIC: retention_percentage = how much to KEEP
+                            # 100% = keep all, 0% = keep nothing
                             risk_after_highest_retention = base_risk
                             if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
                                 # Calculate how much to KEEP (not remove)
                                 kept_highest_risk = highest_risk_adder * (highest_risk_retention_percentage / 100)
-                                # Remove the amount we DON'T want to keep
+                                # Calculate how much to REMOVE
                                 removed_highest_risk = highest_risk_adder - kept_highest_risk
+                                # The risk becomes: base_risk - removed_highest_risk
                                 risk_after_highest_retention = base_risk - removed_highest_risk
                                 applied_highest_retention = removed_highest_risk
-                                print(f"  │   ├─ Keeping {highest_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
-                                print(f"  │   └─ Removing {100 - highest_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
+                                print(f"      ├─ Keeping {highest_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
+                                print(f"      ├─ Removing {100 - highest_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
+                                print(f"      ├─ After retention: ${risk_after_highest_retention:.2f}")
                             else:
                                 risk_after_highest_retention = base_risk
-
-                            # Step 3: Apply expected loss retention (KEEP the retention percentage)
-                            risk_after_expected_retention = risk_after_highest_retention
-                            if martingale_pre_scale_expected_loss_adder and expected_loss_retention_percentage > 0:
-                                # Calculate how much to KEEP (not remove)
-                                kept_expected_loss = expected_loss_value * (expected_loss_retention_percentage / 100)
-                                # Remove the amount we DON'T want to keep
-                                removed_expected_loss = expected_loss_value - kept_expected_loss
-                                risk_after_expected_retention = risk_after_highest_retention - removed_expected_loss
-                                applied_expected_retention = removed_expected_loss
-                                print(f"  │   ├─ Keeping {expected_loss_retention_percentage}% of expected loss: ${kept_expected_loss:.2f}")
-                                print(f"  │   └─ Removing {100 - expected_loss_retention_percentage}%: -${removed_expected_loss:.2f}")
+                                if highest_risk_retention_percentage == 0:
+                                    print(f"      ├─ Keeping 0% of highest risk (removed all)")
+                            
+                            # Step 3: Add expected loss from open position (if exists and enabled)
+                            expected_loss_value = 0
+                            if has_open_position and martingale_pre_scale_expected_loss_adder:
+                                expected_loss_value = open_position_risk
+                                print(f"      ├─ Open position expected loss: +${expected_loss_value:.2f}")
+                                
+                                # Apply expected loss retention
+                                # CORRECT LOGIC: retention_percentage = how much to KEEP
+                                if expected_loss_retention_percentage > 0:
+                                    kept_expected_loss = expected_loss_value * (expected_loss_retention_percentage / 100)
+                                    removed_expected_loss = expected_loss_value - kept_expected_loss
+                                    expected_loss_after_retention = kept_expected_loss  # Keep the kept amount
+                                    applied_expected_retention = removed_expected_loss
+                                    print(f"      │   ├─ Keeping {expected_loss_retention_percentage}% of expected loss: ${kept_expected_loss:.2f}")
+                                    print(f"      │   └─ Removing {100 - expected_loss_retention_percentage}%: -${removed_expected_loss:.2f}")
+                                else:
+                                    expected_loss_after_retention = 0  # Keep nothing
+                                    print(f"      │   └─ Expected loss retention: 0% (keeping nothing)")
+                                
+                                risk_after_expected_retention = risk_after_highest_retention + expected_loss_after_retention
+                                print(f"      ├─ After expected loss retention: ${risk_after_expected_retention:.2f}")
                             else:
                                 risk_after_expected_retention = risk_after_highest_retention
+                                if has_open_position:
+                                    print(f"      ├─ Expected loss adder DISABLED (open position exists)")
                             
                             # Step 4: Apply recovery ADDER (add percentage to the final risk)
                             if recovery_adder_percentage > 0:
                                 applied_recovery_adder = risk_after_expected_retention * (recovery_adder_percentage / 100)
                                 expected_risk = risk_after_expected_retention + applied_recovery_adder
+                                print(f"      ├─ Recovery adder ({recovery_adder_percentage}%): +${applied_recovery_adder:.2f}")
                             else:
                                 expected_risk = risk_after_expected_retention
                             
@@ -15288,18 +15442,7 @@ def martingale_system(inv_id=None):
                             
                             # Print the calculation breakdown
                             print(f"      ├─ Cumulative loss: ${cumulative_loss:.2f}")
-                            if martingale_pre_scale_highest_risk_adder:
-                                print(f"      ├─ Highest risk adder: +${highest_risk_adder:.2f}")
                             print(f"      ├─ Base risk: ${base_risk:.2f}")
-                            
-                            if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
-                                removed_percentage = 100 - highest_risk_retention_percentage
-                                print(f"      ├─ Keeping {highest_risk_retention_percentage}% of highest risk (removing {removed_percentage}%): -${applied_highest_retention:.2f}")
-                                print(f"      │   └─ After retention: ${risk_after_highest_retention:.2f}")
-                            
-                            if recovery_adder_percentage > 0:
-                                print(f"      ├─ Recovery adder ({recovery_adder_percentage}%): +${applied_recovery_adder:.2f}")
-                            
                             print(f"      ├─ FINAL EXPECTED RISK: ${expected_risk:.2f}")
                             print(f"      ├─ Actual risk: ${actual_risk:.2f}")
                             print(f"      ├─ Mismatch: ${mismatch:+.2f}")
@@ -15342,17 +15485,32 @@ def martingale_system(inv_id=None):
                                 next_base = next_cumulative
                                 
                                 if martingale_pre_scale_highest_risk_adder:
-                                    next_base += highest_risk_adder
+                                    next_highest_adder = abs(next_trade['total_profit'])
+                                    next_base += next_highest_adder
                                 
                                 # Apply retentions and adder to next trade
+                                # CORRECT LOGIC: retention = how much to KEEP
                                 next_risk_after_highest = next_base
                                 if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
-                                    next_risk_after_highest = next_base - (highest_risk_adder * (highest_risk_retention_percentage / 100))
+                                    kept_highest = next_highest_adder * (highest_risk_retention_percentage / 100)
+                                    removed_highest = next_highest_adder - kept_highest
+                                    next_risk_after_highest = next_base - removed_highest
+                                
+                                # Add expected loss retention if enabled
+                                if has_open_position and martingale_pre_scale_expected_loss_adder:
+                                    if expected_loss_retention_percentage > 0:
+                                        kept_expected = expected_loss_value * (expected_loss_retention_percentage / 100)
+                                        removed_expected = expected_loss_value - kept_expected
+                                        next_risk_after_expected = next_risk_after_highest + kept_expected
+                                    else:
+                                        next_risk_after_expected = next_risk_after_highest
+                                else:
+                                    next_risk_after_expected = next_risk_after_highest
                                 
                                 if recovery_adder_percentage > 0:
-                                    next_expected = next_risk_after_highest * (1 + recovery_adder_percentage / 100)
+                                    next_expected = next_risk_after_expected * (1 + recovery_adder_percentage / 100)
                                 else:
-                                    next_expected = next_risk_after_highest
+                                    next_expected = next_risk_after_expected
                                 
                                 next_actual = abs(next_trade['total_profit'])
                                 next_is_profit = next_trade['total_profit'] > 0
@@ -15446,7 +15604,7 @@ def martingale_system(inv_id=None):
                     import traceback
                     traceback.print_exc()
                     return [], {}, 0, {}
-
+    
             def get_open_position_risk():
                 """
                 Get current open positions and calculate their risk.
@@ -15549,21 +15707,33 @@ def martingale_system(inv_id=None):
             print(f"{'='*60}")
             print(f"  │ Assumption: {martingale_assumption.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
-            
+            print(f"  │ Retention Logic: percentage = how much to KEEP (100% = keep all, 0% = keep nothing)")
+
+            # Start with base target
+            final_target_risk = base_target_risk
+            applied_highest_retention = 0
+            applied_expected_retention = 0
+            applied_recovery_adder = 0
+            highest_risk_value = 0
+            expected_loss_value = 0
+
             # STEP 3a: Add Expected Loss from Open Position (if exists)
             if has_open_position and martingale_pre_scale_expected_loss_adder:
                 expected_loss_value = open_position_risk
                 print(f"\n  │ Open position expected loss: ${expected_loss_value:.2f}")
                 
-                # Apply expected loss retention to the open position risk
+                # Apply expected loss retention
+                # CORRECT: retention_percentage = how much to KEEP
                 if expected_loss_retention_percentage > 0:
-                    applied_expected_retention = expected_loss_value * (expected_loss_retention_percentage / 100)
-                    expected_loss_after_retention = expected_loss_value - applied_expected_retention
-                    print(f"  │   ├─ Expected loss retention ({expected_loss_retention_percentage}%): -${applied_expected_retention:.2f}")
-                    print(f"  │   └─ Expected loss after retention: ${expected_loss_after_retention:.2f}")
+                    kept_expected_loss = expected_loss_value * (expected_loss_retention_percentage / 100)
+                    removed_expected_loss = expected_loss_value - kept_expected_loss
+                    expected_loss_after_retention = kept_expected_loss  # Keep the kept amount
+                    applied_expected_retention = removed_expected_loss
+                    print(f"  │   ├─ Keeping {expected_loss_retention_percentage}% of expected loss: ${kept_expected_loss:.2f}")
+                    print(f"  │   └─ Removing {100 - expected_loss_retention_percentage}%: -${removed_expected_loss:.2f}")
                 else:
-                    expected_loss_after_retention = expected_loss_value
-                    print(f"  │   └─ Expected loss retention: 0% (no retention)")
+                    expected_loss_after_retention = 0  # Keep nothing
+                    print(f"  │   └─ Expected loss retention: 0% (keeping nothing)")
                 
                 final_target_risk += expected_loss_after_retention
                 print(f"  │   └─ Added to target: +${expected_loss_after_retention:.2f}")
@@ -15572,7 +15742,7 @@ def martingale_system(inv_id=None):
                     print(f"\n  │ Open position exists but expected loss adder is DISABLED")
                 else:
                     print(f"\n  │ No open position found - skipping expected loss adder")
-            
+
             # STEP 3b: Add Highest Risk from Limit Orders (if enabled)
             if martingale_pre_scale_highest_risk_adder:
                 # Analyze highest risk from limit orders
@@ -15581,27 +15751,29 @@ def martingale_system(inv_id=None):
                 # Get highest risk for each symbol
                 total_highest_risk = 0
                 for symbol, order_info in limit_highest_risk_orders.items():
-                    highest_risk = order_info['risk']
+                    highest_risk = order_info['original_risk']
                     total_highest_risk += highest_risk
                     print(f"\n  │ {symbol} highest risk: ${highest_risk:.2f}")
                     
-                    # Apply highest risk retention to the highest risk value
+                    # Apply highest risk retention
+                    # CORRECT: retention_percentage = how much to KEEP
                     if highest_risk_retention_percentage > 0:
-                        retention = highest_risk * (highest_risk_retention_percentage / 100)
-                        applied_highest_retention += retention
-                        highest_risk_after_retention = highest_risk - retention
-                        print(f"  │   ├─ Highest risk retention ({highest_risk_retention_percentage}%): -${retention:.2f}")
-                        print(f"  │   └─ After retention: ${highest_risk_after_retention:.2f}")
+                        kept_highest_risk = highest_risk * (highest_risk_retention_percentage / 100)
+                        removed_highest_risk = highest_risk - kept_highest_risk
+                        highest_risk_after_retention = kept_highest_risk  # Keep the kept amount
+                        applied_highest_retention += removed_highest_risk
+                        print(f"  │   ├─ Keeping {highest_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
+                        print(f"  │   └─ Removing {100 - highest_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
                     else:
-                        highest_risk_after_retention = highest_risk
-                        print(f"  │   └─ Highest risk retention: 0% (no retention)")
+                        highest_risk_after_retention = 0  # Keep nothing
+                        print(f"  │   └─ Highest risk retention: 0% (keeping nothing)")
                     
-                    # Add the reduced highest risk to final target
+                    # Add the kept amount to final target
                     final_target_risk += highest_risk_after_retention
                     print(f"  │   └─ Added to target: +${highest_risk_after_retention:.2f}")
                 
                 highest_risk_value = total_highest_risk
-            
+
             # STEP 3c: Apply Recovery Adder to final target
             if recovery_adder_percentage > 0:
                 applied_recovery_adder = final_target_risk * (recovery_adder_percentage / 100)
@@ -15610,7 +15782,9 @@ def martingale_system(inv_id=None):
                 print(f"\n  │ Recovery adder ({recovery_adder_percentage}%): +${applied_recovery_adder:.2f}")
                 print(f"  │   ├─ Before adder: ${final_target_risk_before_adder:.2f}")
                 print(f"  │   └─ After adder: ${final_target_risk:.2f}")
-            
+
+            print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
+            print(f"{'='*60}")
             print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
             print(f"{'='*60}")
             
@@ -16650,14 +16824,21 @@ def recent_highest_balance_target(inv_id=None):
     Function: Manages recent_highest_balance tracking for investors.
     
     FLOW:
-    1. If recent_highest_balance doesn't exist in activities.json → Initialize with current MT5 balance, date = YESTERDAY (alarm OFF)
-    2. Get current MT5 balance
-    3. If current MT5 balance > stored recent_highest_balance:
+    1. If recent_highest_balance doesn't exist in activities.json → Initialize:
+       a. Get broker_balance from FETCHED_INVESTORS
+       b. Get current MT5 balance
+       c. Use the HIGHER of broker_balance or current MT5 balance
+       d. Date = YESTERDAY (alarm OFF)
+    2. GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
+       a. If not, update with broker_balance (date unchanged, alarm OFF)
+       b. Save to ALL files
+    3. Get current MT5 balance
+    4. If current MT5 balance > stored recent_highest_balance:
        a. Get default risk from account_balance_default_risk_management
        b. Check today's profit from MT5 history
        c. If today's profit >= default risk → Record new high, set date to TODAY, ALARM ON
        d. If today's profit < default risk → Record new high ONLY, DON'T update date, ALARM OFF
-    4. If current MT5 balance <= stored high → No change, ALARM OFF
+    5. If current MT5 balance <= stored high → No change, ALARM OFF
     
     NEW: Uses activities.json as source of truth but saves to ALL files
     
@@ -16701,6 +16882,7 @@ def recent_highest_balance_target(inv_id=None):
         "new_high_alerts": 0,
         "new_high_recorded_only": 0,
         "field_created": 0,
+        "broker_balance_corrections": 0,
         "activities_updated": 0,
         "errors": [],
         "current_time": datetime.now().strftime('%I:%M:%S %p'),
@@ -16934,6 +17116,39 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  ⚠️ Error reading activities.json for {inv_id}: {e}")
             return None, None
     
+    def get_broker_balance_from_fetched(inv_id):
+        """
+        Get broker_balance from FETCHED_INVESTORS
+        Returns: broker_balance (float) or None
+        """
+        if not os.path.exists(FETCHED_INVESTORS):
+            print(f"  ⚠️ FETCHED_INVESTORS not found")
+            return None
+        
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            
+            investor_data = fetched_data.get(inv_id)
+            if not investor_data:
+                print(f"  ⚠️ Investor {inv_id} not found in FETCHED_INVESTORS")
+                return None
+            
+            broker_balance = investor_data.get('broker_balance')
+            if broker_balance is not None:
+                try:
+                    return float(broker_balance)
+                except (ValueError, TypeError):
+                    print(f"  ⚠️ Invalid broker_balance format: {broker_balance}")
+                    return None
+            
+            print(f"  ℹ️ No broker_balance found in FETCHED_INVESTORS for {inv_id}")
+            return None
+            
+        except Exception as e:
+            print(f"  ⚠️ Error loading FETCHED_INVESTORS: {e}")
+            return None
+    
     def update_investor_data(data_dict, inv_id, new_balance, update_date):
         """Update recent_highest_balance and date in a data dictionary"""
         if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
@@ -17123,7 +17338,12 @@ def recent_highest_balance_target(inv_id=None):
         
         print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
         
-        # STEP 2: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
+        # STEP 2: Get broker_balance from FETCHED_INVESTORS (for validation)
+        broker_balance = get_broker_balance_from_fetched(inv_id)
+        if broker_balance is not None:
+            print(f"  📊 Broker balance from FETCHED_INVESTORS: ${broker_balance:.2f}")
+        
+        # STEP 3: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
         existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
         source_name = "activities.json (SOURCE OF TRUTH)"
         
@@ -17140,13 +17360,31 @@ def recent_highest_balance_target(inv_id=None):
         # CASE 1: Field doesn't exist - INITIALIZE
         # ============================================================
         if existing_recent is None:
-            print(f"  📝 Recent balance field not set - creating with current MT5 balance")
+            print(f"  📝 Recent balance field not set - initializing...")
+            
+            # Determine which balance to use for initialization
+            # Use the HIGHER of broker_balance or current MT5 balance
+            if broker_balance is not None:
+                init_balance = max(broker_balance, current_balance)
+                if init_balance == broker_balance and broker_balance > current_balance:
+                    print(f"  ℹ️ Using broker_balance (${broker_balance:.2f}) as it's higher than current balance (${current_balance:.2f})")
+                elif init_balance == current_balance and current_balance > broker_balance:
+                    print(f"  ℹ️ Using current MT5 balance (${current_balance:.2f}) as it's higher than broker_balance (${broker_balance:.2f})")
+                else:
+                    print(f"  ℹ️ Balances equal: using ${init_balance:.2f}")
+            else:
+                # No broker_balance available, use current MT5 balance
+                init_balance = current_balance
+                print(f"  ℹ️ No broker_balance available, using current MT5 balance: ${init_balance:.2f}")
+            
+            print(f"  ✅ Initialized with balance: ${init_balance:.2f} (date set to YESTERDAY - {yesterday_str})")
+            print(f"  ✅ Alarm OFF - Trading allowed")
             
             recent_highest_alert = {
                 'is_triggered': False,
                 'investor_id': inv_id,
                 'old_balance': None,
-                'new_balance': current_balance,
+                'new_balance': init_balance,
                 'difference': None,
                 'timestamp': datetime.now().strftime('%I:%M:%S %p'),
                 'action': 'initialized',
@@ -17154,22 +17392,21 @@ def recent_highest_balance_target(inv_id=None):
                 'today_profit': None,
                 'default_risk': None,
                 'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': None
+                'alarm_blocked_reason': None,
+                'init_source': 'broker_balance' if (broker_balance is not None and broker_balance >= current_balance) else 'mt5_balance'
             }
-            print(f"  ℹ️ Initialized with MT5 balance: ${current_balance:.2f} (date set to YESTERDAY - {yesterday_str})")
-            print(f"  ✅ Alarm OFF - Trading allowed")
             
             # Update activities.json (SOURCE OF TRUTH)
-            activities_updated = update_activities_json(inv_id, current_balance, yesterday_str)
+            activities_updated = update_activities_json(inv_id, init_balance, yesterday_str)
             if activities_updated:
                 stats["activities_updated"] += 1
                 stats["field_created"] += 1
             
             # Update ALL investor files
-            update_investor_data(fetched_data, inv_id, current_balance, yesterday_str)
-            update_investor_data(updated_data, inv_id, current_balance, yesterday_str)
-            update_investor_data(all_fetched_data, inv_id, current_balance, yesterday_str)
-            update_investor_data(all_updated_data, inv_id, current_balance, yesterday_str)
+            update_investor_data(fetched_data, inv_id, init_balance, yesterday_str)
+            update_investor_data(updated_data, inv_id, init_balance, yesterday_str)
+            update_investor_data(all_fetched_data, inv_id, init_balance, yesterday_str)
+            update_investor_data(all_updated_data, inv_id, init_balance, yesterday_str)
             
             stats["investors_updated"] += 1
             stats["investors_checked"] += 1
@@ -17177,7 +17414,68 @@ def recent_highest_balance_target(inv_id=None):
             continue
         
         # ============================================================
-        # CASE 2: Field exists - Check if current MT5 > stored high
+        # GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
+        # ============================================================
+        if broker_balance is not None and existing_recent < broker_balance:
+            print(f"  ⚠️ RECENT HIGHEST BALANCE (${existing_recent:.2f}) IS LESS THAN BROKER BALANCE (${broker_balance:.2f})")
+            print(f"  🔧 CORRECTING: Setting recent_highest_balance to broker_balance: ${broker_balance:.2f}")
+            
+            # Determine the date to use (preserve existing or use yesterday)
+            correction_date = existing_last_update if existing_last_update else yesterday_str
+            
+            # Update activities.json (SOURCE OF TRUTH)
+            activities_updated = update_activities_json(inv_id, broker_balance, correction_date)
+            if activities_updated:
+                stats["activities_updated"] += 1
+                stats["broker_balance_corrections"] += 1
+            
+            # Update ALL investor files with the correction
+            update_investor_data(fetched_data, inv_id, broker_balance, correction_date)
+            update_investor_data(updated_data, inv_id, broker_balance, correction_date)
+            update_investor_data(all_fetched_data, inv_id, broker_balance, correction_date)
+            update_investor_data(all_updated_data, inv_id, broker_balance, correction_date)
+            
+            # Update the existing_recent variable for further processing
+            old_recent = existing_recent
+            existing_recent = broker_balance
+            
+            stats["investors_updated"] += 1
+            has_updates = True
+            
+            recent_highest_alert = {
+                'is_triggered': False,
+                'investor_id': inv_id,
+                'old_balance': old_recent,
+                'new_balance': broker_balance,
+                'difference': broker_balance - old_recent,
+                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'broker_balance_correction',
+                'last_update_date': correction_date,
+                'today_profit': None,
+                'default_risk': None,
+                'profit_met_risk_threshold': False,
+                'alarm_blocked_reason': 'Corrected to broker_balance'
+            }
+            
+            print(f"  ✅ Balance corrected to ${broker_balance:.2f} and saved to ALL files")
+            print(f"  📅 Date: {correction_date}")
+            print(f"  ✅ Alarm OFF - Trading continues")
+            
+            stats["details"].append({
+                "investor_id": inv_id,
+                "action": "broker_balance_correction",
+                "old_balance": old_recent,
+                "new_balance": broker_balance,
+                "difference": broker_balance - old_recent,
+                "timestamp": timestamp,
+                "update_date": correction_date
+            })
+            
+            # Continue to check if current balance > corrected balance
+            # (fall through to the next check)
+        
+        # ============================================================
+        # CASE 2: Check if current MT5 > stored high
         # ============================================================
         print(f"  📊 Existing recent balance: ${existing_recent:.2f} (from {source_name})")
         print(f"  📅 Last update date: {existing_last_update}")
@@ -17187,14 +17485,14 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  🚀 NEW HIGHER BALANCE DETECTED: ${difference:.2f} increase")
             print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
             
-            # STEP 3: Get default risk from ALL_FETCHED_INVESTORS
+            # STEP 4: Get default risk from ALL_FETCHED_INVESTORS
             default_risk = get_default_risk_from_all_fetched(inv_id)
             
-            # STEP 4: Get today's profit from MT5 history
+            # STEP 5: Get today's profit from MT5 history
             today_profit = get_today_profit_from_history()
             print(f"  📊 Today's profit from MT5 history: ${today_profit:.2f}")
             
-            # STEP 5: Check if today's profit >= default risk
+            # STEP 6: Check if today's profit >= default risk
             profit_met_risk_threshold = False
             if default_risk is not None:
                 if today_profit >= default_risk:
@@ -17394,6 +17692,7 @@ def recent_highest_balance_target(inv_id=None):
     print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
     print(f"  Investors checked: {stats['investors_checked']}")
     print(f"  Field created: {stats['field_created']}")
+    print(f"  Broker balance corrections: {stats['broker_balance_corrections']}")
     print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
     print(f"  New high alerts triggered: {stats['new_high_alerts']}")
     print(f"  Alarms blocked (profit < risk): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
@@ -17413,6 +17712,12 @@ def recent_highest_balance_target(inv_id=None):
         for detail in stats['details']:
             if detail.get('action') == 'new_high_recorded_only':
                 print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Today's Profit ${detail['today_profit']:.2f} < Risk ${detail['default_risk']:.2f} 🟡")
+    
+    if stats['broker_balance_corrections'] > 0:
+        print(f"\n  🔧 BROKER BALANCE CORRECTIONS: {stats['broker_balance_corrections']} investor(s)")
+        for detail in stats['details']:
+            if detail.get('action') == 'broker_balance_correction':
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (corrected to broker balance) 🔧")
     
     if recent_highest_alert['is_triggered']:
         print(f"\n  🚨 ALARM ACTIVE: {recent_highest_alert['investor_id']} - Trading SUSPENDED")
@@ -29326,6 +29631,7 @@ def process_single_investor_(inv_folder):
         # =====================================================================
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
+        #recent_highest_balance_target(inv_id=inv_id)
         martingale_system(inv_id=inv_id)
         
         mt5.shutdown()

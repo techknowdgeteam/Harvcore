@@ -33,6 +33,7 @@ INVHARV_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\fetched_in
 INVHARV_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\invharv\updated_investors.json"
 HARVHUB_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_harvhub_investors.json"
 HARVHUB_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
+ALL_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\all_investors.json"
 ALL_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
 ALL_INVESTORS_BACKUP = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors_backup.json"
 ALL_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\updated_investors.json"
@@ -1059,11 +1060,12 @@ def restore_missing_fields():
 def update_fresh_data_from_fetched_to_all_files():
     """
     Distribute fresh data from ALL_FETCHED_INVESTORS to all other files.
-    FIELD-BY-FIELD DISTRIBUTION: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED, ALL_INVESTORS_BACKUP
+    FIELD-BY-FIELD DISTRIBUTION: ALL_FETCHED → ALL_INVESTORS, ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED, ALL_INVESTORS_BACKUP
     
     This function performs:
     1. Reads ALL_FETCHED_INVESTORS (the source of truth for fresh data)
     2. Distributes each field to matching records in:
+       - ALL_INVESTORS
        - ALL_UPDATED_INVESTORS
        - INVHARV_FETCHED_INVESTORS
        - HARVHUB_FETCHED_INVESTORS
@@ -1080,6 +1082,7 @@ def update_fresh_data_from_fetched_to_all_files():
         - ALL_FETCHED_INVESTORS (source of truth)
     
     Writes:
+        - ALL_INVESTORS
         - ALL_UPDATED_INVESTORS
         - INVHARV_FETCHED_INVESTORS
         - HARVHUB_FETCHED_INVESTORS
@@ -1095,7 +1098,7 @@ def update_fresh_data_from_fetched_to_all_files():
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
-    print("  Direction: ALL_FETCHED → ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED, ALL_INVESTORS_BACKUP")
+    print("  Direction: ALL_FETCHED → ALL_INVESTORS, ALL_UPDATED, INVHARV_FETCHED, HARVHUB_FETCHED, INVHARV_UPDATED, HARVHUB_UPDATED, ALL_INVESTORS_BACKUP")
     print("  Mode     : FIELD-BY-FIELD DISTRIBUTION")
     print("="*70)
     
@@ -1107,6 +1110,14 @@ def update_fresh_data_from_fetched_to_all_files():
             "loaded": False
         },
         "targets": {
+            ALL_INVESTORS: {
+                "name": "ALL_INVESTORS",
+                "records_updated": 0,
+                "records_added": 0,
+                "fields_merged": 0,
+                "field_changes": {},
+                "modified": False
+            },
             ALL_UPDATED_INVESTORS: {
                 "name": "ALL_UPDATED_INVESTORS",
                 "records_updated": 0,
@@ -1388,6 +1399,7 @@ def update_fresh_data_from_fetched_to_all_files():
         print()
         
         targets_to_process = [
+            (ALL_INVESTORS, stats["targets"][ALL_INVESTORS]),
             (ALL_UPDATED_INVESTORS, stats["targets"][ALL_UPDATED_INVESTORS]),
             (INVHARV_FETCHED_INVESTORS, stats["targets"][INVHARV_FETCHED_INVESTORS]),
             (HARVHUB_FETCHED_INVESTORS, stats["targets"][HARVHUB_FETCHED_INVESTORS]),
@@ -1565,6 +1577,13 @@ def update_fresh_data_from_fetched_to_all_files():
         print(f"     Total Records Updated : {total_records_updated:,}")
         print(f"     Total Fields Merged   : {total_fields_merged:,}")
         
+        # Special check for ALL_INVESTORS
+        all_investors_stats = stats["targets"][ALL_INVESTORS]
+        if all_investors_stats["modified"]:
+            print(f"\n  ✅ ALL_INVESTORS was successfully updated!")
+        else:
+            print(f"\n  ⚠️  ALL_INVESTORS was NOT updated - check for issues")
+        
         # Special check for HARVHUB_UPDATED
         harvhub_updated_stats = stats["targets"][HARVHUB_UPDATED_INVESTORS]
         if harvhub_updated_stats["modified"]:
@@ -1610,7 +1629,7 @@ def update_fresh_data_from_fetched_to_all_files():
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
- 
+     
 def restore_empty_investor_files():
     """
     Checks and synchronizes investor files between main and backup.
