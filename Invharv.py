@@ -13174,26 +13174,1093 @@ def convert_grid_prices_to_limit_orders(inv_id=None):
 # ---       ---#
 
  
-# MARTINGALE #
+#RECENT HIGHEST BALANCE 
+def recent_highest_balance_target(inv_id=None):
+    """
+    Function: Manages recent_highest_balance tracking for investors.
+    
+    FLOW:
+    1. If recent_highest_balance doesn't exist in activities.json → Initialize:
+       a. Get broker_balance from FETCHED_INVESTORS
+       b. Get current MT5 balance
+       c. Use the HIGHER of broker_balance or current MT5 balance
+       d. Date = YESTERDAY (alarm OFF)
+    2. GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
+       a. If not, update with broker_balance (date unchanged, alarm OFF)
+       b. Save to ALL files
+    3. Get current MT5 balance
+    4. If current MT5 balance > stored recent_highest_balance:
+       a. Get default risk from account_balance_default_risk_management
+       b. Check today's profit from MT5 history
+       c. If today's profit >= default risk → Record new high, set date to TODAY, ALARM ON
+       d. If today's profit < default risk → Record new high ONLY, DON'T update date, ALARM OFF
+    5. If current MT5 balance <= stored high → No change, ALARM OFF
+    
+    Uses activities.json as source of truth but saves to ALL files
+    
+    Args:
+        inv_id: Optional specific investor ID to process.
+        
+    Returns:
+        dict: Statistics about the recent balance check
+    """
+    global recent_highest_alert
+    
+    import os
+    import json
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    
+    recent_highest_alert = {
+        'is_triggered': False,
+        'investor_id': inv_id if inv_id else "all",
+        'old_balance': None,
+        'new_balance': None,
+        'difference': None,
+        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+        'action': None,
+        'last_update_date': None,
+        'today_profit': None,
+        'default_risk': None,
+        'profit_met_risk_threshold': False,
+        'alarm_blocked_reason': None
+    }
+    
+    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE TARGET (DAILY RESET) {'='*10}")
+    if inv_id:
+        print(f" Investor: {inv_id}")
+    
+    stats = {
+        "investor_id": inv_id if inv_id else "all",
+        "investors_checked": 0,
+        "investors_updated": 0,
+        "investors_skipped": 0,
+        "new_high_alerts": 0,
+        "new_high_recorded_only": 0,
+        "field_created": 0,
+        "broker_balance_corrections": 0,
+        "activities_updated": 0,
+        "files_updated": 0,
+        "errors": [],
+        "current_time": datetime.now().strftime('%I:%M:%S %p'),
+        "processing_success": False,
+        "details": []
+    }
+    
+    def get_last_message(notifications_dict, section_key):
+        if not notifications_dict:
+            return None
+        
+        latest_message = None
+        latest_time = None
+        
+        for msg_id, msg_data in notifications_dict.items():
+            if isinstance(msg_data, dict) and msg_data.get('section') == section_key:
+                try:
+                    msg_time = datetime.strptime(msg_data['time'], "%Y-%m-%d %H:%M:%S")
+                    if latest_time is None or msg_time > latest_time:
+                        latest_time = msg_time
+                        latest_message = msg_data
+                except:
+                    pass
+        
+        if latest_message:
+            return {
+                'type': latest_message.get('type'),
+                'time': latest_time,
+                'data': latest_message
+            }
+        return None
+    
+    def add_notification(notifications_dict, section_key, message, message_type, timestamp=None):
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        last_msg = get_last_message(notifications_dict, section_key)
+        
+        should_add = False
+        if last_msg is None:
+            should_add = True
+        else:
+            if last_msg['type'] != message_type:
+                should_add = True
+        
+        if not should_add:
+            return False
+        
+        next_id = 1
+        if notifications_dict:
+            try:
+                existing_ids = [int(k) for k in notifications_dict.keys() if k.isdigit()]
+                next_id = max(existing_ids) + 1 if existing_ids else 1
+            except:
+                next_id = len(notifications_dict) + 1
+        
+        notifications_dict[str(next_id)] = {
+            "section": section_key,
+            "message": message,
+            "time": timestamp,
+            "type": message_type,
+            "update": "new"
+        }
+        return True
+    
+    def add_execution_notification(executions_dict, section_key, message, message_type, timestamp=None):
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        last_msg = get_last_message(executions_dict, section_key)
+        
+        should_add = False
+        if last_msg is None:
+            should_add = True
+        else:
+            if last_msg['type'] != message_type:
+                should_add = True
+        
+        if not should_add:
+            return False
+        
+        next_id = 1
+        if executions_dict:
+            try:
+                existing_ids = [int(k) for k in executions_dict.keys() if k.isdigit()]
+                next_id = max(existing_ids) + 1 if existing_ids else 1
+            except:
+                next_id = len(executions_dict) + 1
+        
+        executions_dict[str(next_id)] = {
+            "section": section_key,
+            "message": message,
+            "time": timestamp,
+            "type": message_type,
+            "update": "new"
+        }
+        return True
+    
+    def get_mt5_balance():
+        """Get current MT5 account balance"""
+        try:
+            if not mt5.terminal_info():
+                print(f"  MT5 not connected")
+                return None
+            
+            account_info = mt5.account_info()
+            if account_info:
+                return account_info.balance
+            return None
+        except Exception as e:
+            print(f"  Error getting MT5 balance: {e}")
+            return None
+    
+    def get_today_profit_from_history():
+        """
+        Get today's profit from MT5 history.
+        Returns: total profit for today (float)
+        """
+        try:
+            if not mt5.terminal_info():
+                print(f"  MT5 not connected")
+                return 0.0
+            
+            # Get today's date range
+            today = datetime.now()
+            start_of_day = datetime(today.year, today.month, today.day, 0, 0, 0)
+            
+            # Get history deals from today
+            deals = mt5.history_deals_get(start_of_day, datetime.now())
+            
+            if deals is None or len(deals) == 0:
+                print(f"  No deals found for today")
+                return 0.0
+            
+            # Calculate total profit from all deals today
+            total_profit = 0.0
+            for deal in deals:
+                if deal.profit is not None:
+                    total_profit += deal.profit
+            
+            print(f"  Today's total profit from MT5 history: ${total_profit:.2f}")
+            return total_profit
+            
+        except Exception as e:
+            print(f"  Error getting today's profit from MT5 history: {e}")
+            return 0.0
+    
+    def get_default_risk_from_all_fetched(investor_id):
+        """
+        Get default risk from account_balance_default_risk_management in ALL_FETCHED_INVESTORS.
+        Uses current MT5 balance to find the matching risk range.
+        Returns: default_risk (float) or None
+        """
+        if not os.path.exists(ALL_FETCHED_INVESTORS):
+            print(f"  ⚠️ ALL_FETCHED_INVESTORS not found")
+            return None
+        
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            
+            investor_data = all_fetched_data.get(investor_id)
+            if not investor_data:
+                print(f"  ⚠️ Investor {investor_id} not found in ALL_FETCHED_INVESTORS")
+                return None
+            
+            # Get current MT5 balance to find which risk range applies
+            current_bal = get_mt5_balance()
+            if current_bal is None:
+                print(f"  ⚠️ Could not get current MT5 balance for risk lookup")
+                return None
+            
+            # Get risk map from accountmanagement
+            accountmanagement = investor_data.get('accountmanagement', {})
+            risk_map = accountmanagement.get('account_balance_default_risk_management', {})
+            
+            if not risk_map:
+                print(f"  ⚠️ No account_balance_default_risk_management found for {investor_id}")
+                return None
+            
+            # Find the matching risk range
+            for range_str, risk_value in risk_map.items():
+                try:
+                    raw_range = range_str.split("_")[0]
+                    low_str, high_str = raw_range.split("-")
+                    low = float(low_str)
+                    high = float(high_str)
+                    
+                    if low <= current_bal <= high:
+                        default_risk = float(risk_value)
+                        print(f"  📊 Default risk for balance ${current_bal:.2f}: ${default_risk:.2f}")
+                        return default_risk
+                except Exception:
+                    continue
+            
+            print(f"  ⚠️ No matching risk range found for balance ${current_bal:.2f}")
+            return None
+            
+        except Exception as e:
+            print(f"  ⚠️ Error loading ALL_FETCHED_INVESTORS: {e}")
+            return None
+    
+    def get_recent_balance_from_activities(inv_id):
+        """
+        Get recent_highest_balance from activities.json (SOURCE OF TRUTH)
+        Returns: (balance, date) or (None, None)
+        """
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            activities_path = inv_root / "activities.json"
+            
+            if not activities_path.exists():
+                print(f"  ℹ️ activities.json not found for {inv_id}")
+                return None, None
+            
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities = json.load(f)
+            
+            balance = activities.get('recent_highest_balance')
+            date = activities.get('recent_highest_balance_last_update')
+            
+            if balance is not None:
+                try:
+                    return float(balance), str(date) if date else None
+                except (ValueError, TypeError):
+                    return None, None
+            
+            return None, None
+            
+        except Exception as e:
+            print(f"  ⚠️ Error reading activities.json for {inv_id}: {e}")
+            return None, None
+    
+    def get_broker_balance_from_fetched(inv_id):
+        """
+        Get broker_balance from FETCHED_INVESTORS
+        Returns: broker_balance (float) or None
+        """
+        if not os.path.exists(FETCHED_INVESTORS):
+            print(f"  ⚠️ FETCHED_INVESTORS not found")
+            return None
+        
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            
+            investor_data = fetched_data.get(inv_id)
+            if not investor_data:
+                print(f"  ⚠️ Investor {inv_id} not found in FETCHED_INVESTORS")
+                return None
+            
+            broker_balance = investor_data.get('broker_balance')
+            if broker_balance is not None:
+                try:
+                    return float(broker_balance)
+                except (ValueError, TypeError):
+                    print(f"  ⚠️ Invalid broker_balance format: {broker_balance}")
+                    return None
+            
+            print(f"  ℹ️ No broker_balance found in FETCHED_INVESTORS for {inv_id}")
+            return None
+            
+        except Exception as e:
+            print(f"  ⚠️ Error loading FETCHED_INVESTORS: {e}")
+            return None
+    
+    def update_investor_data(data_dict, inv_id, new_balance, update_date):
+        """Update recent_highest_balance and date in a data dictionary (PRESERVES ALL OTHER FIELDS)"""
+        if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+            # Update only the specific fields, preserve everything else
+            data_dict[inv_id]['recent_highest_balance'] = str(round(new_balance, 2))
+            data_dict[inv_id]['recent_highest_balance_last_update'] = update_date
+        else:
+            # Create new entry with only the balance fields (will be merged later)
+            data_dict[inv_id] = {
+                'recent_highest_balance': str(round(new_balance, 2)),
+                'recent_highest_balance_last_update': update_date
+            }
+    
+    def get_highest_balance_from_all_files(inv_id):
+        """
+        Check ALL files for the highest recent_highest_balance and return the max.
+        Returns: (highest_balance, date, source_file)
+        """
+        highest_balance = None
+        highest_date = None
+        source_file = None
+        
+        # Check each file
+        file_checks = [
+            (fetched_data, "FETCHED_INVESTORS"),
+            (updated_data, "UPDATED_INVESTORS"),
+            (all_fetched_data, "ALL_FETCHED_INVESTORS"),
+            (all_updated_data, "ALL_UPDATED_INVESTORS")
+        ]
+        
+        for data_dict, file_name in file_checks:
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                balance = data_dict[inv_id].get('recent_highest_balance')
+                date = data_dict[inv_id].get('recent_highest_balance_last_update')
+                
+                if balance is not None:
+                    try:
+                        balance_float = float(balance)
+                        if highest_balance is None or balance_float > highest_balance:
+                            highest_balance = balance_float
+                            highest_date = str(date) if date else None
+                            source_file = file_name
+                    except (ValueError, TypeError):
+                        continue
+        
+        return highest_balance, highest_date, source_file
+    
+    def update_activities_json(inv_id, new_balance, update_date):
+        """
+        Update activities.json with recent_highest_balance and date.
+        This is the SOURCE OF TRUTH.
+        PRESERVES ALL EXISTING FIELDS - ONLY UPDATES THE TARGET FIELDS.
+        """
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            activities_path = inv_root / "activities.json"
+            
+            # Load or create activities
+            if activities_path.exists():
+                with open(activities_path, 'r', encoding='utf-8') as f:
+                    activities = json.load(f)
+                print(f"  📝 Loaded existing activities.json for {inv_id}")
+            else:
+                # Create NEW activities dict with ALL required fields
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                activities = {
+                    "recent_highest_balance": str(round(new_balance, 2)),
+                    "recent_highest_balance_last_update": update_date,
+                    "execution_start_date": current_time,
+                    "execution_start_balance": str(round(new_balance, 2)),
+                    "total_deposits": 0.0,
+                    "total_withdrawals": 0.0,
+                    "net_deposits": 0.0,
+                    "total_profits": 0.0,
+                    "total_losses": 0.0,
+                    "profit_factor": 0.0,
+                    "win_rate": 0.0,
+                    "total_trades": 0,
+                    "winning_trades": 0,
+                    "losing_trades": 0,
+                    "max_drawdown": 0.0,
+                    "max_drawdown_percentage": 0.0,
+                    "current_drawdown": 0.0,
+                    "current_drawdown_percentage": 0.0,
+                    "peak_balance": str(round(new_balance, 2)),
+                    "peak_balance_date": current_time,
+                    "last_updated": current_time,
+                    "trades": [],
+                    "daily_stats": {},
+                    "weekly_stats": {},
+                    "monthly_stats": {}
+                }
+                print(f"  📝 Creating new activities.json with all fields for {inv_id}")
+            
+            # UPDATE ONLY the specific fields - PRESERVE EVERYTHING ELSE
+            activities['recent_highest_balance'] = str(round(new_balance, 2))
+            activities['recent_highest_balance_last_update'] = update_date
+            activities['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Update peak_balance if new balance is higher
+            if 'peak_balance' in activities:
+                try:
+                    current_peak = float(activities['peak_balance'])
+                    if new_balance > current_peak:
+                        activities['peak_balance'] = str(round(new_balance, 2))
+                        activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                except (ValueError, TypeError):
+                    activities['peak_balance'] = str(round(new_balance, 2))
+                    activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Save back to file - PRESERVES ALL OTHER FIELDS
+            with open(activities_path, 'w', encoding='utf-8') as f:
+                json.dump(activities, f, indent=4)
+            
+            print(f"  ✅ Updated activities.json (SOURCE OF TRUTH): ${new_balance:.2f} (date: {update_date})")
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ Failed to update activities.json: {e}")
+            import traceback
+            traceback.print_exc()
+            stats["errors"].append(f"Failed to update activities.json for {inv_id}: {e}")
+            return False
+    
+    def sync_all_files(inv_id, balance, date, message, exec_message, msg_type):
+        """
+        Sync ALL files with the new balance data.
+        This ensures ALL files have the same recent_highest_balance data.
+        """
+        files_updated = 0
+        
+        print(f"\n  🔄 SYNCING ALL FILES WITH BALANCE: ${balance:.2f} (date: {date})")
+        
+        # Update activities.json (SOURCE OF TRUTH)
+        if update_activities_json(inv_id, balance, date):
+            files_updated += 1
+            stats["activities_updated"] += 1
+        
+        # Update all investor files
+        update_investor_data(fetched_data, inv_id, balance, date)
+        update_investor_data(updated_data, inv_id, balance, date)
+        update_investor_data(all_fetched_data, inv_id, balance, date)
+        update_investor_data(all_updated_data, inv_id, balance, date)
+        
+        # Add notifications to ALL files if provided
+        if message and exec_message:
+            for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                    if 'notifications' not in data_dict[inv_id]:
+                        data_dict[inv_id]['notifications'] = {}
+                    if 'executions_notification' not in data_dict[inv_id]:
+                        data_dict[inv_id]['executions_notification'] = {}
+                    add_notification(data_dict[inv_id]['notifications'], 'RecentBalance', message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    add_execution_notification(data_dict[inv_id]['executions_notification'], 'RecentBalance', exec_message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+        stats["files_updated"] += 4  # activities.json + 4 investor files
+        return files_updated
+    
+    def get_recent_balance_from_all_files(inv_id):
+        """
+        Fallback: Get recent_highest_balance from all files if not in activities.json
+        Returns: (balance, date, source_name)
+        """
+        # Check updated_data first
+        if inv_id in updated_data:
+            val = updated_data[inv_id].get('recent_highest_balance')
+            date = updated_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "UPDATED_INVESTORS"
+                except:
+                    pass
+        
+        # Check all_updated_data
+        if inv_id in all_updated_data:
+            val = all_updated_data[inv_id].get('recent_highest_balance')
+            date = all_updated_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "ALL_UPDATED_INVESTORS"
+                except:
+                    pass
+        
+        # Check fetched_data
+        if inv_id in fetched_data:
+            val = fetched_data[inv_id].get('recent_highest_balance')
+            date = fetched_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "FETCHED_INVESTORS"
+                except:
+                    pass
+        
+        # Check all_fetched_data
+        if inv_id in all_fetched_data:
+            val = all_fetched_data[inv_id].get('recent_highest_balance')
+            date = all_fetched_data[inv_id].get('recent_highest_balance_last_update')
+            if val is not None:
+                try:
+                    return float(val), str(date) if date else None, "ALL_FETCHED_INVESTORS"
+                except:
+                    pass
+        
+        return None, None, None
+    
+    def safe_merge_dict(existing, updates):
+        """Safely merge updates into existing dict without overwriting other fields"""
+        if not isinstance(existing, dict):
+            return updates.copy() if isinstance(updates, dict) else {}
+        
+        result = existing.copy()
+        for key, value in updates.items():
+            if isinstance(value, dict) and key in result and isinstance(result[key], dict):
+                result[key] = safe_merge_dict(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    def update_file_safely(file_path, inv_id, update_data):
+        """
+        Safely update a single field in a JSON file without overwriting other data.
+        Uses a temporary file to prevent corruption.
+        """
+        try:
+            # Load existing data
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+            else:
+                existing_data = {}
+            
+            # Check if investor exists
+            if inv_id in existing_data and isinstance(existing_data[inv_id], dict):
+                # Update only the specific fields
+                existing_data[inv_id] = safe_merge_dict(existing_data[inv_id], update_data)
+            else:
+                # Create new investor entry
+                existing_data[inv_id] = update_data
+            
+            # Write to temp file first, then rename to prevent corruption
+            temp_path = file_path + ".tmp"
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(existing_data, f, indent=4)
+            
+            # Rename temp to actual file
+            os.replace(temp_path, file_path)
+            
+            return True
+            
+        except Exception as e:
+            print(f"  ❌ Error updating {file_path}: {e}")
+            return False
+    
+    # ================================================================
+    # LOAD ALL INVESTOR FILES
+    # ================================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR FILES")
+    print("─"*80)
+    
+    fetched_data = {}
+    updated_data = {}
+    all_fetched_data = {}
+    all_updated_data = {}
+    
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load FETCHED_INVESTORS: {e}")
+    
+    if os.path.exists(UPDATED_INVESTORS):
+        try:
+            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                updated_data = json.load(f)
+            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load UPDATED_INVESTORS: {e}")
+    
+    if os.path.exists(ALL_FETCHED_INVESTORS):
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load ALL_FETCHED_INVESTORS: {e}")
+    
+    if os.path.exists(ALL_UPDATED_INVESTORS):
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_updated_data = json.load(f)
+            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to load ALL_UPDATED_INVESTORS: {e}")
+    
+    print("─"*80)
+    
+    # Get list of investors from activities.json (SOURCE OF TRUTH)
+    investors_from_activities = set()
+    try:
+        if os.path.exists(INV_PATH):
+            for inv_folder in os.listdir(INV_PATH):
+                activities_path = Path(INV_PATH) / inv_folder / "activities.json"
+                if activities_path.exists():
+                    investors_from_activities.add(inv_folder)
+        print(f" │ Found {len(investors_from_activities)} investors with activities.json")
+    except Exception as e:
+        print(f" │ Error scanning activities.json files: {e}")
+    
+    # Combine with other files for complete list
+    all_investor_ids = set()
+    all_investor_ids.update(investors_from_activities)
+    all_investor_ids.update(fetched_data.keys())
+    all_investor_ids.update(updated_data.keys())
+    all_investor_ids.update(all_fetched_data.keys())
+    all_investor_ids.update(all_updated_data.keys())
+    
+    if inv_id:
+        investors_to_process = [inv_id] if inv_id in all_investor_ids else []
+        if not investors_to_process:
+            print(f" ⚠️ Investor {inv_id} not found in any data file!")
+            stats["errors"].append(f"Investor {inv_id} not found")
+            return stats
+    else:
+        investors_to_process = list(all_investor_ids)
+    
+    print(f"\n 📋 Processing {len(investors_to_process)} investors...")
+    
+    has_updates = False
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    for inv_id in investors_to_process:
+        print(f"\n[{stats['investors_checked'] + 1}/{len(investors_to_process)}] 📊 Investor: {inv_id}")
+        
+        # STEP 1: Get current MT5 balance
+        current_balance = get_mt5_balance()
+        if current_balance is None:
+            print(f"  ⚠️ Could not get MT5 balance")
+            stats["errors"].append(f"Could not get MT5 balance for {inv_id}")
+            stats["investors_skipped"] += 1
+            continue
+        
+        print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
+        
+        # STEP 2: Get broker_balance from FETCHED_INVESTORS (for validation)
+        broker_balance = get_broker_balance_from_fetched(inv_id)
+        if broker_balance is not None:
+            print(f"  📊 Broker balance from FETCHED_INVESTORS: ${broker_balance:.2f}")
+        
+        # STEP 3: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
+        existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
+        source_name = "activities.json (SOURCE OF TRUTH)"
+        
+        # CRITICAL FIX: If not in activities.json, check ALL other files for the HIGHEST value
+        if existing_recent is None:
+            print(f"  📝 No recent_highest_balance in activities.json - checking ALL files...")
+            
+            # Get the highest balance from ALL files
+            highest_from_files, highest_date, source_file = get_highest_balance_from_all_files(inv_id)
+            
+            if highest_from_files is not None:
+                print(f"  📝 Found data in {source_file}: ${highest_from_files:.2f} (date: {highest_date})")
+                
+                # IMMEDIATELY SYNC to ALL files (including activities.json)
+                print(f"  🔄 MIGRATING data to ALL files (including activities.json)...")
+                
+                # Sync to ALL files
+                sync_all_files(inv_id, highest_from_files, highest_date, None, None, None)
+                
+                # Update the existing_recent variable for further processing
+                existing_recent = highest_from_files
+                existing_last_update = highest_date
+                source_name = f"{source_file} (MIGRATED to ALL files)"
+                stats["field_created"] += 1
+                stats["activities_updated"] += 1
+                has_updates = True
+                
+                print(f"  ✅ MIGRATION COMPLETE - All files now have balance: ${existing_recent:.2f}")
+            else:
+                print(f"  ℹ️ No data found in ANY file - will initialize")
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # ============================================================
+        # CASE 1: Field doesn't exist - INITIALIZE
+        # ============================================================
+        if existing_recent is None:
+            print(f"  📝 Recent balance field not set - initializing...")
+            
+            # Determine which balance to use for initialization
+            # Use the HIGHER of broker_balance or current MT5 balance
+            if broker_balance is not None:
+                init_balance = max(broker_balance, current_balance)
+                if init_balance == broker_balance and broker_balance > current_balance:
+                    print(f"  ℹ️ Using broker_balance (${broker_balance:.2f}) as it's higher than current balance (${current_balance:.2f})")
+                elif init_balance == current_balance and current_balance > broker_balance:
+                    print(f"  ℹ️ Using current MT5 balance (${current_balance:.2f}) as it's higher than broker_balance (${broker_balance:.2f})")
+                else:
+                    print(f"  ℹ️ Balances equal: using ${init_balance:.2f}")
+            else:
+                # No broker_balance available, use current MT5 balance
+                init_balance = current_balance
+                print(f"  ℹ️ No broker_balance available, using current MT5 balance: ${init_balance:.2f}")
+            
+            print(f"  ✅ Initialized with balance: ${init_balance:.2f} (date set to YESTERDAY - {yesterday_str})")
+            print(f"  ✅ Alarm OFF - Trading allowed")
+            
+            recent_highest_alert = {
+                'is_triggered': False,
+                'investor_id': inv_id,
+                'old_balance': None,
+                'new_balance': init_balance,
+                'difference': None,
+                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'initialized',
+                'last_update_date': yesterday_str,
+                'today_profit': None,
+                'default_risk': None,
+                'profit_met_risk_threshold': False,
+                'alarm_blocked_reason': None,
+                'init_source': 'broker_balance' if (broker_balance is not None and broker_balance >= current_balance) else 'mt5_balance'
+            }
+            
+            # Sync to ALL files
+            sync_all_files(inv_id, init_balance, yesterday_str, None, None, None)
+            
+            stats["investors_updated"] += 1
+            stats["investors_checked"] += 1
+            stats["field_created"] += 1
+            has_updates = True
+            continue
+        
+        # ============================================================
+        # GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
+        # ============================================================
+        if broker_balance is not None and existing_recent < broker_balance:
+            print(f"  ⚠️ RECENT HIGHEST BALANCE (${existing_recent:.2f}) IS LESS THAN BROKER BALANCE (${broker_balance:.2f})")
+            print(f"  🔧 CORRECTING: Setting recent_highest_balance to broker_balance: ${broker_balance:.2f}")
+            
+            # Determine the date to use (preserve existing or use yesterday)
+            correction_date = existing_last_update if existing_last_update else yesterday_str
+            
+            # Sync to ALL files with correction
+            sync_all_files(inv_id, broker_balance, correction_date, None, None, None)
+            
+            # Update the existing_recent variable for further processing
+            old_recent = existing_recent
+            existing_recent = broker_balance
+            
+            stats["investors_updated"] += 1
+            stats["broker_balance_corrections"] += 1
+            has_updates = True
+            
+            recent_highest_alert = {
+                'is_triggered': False,
+                'investor_id': inv_id,
+                'old_balance': old_recent,
+                'new_balance': broker_balance,
+                'difference': broker_balance - old_recent,
+                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'broker_balance_correction',
+                'last_update_date': correction_date,
+                'today_profit': None,
+                'default_risk': None,
+                'profit_met_risk_threshold': False,
+                'alarm_blocked_reason': 'Corrected to broker_balance'
+            }
+            
+            print(f"  ✅ Balance corrected to ${broker_balance:.2f} and saved to ALL files")
+            print(f"  📅 Date: {correction_date}")
+            print(f"  ✅ Alarm OFF - Trading continues")
+            
+            stats["details"].append({
+                "investor_id": inv_id,
+                "action": "broker_balance_correction",
+                "old_balance": old_recent,
+                "new_balance": broker_balance,
+                "difference": broker_balance - old_recent,
+                "timestamp": timestamp,
+                "update_date": correction_date
+            })
+            
+            # Continue to check if current balance > corrected balance
+            # (fall through to the next check)
+        
+        # ============================================================
+        # CASE 2: Check if current MT5 > stored high
+        # ============================================================
+        print(f"  📊 Existing recent balance: ${existing_recent:.2f} (from {source_name})")
+        print(f"  📅 Last update date: {existing_last_update}")
+        
+        if current_balance > existing_recent:
+            difference = current_balance - existing_recent
+            print(f"  🚀 NEW HIGHER BALANCE DETECTED: ${difference:.2f} increase")
+            print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
+            
+            # STEP 4: Get default risk from ALL_FETCHED_INVESTORS
+            default_risk = get_default_risk_from_all_fetched(inv_id)
+            
+            # STEP 5: Get today's profit from MT5 history
+            today_profit = get_today_profit_from_history()
+            print(f"  📊 Today's profit from MT5 history: ${today_profit:.2f}")
+            
+            # STEP 6: Check if today's profit >= default risk
+            profit_met_risk_threshold = False
+            if default_risk is not None:
+                if today_profit >= default_risk:
+                    profit_met_risk_threshold = True
+                    print(f"  ✅ Today's profit (${today_profit:.2f}) >= default risk (${default_risk:.2f}) - ALARM CAN TRIGGER")
+                else:
+                    print(f"  ⚠️ Today's profit (${today_profit:.2f}) < default risk (${default_risk:.2f}) - ALARM BLOCKED")
+            else:
+                print(f"  ⚠️ No default risk found - ALARM BLOCKED")
+                default_risk = 0  # Set to 0 so it doesn't block
+            
+            # ALWAYS record the new high balance
+            stats["investors_updated"] += 1
+            stats["new_high_recorded_only"] += 1
+            
+            if profit_met_risk_threshold and default_risk is not None:
+                # BOTH conditions met: Record high, date = TODAY, ALARM ON
+                action = "new_high"
+                stats["new_high_alerts"] += 1
+                update_date = today_str
+                
+                recent_highest_alert = {
+                    'is_triggered': True,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': difference,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'new_high',
+                    'last_update_date': today_str,
+                    'today_profit': today_profit,
+                    'default_risk': default_risk,
+                    'profit_met_risk_threshold': True,
+                    'alarm_blocked_reason': None
+                }
+                print(f"  🚨 ALARM ACTIVATED: New high AND today's profit >= risk! Trading SUSPENDED!")
+                
+                message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Today's Profit: ${today_profit:.2f} >= Risk: ${default_risk:.2f}. TRADING SUSPENDED!"
+                exec_message = f"🚨 SERVER ALERT: {inv_id} new daily high ${current_balance:.2f} - Trading SUSPENDED"
+                msg_type = 'danger'
+                
+            else:
+                # New high BUT today's profit < risk: Record only, DON'T update date
+                action = "new_high_recorded_only"
+                update_date = existing_last_update if existing_last_update else yesterday_str
+                
+                recent_highest_alert = {
+                    'is_triggered': False,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': difference,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'new_high_recorded_only',
+                    'last_update_date': update_date,
+                    'today_profit': today_profit,
+                    'default_risk': default_risk,
+                    'profit_met_risk_threshold': False,
+                    'alarm_blocked_reason': f"Today's profit (${today_profit:.2f}) < default risk (${default_risk:.2f})" if default_risk else "No default risk found"
+                }
+                print(f"  🟡 NEW HIGH RECORDED ONLY - Alarm BLOCKED")
+                print(f"  📅 Date NOT updated - kept as: {update_date}")
+                print(f"  ✅ Alarm OFF - Trading continues")
+                
+                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM NOT TRIGGERED: Today's Profit (${today_profit:.2f}) < Risk (${default_risk:.2f}). Trading continues."
+                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but today's profit below risk - Trading continues"
+                msg_type = 'info'
+            
+            # Sync to ALL files with new balance and notifications
+            sync_all_files(inv_id, current_balance, update_date, message, exec_message, msg_type)
+            
+            stats["details"].append({
+                "investor_id": inv_id,
+                "action": action,
+                "old_balance": existing_recent,
+                "new_balance": current_balance,
+                "difference": difference,
+                "timestamp": timestamp,
+                "update_date": update_date,
+                "today_profit": today_profit,
+                "default_risk": default_risk,
+                "profit_met_risk_threshold": profit_met_risk_threshold,
+                "alarm_triggered": profit_met_risk_threshold
+            })
+            
+            has_updates = True
+            stats["investors_checked"] += 1
+            continue
+        
+        # ============================================================
+        # CASE 3: Current balance <= stored high - No change
+        # ============================================================
+        else:
+            if current_balance < existing_recent:
+                difference = existing_recent - current_balance
+                print(f"  📉 Current balance is LOWER than stored high: ${difference:.2f} decrease")
+            else:
+                print(f"  ℹ️ Balance unchanged at stored high: ${current_balance:.2f}")
+            
+            print(f"  ✅ Alarm OFF - Trading allowed")
+            stats["investors_skipped"] += 1
+            
+            recent_highest_alert = {
+                'is_triggered': False,
+                'investor_id': inv_id,
+                'old_balance': existing_recent,
+                'new_balance': current_balance,
+                'difference': existing_recent - current_balance if current_balance < existing_recent else 0,
+                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'no_change',
+                'last_update_date': existing_last_update,
+                'today_profit': None,
+                'default_risk': None,
+                'profit_met_risk_threshold': False,
+                'alarm_blocked_reason': None
+            }
+            
+            stats["details"].append({
+                "investor_id": inv_id,
+                "action": "no_change",
+                "stored_high": existing_recent,
+                "current_balance": current_balance,
+                "difference": existing_recent - current_balance if current_balance < existing_recent else 0,
+                "timestamp": timestamp,
+                "update_date": existing_last_update
+            })
+            
+            stats["investors_checked"] += 1
+            continue
+    
+    # ================================================================
+    # SAVE ALL UPDATES - PRESERVES ALL EXISTING DATA
+    # ================================================================
+    if has_updates:
+        print("\n" + "─"*80)
+        print(" 💾 SAVING ALL UPDATED FILES (PRESERVING EXISTING DATA)")
+        print("─"*80)
+        
+        # Save FETCHED_INVESTORS - PRESERVES ALL EXISTING DATA
+        try:
+            with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(fetched_data, f, indent=4)
+            print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save FETCHED_INVESTORS: {e}")
+        
+        # Save UPDATED_INVESTORS - PRESERVES ALL EXISTING DATA
+        try:
+            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(updated_data, f, indent=4)
+            print(f" │ ✅ Updated: {UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save UPDATED_INVESTORS: {e}")
+        
+        # Save ALL_FETCHED_INVESTORS - PRESERVES ALL EXISTING DATA
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_fetched_data, f, indent=4)
+            print(f" │ ✅ Updated: {ALL_FETCHED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save ALL_FETCHED_INVESTORS: {e}")
+        
+        # Save ALL_UPDATED_INVESTORS - PRESERVES ALL EXISTING DATA
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_updated_data, f, indent=4)
+            print(f" │ ✅ Updated: {ALL_UPDATED_INVESTORS}")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
+            stats["errors"].append(f"Failed to save ALL_UPDATED_INVESTORS: {e}")
+        
+        print(f"\n │ ✅ All investor files updated successfully (existing data preserved).")
+        print(f" │ ✅ activities.json (SOURCE OF TRUTH) updated for {stats['activities_updated']} investor(s)")
+        stats["processing_success"] = True
+    else:
+        print("\n │ ℹ️ No updates needed. All files are up to date.")
+        stats["processing_success"] = True
+    
+    # Summary
+    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
+    print(f"  Investors checked: {stats['investors_checked']}")
+    print(f"  Field created: {stats['field_created']}")
+    print(f"  Broker balance corrections: {stats['broker_balance_corrections']}")
+    print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
+    print(f"  New high alerts triggered: {stats['new_high_alerts']}")
+    print(f"  Alarms blocked (profit < risk): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
+    print(f"  Investors updated: {stats['investors_updated']}")
+    print(f"  Investors skipped: {stats['investors_skipped']}")
+    print(f"  activities.json updated: {stats['activities_updated']}")
+    print(f"  Files updated: {stats['files_updated']}")
+    
+    if stats['new_high_alerts'] > 0:
+        print(f"\n  🚨 ALARM ACTIVE: {stats['new_high_alerts']} investor(s)")
+        for detail in stats['details']:
+            if detail.get('action') == 'new_high':
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) 🔴")
+    
+    blocked = stats['new_high_recorded_only'] - stats['new_high_alerts']
+    if blocked > 0:
+        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (profit < risk)")
+        for detail in stats['details']:
+            if detail.get('action') == 'new_high_recorded_only':
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Today's Profit ${detail['today_profit']:.2f} < Risk ${detail['default_risk']:.2f} 🟡")
+    
+    if stats['broker_balance_corrections'] > 0:
+        print(f"\n  🔧 BROKER BALANCE CORRECTIONS: {stats['broker_balance_corrections']} investor(s)")
+        for detail in stats['details']:
+            if detail.get('action') == 'broker_balance_correction':
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (corrected to broker balance) 🔧")
+    
+    if stats['field_created'] > 0:
+        print(f"\n  📝 FIELDS CREATED: {stats['field_created']} investor(s)")
+        for detail in stats['details']:
+            if detail.get('action') == 'initialized':
+                print(f"     • {detail['investor_id']}: Initialized with ${detail['new_balance']:.2f} 📝")
+    
+    if recent_highest_alert['is_triggered']:
+        print(f"\n  🚨 ALARM ACTIVE: {recent_highest_alert['investor_id']} - Trading SUSPENDED")
+    
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+    
+    return stats
+#==================#
+# MARTINGALE SYSTEM#
 def martingale_system(inv_id=None):
     print(f"\n{'='*10} 🎰 MARTINGALE STAGED DRAWDOWN SYSTEM {'='*10}")
     if inv_id:
         print(f" Processing single investor: {inv_id}")
 
-    # Track statistics
     stats = {
         "investor_id": inv_id if inv_id else "all",
         "investors_processed": 0,
         "martingale_enabled": False,
-        "martingale_type": "loss_streak",  # NEW
+        "martingale_type": "loss_streak",
         "martingale_maximum_risk": 0,
         "martingale_loss_recovery_adder_percentage": 0,
         "martingale_for_position_order_scale": False,
         "martingale_pre_scaling": False,
-        "martingale_pre_scale_highest_risk_adder": False,
-        "highest_risk_retention_percentage": 0,
-        "martingale_pre_scale_expected_loss_adder": False,
-        "expected_loss_retention_percentage": 0,
+        "enable_initial_risk_retention": False,
+        "initial_risk_retention_percentage": 0,
+        "pre_drawdown_assumption": False,  # NEW
         "has_loss": False,
         "execution_start_balance": 0.0,
         "later_balance": 0.0,
@@ -13277,18 +14344,18 @@ def martingale_system(inv_id=None):
                     pre_scaling_config = martingale_config.get("pre_scaling", {})
                     if pre_scaling_config:
                         martingale_pre_scaling = pre_scaling_config.get("martingale_pre_scaling", False)
-                        martingale_pre_scale_highest_risk_adder = pre_scaling_config.get("martingale_pre_scale_highest_risk_adder", False)
-                        highest_risk_retention_str = pre_scaling_config.get("highest_risk_retention_percentage", "0%")
-                        martingale_pre_scale_expected_loss_adder = pre_scaling_config.get("martingale_pre_scale_expected_loss_adder", False)
-                        expected_loss_retention_str = pre_scaling_config.get("expected_loss_retention_percentage", "0%")
+                        enable_initial_risk_retention = pre_scaling_config.get("enable_initial_risk_retention", False)
+                        highest_risk_retention_str = pre_scaling_config.get("initial_risk_retention_percentage", "0%")
                         martingale_linear_scaling = pre_scaling_config.get("martingale_linear_scaling", False)
+                        
+                        # NEW: pre-drawdown assumption flag
+                        pre_drawdown_assumption = pre_scaling_config.get("pre-drawdown_assumption", False)
                     else:
                         martingale_pre_scaling = martingale_config.get("martingale_pre_scaling", False)
-                        martingale_pre_scale_highest_risk_adder = False
+                        enable_initial_risk_retention = False
                         highest_risk_retention_str = "0%"
-                        martingale_pre_scale_expected_loss_adder = False
-                        expected_loss_retention_str = "0%"
                         martingale_linear_scaling = False
+                        pre_drawdown_assumption = False
                 else:
                     martingale_enabled = settings.get("enable_martingale", False)
                     martingale_type = "loss_streak"
@@ -13296,11 +14363,10 @@ def martingale_system(inv_id=None):
                     recovery_adder_str = settings.get("martingale_loss_recovery_adder_percentage", "0%")
                     martingale_for_position_order_scale = settings.get("martingale_for_position_order_scale", False)
                     martingale_pre_scaling = settings.get("martingale_pre_scaling", False)
-                    martingale_pre_scale_highest_risk_adder = False
+                    enable_initial_risk_retention = False
                     highest_risk_retention_str = "0%"
-                    martingale_pre_scale_expected_loss_adder = False
-                    expected_loss_retention_str = "0%"
                     martingale_linear_scaling = False
+                    pre_drawdown_assumption = False
                 
                 recovery_adder_percentage = 0
                 if recovery_adder_str:
@@ -13314,25 +14380,14 @@ def martingale_system(inv_id=None):
                 # 100% = keep all, remove 0%
                 # 90% = keep 90%, remove 10%
                 # 0% = keep 0%, remove 100%
-                highest_risk_retention_percentage = 0
+                initial_risk_retention_percentage = 0
                 if highest_risk_retention_str:
                     try:
                         retention_percentage = float(highest_risk_retention_str.replace('%', ''))
-                        # Store directly - this IS the amount to keep
-                        highest_risk_retention_percentage = retention_percentage
+                        initial_risk_retention_percentage = retention_percentage
                         print(f"  │ Highest risk: Keeping {retention_percentage}% of risk (removing {100 - retention_percentage}%)")
                     except:
-                        highest_risk_retention_percentage = 0
-
-                expected_loss_retention_percentage = 0
-                if expected_loss_retention_str:
-                    try:
-                        retention_percentage = float(expected_loss_retention_str.replace('%', ''))
-                        # Store directly - this IS the amount to keep
-                        expected_loss_retention_percentage = retention_percentage
-                        print(f"  │ Expected loss: Keeping {retention_percentage}% of risk (removing {100 - retention_percentage}%)")
-                    except:
-                        expected_loss_retention_percentage = 0
+                        initial_risk_retention_percentage = 0
                 
                 default_risk_map = config.get("account_balance_default_risk_management", {})
                 default_minimum_risk = 2
@@ -13357,17 +14412,16 @@ def martingale_system(inv_id=None):
                     "recovery_adder_percentage": recovery_adder_percentage,
                     "martingale_for_position_order_scale": martingale_for_position_order_scale,
                     "martingale_pre_scaling": martingale_pre_scaling,
-                    "martingale_pre_scale_highest_risk_adder": martingale_pre_scale_highest_risk_adder,
-                    "highest_risk_retention_percentage": highest_risk_retention_percentage,
-                    "martingale_pre_scale_expected_loss_adder": martingale_pre_scale_expected_loss_adder,
-                    "expected_loss_retention_percentage": expected_loss_retention_percentage,
+                    "enable_initial_risk_retention": enable_initial_risk_retention,
+                    "initial_risk_retention_percentage": initial_risk_retention_percentage,
                     "default_minimum_risk": default_minimum_risk,
-                    "martingale_linear_scaling": martingale_linear_scaling
+                    "martingale_linear_scaling": martingale_linear_scaling,
+                    "pre_drawdown_assumption": pre_drawdown_assumption  # NEW
                 }
             except Exception as e:
                 print(f"  ✗ Failed to read config: {e}")
                 return None
-            
+        
         config_data = load_configuration()
         if config_data is None:
             stats["errors"] += 1
@@ -13380,26 +14434,24 @@ def martingale_system(inv_id=None):
         recovery_adder_percentage = config_data["recovery_adder_percentage"]
         martingale_for_position_order_scale = config_data["martingale_for_position_order_scale"]
         martingale_pre_scaling = config_data["martingale_pre_scaling"]
-        martingale_pre_scale_highest_risk_adder = config_data["martingale_pre_scale_highest_risk_adder"]
-        highest_risk_retention_percentage = config_data["highest_risk_retention_percentage"]
-        martingale_pre_scale_expected_loss_adder = config_data["martingale_pre_scale_expected_loss_adder"]
-        expected_loss_retention_percentage = config_data["expected_loss_retention_percentage"]
+        enable_initial_risk_retention = config_data["enable_initial_risk_retention"]
+        initial_risk_retention_percentage = config_data["initial_risk_retention_percentage"]
         default_minimum_risk = config_data["default_minimum_risk"]
-        martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)  # ADD THIS
+        martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)  
+        pre_drawdown_assumption = config_data.get("pre_drawdown_assumption", False) 
 
         stats.update({
             "martingale_enabled": martingale_enabled,
             "martingale_type": martingale_type,
-            "martingale_assumption": martingale_assumption,  # ADD THIS
+            "martingale_assumption": martingale_assumption,
             "martingale_loss_recovery_adder_percentage": recovery_adder_percentage,
             "martingale_for_position_order_scale": martingale_for_position_order_scale,
             "martingale_pre_scaling": martingale_pre_scaling,
-            "martingale_pre_scale_highest_risk_adder": martingale_pre_scale_highest_risk_adder,
-            "highest_risk_retention_percentage": highest_risk_retention_percentage,
-            "martingale_pre_scale_expected_loss_adder": martingale_pre_scale_expected_loss_adder,
-            "expected_loss_retention_percentage": expected_loss_retention_percentage,
+            "enable_initial_risk_retention": enable_initial_risk_retention,
+            "initial_risk_retention_percentage": initial_risk_retention_percentage,
             "default_minimum_risk": default_minimum_risk,
-            "martingale_linear_scaling": martingale_linear_scaling  # ADD THIS
+            "martingale_linear_scaling": martingale_linear_scaling,
+            "pre_drawdown_assumption": pre_drawdown_assumption  # NEW
         })
 
         if not martingale_enabled:
@@ -13409,7 +14461,8 @@ def martingale_system(inv_id=None):
 
         print(f"  ✓ Martingale ENABLED")
         print(f"  │ Type: {martingale_type.upper()}")
-        print(f"  │ Assumption: {martingale_assumption.upper()}")  # ADD THIS
+        print(f"  │ Assumption: {martingale_assumption.upper()}")
+        print(f"  │ Pre-drawdown: {'ON' if pre_drawdown_assumption else 'OFF'}")  # NEW
         if martingale_assumption == "takeprofit_factor":
             print(f"  │   └─ Using TP profit with drawdown deduction")
         else:
@@ -13434,10 +14487,58 @@ def martingale_system(inv_id=None):
         stats["current_balance"] = current_balance
         print(f"  │ Current balance: ${current_balance:.2f}")
 
+        def get_open_positions_total_risk():
+            """
+            Calculate total risk of all open positions.
+            Returns: (total_risk, list_of_position_risks)
+            """
+            positions = mt5.positions_get()
+            if positions is None or len(positions) == 0:
+                return 0, []
+            
+            total_risk = 0
+            position_risks = []
+            
+            for pos in positions:
+                symbol = pos.symbol
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
+                
+                # Skip if no stop loss
+                if pos.sl is None or pos.sl == 0:
+                    continue
+                
+                # Calculate risk based on position type
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    price_diff = pos.price_open - pos.sl
+                else:  # SELL
+                    price_diff = pos.sl - pos.price_open
+                
+                if price_diff <= 0:
+                    continue
+                
+                contract_size = symbol_info.trade_contract_size
+                risk = price_diff * pos.volume * contract_size
+                total_risk += risk
+                
+                position_risks.append({
+                    'ticket': pos.ticket,
+                    'symbol': symbol,
+                    'volume': pos.volume,
+                    'entry': pos.price_open,
+                    'sl': pos.sl,
+                    'type': 'BUY' if pos.type == 0 else 'SELL',
+                    'risk': risk
+                })
+            
+            return total_risk, position_risks
+
         # ========== SECTION 3: GET EXECUTION START BALANCE & DRAWDOWN ==========
         def get_starting_balance_and_drawdown():
             """
             Unified: Both modes read from activities.json for consistency
+            Now with pre-drawdown assumption support
             """
             activities_path = inv_root / "activities.json"
             starting_balance = current_balance
@@ -13476,6 +14577,31 @@ def martingale_system(inv_id=None):
             print(f"  │ Current balance: ${current_balance:.2f}")
             print(f"  │ Drawdown: ${drawdown:.2f}")
             
+            # ========== NEW: Pre-drawdown assumption ==========
+            if pre_drawdown_assumption:
+                print(f"\n  🔄 PRE-DRAWDOWN ASSUMPTION ENABLED:")
+                print(f"  │ Calculating risk from open positions...")
+                
+                positions_risk, positions_details = get_open_positions_total_risk()
+                
+                if positions_risk > 0:
+                    print(f"  │ Found {len(positions_details)} open position(s) with stop losses:")
+                    for pos in positions_details:
+                        print(f"  │   ├─ {pos['symbol']} {pos['type']}: ${pos['risk']:.2f} risk")
+                    print(f"  │ Total open positions risk: ${positions_risk:.2f}")
+                    
+                    # Add positions risk to drawdown
+                    original_drawdown = drawdown
+                    drawdown = drawdown + positions_risk
+                    print(f"  │ Pre-drawdown = existing drawdown + positions risk")
+                    print(f"  │ ${original_drawdown:.2f} + ${positions_risk:.2f} = ${drawdown:.2f}")
+                else:
+                    print(f"  │ No open positions with stop losses found")
+                    print(f"  │ Pre-drawdown = existing drawdown (${drawdown:.2f})")
+            else:
+                print(f"  │ Pre-drawdown assumption DISABLED")
+                print(f"  │ Using existing drawdown: ${drawdown:.2f}")
+            
             return starting_balance, drawdown
 
         # Execute based on martingale type
@@ -13508,9 +14634,9 @@ def martingale_system(inv_id=None):
                 print(f"  │ Drawdown detected: ${total_drawdown:.2f} ({(total_drawdown/execution_start_balance*100):.2f}% from start)")
 
         else:
-            # Original loss_streak behavior - FULL original code
+            # Original loss_streak behavior with pre-drawdown support
             def get_execution_start_balance_and_stats():
-                """Original loss_streak function - unchanged"""
+                """Original loss_streak function with pre-drawdown support"""
                 activities_path = inv_root / "activities.json"
                 starting_balance = current_balance
                 total_profits = 0.0
@@ -13556,6 +14682,61 @@ def martingale_system(inv_id=None):
                 
                 return starting_balance, total_profits, total_losses, net_deposits, later_balance, winrate, lossrate, total_wins_value, total_losses_value, winning_trades_count, losing_trades_count
 
+            execution_start_balance, total_profits_since_start, total_losses_since_start, net_deposits, later_balance, winrate, lossrate, total_wins_value, total_losses_value, winning_trades_count, losing_trades_count = get_execution_start_balance_and_stats()
+            
+            stats["execution_start_balance"] = execution_start_balance
+            stats["later_balance"] = later_balance
+            stats["total_profits_since_start"] = total_profits_since_start
+            stats["total_losses_since_start"] = total_losses_since_start
+            stats["winrate_percentage"] = winrate
+            stats["lossrate_percentage"] = lossrate
+            stats["total_wins_value"] = total_wins_value
+            stats["total_losses_value"] = total_losses_value
+            stats["total_trades_count"] = winning_trades_count + losing_trades_count
+            stats["winning_trades_count"] = winning_trades_count
+            stats["losing_trades_count"] = losing_trades_count
+            
+            total_drawdown = later_balance - current_balance
+            total_drawdown = max(0, total_drawdown)
+            
+            # ========== NEW: Pre-drawdown assumption ==========
+            if pre_drawdown_assumption:
+                print(f"\n  🔄 PRE-DRAWDOWN ASSUMPTION ENABLED:")
+                print(f"  │ Calculating risk from open positions...")
+                
+                positions_risk, positions_details = get_open_positions_total_risk()
+                
+                if positions_risk > 0:
+                    print(f"  │ Found {len(positions_details)} open position(s) with stop losses:")
+                    for pos in positions_details:
+                        print(f"  │   ├─ {pos['symbol']} {pos['type']}: ${pos['risk']:.2f} risk")
+                    print(f"  │ Total open positions risk: ${positions_risk:.2f}")
+                    
+                    # Add positions risk to drawdown
+                    original_drawdown = total_drawdown
+                    total_drawdown = total_drawdown + positions_risk
+                    print(f"  │ Pre-drawdown = existing drawdown + positions risk")
+                    print(f"  │ ${original_drawdown:.2f} + ${positions_risk:.2f} = ${total_drawdown:.2f}")
+                else:
+                    print(f"  │ No open positions with stop losses found")
+                    print(f"  │ Pre-drawdown = existing drawdown (${total_drawdown:.2f})")
+            else:
+                print(f"  │ Pre-drawdown assumption DISABLED")
+                print(f"  │ Using existing drawdown: ${total_drawdown:.2f}")
+            
+            stats["total_drawdown"] = total_drawdown
+            
+            print(f"\n  📉 Drawdown Analysis (Later-Balance Method):")
+            print(f"  │ Execution start balance: ${execution_start_balance:.2f}")
+            print(f"  │ Later-balance (start + profits): ${later_balance:.2f}")
+            print(f"  │ Current balance: ${current_balance:.2f}")
+            print(f"  │ Total drawdown: ${total_drawdown:.2f}")
+            
+            if total_drawdown == 0:
+                print(f"  │ ✓ No drawdown - account is at or above later-balance")
+            else:
+                print(f"  │ Drawdown detected: ${total_drawdown:.2f} ({(total_drawdown/later_balance*100):.2f}% from later-balance)")
+                
             execution_start_balance, total_profits_since_start, total_losses_since_start, net_deposits, later_balance, winrate, lossrate, total_wins_value, total_losses_value, winning_trades_count, losing_trades_count = get_execution_start_balance_and_stats()
             
             stats["execution_start_balance"] = execution_start_balance
@@ -14529,12 +15710,12 @@ def martingale_system(inv_id=None):
             else:
                 print(f"  │   └─ Using SL risk (standard behavior)")
             print(f"  │ Linear scaling: {'✓ ENABLED' if martingale_linear_scaling else '✗ DISABLED'}")
-            print(f"  │ Highest risk adder: {'✓ ENABLED' if martingale_pre_scale_highest_risk_adder else '✗ DISABLED'}")
-            print(f"  │   - retention: {highest_risk_retention_percentage}%")
-            print(f"  │ Expected loss adder: {'✓ ENABLED' if martingale_pre_scale_expected_loss_adder else '✗ DISABLED'}")
-            print(f"  │   - retention: {expected_loss_retention_percentage}%")
+            print(f"  │ Initial risk adder: {'✓ ENABLED' if enable_initial_risk_retention else '✗ DISABLED'}")
+            print(f"  │   - retention: {initial_risk_retention_percentage}%")
+            print(f"  │ Pre-drawdown assumption: {'✓ ENABLED' if pre_drawdown_assumption else '✗ DISABLED'}")
             print(f"  │ Stage max risk: ${stage_max_risk:.2f}")
             print(f"  │ Recovery adder: {recovery_adder_percentage}%")
+            print(f"  │ Total drawdown: ${total_drawdown:.2f}")
             print(f"{'─'*60}")
 
             # ========== DEFINE HELPER FUNCTIONS ==========
@@ -14618,9 +15799,10 @@ def martingale_system(inv_id=None):
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
 
-            def analyze_highest_risk_from_limit_orders(limit_orders_data):
+            def analyze_initial_risk_from_risk_config(limit_orders_data):
                 """
-                Analyze highest risk from limit orders.
+                Analyzes initial risk from account_balance_default_risk_management dictionary.
+                Uses the default risk value for the current balance as the initial risk.
                 Retention logic: 
                 - 100% retention = keep 100%, remove 0%
                 - 90% retention = keep 90%, remove 10%
@@ -14631,6 +15813,30 @@ def martingale_system(inv_id=None):
                 if not limit_orders_data or not isinstance(limit_orders_data, list):
                     return highest_risk_orders
                 
+                # ========== GET DEFAULT RISK FROM CONFIG BASED ON CURRENT BALANCE ==========
+                default_risk_map = config.get("account_balance_default_risk_management", {})
+                default_risk_value = 0
+                
+                if default_risk_map:
+                    for range_str, risk_value in default_risk_map.items():
+                        try:
+                            raw_range = range_str.split("_")[0]
+                            low_str, high_str = raw_range.split("-")
+                            low = float(low_str)
+                            high = float(high_str)
+                            
+                            if low <= current_balance <= high:
+                                default_risk_value = float(risk_value)
+                                print(f"  │ Default risk from config for balance ${current_balance:.2f}: ${default_risk_value:.2f}")
+                                break
+                        except Exception:
+                            continue
+                
+                if default_risk_value == 0:
+                    print(f"  │ ⚠️ No default risk found for balance ${current_balance:.2f}, using 0")
+                    return highest_risk_orders
+                
+                # ========== GROUP ORDERS BY SYMBOL ==========
                 symbol_orders = {}
                 for order in limit_orders_data:
                     if isinstance(order, dict):
@@ -14640,54 +15846,72 @@ def martingale_system(inv_id=None):
                                 symbol_orders[symbol] = []
                             symbol_orders[symbol].append(order)
                 
+                # ========== APPLY DEFAULT RISK TO EACH SYMBOL ==========
                 for symbol, orders_list in symbol_orders.items():
-                    highest_risk = 0
-                    highest_risk_order_info = None
+                    # Get first order to determine entry, stop, and order type
+                    sample_order = orders_list[0] if orders_list else None
+                    if not sample_order:
+                        continue
                     
-                    for order in orders_list:
-                        entry = order.get('entry')
-                        stop = order.get('exit') or order.get('stop_loss')
-                        volume_key, volume = get_volume_field_from_order(order)
-                        order_type = order.get('order_type', 'Unknown')
-                        
-                        if entry and stop and volume and volume > 0:
-                            symbol_info = mt5.symbol_info(symbol)
-                            if symbol_info:
-                                contract_size = symbol_info.trade_contract_size
-                                price_diff = abs(entry - stop)
-                                risk = price_diff * volume * contract_size
+                    entry = sample_order.get('entry')
+                    stop = sample_order.get('exit') or sample_order.get('stop_loss')
+                    order_type = sample_order.get('order_type', 'Unknown')
+                    volume_key, volume = get_volume_field_from_order(sample_order)
+                    
+                    if entry and stop and volume and volume > 0:
+                        symbol_info = mt5.symbol_info(symbol)
+                        if symbol_info:
+                            contract_size = symbol_info.trade_contract_size
+                            price_diff = abs(entry - stop)
+                            risk_per_lot = price_diff * contract_size
+                            
+                            # Calculate volume needed to achieve default risk
+                            required_volume = default_risk_value / risk_per_lot if risk_per_lot > 0 else 0.01
+                            required_volume = round(required_volume, 2)
+                            
+                            # Apply volume constraints
+                            min_volume = symbol_info.volume_min if symbol_info else 0.01
+                            volume_step = symbol_info.volume_step if symbol_info else 0.01
+                            steps = round(required_volume / volume_step) if volume_step > 0 else 0
+                            required_volume = max(min_volume, round(steps * volume_step, 2))
+                            
+                            # Calculate actual risk at required volume
+                            actual_risk = risk_per_lot * required_volume
+                            
+                            highest_risk_order_info = {
+                                'order_type': order_type,
+                                'entry': entry,
+                                'stop': stop,
+                                '_volume': required_volume,
+                                'risk': actual_risk,
+                                'original_risk': default_risk_value,
+                                'source': 'default_risk_config',
+                                'default_risk_from_config': default_risk_value
+                            }
+                            
+                            # CORRECT RETENTION LOGIC:
+                            # retention_percentage = how much to KEEP
+                            # 100% = keep all, remove 0%
+                            # 90% = keep 90%, remove 10%
+                            # 0% = keep 0%, remove 100%
+                            if initial_risk_retention_percentage > 0:
+                                # Calculate how much to KEEP
+                                kept_amount = actual_risk * (initial_risk_retention_percentage / 100)
+                                highest_risk_order_info['risk'] = kept_amount
+                                highest_risk_order_info['kept'] = kept_amount
+                                highest_risk_order_info['retention_percentage'] = initial_risk_retention_percentage
+                                # Calculate how much was REMOVED (for display)
+                                removed_amount = actual_risk - kept_amount
+                                highest_risk_order_info['retention_applied'] = removed_amount
                                 
-                                if risk > highest_risk:
-                                    highest_risk = risk
-                                    highest_risk_order_info = {
-                                        'order_type': order_type,
-                                        'entry': entry,
-                                        'stop': stop,
-                                        '_volume': volume,
-                                        'risk': risk,
-                                        'original_risk': risk,
-                                        'source': 'limit_orders'
-                                    }
-                    
-                    if highest_risk_order_info:
-                        # CORRECT RETENTION LOGIC:
-                        # retention_percentage = how much to KEEP
-                        # 100% = keep all, remove 0%
-                        # 90% = keep 90%, remove 10%
-                        # 0% = keep 0%, remove 100%
-                        if highest_risk_retention_percentage > 0:
-                            # Calculate how much to KEEP
-                            kept_amount = highest_risk * (highest_risk_retention_percentage / 100)
-                            # The risk becomes the kept amount (not highest_risk - kept_amount)
-                            highest_risk = kept_amount
-                            highest_risk_order_info['risk'] = highest_risk
-                            # Calculate how much was REMOVED (for display)
-                            removed_amount = highest_risk_order_info['original_risk'] - kept_amount
-                            highest_risk_order_info['retention_applied'] = removed_amount
-                            highest_risk_order_info['kept'] = kept_amount
-                            highest_risk_order_info['retention_percentage'] = highest_risk_retention_percentage
-                        
-                        highest_risk_orders[symbol] = highest_risk_order_info
+                                print(f"  │ {symbol}: Default risk ${default_risk_value:.2f} → Volume {required_volume:.2f} lots → Risk ${actual_risk:.2f}")
+                                print(f"  │   ├─ Keeping {initial_risk_retention_percentage}%: ${kept_amount:.2f}")
+                                print(f"  │   └─ Removing {100 - initial_risk_retention_percentage}%: ${removed_amount:.2f}")
+                            else:
+                                print(f"  │ {symbol}: Default risk ${default_risk_value:.2f} → Volume {required_volume:.2f} lots → Risk ${actual_risk:.2f}")
+                                print(f"  │   └─ 0% retention: Keeping nothing")
+                            
+                            highest_risk_orders[symbol] = highest_risk_order_info
                 
                 return highest_risk_orders
 
@@ -14725,11 +15949,11 @@ def martingale_system(inv_id=None):
 
             def calculate_order_profit_tp(order, symbol_info):
                 """
-                NEW: Calculate the profit of a single limit order using tp (take profit)
+                Calculate the profit of a single limit order using tp (take profit)
                 Used for takeprofit_factor assumption
                 """
                 entry = order.get('entry')
-                tp = order.get('tp') or order.get('target')  # Check both 'tp' and 'target' fields
+                tp = order.get('tp') or order.get('target')
                 volume_key, volume = get_volume_field_from_order(order)
                 
                 if not entry or not tp or not volume or volume <= 0:
@@ -14812,7 +16036,7 @@ def martingale_system(inv_id=None):
 
             def scale_order_volume_to_target_profit(order, symbol_info, target_profit, order_index=0):
                 """
-                NEW: Scale a single order's volume to match target profit using tp.
+                Scale a single order's volume to match target profit using tp.
                 Used for takeprofit_factor assumption.
                 Returns: (new_volume, actual_profit, scaled, remaining_profit)
                 
@@ -15307,237 +16531,8 @@ def martingale_system(inv_id=None):
                         else:
                             print(f"      └─ Magic: {pos['magic']}")
                         
-                        # ========== CHECK IF THIS TRADE SHOULD BE ANALYZED ==========
-                        should_analyze = False
-                        seq_info = None
-                        cumulative_loss = 0
-                        previous_losses = []
-                        actual_risk = abs(profit)
-                        
-                        if pos['position_id'] in trade_to_sequence:
-                            should_analyze = True
-                            seq_info = trade_to_sequence[pos['position_id']]
-                            seq = seq_info['sequence']
-                            cumulative_loss = sum(abs(t['total_profit']) for t in seq['losses'][:seq_info['position'] + 1])
-                            previous_losses = seq['losses'][:seq_info['position']]
-                            
-                        elif pos['position_id'] in trade_follows_loss:
-                            should_analyze = True
-                            loss_info = trade_follows_loss[pos['position_id']]
-                            prev_loss = loss_info['previous_loss']
-                            
-                            if prev_loss['position_id'] in trade_to_sequence:
-                                seq_info = trade_to_sequence[prev_loss['position_id']]
-                                seq = seq_info['sequence']
-                                cumulative_loss = sum(abs(t['total_profit']) for t in seq['losses'])
-                                previous_losses = seq['losses']
-                            else:
-                                cumulative_loss = abs(prev_loss['total_profit'])
-                                previous_losses = [prev_loss]
-                        
-                        if should_analyze:
-                            if previous_losses:
-                                print(f"\n      📊 SEQUENTIAL LOSS ANALYSIS:")
-                                print(f"      ├─ Previous losses in sequence:")
-                                for p_idx, prev_trade in enumerate(previous_losses):
-                                    print(f"      │   └─ Trade {p_idx+1}: ${prev_trade['total_profit']:.2f}")
-                            else:
-                                print(f"\n      📊 SEQUENTIAL LOSS ANALYSIS:")
-                                print(f"      ├─ Previous losses: None (first loss)")
-                            
-                            # ========== CALCULATE EXPECTED RISK ==========
-                            # Start with cumulative loss
-                            base_risk = cumulative_loss
-                            
-                            # Track applied config values for display
-                            applied_highest_retention = 0
-                            applied_expected_retention = 0
-                            applied_recovery_adder = 0
-                            
-                            # Step 1: Add highest risk adder if enabled
-                            highest_risk_adder = 0
-                            if martingale_pre_scale_highest_risk_adder:
-                                highest_risk_adder = actual_risk
-                                base_risk += highest_risk_adder
-                                print(f"      ├─ Highest risk adder: +${highest_risk_adder:.2f}")
-                            
-                            # Step 2: Apply highest risk retention
-                            # CORRECT LOGIC: retention_percentage = how much to KEEP
-                            # 100% = keep all, 0% = keep nothing
-                            risk_after_highest_retention = base_risk
-                            if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
-                                # Calculate how much to KEEP (not remove)
-                                kept_highest_risk = highest_risk_adder * (highest_risk_retention_percentage / 100)
-                                # Calculate how much to REMOVE
-                                removed_highest_risk = highest_risk_adder - kept_highest_risk
-                                # The risk becomes: base_risk - removed_highest_risk
-                                risk_after_highest_retention = base_risk - removed_highest_risk
-                                applied_highest_retention = removed_highest_risk
-                                print(f"      ├─ Keeping {highest_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
-                                print(f"      ├─ Removing {100 - highest_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
-                                print(f"      ├─ After retention: ${risk_after_highest_retention:.2f}")
-                            else:
-                                risk_after_highest_retention = base_risk
-                                if highest_risk_retention_percentage == 0:
-                                    print(f"      ├─ Keeping 0% of highest risk (removed all)")
-                            
-                            # Step 3: Add expected loss from open position (if exists and enabled)
-                            expected_loss_value = 0
-                            if has_open_position and martingale_pre_scale_expected_loss_adder:
-                                expected_loss_value = open_position_risk
-                                print(f"      ├─ Open position expected loss: +${expected_loss_value:.2f}")
-                                
-                                # Apply expected loss retention
-                                # CORRECT LOGIC: retention_percentage = how much to KEEP
-                                if expected_loss_retention_percentage > 0:
-                                    kept_expected_loss = expected_loss_value * (expected_loss_retention_percentage / 100)
-                                    removed_expected_loss = expected_loss_value - kept_expected_loss
-                                    expected_loss_after_retention = kept_expected_loss  # Keep the kept amount
-                                    applied_expected_retention = removed_expected_loss
-                                    print(f"      │   ├─ Keeping {expected_loss_retention_percentage}% of expected loss: ${kept_expected_loss:.2f}")
-                                    print(f"      │   └─ Removing {100 - expected_loss_retention_percentage}%: -${removed_expected_loss:.2f}")
-                                else:
-                                    expected_loss_after_retention = 0  # Keep nothing
-                                    print(f"      │   └─ Expected loss retention: 0% (keeping nothing)")
-                                
-                                risk_after_expected_retention = risk_after_highest_retention + expected_loss_after_retention
-                                print(f"      ├─ After expected loss retention: ${risk_after_expected_retention:.2f}")
-                            else:
-                                risk_after_expected_retention = risk_after_highest_retention
-                                if has_open_position:
-                                    print(f"      ├─ Expected loss adder DISABLED (open position exists)")
-                            
-                            # Step 4: Apply recovery ADDER (add percentage to the final risk)
-                            if recovery_adder_percentage > 0:
-                                applied_recovery_adder = risk_after_expected_retention * (recovery_adder_percentage / 100)
-                                expected_risk = risk_after_expected_retention + applied_recovery_adder
-                                print(f"      ├─ Recovery adder ({recovery_adder_percentage}%): +${applied_recovery_adder:.2f}")
-                            else:
-                                expected_risk = risk_after_expected_retention
-                            
-                            mismatch = expected_risk - actual_risk
-                            
-                            # Print the calculation breakdown
-                            print(f"      ├─ Cumulative loss: ${cumulative_loss:.2f}")
-                            print(f"      ├─ Base risk: ${base_risk:.2f}")
-                            print(f"      ├─ FINAL EXPECTED RISK: ${expected_risk:.2f}")
-                            print(f"      ├─ Actual risk: ${actual_risk:.2f}")
-                            print(f"      ├─ Mismatch: ${mismatch:+.2f}")
-                            
-                            if expected_risk > 0:
-                                if abs(expected_risk - actual_risk) < 0.01:
-                                    print(f"      ✅ MATCH: Expected ${expected_risk:.2f} = Actual ${actual_risk:.2f}")
-                                else:
-                                    ratio = actual_risk / expected_risk if expected_risk > 0 else 0
-                                    print(f"      ⚠️ MISMATCH: Expected ${expected_risk:.2f} vs Actual ${actual_risk:.2f} (Ratio: {ratio:.2f}x)")
-                                    if ratio < 1:
-                                        print(f"      │   └─ Under-risked by ${mismatch:.2f} ({(1-ratio)*100:.1f}% below expected)")
-                                    else:
-                                        print(f"      │   └─ Over-risked by ${abs(mismatch):.2f} ({(ratio-1)*100:.1f}% above expected)")
-                            
-                            # ========== STAGE DRAWDOWN CLARIFICATION ==========
-                            print(f"\n      📌 STAGE DRAWDOWN CLARIFICATION:")
-                            
-                            if expected_risk <= stage_max_risk:
-                                print(f"      │   ├─ Expected risk ${expected_risk:.2f} is WITHIN Stage 1 drawdown (${stage_max_risk:.2f})")
-                                print(f"      │   └─ ✓ Falls in Stage 1 - Risks as expected")
-                            else:
-                                stage_number = int(expected_risk // stage_max_risk) + 1
-                                remaining_in_stage = expected_risk % stage_max_risk
-                                if remaining_in_stage == 0:
-                                    stage_number = int(expected_risk // stage_max_risk)
-                                    remaining_in_stage = stage_max_risk
-                                print(f"      │   ├─ Expected risk ${expected_risk:.2f} EXCEEDS Stage 1 drawdown (${stage_max_risk:.2f})")
-                                print(f"      │   ├─ Falls into Stage {stage_number} drawdown")
-                                print(f"      │   └─ Stage {stage_number} remaining: ${remaining_in_stage:.2f}")
-                            
-                            last_expected_risk = expected_risk
-                            last_actual_risk = actual_risk
-                            last_trade_symbol = pos['symbol']
-                            
-                            # ========== CHECK NEXT TRADE ==========
-                            if i < len(closed_positions):
-                                next_trade = closed_positions[i]
-                                next_cumulative = cumulative_loss + abs(next_trade['total_profit']) if next_trade['total_profit'] < 0 else cumulative_loss
-                                next_base = next_cumulative
-                                
-                                if martingale_pre_scale_highest_risk_adder:
-                                    next_highest_adder = abs(next_trade['total_profit'])
-                                    next_base += next_highest_adder
-                                
-                                # Apply retentions and adder to next trade
-                                # CORRECT LOGIC: retention = how much to KEEP
-                                next_risk_after_highest = next_base
-                                if martingale_pre_scale_highest_risk_adder and highest_risk_retention_percentage > 0:
-                                    kept_highest = next_highest_adder * (highest_risk_retention_percentage / 100)
-                                    removed_highest = next_highest_adder - kept_highest
-                                    next_risk_after_highest = next_base - removed_highest
-                                
-                                # Add expected loss retention if enabled
-                                if has_open_position and martingale_pre_scale_expected_loss_adder:
-                                    if expected_loss_retention_percentage > 0:
-                                        kept_expected = expected_loss_value * (expected_loss_retention_percentage / 100)
-                                        removed_expected = expected_loss_value - kept_expected
-                                        next_risk_after_expected = next_risk_after_highest + kept_expected
-                                    else:
-                                        next_risk_after_expected = next_risk_after_highest
-                                else:
-                                    next_risk_after_expected = next_risk_after_highest
-                                
-                                if recovery_adder_percentage > 0:
-                                    next_expected = next_risk_after_expected * (1 + recovery_adder_percentage / 100)
-                                else:
-                                    next_expected = next_risk_after_expected
-                                
-                                next_actual = abs(next_trade['total_profit'])
-                                next_is_profit = next_trade['total_profit'] > 0
-                                
-                                print(f"\n      🎯 NEXT TRADE (Trade #{i+1}) SHOULD RISK: ${next_expected:.2f}")
-                                if next_is_profit:
-                                    print(f"      │   └─ Next trade is a PROFIT trade")
-                                else:
-                                    print(f"      │   └─ Next trade is a LOSS trade")
-                                
-                                if next_expected <= stage_max_risk:
-                                    print(f"      │   └─ Falls in Stage 1 - Risks as expected")
-                                else:
-                                    next_stage = int(next_expected // stage_max_risk) + 1
-                                    print(f"      │   └─ Falls in Stage {next_stage}")
-                                
-                                if abs(next_expected - next_actual) < 0.01:
-                                    print(f"      ✅ NEXT TRADE MATCHES: ${next_expected:.2f}")
-                                else:
-                                    print(f"      ⚠️ NEXT TRADE MISMATCH: Expected ${next_expected:.2f} vs Actual ${next_actual:.2f}")
-                                    if next_actual < next_expected:
-                                        print(f"      │   └─ Next trade is under-risked by ${next_expected - next_actual:.2f}")
-                                    else:
-                                        print(f"      │   └─ Next trade is over-risked by ${next_actual - next_expected:.2f}")
-                            else:
-                                # ========== THIS IS THE LAST TRADE ==========
-                                print(f"\n      🎯 NEXT TRADE RISK SHOULD BE: ${expected_risk:.2f}")
-                                print(f"      │   └─ This becomes the BASE TARGET RISK for limit order scaling")
-                                
-                                if expected_risk <= stage_max_risk:
-                                    print(f"      │   └─ Falls in Stage 1 - Risks as expected")
-                                    print(f"      │   └─ ✓ Within current stage drawdown (${stage_max_risk:.2f})")
-                                else:
-                                    stage_number = int(expected_risk // stage_max_risk) + 1
-                                    remaining = expected_risk % stage_max_risk
-                                    if remaining == 0:
-                                        stage_number = int(expected_risk // stage_max_risk)
-                                        remaining = stage_max_risk
-                                    print(f"      │   └─ Falls in Stage {stage_number}")
-                                    print(f"      │   └─ Stage {stage_number} remaining: ${remaining:.2f}")
-                                
-                                print(f"      │   └─ Actual risk for this trade: ${actual_risk:.2f}")
-                                if abs(expected_risk - actual_risk) < 0.01:
-                                    print(f"      ✅ MATCH: Expected ${expected_risk:.2f} = Actual ${actual_risk:.2f}")
-                                else:
-                                    print(f"      ⚠️ MISMATCH: Expected ${expected_risk:.2f} vs Actual ${actual_risk:.2f}")
-                                
-                                last_expected_risk = expected_risk
-                                last_actual_risk = actual_risk
-                                last_trade_symbol = pos['symbol']
+                        # Note: The sequential loss analysis with expected loss has been removed
+                        # since pre-drawdown assumption now handles open positions at the drawdown level
                         
                         print()
                     
@@ -15550,30 +16545,15 @@ def martingale_system(inv_id=None):
                     print(f"  │ Total profit: ${total_profit:.2f}")
                     print(f"  │ Total pips: {total_pips:.1f}")
                     
-                    print(f"\n  │ 🔑 LAST TRADE'S EXPECTED RISK (BASE TARGET): ${last_expected_risk:.2f}")
-                    print(f"  │   └─ Symbol: {last_trade_symbol}")
-                    print(f"  │   └─ Actual risk: ${last_actual_risk:.2f}")
-                    print(f"  │   └─ Mismatch: ${last_expected_risk - last_actual_risk:+.2f}")
-                    
-                    if last_expected_risk <= stage_max_risk:
-                        print(f"  │   └─ ✓ Falls in Stage 1 - Within current stage drawdown (${stage_max_risk:.2f})")
-                    else:
-                        stage_number = int(last_expected_risk // stage_max_risk) + 1
-                        remaining = last_expected_risk % stage_max_risk
-                        if remaining == 0:
-                            stage_number = int(last_expected_risk // stage_max_risk)
-                            remaining = stage_max_risk
-                        print(f"  │   └─ Falls in Stage {stage_number}")
-                        print(f"  │   └─ Stage {stage_number} remaining: ${remaining:.2f}")
-                    
                     print(f"{'─'*70}")
                     
-                    return closed_positions, sequential_losses_by_symbol, last_expected_risk, {
-                        'last_expected_risk': last_expected_risk,
-                        'last_actual_risk': last_actual_risk,
-                        'last_symbol': last_trade_symbol,
-                        'stage_max_risk': stage_max_risk,
-                        'stage_number': int(last_expected_risk // stage_max_risk) + 1 if last_expected_risk > 0 else 1
+                    # For loss_streak mode, we use the drawdown as the base target
+                    # The drawdown already includes pre-drawdown if enabled
+                    return closed_positions, sequential_losses_by_symbol, 0, {
+                        'total_trades': total_trades,
+                        'winning_count': winning_count,
+                        'losing_count': losing_count,
+                        'total_profit': total_profit
                     }
                     
                 except Exception as e:
@@ -15581,57 +16561,13 @@ def martingale_system(inv_id=None):
                     import traceback
                     traceback.print_exc()
                     return [], {}, 0, {}
-    
-            def get_open_position_risk():
-                """
-                Get current open positions and calculate their risk.
-                Returns: (symbol, risk_amount, position_info)
-                """
-                positions = mt5.positions_get()
-                if positions is None or len(positions) == 0:
-                    return None, 0, None
-                
-                for pos in positions:
-                    symbol = pos.symbol
-                    symbol_info = mt5.symbol_info(symbol)
-                    if not symbol_info:
-                        continue
-                    
-                    if pos.sl is None or pos.sl == 0:
-                        continue
-                    
-                    if pos.type == mt5.POSITION_TYPE_BUY:
-                        price_diff = pos.price_open - pos.sl
-                    else:
-                        price_diff = pos.sl - pos.price_open
-                    
-                    if price_diff <= 0:
-                        continue
-                    
-                    contract_size = symbol_info.trade_contract_size
-                    risk = price_diff * pos.volume * contract_size
-                    
-                    return symbol, risk, {
-                        'ticket': pos.ticket,
-                        'symbol': symbol,
-                        'volume': pos.volume,
-                        'entry': pos.price_open,
-                        'sl': pos.sl,
-                        'type': 'BUY' if pos.type == 0 else 'SELL',
-                        'risk': risk
-                    }
-                
-                return None, 0, None
 
             # ========== MAIN EXECUTION ==========
             
-            # STEP 1: Check for open positions
-            open_position_symbol, open_position_risk, open_position_info = get_open_position_risk()
-            has_open_position = open_position_symbol is not None and open_position_risk > 0
-            
-            # STEP 2: Get BASE TARGET RISK based on martingale type
+            # STEP 1: Get BASE TARGET RISK based on martingale type
+            # Note: total_drawdown already includes pre-drawdown assumption if enabled
             if martingale_type == "balance_based":
-                # For balance_based: base target is the drawdown amount
+                # For balance_based: base target is the drawdown amount (which may include pre-drawdown)
                 base_target_risk = total_drawdown
                 
                 # CRITICAL FIX: If no drawdown, use default risk from config
@@ -15649,13 +16585,17 @@ def martingale_system(inv_id=None):
                 print(f"  │ Drawdown amount: ${total_drawdown:.2f}")
                 print(f"  │ Base target risk: ${base_target_risk:.2f}")
             else:
-                # For loss_streak: analyze closed trades
+                # For loss_streak: analyze closed trades for display only
                 print(f"\n  📊 Analyzing closed trades for sequential losses...")
-                closed_positions, sequential_losses_by_symbol, base_target_risk, stage_info = fetch_and_analyze_trades_with_sequential_loss()
+                closed_positions, sequential_losses_by_symbol, _, stage_info = fetch_and_analyze_trades_with_sequential_loss()
                 
-                # FIX: If no target risk from loss streak, use default risk from config
+                # For loss_streak, we use the drawdown as the base target
+                # The drawdown already includes pre-drawdown if enabled
+                base_target_risk = total_drawdown
+                
+                # FIX: If no drawdown, use default risk from config
                 if base_target_risk == 0:
-                    print(f"\n  📊 No sequential loss detected - using default risk from config")
+                    print(f"\n  📊 No drawdown detected - using default risk from config")
                     default_risk = get_default_risk_from_config()
                     if default_risk is None:
                         print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
@@ -15663,8 +16603,12 @@ def martingale_system(inv_id=None):
                         return False
                     print(f"  │ Default risk from config: ${default_risk:.2f}")
                     base_target_risk = default_risk
+                
+                print(f"\n  📊 LOSS_STREAK BASE TARGET:")
+                print(f"  │ Total drawdown: ${total_drawdown:.2f}")
+                print(f"  │ Base target risk: ${base_target_risk:.2f}")
             
-            # STEP 3: Load limit orders and calculate highest risk
+            # STEP 2: Load limit orders
             limit_orders_path, limit_orders_data = load_limit_orders()
             
             if not limit_orders_data or not isinstance(limit_orders_data, list):
@@ -15674,10 +16618,8 @@ def martingale_system(inv_id=None):
             # ========== CALCULATE FINAL TARGET RISK ==========
             final_target_risk = base_target_risk
             applied_highest_retention = 0
-            applied_expected_retention = 0
             applied_recovery_adder = 0
             highest_risk_value = 0
-            expected_loss_value = 0
             
             print(f"\n{'='*60}")
             print(f"  📊 CALCULATING FINAL TARGET RISK")
@@ -15685,45 +16627,18 @@ def martingale_system(inv_id=None):
             print(f"  │ Assumption: {martingale_assumption.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
             print(f"  │ Retention Logic: percentage = how much to KEEP (100% = keep all, 0% = keep nothing)")
+            print(f"  │ Pre-drawdown already included in base target: {total_drawdown:.2f}")
 
             # Start with base target
             final_target_risk = base_target_risk
             applied_highest_retention = 0
-            applied_expected_retention = 0
             applied_recovery_adder = 0
             highest_risk_value = 0
-            expected_loss_value = 0
 
-            # STEP 3a: Add Expected Loss from Open Position (if exists)
-            if has_open_position and martingale_pre_scale_expected_loss_adder:
-                expected_loss_value = open_position_risk
-                print(f"\n  │ Open position expected loss: ${expected_loss_value:.2f}")
-                
-                # Apply expected loss retention
-                # CORRECT: retention_percentage = how much to KEEP
-                if expected_loss_retention_percentage > 0:
-                    kept_expected_loss = expected_loss_value * (expected_loss_retention_percentage / 100)
-                    removed_expected_loss = expected_loss_value - kept_expected_loss
-                    expected_loss_after_retention = kept_expected_loss  # Keep the kept amount
-                    applied_expected_retention = removed_expected_loss
-                    print(f"  │   ├─ Keeping {expected_loss_retention_percentage}% of expected loss: ${kept_expected_loss:.2f}")
-                    print(f"  │   └─ Removing {100 - expected_loss_retention_percentage}%: -${removed_expected_loss:.2f}")
-                else:
-                    expected_loss_after_retention = 0  # Keep nothing
-                    print(f"  │   └─ Expected loss retention: 0% (keeping nothing)")
-                
-                final_target_risk += expected_loss_after_retention
-                print(f"  │   └─ Added to target: +${expected_loss_after_retention:.2f}")
-            else:
-                if has_open_position:
-                    print(f"\n  │ Open position exists but expected loss adder is DISABLED")
-                else:
-                    print(f"\n  │ No open position found - skipping expected loss adder")
-
-            # STEP 3b: Add Highest Risk from Limit Orders (if enabled)
-            if martingale_pre_scale_highest_risk_adder:
+            # STEP 3: Add Highest Risk from Limit Orders (if enabled)
+            if enable_initial_risk_retention:
                 # Analyze highest risk from limit orders
-                limit_highest_risk_orders = analyze_highest_risk_from_limit_orders(limit_orders_data)
+                limit_highest_risk_orders = analyze_initial_risk_from_risk_config(limit_orders_data)
                 
                 # Get highest risk for each symbol
                 total_highest_risk = 0
@@ -15734,13 +16649,13 @@ def martingale_system(inv_id=None):
                     
                     # Apply highest risk retention
                     # CORRECT: retention_percentage = how much to KEEP
-                    if highest_risk_retention_percentage > 0:
-                        kept_highest_risk = highest_risk * (highest_risk_retention_percentage / 100)
+                    if initial_risk_retention_percentage > 0:
+                        kept_highest_risk = highest_risk * (initial_risk_retention_percentage / 100)
                         removed_highest_risk = highest_risk - kept_highest_risk
                         highest_risk_after_retention = kept_highest_risk  # Keep the kept amount
                         applied_highest_retention += removed_highest_risk
-                        print(f"  │   ├─ Keeping {highest_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
-                        print(f"  │   └─ Removing {100 - highest_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
+                        print(f"  │   ├─ Keeping {initial_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
+                        print(f"  │   └─ Removing {100 - initial_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
                     else:
                         highest_risk_after_retention = 0  # Keep nothing
                         print(f"  │   └─ Highest risk retention: 0% (keeping nothing)")
@@ -15751,7 +16666,7 @@ def martingale_system(inv_id=None):
                 
                 highest_risk_value = total_highest_risk
 
-            # STEP 3c: Apply Recovery Adder to final target
+            # STEP 4: Apply Recovery Adder to final target
             if recovery_adder_percentage > 0:
                 applied_recovery_adder = final_target_risk * (recovery_adder_percentage / 100)
                 final_target_risk_before_adder = final_target_risk
@@ -15762,10 +16677,8 @@ def martingale_system(inv_id=None):
 
             print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
             print(f"{'='*60}")
-            print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
-            print(f"{'='*60}")
             
-            # ========== STEP 4: APPLY SMART SCALING TO LIMIT ORDERS ==========
+            # ========== STEP 5: APPLY SMART SCALING TO LIMIT ORDERS ==========
             print(f"\n{'='*60}")
             print(f"  🎯 APPLYING SMART SCALING TO LIMIT ORDERS")
             print(f"{'='*60}")
@@ -15788,7 +16701,7 @@ def martingale_system(inv_id=None):
             print(f"{'─'*60}")
             
             try:
-                # ========== STEP 5: REMOVE INVALID PRICE LEVELS ==========
+                # ========== STEP 6: REMOVE INVALID PRICE LEVELS ==========
                 print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
                 print(f"{'─'*60}")
                 
@@ -15815,7 +16728,7 @@ def martingale_system(inv_id=None):
                 for symbol, vol in current_limit_volumes.items():
                     print(f"     {symbol}: {vol:.2f} lots")
                 
-                # ========== STEP 6: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
+                # ========== STEP 7: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
                 print(f"\n  📈 STEP: Scaling Limit Orders")
                 print(f"{'─'*60}")
                 
@@ -16085,7 +16998,7 @@ def martingale_system(inv_id=None):
                 else:
                     print(f"\n  ℹ️ No scaling needed - all orders already at target")
                 
-                # ========== STEP 7: LINEAR SCALING ==========
+                # ========== STEP 8: LINEAR SCALING ==========
                 print(f"\n{'─'*60}")
                 print(f"  📈 STEP: Linear Scaling (Progressive)")
                 print(f"{'─'*60}")
@@ -16101,175 +17014,6 @@ def martingale_system(inv_id=None):
                 
                 order_updates = {}
                 pre_scaling_details = {}
-                
-                def group_orders_by_linear(orders_data):
-                    stepup_linear = []
-                    stepdown_linear = []
-                    
-                    if not orders_data or not isinstance(orders_data, list):
-                        return stepup_linear, stepdown_linear
-                    
-                    for idx, order in enumerate(orders_data):
-                        if not isinstance(order, dict):
-                            continue
-                        
-                        order_type = order.get('order_type', '').lower()
-                        entry = order.get('entry')
-                        
-                        if not entry:
-                            continue
-                        
-                        order_info = {'order': order, 'index': idx}
-                        
-                        if 'sell_limit' in order_type or 'buy_stop' in order_type:
-                            stepup_linear.append(order_info)
-                        elif 'buy_limit' in order_type or 'sell_stop' in order_type:
-                            stepdown_linear.append(order_info)
-                    
-                    stepup_linear.sort(key=lambda x: x['order'].get('entry', 0))
-                    stepdown_linear.sort(key=lambda x: x['order'].get('entry', 0), reverse=True)
-                    
-                    return stepup_linear, stepdown_linear
-                
-                def apply_linear_step_scaling(orders_linear, linear_name, symbol_info, 
-                                            total_extra_risk, calculation_details):
-                    """
-                    Apply linear scaling to a group of orders.
-                    Uses the appropriate calculation based on martingale_assumption.
-                    
-                    IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
-                    """
-                    linear_updates = {}
-                    
-                    if not orders_linear:
-                        return linear_updates
-                    
-                    print(f"\n     📊 {linear_name.upper()} LINEAR SCALING:")
-                    print(f"        Orders in linear: {len(orders_linear)}")
-                    
-                    if martingale_assumption == "takeprofit_factor":
-                        print(f"        LEADER amount (remaining profit after recovery): ${total_extra_risk:.2f}")
-                        print(f"        Each order recovers ${total_extra_risk:.2f} from drawdown")
-                        print(f"        IMPORTANT: NEVER scaling DOWN, only UP or keep same")
-                    else:
-                        print(f"        LEADER amount (first order risk): ${total_extra_risk:.2f}")
-                    
-                    calculated_volumes = []
-                    calculated_amounts = []  # risk or profit depending on assumption
-                    
-                    for idx, order_info in enumerate(orders_linear):
-                        order = order_info['order']
-                        order_index = order_info['index']
-                        symbol = order.get('symbol')
-                        entry = order.get('entry')
-                        order_type = order.get('order_type', '')
-                        direction = get_direction_from_order(order)
-                        
-                        if martingale_assumption == "takeprofit_factor":
-                            # Use TP for profit calculation
-                            tp = order.get('tp') or order.get('target')
-                            if not entry or not tp:
-                                continue
-                            
-                            price_diff = abs(entry - tp)
-                            amount_per_lot = price_diff * symbol_info.trade_contract_size
-                            amount_type = "profit"
-                        else:
-                            # Use stoploss for risk calculation (standard)
-                            stop = order.get('exit') or order.get('stop_loss')
-                            if not entry or not stop:
-                                continue
-                            
-                            is_buy = 'buy' in order_type.lower()
-                            if is_buy:
-                                price_diff = entry - stop
-                            else:
-                                price_diff = stop - entry
-                            
-                            if price_diff <= 0:
-                                continue
-                            
-                            amount_per_lot = price_diff * symbol_info.trade_contract_size
-                            amount_type = "risk"
-                        
-                        if idx == 0:
-                            # LEADER order - keep original volume (NEVER scale down LEADER)
-                            leader_volume = get_volume_field_from_order(order)[1] or 0.01
-                            leader_amount = amount_per_lot * leader_volume
-                            
-                            print(f"\n        🔹 [{direction}] Order #1 (LEADER): {symbol} @ {entry:.5f} ({order_type})")
-                            print(f"          ├─ LEADER {amount_type}: ${leader_amount:.2f}")
-                            print(f"          ├─ Volume: {leader_volume:.2f} lots")
-                            
-                            if martingale_assumption == "takeprofit_factor":
-                                remaining = leader_amount - total_extra_risk
-                                print(f"          ├─ Recovers ${total_extra_risk:.2f} from drawdown")
-                                print(f"          └─ Remaining profit after recovery: ${remaining:.2f}")
-                            else:
-                                print(f"          └─ This is the LEADER amount for scaling")
-                            
-                            calculated_volumes.append(leader_volume)
-                            calculated_amounts.append(leader_amount)
-                            
-                        else:
-                            # Subsequent orders - progressive scaling
-                            previous_amount = calculated_amounts[idx - 1]
-                            
-                            current_volume = get_volume_field_from_order(order)[1] or 0.01
-                            current_amount = amount_per_lot * current_volume
-                            
-                            # CRITICAL: NEVER SCALE DOWN
-                            # If current amount already >= previous amount, keep current volume
-                            if current_amount >= previous_amount:
-                                print(f"\n        [{direction}] Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
-                                print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
-                                print(f"          ├─ Target to match (from previous): ${previous_amount:.2f}")
-                                print(f"          ├─ Already meets or exceeds target!")
-                                print(f"          └─ → Keeping current volume (NO DOWNSCALING)")
-                                calculated_volumes.append(current_volume)
-                                calculated_amounts.append(current_amount)
-                                continue
-                            
-                            additional_volume = (previous_amount - current_amount) / amount_per_lot
-                            additional_volume = round(additional_volume, 2)
-                            
-                            new_volume = current_volume + additional_volume
-                            new_volume = round(new_volume, 2)
-                            
-                            min_volume = symbol_info.volume_min
-                            max_volume = symbol_info.volume_max
-                            volume_step = symbol_info.volume_step
-                            
-                            steps = round(new_volume / volume_step) if volume_step > 0 else 0
-                            new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
-                            
-                            new_amount = amount_per_lot * new_volume
-                            
-                            print(f"\n        [{direction}] Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
-                            print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
-                            print(f"          ├─ Target to match (from previous): ${previous_amount:.2f}")
-                            print(f"          ├─ Additional volume needed: {additional_volume:.2f} lots")
-                            print(f"          ├─ New volume: {new_volume:.2f} lots")
-                            if martingale_assumption == "takeprofit_factor":
-                                print(f"          └─ New profit: ${new_amount:.2f} (recovers ${total_extra_risk:.2f}, leaves ${new_amount - total_extra_risk:.2f})")
-                            else:
-                                print(f"          └─ New risk: ${new_amount:.2f}")
-                            
-                            calculated_volumes.append(new_volume)
-                            calculated_amounts.append(new_amount)
-                            
-                            if abs(current_volume - new_volume) > 0.001:
-                                linear_updates[order_index] = new_volume
-                    
-                    print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
-                    for i, (vol, amt) in enumerate(zip(calculated_volumes, calculated_amounts)):
-                        if martingale_assumption == "takeprofit_factor":
-                            remaining = amt - total_extra_risk
-                            print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} profit (recovers ${total_extra_risk:.2f}, keeps ${remaining:.2f})")
-                        else:
-                            print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} risk")
-                    
-                    return linear_updates
                 
                 all_symbols = set()
                 for order in limit_orders_data:
@@ -16391,7 +17135,7 @@ def martingale_system(inv_id=None):
                     
                     pre_scaling_details[f"{symbol}_limit"] = calculation_details
                 
-                # ========== STEP 8: APPLY UPDATES ==========
+                # ========== STEP 9: APPLY UPDATES ==========
                 print(f"\n{'─'*60}")
                 print(f"  💾 APPLYING FINAL UPDATES")
                 print(f"{'─'*60}")
@@ -16458,7 +17202,8 @@ def martingale_system(inv_id=None):
                 import traceback
                 traceback.print_exc()
                 return False
-    
+
+        
         def safety_check_pending_orders():
             """
             Safety check that ONLY cancels orders when:
@@ -16793,913 +17538,6 @@ def martingale_system(inv_id=None):
     
     return stats
 # MARTINGALE #
-
-def recent_highest_balance_target(inv_id=None):
-    """
-    Function: Manages recent_highest_balance tracking for investors.
-    
-    FLOW:
-    1. If recent_highest_balance doesn't exist in activities.json → Initialize:
-       a. Get broker_balance from FETCHED_INVESTORS
-       b. Get current MT5 balance
-       c. Use the HIGHER of broker_balance or current MT5 balance
-       d. Date = YESTERDAY (alarm OFF)
-    2. GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
-       a. If not, update with broker_balance (date unchanged, alarm OFF)
-       b. Save to ALL files
-    3. Get current MT5 balance
-    4. If current MT5 balance > stored recent_highest_balance:
-       a. Get default risk from account_balance_default_risk_management
-       b. Check today's profit from MT5 history
-       c. If today's profit >= default risk → Record new high, set date to TODAY, ALARM ON
-       d. If today's profit < default risk → Record new high ONLY, DON'T update date, ALARM OFF
-    5. If current MT5 balance <= stored high → No change, ALARM OFF
-    
-    NEW: Uses activities.json as source of truth but saves to ALL files
-    
-    Args:
-        inv_id: Optional specific investor ID to process.
-        
-    Returns:
-        dict: Statistics about the recent balance check
-    """
-    global recent_highest_alert
-    
-    import os
-    import json
-    from datetime import datetime, timedelta
-    from pathlib import Path
-    
-    recent_highest_alert = {
-        'is_triggered': False,
-        'investor_id': inv_id if inv_id else "all",
-        'old_balance': None,
-        'new_balance': None,
-        'difference': None,
-        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-        'action': None,
-        'last_update_date': None,
-        'today_profit': None,
-        'default_risk': None,
-        'profit_met_risk_threshold': False,
-        'alarm_blocked_reason': None
-    }
-    
-    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE TARGET (DAILY RESET) {'='*10}")
-    if inv_id:
-        print(f" Investor: {inv_id}")
-    
-    stats = {
-        "investor_id": inv_id if inv_id else "all",
-        "investors_checked": 0,
-        "investors_updated": 0,
-        "investors_skipped": 0,
-        "new_high_alerts": 0,
-        "new_high_recorded_only": 0,
-        "field_created": 0,
-        "broker_balance_corrections": 0,
-        "activities_updated": 0,
-        "errors": [],
-        "current_time": datetime.now().strftime('%I:%M:%S %p'),
-        "processing_success": False,
-        "details": []
-    }
-    
-    def get_last_message(notifications_dict, section_key):
-        if not notifications_dict:
-            return None
-        
-        latest_message = None
-        latest_time = None
-        
-        for msg_id, msg_data in notifications_dict.items():
-            if isinstance(msg_data, dict) and msg_data.get('section') == section_key:
-                try:
-                    msg_time = datetime.strptime(msg_data['time'], "%Y-%m-%d %H:%M:%S")
-                    if latest_time is None or msg_time > latest_time:
-                        latest_time = msg_time
-                        latest_message = msg_data
-                except:
-                    pass
-        
-        if latest_message:
-            return {
-                'type': latest_message.get('type'),
-                'time': latest_time,
-                'data': latest_message
-            }
-        return None
-    
-    def add_notification(notifications_dict, section_key, message, message_type, timestamp=None):
-        if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        last_msg = get_last_message(notifications_dict, section_key)
-        
-        should_add = False
-        if last_msg is None:
-            should_add = True
-        else:
-            if last_msg['type'] != message_type:
-                should_add = True
-        
-        if not should_add:
-            return False
-        
-        next_id = 1
-        if notifications_dict:
-            try:
-                existing_ids = [int(k) for k in notifications_dict.keys() if k.isdigit()]
-                next_id = max(existing_ids) + 1 if existing_ids else 1
-            except:
-                next_id = len(notifications_dict) + 1
-        
-        notifications_dict[str(next_id)] = {
-            "section": section_key,
-            "message": message,
-            "time": timestamp,
-            "type": message_type,
-            "update": "new"
-        }
-        return True
-    
-    def add_execution_notification(executions_dict, section_key, message, message_type, timestamp=None):
-        if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        last_msg = get_last_message(executions_dict, section_key)
-        
-        should_add = False
-        if last_msg is None:
-            should_add = True
-        else:
-            if last_msg['type'] != message_type:
-                should_add = True
-        
-        if not should_add:
-            return False
-        
-        next_id = 1
-        if executions_dict:
-            try:
-                existing_ids = [int(k) for k in executions_dict.keys() if k.isdigit()]
-                next_id = max(existing_ids) + 1 if existing_ids else 1
-            except:
-                next_id = len(executions_dict) + 1
-        
-        executions_dict[str(next_id)] = {
-            "section": section_key,
-            "message": message,
-            "time": timestamp,
-            "type": message_type,
-            "update": "new"
-        }
-        return True
-    
-    def get_mt5_balance():
-        """Get current MT5 account balance"""
-        try:
-            if not mt5.terminal_info():
-                print(f"  MT5 not connected")
-                return None
-            
-            account_info = mt5.account_info()
-            if account_info:
-                return account_info.balance
-            return None
-        except Exception as e:
-            print(f"  Error getting MT5 balance: {e}")
-            return None
-    
-    def get_today_profit_from_history():
-        """
-        Get today's profit from MT5 history.
-        Returns: total profit for today (float)
-        """
-        try:
-            if not mt5.terminal_info():
-                print(f"  MT5 not connected")
-                return 0.0
-            
-            # Get today's date range
-            today = datetime.now()
-            start_of_day = datetime(today.year, today.month, today.day, 0, 0, 0)
-            
-            # Get history deals from today
-            deals = mt5.history_deals_get(start_of_day, datetime.now())
-            
-            if deals is None or len(deals) == 0:
-                print(f"  No deals found for today")
-                return 0.0
-            
-            # Calculate total profit from all deals today
-            total_profit = 0.0
-            for deal in deals:
-                if deal.profit is not None:
-                    total_profit += deal.profit
-            
-            print(f"  Today's total profit from MT5 history: ${total_profit:.2f}")
-            return total_profit
-            
-        except Exception as e:
-            print(f"  Error getting today's profit from MT5 history: {e}")
-            return 0.0
-    
-    def get_default_risk_from_all_fetched(investor_id):
-        """
-        Get default risk from account_balance_default_risk_management in ALL_FETCHED_INVESTORS.
-        Uses current MT5 balance to find the matching risk range.
-        Returns: default_risk (float) or None
-        """
-        if not os.path.exists(ALL_FETCHED_INVESTORS):
-            print(f"  ⚠️ ALL_FETCHED_INVESTORS not found")
-            return None
-        
-        try:
-            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_fetched_data = json.load(f)
-            
-            investor_data = all_fetched_data.get(investor_id)
-            if not investor_data:
-                print(f"  ⚠️ Investor {investor_id} not found in ALL_FETCHED_INVESTORS")
-                return None
-            
-            # Get current MT5 balance to find which risk range applies
-            current_bal = get_mt5_balance()
-            if current_bal is None:
-                print(f"  ⚠️ Could not get current MT5 balance for risk lookup")
-                return None
-            
-            # Get risk map from accountmanagement
-            accountmanagement = investor_data.get('accountmanagement', {})
-            risk_map = accountmanagement.get('account_balance_default_risk_management', {})
-            
-            if not risk_map:
-                print(f"  ⚠️ No account_balance_default_risk_management found for {investor_id}")
-                return None
-            
-            # Find the matching risk range
-            for range_str, risk_value in risk_map.items():
-                try:
-                    raw_range = range_str.split("_")[0]
-                    low_str, high_str = raw_range.split("-")
-                    low = float(low_str)
-                    high = float(high_str)
-                    
-                    if low <= current_bal <= high:
-                        default_risk = float(risk_value)
-                        print(f"  📊 Default risk for balance ${current_bal:.2f}: ${default_risk:.2f}")
-                        return default_risk
-                except Exception:
-                    continue
-            
-            print(f"  ⚠️ No matching risk range found for balance ${current_bal:.2f}")
-            return None
-            
-        except Exception as e:
-            print(f"  ⚠️ Error loading ALL_FETCHED_INVESTORS: {e}")
-            return None
-    
-    def get_recent_balance_from_activities(inv_id):
-        """
-        Get recent_highest_balance from activities.json (SOURCE OF TRUTH)
-        Returns: (balance, date) or (None, None)
-        """
-        try:
-            inv_root = Path(INV_PATH) / inv_id
-            activities_path = inv_root / "activities.json"
-            
-            if not activities_path.exists():
-                print(f"  ℹ️ activities.json not found for {inv_id}")
-                return None, None
-            
-            with open(activities_path, 'r', encoding='utf-8') as f:
-                activities = json.load(f)
-            
-            balance = activities.get('recent_highest_balance')
-            date = activities.get('recent_highest_balance_last_update')
-            
-            if balance is not None:
-                try:
-                    return float(balance), str(date) if date else None
-                except (ValueError, TypeError):
-                    return None, None
-            
-            return None, None
-            
-        except Exception as e:
-            print(f"  ⚠️ Error reading activities.json for {inv_id}: {e}")
-            return None, None
-    
-    def get_broker_balance_from_fetched(inv_id):
-        """
-        Get broker_balance from FETCHED_INVESTORS
-        Returns: broker_balance (float) or None
-        """
-        if not os.path.exists(FETCHED_INVESTORS):
-            print(f"  ⚠️ FETCHED_INVESTORS not found")
-            return None
-        
-        try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                fetched_data = json.load(f)
-            
-            investor_data = fetched_data.get(inv_id)
-            if not investor_data:
-                print(f"  ⚠️ Investor {inv_id} not found in FETCHED_INVESTORS")
-                return None
-            
-            broker_balance = investor_data.get('broker_balance')
-            if broker_balance is not None:
-                try:
-                    return float(broker_balance)
-                except (ValueError, TypeError):
-                    print(f"  ⚠️ Invalid broker_balance format: {broker_balance}")
-                    return None
-            
-            print(f"  ℹ️ No broker_balance found in FETCHED_INVESTORS for {inv_id}")
-            return None
-            
-        except Exception as e:
-            print(f"  ⚠️ Error loading FETCHED_INVESTORS: {e}")
-            return None
-    
-    def update_investor_data(data_dict, inv_id, new_balance, update_date):
-        """Update recent_highest_balance and date in a data dictionary"""
-        if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-            data_dict[inv_id]['recent_highest_balance'] = str(round(new_balance, 2))
-            data_dict[inv_id]['recent_highest_balance_last_update'] = update_date
-        else:
-            data_dict[inv_id] = {
-                'recent_highest_balance': str(round(new_balance, 2)),
-                'recent_highest_balance_last_update': update_date
-            }
-    
-    def update_activities_json(inv_id, new_balance, update_date):
-        """
-        Update activities.json with recent_highest_balance and date.
-        This is the SOURCE OF TRUTH.
-        """
-        try:
-            inv_root = Path(INV_PATH) / inv_id
-            activities_path = inv_root / "activities.json"
-            
-            # Load or create activities
-            if activities_path.exists():
-                with open(activities_path, 'r', encoding='utf-8') as f:
-                    activities = json.load(f)
-            else:
-                activities = {}
-                print(f"  📝 Creating new activities.json for {inv_id}")
-            
-            # Update recent_highest_balance fields
-            activities['recent_highest_balance'] = str(round(new_balance, 2))
-            activities['recent_highest_balance_last_update'] = update_date
-            
-            # Save back to file
-            with open(activities_path, 'w', encoding='utf-8') as f:
-                json.dump(activities, f, indent=4)
-            
-            print(f"  ✅ Updated activities.json (SOURCE OF TRUTH): ${new_balance:.2f} (date: {update_date})")
-            return True
-            
-        except Exception as e:
-            print(f"  ❌ Failed to update activities.json: {e}")
-            stats["errors"].append(f"Failed to update activities.json for {inv_id}: {e}")
-            return False
-    
-    def get_recent_balance_from_all_files(inv_id):
-        """
-        Fallback: Get recent_highest_balance from all files if not in activities.json
-        Returns: (balance, date, source_name)
-        """
-        # Check updated_data first
-        if inv_id in updated_data:
-            val = updated_data[inv_id].get('recent_highest_balance')
-            date = updated_data[inv_id].get('recent_highest_balance_last_update')
-            if val is not None:
-                try:
-                    return float(val), str(date) if date else None, "UPDATED_INVESTORS"
-                except:
-                    pass
-        
-        # Check all_updated_data
-        if inv_id in all_updated_data:
-            val = all_updated_data[inv_id].get('recent_highest_balance')
-            date = all_updated_data[inv_id].get('recent_highest_balance_last_update')
-            if val is not None:
-                try:
-                    return float(val), str(date) if date else None, "ALL_UPDATED_INVESTORS"
-                except:
-                    pass
-        
-        # Check fetched_data
-        if inv_id in fetched_data:
-            val = fetched_data[inv_id].get('recent_highest_balance')
-            date = fetched_data[inv_id].get('recent_highest_balance_last_update')
-            if val is not None:
-                try:
-                    return float(val), str(date) if date else None, "FETCHED_INVESTORS"
-                except:
-                    pass
-        
-        # Check all_fetched_data
-        if inv_id in all_fetched_data:
-            val = all_fetched_data[inv_id].get('recent_highest_balance')
-            date = all_fetched_data[inv_id].get('recent_highest_balance_last_update')
-            if val is not None:
-                try:
-                    return float(val), str(date) if date else None, "ALL_FETCHED_INVESTORS"
-                except:
-                    pass
-        
-        return None, None, None
-    
-    # ================================================================
-    # LOAD ALL INVESTOR FILES
-    # ================================================================
-    print("\n" + "─"*80)
-    print(" 📁 LOADING INVESTOR FILES")
-    print("─"*80)
-    
-    fetched_data = {}
-    updated_data = {}
-    all_fetched_data = {}
-    all_updated_data = {}
-    
-    if os.path.exists(FETCHED_INVESTORS):
-        try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                fetched_data = json.load(f)
-            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading FETCHED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to load FETCHED_INVESTORS: {e}")
-    
-    if os.path.exists(UPDATED_INVESTORS):
-        try:
-            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                updated_data = json.load(f)
-            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading UPDATED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to load UPDATED_INVESTORS: {e}")
-    
-    if os.path.exists(ALL_FETCHED_INVESTORS):
-        try:
-            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_fetched_data = json.load(f)
-            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to load ALL_FETCHED_INVESTORS: {e}")
-    
-    if os.path.exists(ALL_UPDATED_INVESTORS):
-        try:
-            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_updated_data = json.load(f)
-            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading ALL_UPDATED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to load ALL_UPDATED_INVESTORS: {e}")
-    
-    print("─"*80)
-    
-    # Get list of investors from activities.json (SOURCE OF TRUTH)
-    investors_from_activities = set()
-    try:
-        if os.path.exists(INV_PATH):
-            for inv_folder in os.listdir(INV_PATH):
-                activities_path = Path(INV_PATH) / inv_folder / "activities.json"
-                if activities_path.exists():
-                    investors_from_activities.add(inv_folder)
-        print(f" │ Found {len(investors_from_activities)} investors with activities.json")
-    except Exception as e:
-        print(f" │ Error scanning activities.json files: {e}")
-    
-    # Combine with other files for complete list
-    all_investor_ids = set()
-    all_investor_ids.update(investors_from_activities)
-    all_investor_ids.update(fetched_data.keys())
-    all_investor_ids.update(updated_data.keys())
-    all_investor_ids.update(all_fetched_data.keys())
-    all_investor_ids.update(all_updated_data.keys())
-    
-    if inv_id:
-        investors_to_process = [inv_id] if inv_id in all_investor_ids else []
-        if not investors_to_process:
-            print(f" ⚠️ Investor {inv_id} not found in any data file!")
-            stats["errors"].append(f"Investor {inv_id} not found")
-            return stats
-    else:
-        investors_to_process = list(all_investor_ids)
-    
-    print(f"\n 📋 Processing {len(investors_to_process)} investors...")
-    
-    has_updates = False
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    for inv_id in investors_to_process:
-        print(f"\n[{stats['investors_checked'] + 1}/{len(investors_to_process)}] 📊 Investor: {inv_id}")
-        
-        # STEP 1: Get current MT5 balance
-        current_balance = get_mt5_balance()
-        if current_balance is None:
-            print(f"  ⚠️ Could not get MT5 balance")
-            stats["errors"].append(f"Could not get MT5 balance for {inv_id}")
-            stats["investors_skipped"] += 1
-            continue
-        
-        print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
-        
-        # STEP 2: Get broker_balance from FETCHED_INVESTORS (for validation)
-        broker_balance = get_broker_balance_from_fetched(inv_id)
-        if broker_balance is not None:
-            print(f"  📊 Broker balance from FETCHED_INVESTORS: ${broker_balance:.2f}")
-        
-        # STEP 3: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
-        existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
-        source_name = "activities.json (SOURCE OF TRUTH)"
-        
-        # If not in activities.json, try to get from other files (migration)
-        if existing_recent is None:
-            existing_recent, existing_last_update, fallback_source = get_recent_balance_from_all_files(inv_id)
-            if existing_recent is not None:
-                source_name = f"{fallback_source} (FALLBACK - will migrate to activities.json)"
-                print(f"  📝 Found existing data in {fallback_source}, will migrate to activities.json")
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # ============================================================
-        # CASE 1: Field doesn't exist - INITIALIZE
-        # ============================================================
-        if existing_recent is None:
-            print(f"  📝 Recent balance field not set - initializing...")
-            
-            # Determine which balance to use for initialization
-            # Use the HIGHER of broker_balance or current MT5 balance
-            if broker_balance is not None:
-                init_balance = max(broker_balance, current_balance)
-                if init_balance == broker_balance and broker_balance > current_balance:
-                    print(f"  ℹ️ Using broker_balance (${broker_balance:.2f}) as it's higher than current balance (${current_balance:.2f})")
-                elif init_balance == current_balance and current_balance > broker_balance:
-                    print(f"  ℹ️ Using current MT5 balance (${current_balance:.2f}) as it's higher than broker_balance (${broker_balance:.2f})")
-                else:
-                    print(f"  ℹ️ Balances equal: using ${init_balance:.2f}")
-            else:
-                # No broker_balance available, use current MT5 balance
-                init_balance = current_balance
-                print(f"  ℹ️ No broker_balance available, using current MT5 balance: ${init_balance:.2f}")
-            
-            print(f"  ✅ Initialized with balance: ${init_balance:.2f} (date set to YESTERDAY - {yesterday_str})")
-            print(f"  ✅ Alarm OFF - Trading allowed")
-            
-            recent_highest_alert = {
-                'is_triggered': False,
-                'investor_id': inv_id,
-                'old_balance': None,
-                'new_balance': init_balance,
-                'difference': None,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                'action': 'initialized',
-                'last_update_date': yesterday_str,
-                'today_profit': None,
-                'default_risk': None,
-                'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': None,
-                'init_source': 'broker_balance' if (broker_balance is not None and broker_balance >= current_balance) else 'mt5_balance'
-            }
-            
-            # Update activities.json (SOURCE OF TRUTH)
-            activities_updated = update_activities_json(inv_id, init_balance, yesterday_str)
-            if activities_updated:
-                stats["activities_updated"] += 1
-                stats["field_created"] += 1
-            
-            # Update ALL investor files
-            update_investor_data(fetched_data, inv_id, init_balance, yesterday_str)
-            update_investor_data(updated_data, inv_id, init_balance, yesterday_str)
-            update_investor_data(all_fetched_data, inv_id, init_balance, yesterday_str)
-            update_investor_data(all_updated_data, inv_id, init_balance, yesterday_str)
-            
-            stats["investors_updated"] += 1
-            stats["investors_checked"] += 1
-            has_updates = True
-            continue
-        
-        # ============================================================
-        # GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
-        # ============================================================
-        if broker_balance is not None and existing_recent < broker_balance:
-            print(f"  ⚠️ RECENT HIGHEST BALANCE (${existing_recent:.2f}) IS LESS THAN BROKER BALANCE (${broker_balance:.2f})")
-            print(f"  🔧 CORRECTING: Setting recent_highest_balance to broker_balance: ${broker_balance:.2f}")
-            
-            # Determine the date to use (preserve existing or use yesterday)
-            correction_date = existing_last_update if existing_last_update else yesterday_str
-            
-            # Update activities.json (SOURCE OF TRUTH)
-            activities_updated = update_activities_json(inv_id, broker_balance, correction_date)
-            if activities_updated:
-                stats["activities_updated"] += 1
-                stats["broker_balance_corrections"] += 1
-            
-            # Update ALL investor files with the correction
-            update_investor_data(fetched_data, inv_id, broker_balance, correction_date)
-            update_investor_data(updated_data, inv_id, broker_balance, correction_date)
-            update_investor_data(all_fetched_data, inv_id, broker_balance, correction_date)
-            update_investor_data(all_updated_data, inv_id, broker_balance, correction_date)
-            
-            # Update the existing_recent variable for further processing
-            old_recent = existing_recent
-            existing_recent = broker_balance
-            
-            stats["investors_updated"] += 1
-            has_updates = True
-            
-            recent_highest_alert = {
-                'is_triggered': False,
-                'investor_id': inv_id,
-                'old_balance': old_recent,
-                'new_balance': broker_balance,
-                'difference': broker_balance - old_recent,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                'action': 'broker_balance_correction',
-                'last_update_date': correction_date,
-                'today_profit': None,
-                'default_risk': None,
-                'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': 'Corrected to broker_balance'
-            }
-            
-            print(f"  ✅ Balance corrected to ${broker_balance:.2f} and saved to ALL files")
-            print(f"  📅 Date: {correction_date}")
-            print(f"  ✅ Alarm OFF - Trading continues")
-            
-            stats["details"].append({
-                "investor_id": inv_id,
-                "action": "broker_balance_correction",
-                "old_balance": old_recent,
-                "new_balance": broker_balance,
-                "difference": broker_balance - old_recent,
-                "timestamp": timestamp,
-                "update_date": correction_date
-            })
-            
-            # Continue to check if current balance > corrected balance
-            # (fall through to the next check)
-        
-        # ============================================================
-        # CASE 2: Check if current MT5 > stored high
-        # ============================================================
-        print(f"  📊 Existing recent balance: ${existing_recent:.2f} (from {source_name})")
-        print(f"  📅 Last update date: {existing_last_update}")
-        
-        if current_balance > existing_recent:
-            difference = current_balance - existing_recent
-            print(f"  🚀 NEW HIGHER BALANCE DETECTED: ${difference:.2f} increase")
-            print(f"     Old: ${existing_recent:.2f} → New: ${current_balance:.2f}")
-            
-            # STEP 4: Get default risk from ALL_FETCHED_INVESTORS
-            default_risk = get_default_risk_from_all_fetched(inv_id)
-            
-            # STEP 5: Get today's profit from MT5 history
-            today_profit = get_today_profit_from_history()
-            print(f"  📊 Today's profit from MT5 history: ${today_profit:.2f}")
-            
-            # STEP 6: Check if today's profit >= default risk
-            profit_met_risk_threshold = False
-            if default_risk is not None:
-                if today_profit >= default_risk:
-                    profit_met_risk_threshold = True
-                    print(f"  ✅ Today's profit (${today_profit:.2f}) >= default risk (${default_risk:.2f}) - ALARM CAN TRIGGER")
-                else:
-                    print(f"  ⚠️ Today's profit (${today_profit:.2f}) < default risk (${default_risk:.2f}) - ALARM BLOCKED")
-            else:
-                print(f"  ⚠️ No default risk found - ALARM BLOCKED")
-                default_risk = 0  # Set to 0 so it doesn't block
-            
-            # ALWAYS record the new high balance
-            stats["investors_updated"] += 1
-            stats["new_high_recorded_only"] += 1
-            
-            if profit_met_risk_threshold and default_risk is not None:
-                # BOTH conditions met: Record high, date = TODAY, ALARM ON
-                action = "new_high"
-                stats["new_high_alerts"] += 1
-                update_date = today_str
-                
-                recent_highest_alert = {
-                    'is_triggered': True,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': difference,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'new_high',
-                    'last_update_date': today_str,
-                    'today_profit': today_profit,
-                    'default_risk': default_risk,
-                    'profit_met_risk_threshold': True,
-                    'alarm_blocked_reason': None
-                }
-                print(f"  🚨 ALARM ACTIVATED: New high AND today's profit >= risk! Trading SUSPENDED!")
-                
-                message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Today's Profit: ${today_profit:.2f} >= Risk: ${default_risk:.2f}. TRADING SUSPENDED!"
-                exec_message = f"🚨 SERVER ALERT: {inv_id} new daily high ${current_balance:.2f} - Trading SUSPENDED"
-                msg_type = 'danger'
-                
-            else:
-                # New high BUT today's profit < risk: Record only, DON'T update date
-                action = "new_high_recorded_only"
-                update_date = existing_last_update if existing_last_update else yesterday_str
-                
-                recent_highest_alert = {
-                    'is_triggered': False,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': difference,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'new_high_recorded_only',
-                    'last_update_date': update_date,
-                    'today_profit': today_profit,
-                    'default_risk': default_risk,
-                    'profit_met_risk_threshold': False,
-                    'alarm_blocked_reason': f"Today's profit (${today_profit:.2f}) < default risk (${default_risk:.2f})" if default_risk else "No default risk found"
-                }
-                print(f"  🟡 NEW HIGH RECORDED ONLY - Alarm BLOCKED")
-                print(f"  📅 Date NOT updated - kept as: {update_date}")
-                print(f"  ✅ Alarm OFF - Trading continues")
-                
-                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM NOT TRIGGERED: Today's Profit (${today_profit:.2f}) < Risk (${default_risk:.2f}). Trading continues."
-                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but today's profit below risk - Trading continues"
-                msg_type = 'info'
-            
-            # Update activities.json (SOURCE OF TRUTH)
-            activities_updated = update_activities_json(inv_id, current_balance, update_date)
-            if activities_updated:
-                stats["activities_updated"] += 1
-            
-            # Update ALL investor files with new balance (and date if alarm triggered)
-            update_investor_data(fetched_data, inv_id, current_balance, update_date)
-            update_investor_data(updated_data, inv_id, current_balance, update_date)
-            update_investor_data(all_fetched_data, inv_id, current_balance, update_date)
-            update_investor_data(all_updated_data, inv_id, current_balance, update_date)
-            
-            # Add notifications to ALL files
-            for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
-                if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-                    if 'notifications' not in data_dict[inv_id]:
-                        data_dict[inv_id]['notifications'] = {}
-                    if 'executions_notification' not in data_dict[inv_id]:
-                        data_dict[inv_id]['executions_notification'] = {}
-                    add_notification(data_dict[inv_id]['notifications'], 'RecentBalance', message, msg_type, timestamp)
-                    add_execution_notification(data_dict[inv_id]['executions_notification'], 'RecentBalance', exec_message, msg_type, timestamp)
-            
-            stats["details"].append({
-                "investor_id": inv_id,
-                "action": action,
-                "old_balance": existing_recent,
-                "new_balance": current_balance,
-                "difference": difference,
-                "timestamp": timestamp,
-                "update_date": update_date,
-                "today_profit": today_profit,
-                "default_risk": default_risk,
-                "profit_met_risk_threshold": profit_met_risk_threshold,
-                "alarm_triggered": profit_met_risk_threshold
-            })
-            
-            has_updates = True
-            stats["investors_checked"] += 1
-            continue
-        
-        # ============================================================
-        # CASE 3: Current balance <= stored high - No change
-        # ============================================================
-        else:
-            if current_balance < existing_recent:
-                difference = existing_recent - current_balance
-                print(f"  📉 Current balance is LOWER than stored high: ${difference:.2f} decrease")
-            else:
-                print(f"  ℹ️ Balance unchanged at stored high: ${current_balance:.2f}")
-            
-            print(f"  ✅ Alarm OFF - Trading allowed")
-            stats["investors_skipped"] += 1
-            
-            recent_highest_alert = {
-                'is_triggered': False,
-                'investor_id': inv_id,
-                'old_balance': existing_recent,
-                'new_balance': current_balance,
-                'difference': existing_recent - current_balance if current_balance < existing_recent else 0,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                'action': 'no_change',
-                'last_update_date': existing_last_update,
-                'today_profit': None,
-                'default_risk': None,
-                'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': None
-            }
-            
-            stats["details"].append({
-                "investor_id": inv_id,
-                "action": "no_change",
-                "stored_high": existing_recent,
-                "current_balance": current_balance,
-                "difference": existing_recent - current_balance if current_balance < existing_recent else 0,
-                "timestamp": timestamp,
-                "update_date": existing_last_update
-            })
-            
-            stats["investors_checked"] += 1
-            continue
-    
-    # ================================================================
-    # SAVE ALL UPDATES
-    # ================================================================
-    if has_updates:
-        print("\n" + "─"*80)
-        print(" 💾 SAVING ALL UPDATED FILES")
-        print("─"*80)
-        
-        try:
-            with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(fetched_data, f, indent=4)
-            print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to save FETCHED_INVESTORS: {e}")
-        
-        try:
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(updated_data, f, indent=4)
-            print(f" │ ✅ Updated: {UPDATED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to save UPDATED_INVESTORS: {e}")
-        
-        try:
-            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(all_fetched_data, f, indent=4)
-            print(f" │ ✅ Updated: {ALL_FETCHED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to save ALL_FETCHED_INVESTORS: {e}")
-        
-        try:
-            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(all_updated_data, f, indent=4)
-            print(f" │ ✅ Updated: {ALL_UPDATED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
-            stats["errors"].append(f"Failed to save ALL_UPDATED_INVESTORS: {e}")
-        
-        print(f"\n │ ✅ All investor files updated successfully.")
-        print(f" │ ✅ activities.json (SOURCE OF TRUTH) updated for {stats['activities_updated']} investor(s)")
-        stats["processing_success"] = True
-    else:
-        print("\n │ ℹ️ No updates needed. All files are up to date.")
-        stats["processing_success"] = True
-    
-    # Summary
-    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
-    print(f"  Investors checked: {stats['investors_checked']}")
-    print(f"  Field created: {stats['field_created']}")
-    print(f"  Broker balance corrections: {stats['broker_balance_corrections']}")
-    print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
-    print(f"  New high alerts triggered: {stats['new_high_alerts']}")
-    print(f"  Alarms blocked (profit < risk): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
-    print(f"  Investors updated: {stats['investors_updated']}")
-    print(f"  Investors skipped: {stats['investors_skipped']}")
-    print(f"  activities.json updated: {stats['activities_updated']}")
-    
-    if stats['new_high_alerts'] > 0:
-        print(f"\n  🚨 ALARM ACTIVE: {stats['new_high_alerts']} investor(s)")
-        for detail in stats['details']:
-            if detail.get('action') == 'new_high':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) 🔴")
-    
-    blocked = stats['new_high_recorded_only'] - stats['new_high_alerts']
-    if blocked > 0:
-        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (profit < risk)")
-        for detail in stats['details']:
-            if detail.get('action') == 'new_high_recorded_only':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Today's Profit ${detail['today_profit']:.2f} < Risk ${detail['default_risk']:.2f} 🟡")
-    
-    if stats['broker_balance_corrections'] > 0:
-        print(f"\n  🔧 BROKER BALANCE CORRECTIONS: {stats['broker_balance_corrections']} investor(s)")
-        for detail in stats['details']:
-            if detail.get('action') == 'broker_balance_correction':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (corrected to broker balance) 🔧")
-    
-    if recent_highest_alert['is_triggered']:
-        print(f"\n  🚨 ALARM ACTIVE: {recent_highest_alert['investor_id']} - Trading SUSPENDED")
-    
-    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
-    
-    return stats
 
 def daily_target_check(inv_id=None):
     """
