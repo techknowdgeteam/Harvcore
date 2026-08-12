@@ -35,7 +35,7 @@ HARVHUB_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\fetched_ha
 HARVHUB_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\harvhub\updated_harvhub_investors.json"
 ALL_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\all_investors.json"
 ALL_FETCHED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors.json"
-ALL_INVESTORS_BACKUP = r"C:\xampp\htdocs\harvcore\harvox\fetched_investors_backup.json"
+ALL_INVESTORS_BACKUP = r"C:\xampp\htdocs\harvcore\harvox\backup_fetched_investors.json"
 ALL_UPDATED_INVESTORS = r"C:\xampp\htdocs\harvcore\harvox\updated_investors.json"
 
 def delete_investor_files():
