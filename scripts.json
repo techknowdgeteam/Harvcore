@@ -2,11 +2,7 @@
     "scripts": [
         {
             "name": "HARVHUB",
-            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\harvhub\\harvhub.py"
-        },
-        {
-            "name": "COMMUNICATOR",
-            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\invharv\\communicator.py"
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\harvhub\\Harvcore_harvhub.py"
         }
     ]
 }

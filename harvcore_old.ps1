@@ -1,91 +1,35 @@
-# HARVEX TRADING SUITE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER + TERMINAL MANAGER
+# HARVEX TRADING SUITE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER
 # Save as: HARVCORE.ps1
 
 # Load required assemblies
 Add-Type -AssemblyName System.Windows.Forms
 
-# Load scripts from engine configuration file
-$engineJsonPath = "C:\xampp\htdocs\harvcore\harvox\harvcore_accountmanagement.json"
+# Load scripts from JSON file
+$jsonPath = "C:\xampp\htdocs\harvcore\scripts.json"
+$jsonContent = Get-Content -Path $jsonPath -Raw | ConvertFrom-Json
+$scripts = $jsonContent.scripts
+
+$pythonExe = "python"
 $scriptDir = "C:\xampp\htdocs\harvcore"
 $launcherTitle = "HARVCORE TRADING SUITE - CONTROL CENTER"
 $switchInterval = 5
 $maxRetries = 5
-$pythonExe = "python"
-
-# Initialize script arrays
-$scripts = @()
 $retryCount = @{}
 $processMap = @{}
 $deadWindows = @{}  # Track dead windows
 $scriptWindowTitles = @{}  # Store actual window titles for each script
 $windowDetails = @{}  # Store detailed window info
 
-# Terminal management variables
-$firstLoop = $true
-$initialKeysSent = $false
-$terminalsLaunched = $false
-
 # Screen awake variables
 $keepScreenAwake = $true
 $lastActivityTime = [DateTime]::Now
 
-# Load engine scripts from JSON file
-function Load-EngineScripts {
-    Write-Log "Loading engine scripts from: $engineJsonPath"
-    
-    if (-not (Test-Path $engineJsonPath)) {
-        Write-Log-Error "Engine configuration file not found: $engineJsonPath"
-        return $false
-    }
-    
-    try {
-        $jsonContent = Get-Content -Path $engineJsonPath -Raw | ConvertFrom-Json
-        
-        # Look for the "engine" key
-        if ($jsonContent.PSObject.Properties.Name -contains "engine") {
-            $engineArray = $jsonContent.engine
-            
-            # Check if it's an array or collection
-            if ($engineArray -is [array] -or $engineArray -is [System.Collections.IEnumerable]) {
-                # Convert to array if it's a collection
-                if ($engineArray -isnot [array]) {
-                    $engineArray = @($engineArray)
-                }
-                
-                foreach ($engine in $engineArray) {
-                    $scriptName = $engine.name
-                    $scriptPath = $engine.path
-                    
-                    if ($scriptName -and $scriptPath) {
-                        Write-Log-Success "Found engine: $scriptName -> $scriptPath"
-                        # Use global scope to modify the global $scripts array
-                        $global:scripts += @{
-                            name = $scriptName
-                            path = $scriptPath
-                        }
-                        
-                        # Initialize tracking arrays using global scope
-                        $global:retryCount[$scriptName] = 0
-                        $global:processMap[$scriptName] = $null
-                        $global:deadWindows[$scriptName] = $false
-                        $global:scriptWindowTitles[$scriptName] = $null
-                        $global:windowDetails[$scriptName] = $null
-                    }
-                }
-                Write-Log-Success "Loaded $($global:scripts.Count) engine scripts"
-                return $true
-            } else {
-                Write-Log-Error "Engine is not an array in the JSON file"
-                return $false
-            }
-        } else {
-            Write-Log-Error "No 'engine' key found in $engineJsonPath"
-            return $false
-        }
-    } catch {
-        Write-Log-Error "Failed to parse engine JSON: $_"
-        return $false
-    }
+foreach ($script in $scripts) {
+    $retryCount[$script.name] = 0
+    $processMap[$script.name] = $null
+    $deadWindows[$script.name] = $false
+    $scriptWindowTitles[$script.name] = $null
+    $windowDetails[$script.name] = $null
 }
 
 function Write-Log {
@@ -126,16 +70,6 @@ function Write-Log-Duplicate {
 function Write-Log-ScreenAwake {
     param([string]$Message)
     Write-Host ("[" + (Get-Date -Format 'HH:mm:ss') + "] SCREEN " + $Message) -ForegroundColor Magenta
-}
-
-function Write-Log-Terminal {
-    param([string]$Message)
-    Write-Host ("[" + (Get-Date -Format 'HH:mm:ss') + "] TERMINAL " + $Message) -ForegroundColor Cyan -BackgroundColor DarkBlue
-}
-
-function Write-Log-Engine {
-    param([string]$Message)
-    Write-Host ("[" + (Get-Date -Format 'HH:mm:ss') + "] ENGINE " + $Message) -ForegroundColor Green -BackgroundColor DarkBlue
 }
 
 function Start-ScreenAwake {
@@ -1082,197 +1016,27 @@ function Show-Window-Details {
     Write-Log "----------------------------------------"
 }
 
-# ==================== TERMINAL MANAGEMENT FUNCTIONS ====================
-
-function Manage-Terminals {
-    Write-Log-Terminal "Checking for JSON files and managing terminals..."
-    
-    # Find all JSON files
-    $files = Get-ChildItem -Path $scriptDir -Include 'investors.json','developers.json','harvhub_investors.json','fetched_investors.json' -Recurse -File
-    
-    # Collect all terminal paths
-    $allTerminals = @()
-    if ($files) {
-        foreach ($file in $files) {
-            Write-Log-Terminal "Found JSON file: $($file.FullName)"
-            try {
-                $json = Get-Content $file.FullName -Raw | ConvertFrom-Json
-                
-                # Loop through all properties in the JSON
-                foreach ($prop in $json.PSObject.Properties) {
-                    $obj = $prop.Value
-                    if ($obj.PSObject.Properties) {
-                        foreach ($innerProp in $obj.PSObject.Properties) {
-                            $value = $innerProp.Value
-                            if ($value -is [string] -and $value -match '\.exe') {
-                                Write-Log-Terminal "  - Found terminal path: $value"
-                                $allTerminals += $value
-                            }
-                        }
-                    }
-                }
-            } catch {
-                Write-Log-Terminal "ERROR parsing JSON file $($file.Name): $_"
-            }
-        }
-    } else {
-        Write-Log-Terminal "No JSON files found"
-    }
-    
-    # Remove duplicates
-    $allTerminals = $allTerminals | Select-Object -Unique
-    Write-Log-Terminal "Total unique terminals found: $($allTerminals.Count)"
-    
-    # Launch each terminal that isn't running
-    if ($allTerminals.Count -gt 0) {
-        foreach ($terminal in $allTerminals) {
-            $exe = Split-Path $terminal -Leaf
-            $name = $exe -replace '\.exe$',''
-            
-            # Check if terminal exists before trying to run it
-            if (-not (Test-Path $terminal)) {
-                Write-Log-Terminal "WARNING: Terminal path does not exist: $terminal"
-                continue
-            }
-            
-            $isRunning = Get-Process -Name $name -ErrorAction SilentlyContinue
-            
-            $alreadyRunning = $false
-            if ($isRunning) {
-                foreach ($proc in $isRunning) {
-                    try {
-                        if ($proc.Path -eq $terminal) {
-                            $alreadyRunning = $true
-                            Write-Log-Terminal "Terminal already running: $exe (PID: $($proc.Id))"
-                            break
-                        }
-                    } catch {
-                        # If we can't access the path, assume it's the right one
-                        $alreadyRunning = $true
-                        Write-Log-Terminal "Terminal may be running: $exe (PID: $($proc.Id)) - Access denied to path"
-                        break
-                    }
-                }
-            }
-            
-            if (-not $alreadyRunning) {
-                Write-Log-Terminal "Launching terminal: $terminal"
-                try {
-                    # Use Start-Process with -WindowStyle Normal and don't wait
-                    Start-Process -FilePath $terminal -WindowStyle Normal
-                    Write-Log-Terminal "  - Launch command sent"
-                } catch {
-                    Write-Log-Terminal "  - ERROR launching: $_"
-                }
-            }
-        }
-    }
-    
-    # Wait for all terminals to be active
-    if ($allTerminals.Count -gt 0) {
-        Write-Log-Terminal "Waiting for terminals to be active..."
-        foreach ($terminal in $allTerminals) {
-            # Skip if path doesn't exist
-            if (-not (Test-Path $terminal)) {
-                continue
-            }
-            
-            $exe = Split-Path $terminal -Leaf
-            $name = $exe -replace '\.exe$',''
-            Write-Log-Terminal "Waiting for: $exe"
-            
-            $retries = 0
-            $found = $false
-            while ($retries -lt 30) {
-                $isRunning = Get-Process -Name $name -ErrorAction SilentlyContinue
-                if ($isRunning) {
-                    foreach ($proc in $isRunning) {
-                        try {
-                            if ($proc.Path -eq $terminal) {
-                                Write-Log-Terminal "Terminal active: $exe (PID: $($proc.Id))"
-                                $found = $true
-                                break
-                            }
-                        } catch {
-                            # If path access denied, assume it's the right one
-                            Write-Log-Terminal "Terminal active (assumed): $exe (PID: $($proc.Id))"
-                            $found = $true
-                            break
-                        }
-                    }
-                    if ($found) { break }
-                }
-                Start-Sleep -Seconds 1
-                $retries++
-            }
-            if (-not $found) {
-                Write-Log-Terminal "Timeout waiting for terminal: $exe"
-            }
-        }
-    }
-    
-    return $allTerminals.Count
-}
-
-# ==================== MAIN EXECUTION ====================
-
 # Main execution - NO PROMPTS
 Write-Log "============================================================"
-Write-Log "  HARVCORE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER + TERMINAL MANAGER"
+Write-Log "  HARVCORE - DEAD WINDOW DETECTOR + AUTO-RELAUNCH + DUPLICATE CLEANER"
 Write-Log "============================================================"
 Write-Log ""
 
-# Load engine scripts from configuration
-Write-Log "STEP 0: Loading engine scripts..."
-$engineLoaded = Load-EngineScripts
-
-if (-not $engineLoaded -or $scripts.Count -eq 0) {
-    Write-Log-Error "No engine scripts loaded. Exiting..."
-    exit 1
-}
-
-Write-Log-Engine "Loaded $($scripts.Count) engine scripts:"
-foreach ($script in $scripts) {
-    Write-Log-Engine "  - $($script.name) -> $($script.path)"
-}
-
 # Start screen awake functionality
-Write-Log ""
-Write-Log "STEP 1: Starting screen awake..."
+Write-Log "STEP 0: Starting screen awake..."
 Start-ScreenAwake
-
-# ==================== TERMINAL MANAGEMENT ====================
-
-Write-Log ""
-Write-Log "STEP 2: Managing terminals..."
-$terminalCount = Manage-Terminals
-Write-Log-Terminal "Terminal management complete. $terminalCount terminals processed."
-
-# Wait based on first loop or subsequent loop
-if ($firstLoop) {
-    Write-Log "==================== FIRST RUN - WAITING 20 SECONDS ===================="
-    Write-Log "Waiting 20 seconds before launching dynamic scripts..."
-    Start-Sleep -Seconds 20
-    $firstLoop = $false
-} else {
-    Write-Log "==================== SUBSEQUENT RUN - WAITING 5 SECONDS ===================="
-    Write-Log "Waiting 5 seconds before launching dynamic scripts..."
-    Start-Sleep -Seconds 5
-}
-
-# ==================== SCRIPT MANAGEMENT ====================
 
 # First, detect and fix dead windows
 Write-Log ""
-Write-Log "STEP 3: Detecting and fixing dead windows..."
+Write-Log "STEP 1: Detecting and fixing dead windows..."
 $deadWindowsList = Detect-And-Fix-Dead-Windows
 
 Write-Log ""
-Write-Log "STEP 4: Detecting and fixing duplicate windows..."
+Write-Log "STEP 2: Detecting and fixing duplicate windows..."
 $duplicateWindowsList = Detect-And-Fix-Duplicate-Windows
 
 Write-Log ""
-Write-Log "STEP 5: Detecting existing windows..."
+Write-Log "STEP 3: Detecting existing windows..."
 $existingWindows = Detect-Existing-Windows
 
 # Launch any missing scripts
@@ -1307,7 +1071,6 @@ Write-Log ""
 Write-Log "All components ready!"
 Write-Log "Monitoring for crashes, duplicates, and auto-relaunching..."
 Write-Log "Screen awake is running in the background..."
-Write-Log "Terminal management will run periodically..."
 Write-Log "Switching windows every $switchInterval seconds"
 Write-Log "Max retries per script: $maxRetries"
 Write-Log ""
@@ -1317,7 +1080,6 @@ Write-Log ""
 $cycleCount = 0
 $healthCheckInterval = 6  # Check for dead windows every 6 cycles
 $duplicateCheckInterval = 12  # Check for duplicates every 12 cycles
-$terminalCheckInterval = 8  # Check for terminals every 8 cycles
 
 try {
     while ($true) {
@@ -1328,13 +1090,6 @@ try {
             try {
                 [ScreenSaver]::KeepAwake()
             } catch {}
-        }
-        
-        # Run terminal management periodically
-        if ($cycleCount % $terminalCheckInterval -eq 0) {
-            Write-Log "Running terminal management..."
-            $terminalCount = Manage-Terminals
-            Write-Log-Terminal "Terminal management complete. $terminalCount terminals processed."
         }
         
         # Run dead window detection and fixing periodically
@@ -1394,5 +1149,3 @@ try {
     Write-Log "Cleaning up screen awake..."
     Stop-ScreenAwake
 }
-
-# Admin elevation removed - script runs with current user privileges

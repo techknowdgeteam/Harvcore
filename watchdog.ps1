@@ -1,5 +1,5 @@
 # Admin elevation removed - script runs with current user privileges
-
+#Watchdog.ps1
 $firstLoop = $true
 $initialKeysSent = $false
 $terminalsLaunched = $false

@@ -14337,15 +14337,18 @@ def martingale_system(inv_id=None):
                 if martingale_config:
                     martingale_enabled = martingale_config.get("enable_martingale", False)
                     martingale_type = martingale_config.get("martingale_type", "loss_streak")
-                    martingale_assumption = martingale_config.get("martingale_assumption", "stoploss_factor")
+                    martingale_factor = martingale_config.get("martingale_factor", "stoploss_factor")
                     recovery_adder_str = martingale_config.get("martingale_loss_recovery_adder_percentage", "0%")
                     martingale_for_position_order_scale = martingale_config.get("martingale_for_position_order_scale", False)
+                    
+                    # NEW: Load stoploss_factor_multiplier
+                    stoploss_factor_multiplier = martingale_config.get("stoploss_factor_multiplier", 1.0)
                     
                     pre_scaling_config = martingale_config.get("pre_scaling", {})
                     if pre_scaling_config:
                         martingale_pre_scaling = pre_scaling_config.get("martingale_pre_scaling", False)
                         enable_initial_risk_retention = pre_scaling_config.get("enable_initial_risk_retention", False)
-                        highest_risk_retention_str = pre_scaling_config.get("initial_risk_retention_percentage", "0%")
+                        initial_risk_retention_str = pre_scaling_config.get("initial_risk_retention_percentage", "0%")
                         martingale_linear_scaling = pre_scaling_config.get("martingale_linear_scaling", False)
                         
                         # NEW: pre-drawdown assumption flag
@@ -14353,20 +14356,21 @@ def martingale_system(inv_id=None):
                     else:
                         martingale_pre_scaling = martingale_config.get("martingale_pre_scaling", False)
                         enable_initial_risk_retention = False
-                        highest_risk_retention_str = "0%"
+                        initial_risk_retention_str = "0%"
                         martingale_linear_scaling = False
                         pre_drawdown_assumption = False
                 else:
                     martingale_enabled = settings.get("enable_martingale", False)
                     martingale_type = "loss_streak"
-                    martingale_assumption = "stoploss_factor"
+                    martingale_factor = "stoploss_factor"
                     recovery_adder_str = settings.get("martingale_loss_recovery_adder_percentage", "0%")
                     martingale_for_position_order_scale = settings.get("martingale_for_position_order_scale", False)
                     martingale_pre_scaling = settings.get("martingale_pre_scaling", False)
                     enable_initial_risk_retention = False
-                    highest_risk_retention_str = "0%"
+                    initial_risk_retention_str = "0%"
                     martingale_linear_scaling = False
                     pre_drawdown_assumption = False
+                    stoploss_factor_multiplier = 1.0  # NEW: Default multiplier
                 
                 recovery_adder_percentage = 0
                 if recovery_adder_str:
@@ -14381,11 +14385,11 @@ def martingale_system(inv_id=None):
                 # 90% = keep 90%, remove 10%
                 # 0% = keep 0%, remove 100%
                 initial_risk_retention_percentage = 0
-                if highest_risk_retention_str:
+                if initial_risk_retention_str:
                     try:
-                        retention_percentage = float(highest_risk_retention_str.replace('%', ''))
+                        retention_percentage = float(initial_risk_retention_str.replace('%', ''))
                         initial_risk_retention_percentage = retention_percentage
-                        print(f"  │ Highest risk: Keeping {retention_percentage}% of risk (removing {100 - retention_percentage}%)")
+                        print(f"  │ initial risk: Keeping {retention_percentage}% of risk (removing {100 - retention_percentage}%)")
                     except:
                         initial_risk_retention_percentage = 0
                 
@@ -14408,7 +14412,7 @@ def martingale_system(inv_id=None):
                     "config": config,
                     "martingale_enabled": martingale_enabled,
                     "martingale_type": martingale_type,
-                    "martingale_assumption": martingale_assumption,
+                    "martingale_factor": martingale_factor,
                     "recovery_adder_percentage": recovery_adder_percentage,
                     "martingale_for_position_order_scale": martingale_for_position_order_scale,
                     "martingale_pre_scaling": martingale_pre_scaling,
@@ -14416,12 +14420,13 @@ def martingale_system(inv_id=None):
                     "initial_risk_retention_percentage": initial_risk_retention_percentage,
                     "default_minimum_risk": default_minimum_risk,
                     "martingale_linear_scaling": martingale_linear_scaling,
-                    "pre_drawdown_assumption": pre_drawdown_assumption  # NEW
+                    "pre_drawdown_assumption": pre_drawdown_assumption,  # NEW
+                    "stoploss_factor_multiplier": stoploss_factor_multiplier  # NEW: Return the multiplier
                 }
             except Exception as e:
                 print(f"  ✗ Failed to read config: {e}")
                 return None
-        
+            
         config_data = load_configuration()
         if config_data is None:
             stats["errors"] += 1
@@ -14430,7 +14435,7 @@ def martingale_system(inv_id=None):
         config = config_data["config"]
         martingale_enabled = config_data["martingale_enabled"]
         martingale_type = config_data.get("martingale_type", "loss_streak")
-        martingale_assumption = config_data.get("martingale_assumption", "stoploss_factor")  # ADD THIS
+        martingale_factor = config_data.get("martingale_factor", "stoploss_factor")  # ADD THIS
         recovery_adder_percentage = config_data["recovery_adder_percentage"]
         martingale_for_position_order_scale = config_data["martingale_for_position_order_scale"]
         martingale_pre_scaling = config_data["martingale_pre_scaling"]
@@ -14443,7 +14448,7 @@ def martingale_system(inv_id=None):
         stats.update({
             "martingale_enabled": martingale_enabled,
             "martingale_type": martingale_type,
-            "martingale_assumption": martingale_assumption,
+            "martingale_factor": martingale_factor,
             "martingale_loss_recovery_adder_percentage": recovery_adder_percentage,
             "martingale_for_position_order_scale": martingale_for_position_order_scale,
             "martingale_pre_scaling": martingale_pre_scaling,
@@ -14461,9 +14466,9 @@ def martingale_system(inv_id=None):
 
         print(f"  ✓ Martingale ENABLED")
         print(f"  │ Type: {martingale_type.upper()}")
-        print(f"  │ Assumption: {martingale_assumption.upper()}")
+        print(f"  │ Assumption: {martingale_factor.upper()}")
         print(f"  │ Pre-drawdown: {'ON' if pre_drawdown_assumption else 'OFF'}")  # NEW
-        if martingale_assumption == "takeprofit_factor":
+        if martingale_factor == "takeprofit_factor":
             print(f"  │   └─ Using TP profit with drawdown deduction")
         else:
             print(f"  │   └─ Using SL risk (standard behavior)")
@@ -15326,9 +15331,10 @@ def martingale_system(inv_id=None):
             return volumes
 
         # ========== SECTION 6: LIMIT_ORDERS RECOVERY ==========
-        def calculate_safe_volume(required_volume, symbol, entry, stop, order_type, stage_max_risk, is_exact_stage_completion, default_volume):
+        def calculate_safe_volume(required_volume, symbol, entry, stop, order_type, stage_max_risk, is_exact_stage_completion, default_volume, stoploss_multiplier=1.0):
             """
             Calculate safe volume that respects stage_max_risk limit.
+            Now applies stoploss_factor_multiplier when in stoploss_factor mode.
             Returns: (safe_volume, risk_check_passed, actual_risk)
             """
             is_buy = 'buy' in order_type.lower() if order_type else False
@@ -15351,8 +15357,11 @@ def martingale_system(inv_id=None):
             if min_risk is None:
                 return 0, False, 0
             
-            if min_risk > stage_max_risk:
-                print(f"        │ WARNING: Minimum volume {min_volume} lots has risk ${min_risk:.2f} which exceeds limit ${stage_max_risk:.2f}")
+            # Apply stoploss factor multiplier if applicable
+            effective_stage_max_risk = stage_max_risk * stoploss_multiplier
+            
+            if min_risk > effective_stage_max_risk:
+                print(f"        │ WARNING: Minimum volume {min_volume} lots has risk ${min_risk:.2f} which exceeds limit ${effective_stage_max_risk:.2f}")
                 print(f"        │ → Cannot place any order for {symbol} (risk limit too low)")
                 return 0, False, 0
             
@@ -15360,7 +15369,7 @@ def martingale_system(inv_id=None):
             if required_risk is None:
                 return 0, False, 0
             
-            if required_risk <= stage_max_risk:
+            if required_risk <= effective_stage_max_risk:
                 safe_volume = required_volume
                 risk_check_passed = True
                 actual_risk = required_risk
@@ -15374,7 +15383,7 @@ def martingale_system(inv_id=None):
                     mid_risk = calculate_risk(mid)
                     if mid_risk is None:
                         break
-                    if mid_risk <= stage_max_risk:
+                    if mid_risk <= effective_stage_max_risk:
                         safe_volume = mid
                         low = mid
                     else:
@@ -15385,12 +15394,10 @@ def martingale_system(inv_id=None):
                 risk_check_passed = False
                 stats["risk_exceeded"] = True
                 
-                print(f"        │ Risk limit would be exceeded: ${required_risk:.2f} > ${stage_max_risk:.2f}")
+                print(f"        │ Risk limit would be exceeded: ${required_risk:.2f} > ${effective_stage_max_risk:.2f}")
                 print(f"        │ → Reduced volume from {required_volume:.2f} to {safe_volume:.2f} lots (risk: ${actual_risk:.2f})")
             
-            # ⭐ REMOVED: The section that reduces volume below default_volume
-            # The default risk floor is now enforced in the calling functions
-            
+            # The default risk floor is enforced in the calling functions
             return safe_volume, risk_check_passed, actual_risk
 
         def process_limit_orders_recovery(recovery_amount):
@@ -15403,6 +15410,13 @@ def martingale_system(inv_id=None):
                 return False, {}
             
             print(f"  │ Recovery target: ${recovery_amount:.2f}")
+            
+            # Apply stoploss_factor_multiplier if in stoploss_factor mode
+            stoploss_multiplier = config_data.get("stoploss_factor_multiplier", 1.0)
+            if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                print(f"  │ Stoploss factor multiplier applied: {stoploss_multiplier}x")
+                recovery_amount = recovery_amount * stoploss_multiplier
+                print(f"  │ Adjusted recovery target: ${recovery_amount:.2f}")
             
             if recovery_adder_percentage > 0:
                 adder_amount = recovery_amount * (recovery_adder_percentage / 100)
@@ -15487,7 +15501,8 @@ def martingale_system(inv_id=None):
                     
                     safe_volume, risk_check_passed, actual_risk = calculate_safe_volume(
                         required_volume, symbol, sample_entry, sample_stop, 
-                        sample_order_type, stage_max_risk, is_exact_stage_completion, default_volume
+                        sample_order_type, stage_max_risk, is_exact_stage_completion, default_volume,
+                        stoploss_multiplier  # NEW: Pass the multiplier
                     )
                     
                     # ⭐ CRITICAL: Enforce minimum volume based on default risk management
@@ -15508,21 +15523,23 @@ def martingale_system(inv_id=None):
                             
                             # Recalculate actual risk at enforced volume
                             actual_risk = price_diff * safe_volume * contract_size
-                            risk_check_passed = (actual_risk <= stage_max_risk)
+                            risk_check_passed = (actual_risk <= stage_max_risk * stoploss_multiplier)
                     
                     if safe_volume >= 0.01:
                         volumes_to_update[symbol] = safe_volume
                         status = "✓" if risk_check_passed else ""
-                        print(f"  │ {status} {symbol}: {safe_volume:.2f} lots (risk: ${actual_risk:.2f} / limit: ${stage_max_risk:.2f})")
+                        effective_limit = stage_max_risk * stoploss_multiplier if martingale_factor == "stoploss_factor" else stage_max_risk
+                        print(f"  │ {status} {symbol}: {safe_volume:.2f} lots (risk: ${actual_risk:.2f} / limit: ${effective_limit:.2f})")
                         
                         stats["order_risk_validation"][symbol] = {
                             "symbol": symbol,
                             "safe_volume": safe_volume,
                             "safe_risk": actual_risk,
-                            "risk_limit": stage_max_risk,
+                            "risk_limit": effective_limit,
                             "risk_check_passed": risk_check_passed,
                             "required_volume": required_volume,
-                            "required_risk": None
+                            "required_risk": None,
+                            "stoploss_multiplier": stoploss_multiplier if martingale_factor == "stoploss_factor" else 1.0
                         }
                         
                         calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
@@ -15545,7 +15562,7 @@ def martingale_system(inv_id=None):
                 print(f"  ✗ Error: {e}")
                 stats["errors"] += 1
                 return False, {}
-    
+            
         def reset_limit_orders_to_default():
             """
             Reset all limit orders to default risk volume based on account_balance_default_risk_management.
@@ -15553,6 +15570,11 @@ def martingale_system(inv_id=None):
             """
             print(f"\n  🔄 STEP 3: Reset to Default Risk (No Drawdown)")
             print(f"  {'─'*40}")
+            
+            # Get stoploss factor multiplier
+            stoploss_multiplier = config_data.get("stoploss_factor_multiplier", 1.0)
+            if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                print(f"  │ Stoploss factor multiplier applied: {stoploss_multiplier}x")
             
             # Get default risk from config
             default_risk_map = config.get("account_balance_default_risk_management", {})
@@ -15577,7 +15599,12 @@ def martingale_system(inv_id=None):
                 print(f"  │ Using minimum volume 0.01 lots")
                 default_risk = 0  # Will use min volume
             else:
-                print(f"  │ Default risk from config: ${default_risk:.2f}")
+                # Apply multiplier to default risk
+                if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                    default_risk = default_risk * stoploss_multiplier
+                    print(f"  │ Default risk from config (with {stoploss_multiplier}x multiplier): ${default_risk:.2f}")
+                else:
+                    print(f"  │ Default risk from config: ${default_risk:.2f}")
             
             # Load limit orders
             orders_path, orders_data = load_limit_orders()
@@ -15676,7 +15703,7 @@ def martingale_system(inv_id=None):
                 print(f"  ✗ Error resetting to default: {e}")
                 stats["errors"] += 1
                 return False
-    
+            
         # ========== SECTION 7: PRE-SCALING (LIMIT ORDERS ONLY) ==========
         def process_pre_scaling():
             """
@@ -15695,7 +15722,7 @@ def martingale_system(inv_id=None):
             """
             if not martingale_pre_scaling:
                 return False
-            
+            stoploss_multiplier = config_data.get("stoploss_factor_multiplier", 1.0)
             # Get linear scaling config from loaded config
             martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)
             
@@ -15703,8 +15730,10 @@ def martingale_system(inv_id=None):
             print(f"  🎯 PRE-SCALING ANALYSIS")
             print(f"{'='*60}")
             print(f"  │ Mode: {martingale_type.upper()}")
-            print(f"  │ Assumption: {martingale_assumption.upper()}")
-            if martingale_assumption == "takeprofit_factor":
+            print(f"  │ Assumption: {martingale_factor.upper()}")
+            if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                print(f"  │ Stoploss factor multiplier: {stoploss_multiplier}x")
+            if martingale_factor == "takeprofit_factor":
                 print(f"  │   └─ Using TP profit: Drawdown recovered from each order's TP profit")
                 print(f"  │   └─ Remaining profit after recovery becomes the scaling target")
             else:
@@ -15713,6 +15742,7 @@ def martingale_system(inv_id=None):
             print(f"  │ Initial risk adder: {'✓ ENABLED' if enable_initial_risk_retention else '✗ DISABLED'}")
             print(f"  │   - retention: {initial_risk_retention_percentage}%")
             print(f"  │ Pre-drawdown assumption: {'✓ ENABLED' if pre_drawdown_assumption else '✗ DISABLED'}")
+            effective_stage_max_risk = stage_max_risk * stoploss_multiplier if martingale_factor == "stoploss_factor" else stage_max_risk
             print(f"  │ Stage max risk: ${stage_max_risk:.2f}")
             print(f"  │ Recovery adder: {recovery_adder_percentage}%")
             print(f"  │ Total drawdown: ${total_drawdown:.2f}")
@@ -15808,10 +15838,10 @@ def martingale_system(inv_id=None):
                 - 90% retention = keep 90%, remove 10%
                 - 0% retention = keep 0%, remove 100%
                 """
-                highest_risk_orders = {}
+                initial_risk_orders = {}
                 
                 if not limit_orders_data or not isinstance(limit_orders_data, list):
-                    return highest_risk_orders
+                    return initial_risk_orders
                 
                 # ========== GET DEFAULT RISK FROM CONFIG BASED ON CURRENT BALANCE ==========
                 default_risk_map = config.get("account_balance_default_risk_management", {})
@@ -15834,7 +15864,7 @@ def martingale_system(inv_id=None):
                 
                 if default_risk_value == 0:
                     print(f"  │ ⚠️ No default risk found for balance ${current_balance:.2f}, using 0")
-                    return highest_risk_orders
+                    return initial_risk_orders
                 
                 # ========== GROUP ORDERS BY SYMBOL ==========
                 symbol_orders = {}
@@ -15878,7 +15908,7 @@ def martingale_system(inv_id=None):
                             # Calculate actual risk at required volume
                             actual_risk = risk_per_lot * required_volume
                             
-                            highest_risk_order_info = {
+                            initial_risk_order_info = {
                                 'order_type': order_type,
                                 'entry': entry,
                                 'stop': stop,
@@ -15897,12 +15927,12 @@ def martingale_system(inv_id=None):
                             if initial_risk_retention_percentage > 0:
                                 # Calculate how much to KEEP
                                 kept_amount = actual_risk * (initial_risk_retention_percentage / 100)
-                                highest_risk_order_info['risk'] = kept_amount
-                                highest_risk_order_info['kept'] = kept_amount
-                                highest_risk_order_info['retention_percentage'] = initial_risk_retention_percentage
+                                initial_risk_order_info['risk'] = kept_amount
+                                initial_risk_order_info['kept'] = kept_amount
+                                initial_risk_order_info['retention_percentage'] = initial_risk_retention_percentage
                                 # Calculate how much was REMOVED (for display)
                                 removed_amount = actual_risk - kept_amount
-                                highest_risk_order_info['retention_applied'] = removed_amount
+                                initial_risk_order_info['retention_applied'] = removed_amount
                                 
                                 print(f"  │ {symbol}: Default risk ${default_risk_value:.2f} → Volume {required_volume:.2f} lots → Risk ${actual_risk:.2f}")
                                 print(f"  │   ├─ Keeping {initial_risk_retention_percentage}%: ${kept_amount:.2f}")
@@ -15911,9 +15941,9 @@ def martingale_system(inv_id=None):
                                 print(f"  │ {symbol}: Default risk ${default_risk_value:.2f} → Volume {required_volume:.2f} lots → Risk ${actual_risk:.2f}")
                                 print(f"  │   └─ 0% retention: Keeping nothing")
                             
-                            highest_risk_orders[symbol] = highest_risk_order_info
+                            initial_risk_orders[symbol] = initial_risk_order_info
                 
-                return highest_risk_orders
+                return initial_risk_orders
 
             def get_volume_field_from_order(order):
                 for key, value in order.items():
@@ -15980,13 +16010,17 @@ def martingale_system(inv_id=None):
                         high = float(high_str)
                         
                         if low <= current_balance <= high:
-                            return float(risk_value)
+                            default_risk = float(risk_value)
+                            # Apply multiplier if in stoploss_factor mode
+                            if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                                return default_risk * stoploss_multiplier
+                            return default_risk
                     except Exception:
                         continue
                 
                 print(f"  ⚠️ No default risk found for balance ${current_balance:.2f}")
                 return None
-
+                
             def scale_order_volume_to_target(order, symbol_info, target_risk):
                 """
                 Scale a single order's volume to match target risk.
@@ -16007,11 +16041,17 @@ def martingale_system(inv_id=None):
                 if risk_per_lot <= 0:
                     return current_volume, 0, False
                 
+                # Apply stoploss multiplier to target risk if in stoploss_factor mode
+                if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                    adjusted_target_risk = target_risk * stoploss_multiplier
+                else:
+                    adjusted_target_risk = target_risk
+                
                 # Calculate current risk
                 current_risk = risk_per_lot * current_volume
                 
                 # Calculate required volume to achieve target risk
-                required_volume = target_risk / risk_per_lot
+                required_volume = adjusted_target_risk / risk_per_lot
                 required_volume = round(required_volume, 2)
                 
                 # Apply volume constraints - MINIMUM ONLY, NO MAXIMUM
@@ -16028,28 +16068,52 @@ def martingale_system(inv_id=None):
                 threshold = 0.10  # $0.10 threshold for precision
                 
                 # Check if we're already at target risk (within threshold)
-                if abs(current_risk - target_risk) <= threshold:
+                if abs(current_risk - adjusted_target_risk) <= threshold:
                     return current_volume, current_risk, False
                 
                 # Scale to target risk
                 return required_volume, actual_risk, True
 
-            def scale_order_volume_to_target_profit(order, symbol_info, target_profit, order_index=0):
+            def scale_order_volume_to_target_profit(order, symbol_info, target_profit, default_risk_floor, order_index=0):
                 """
-                Scale a single order's volume to match target profit using tp.
+                Scale a single order's volume based on TP profit.
                 Used for takeprofit_factor assumption.
-                Returns: (new_volume, actual_profit, scaled, remaining_profit)
                 
-                IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
-                The target_profit is the amount needed to COVER the drawdown.
-                The remaining_profit is what's left after recovering the drawdown.
+                STEP 1: Scale volume to match default risk floor (if current risk > default)
+                STEP 2: Calculate TP profit at default risk volume
+                STEP 3: If TP profit < target_profit, scale UP to meet target
+                IMPORTANT: NEVER scales DOWN below default risk floor
+                
+                Returns: (new_volume, actual_profit, scaled, remaining_profit, steps_taken)
                 """
                 entry = order.get('entry')
                 tp = order.get('tp') or order.get('target')
                 volume_key, current_volume = get_volume_field_from_order(order)
                 order_type = order.get('order_type', 'Unknown').upper()
+                symbol = order.get('symbol', 'Unknown')
                 
-                # Determine STEPUP/STEPDOWN for display
+                if not entry or not tp or not current_volume or current_volume <= 0:
+                    return current_volume, 0, False, 0, "no_data"
+                
+                # Calculate price difference for TP
+                price_diff = abs(entry - tp)
+                contract_size = symbol_info.trade_contract_size if symbol_info else 1
+                profit_per_lot = price_diff * contract_size
+                
+                if profit_per_lot <= 0:
+                    return current_volume, 0, False, 0, "invalid_price"
+                
+                # ========== STEP 1: Calculate risk at current volume ==========
+                # Get stop loss for risk calculation
+                stop = order.get('exit') or order.get('stop_loss')
+                if stop:
+                    risk_price_diff = abs(entry - stop)
+                    risk_per_lot = risk_price_diff * contract_size
+                    current_risk = risk_per_lot * current_volume
+                else:
+                    current_risk = 0
+                
+                # Determine direction for display
                 order_type_lower = order_type.lower()
                 if 'sell_limit' in order_type_lower or 'buy_stop' in order_type_lower:
                     direction = "STEPUP"
@@ -16058,63 +16122,86 @@ def martingale_system(inv_id=None):
                 else:
                     direction = "UNKNOWN"
                 
-                if not entry or not tp or not current_volume or current_volume <= 0:
-                    return current_volume, 0, False, 0
+                # ========== STEP 2: Scale to default risk floor if current risk > default ==========
+                steps_taken = []
+                final_volume = current_volume
                 
-                price_diff = abs(entry - tp)
-                contract_size = symbol_info.trade_contract_size if symbol_info else 1
-                profit_per_lot = price_diff * contract_size
+                if current_risk > default_risk_floor and default_risk_floor > 0:
+                    # Scale down to default risk
+                    target_volume_for_default = default_risk_floor / risk_per_lot
+                    target_volume_for_default = round(target_volume_for_default, 2)
+                    
+                    # Apply volume constraints
+                    min_volume = symbol_info.volume_min if symbol_info else 0.01
+                    volume_step = symbol_info.volume_step if symbol_info else 0.01
+                    steps = round(target_volume_for_default / volume_step) if volume_step > 0 else 0
+                    target_volume_for_default = max(min_volume, round(steps * volume_step, 2))
+                    
+                    if target_volume_for_default < current_volume:
+                        steps_taken.append(f"scaled_down_to_default_risk")
+                        final_volume = target_volume_for_default
+                        print(f"        [{direction}] Order #{order_index}: Scaling DOWN to default risk floor ${default_risk_floor:.2f}")
+                        print(f"        └─ Volume: {current_volume:.2f} → {final_volume:.2f} lots (risk: ${current_risk:.2f} → ${default_risk_floor:.2f})")
                 
-                if profit_per_lot <= 0:
-                    return current_volume, 0, False, 0
+                # ========== STEP 3: Calculate TP profit at current (or scaled) volume ==========
+                current_tp_profit = profit_per_lot * final_volume
                 
-                # Calculate current TP profit
-                current_profit = profit_per_lot * current_volume
+                # ========== STEP 4: Check if TP profit covers target ==========
+                remaining_profit = current_tp_profit - target_profit
                 
-                # Calculate remaining profit after recovering drawdown
-                remaining_profit = current_profit - target_profit
-                
-                # If current TP profit already covers the drawdown (remaining_profit >= 0)
-                # Keep current volume - NO DOWNSCALING
+                # If TP profit already covers the target, keep current volume
                 if remaining_profit >= 0:
-                    print(f"        │ [{direction}] Order #{order_index}: TP profit ${current_profit:.2f} already covers the ${target_profit:.2f} drawdown recovery target")
-                    print(f"        │   └─ Remaining profit after recovery: ${remaining_profit:.2f}")
-                    print(f"        │   └─ → Keeping current volume {current_volume:.2f} lots (NO DOWNSCALING)")
-                    return current_volume, current_profit, False, remaining_profit
+                    print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers the ${target_profit:.2f} target")
+                    print(f"        └─ Remaining profit: ${remaining_profit:.2f} - Keeping current volume {final_volume:.2f} lots (NO SCALING)")
+                    return final_volume, current_tp_profit, False, remaining_profit, steps_taken
                 
-                # Calculate the deficit (how much short we are)
-                deficit = target_profit - current_profit
+                # ========== STEP 5: Need to scale UP to meet target ==========
+                deficit = target_profit - current_tp_profit
+                print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} is short of ${target_profit:.2f} target")
+                print(f"        └─ Deficit: ${deficit:.2f}")
                 
-                # We need to scale up to cover the drawdown AND have some profit remaining
-                # Target profit = drawdown recovery target + minimum remaining profit
-                minimum_remaining = target_profit * 0.01  # 1% of target as minimum remaining profit
-                required_total_profit = target_profit + minimum_remaining
-                
-                # Calculate required volume to achieve required_total_profit
-                required_volume = required_total_profit / profit_per_lot
+                # Calculate required volume to meet target
+                required_volume = target_profit / profit_per_lot
                 required_volume = round(required_volume, 2)
                 
                 # Apply volume constraints
                 min_volume = symbol_info.volume_min if symbol_info else 0.01
                 volume_step = symbol_info.volume_step if symbol_info else 0.01
-                steps = round(required_volume / volume_step) if volume_step > 0 else 0
-                required_volume = max(min_volume, round(steps * volume_step, 2))
+                max_volume = symbol_info.volume_max if symbol_info else 100
                 
-                # CRITICAL: NEVER SCALE DOWN
-                if required_volume < current_volume:
-                    print(f"        │ [{direction}] Order #{order_index}: Required volume {required_volume:.2f} is LESS than current {current_volume:.2f}")
-                    print(f"        │   └─ → Keeping current volume (NO DOWNSCALING)")
-                    return current_volume, current_profit, False, remaining_profit
+                # Ensure we don't go below the volume that achieves default risk
+                if default_risk_floor > 0:
+                    min_volume_for_risk = default_risk_floor / risk_per_lot
+                    min_volume_for_risk = round(min_volume_for_risk, 2)
+                    steps = round(min_volume_for_risk / volume_step) if volume_step > 0 else 0
+                    min_volume_for_risk = max(min_volume, round(steps * volume_step, 2))
+                    min_volume = max(min_volume, min_volume_for_risk)
+                
+                steps = round(required_volume / volume_step) if volume_step > 0 else 0
+                required_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                
+                # ========== STEP 6: NEVER SCALE DOWN - only scale UP ==========
+                if required_volume < final_volume:
+                    print(f"        Required volume {required_volume:.2f} is LESS than current {final_volume:.2f}")
+                    print(f"        → Keeping current volume (NO DOWNSCALING)")
+                    return final_volume, current_tp_profit, False, current_tp_profit - target_profit, steps_taken
                 
                 # Calculate actual profit at required volume
                 actual_profit = profit_per_lot * required_volume
                 actual_remaining = actual_profit - target_profit
                 
-                # Only update if different and volume increased
-                if abs(current_volume - required_volume) > 0.001:
-                    return required_volume, actual_profit, True, actual_remaining
+                steps_taken.append(f"scaled_up_to_target")
                 
-                return current_volume, current_profit, False, remaining_profit
+                # Calculate new risk at required volume
+                new_risk = risk_per_lot * required_volume if stop else 0
+                
+                print(f"        → Scaling UP to meet target:")
+                print(f"        └─ Volume: {final_volume:.2f} → {required_volume:.2f} lots")
+                print(f"        └─ New risk: ${new_risk:.2f}")
+                print(f"        └─ New TP profit: ${actual_profit:.2f}")
+                print(f"        └─ Remaining after target: ${actual_remaining:.2f}")
+                
+                return required_volume, actual_profit, True, actual_remaining, steps_taken
 
             def group_orders_by_linear(orders_data):
                 stepup_linear = []
@@ -16158,7 +16245,7 @@ def martingale_system(inv_id=None):
                                         total_extra_risk, calculation_details):
                 """
                 Apply linear scaling to a group of orders.
-                Uses the appropriate calculation based on martingale_assumption.
+                Uses the appropriate calculation based on martingale_factor.
                 
                 IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
                 """
@@ -16170,9 +16257,10 @@ def martingale_system(inv_id=None):
                 print(f"\n     📊 {linear_name.upper()} LINEAR SCALING:")
                 print(f"        Orders in linear: {len(orders_linear)}")
                 
-                if martingale_assumption == "takeprofit_factor":
-                    print(f"        LEADER amount (remaining profit after drawdown recovery): ${total_extra_risk:.2f}")
-                    print(f"        Each order recovers ${total_extra_risk:.2f} of drawdown")
+                # Apply multiplier to total_extra_risk if in stoploss_factor mode
+                if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
+                    total_extra_risk = total_extra_risk * stoploss_multiplier
+                    print(f"        LEADER amount (with {stoploss_multiplier}x multiplier): ${total_extra_risk:.2f}")
                 else:
                     print(f"        LEADER amount (first order risk): ${total_extra_risk:.2f}")
                 
@@ -16187,7 +16275,7 @@ def martingale_system(inv_id=None):
                     order_type = order.get('order_type', '')
                     direction = get_direction_from_order(order)
                     
-                    if martingale_assumption == "takeprofit_factor":
+                    if martingale_factor == "takeprofit_factor":
                         # Use TP for profit calculation
                         tp = order.get('tp') or order.get('target')
                         if not entry or not tp:
@@ -16223,7 +16311,7 @@ def martingale_system(inv_id=None):
                         print(f"          ├─ LEADER {amount_type}: ${leader_amount:.2f}")
                         print(f"          ├─ Volume: {leader_volume:.2f} lots")
                         
-                        if martingale_assumption == "takeprofit_factor":
+                        if martingale_factor == "takeprofit_factor":
                             remaining = leader_amount - total_extra_risk
                             print(f"          ├─ Recovered from drawdown: ${total_extra_risk:.2f}")
                             print(f"          └─ Remaining profit after recovery: ${remaining:.2f}")
@@ -16282,13 +16370,13 @@ def martingale_system(inv_id=None):
                 
                 print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
                 for i, (vol, amt) in enumerate(zip(calculated_volumes, calculated_amounts)):
-                    if martingale_assumption == "takeprofit_factor":
+                    if martingale_factor == "takeprofit_factor":
                         print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} profit (recovers ${total_extra_risk:.2f} drawdown)")
                     else:
                         print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} risk")
                 
                 return linear_updates
-
+                
             # ========== LOSS_STREAK SPECIFIC FUNCTIONS ==========
             def fetch_and_analyze_trades_with_sequential_loss():
                 """
@@ -16619,12 +16707,12 @@ def martingale_system(inv_id=None):
             final_target_risk = base_target_risk
             applied_highest_retention = 0
             applied_recovery_adder = 0
-            highest_risk_value = 0
+            initial_risk_value = 0
             
             print(f"\n{'='*60}")
             print(f"  📊 CALCULATING FINAL TARGET RISK")
             print(f"{'='*60}")
-            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
             print(f"  │ Retention Logic: percentage = how much to KEEP (100% = keep all, 0% = keep nothing)")
             print(f"  │ Pre-drawdown already included in base target: {total_drawdown:.2f}")
@@ -16633,38 +16721,38 @@ def martingale_system(inv_id=None):
             final_target_risk = base_target_risk
             applied_highest_retention = 0
             applied_recovery_adder = 0
-            highest_risk_value = 0
+            initial_risk_value = 0
 
-            # STEP 3: Add Highest Risk from Limit Orders (if enabled)
+            # STEP 3: Add initial risk from Limit Orders (if enabled)
             if enable_initial_risk_retention:
-                # Analyze highest risk from limit orders
-                limit_highest_risk_orders = analyze_initial_risk_from_risk_config(limit_orders_data)
+                # Analyze initial risk from limit orders
+                limit_initial_risk_orders = analyze_initial_risk_from_risk_config(limit_orders_data)
                 
-                # Get highest risk for each symbol
-                total_highest_risk = 0
-                for symbol, order_info in limit_highest_risk_orders.items():
-                    highest_risk = order_info['original_risk']
-                    total_highest_risk += highest_risk
-                    print(f"\n  │ {symbol} highest risk: ${highest_risk:.2f}")
+                # Get initial risk for each symbol
+                total_initial_risk = 0
+                for symbol, order_info in limit_initial_risk_orders.items():
+                    initial_risk = order_info['original_risk']
+                    total_initial_risk += initial_risk
+                    print(f"\n  │ {symbol} initial risk: ${initial_risk:.2f}")
                     
-                    # Apply highest risk retention
+                    # Apply initial risk retention
                     # CORRECT: retention_percentage = how much to KEEP
                     if initial_risk_retention_percentage > 0:
-                        kept_highest_risk = highest_risk * (initial_risk_retention_percentage / 100)
-                        removed_highest_risk = highest_risk - kept_highest_risk
-                        highest_risk_after_retention = kept_highest_risk  # Keep the kept amount
-                        applied_highest_retention += removed_highest_risk
-                        print(f"  │   ├─ Keeping {initial_risk_retention_percentage}% of highest risk: ${kept_highest_risk:.2f}")
-                        print(f"  │   └─ Removing {100 - initial_risk_retention_percentage}%: -${removed_highest_risk:.2f}")
+                        kept_initial_risk = initial_risk * (initial_risk_retention_percentage / 100)
+                        removed_initial_risk = initial_risk - kept_initial_risk
+                        initial_risk_after_retention = kept_initial_risk  # Keep the kept amount
+                        applied_highest_retention += removed_initial_risk
+                        print(f"  │   ├─ Keeping {initial_risk_retention_percentage}% of initial risk: ${kept_initial_risk:.2f}")
+                        print(f"  │   └─ Removing {100 - initial_risk_retention_percentage}%: -${removed_initial_risk:.2f}")
                     else:
-                        highest_risk_after_retention = 0  # Keep nothing
-                        print(f"  │   └─ Highest risk retention: 0% (keeping nothing)")
+                        initial_risk_after_retention = 0  # Keep nothing
+                        print(f"  │   └─ initial risk retention: 0% (keeping nothing)")
                     
                     # Add the kept amount to final target
-                    final_target_risk += highest_risk_after_retention
-                    print(f"  │   └─ Added to target: +${highest_risk_after_retention:.2f}")
+                    final_target_risk += initial_risk_after_retention
+                    print(f"  │   └─ Added to target: +${initial_risk_after_retention:.2f}")
                 
-                highest_risk_value = total_highest_risk
+                initial_risk_value = total_initial_risk
 
             # STEP 4: Apply Recovery Adder to final target
             if recovery_adder_percentage > 0:
@@ -16682,10 +16770,10 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*60}")
             print(f"  🎯 APPLYING SMART SCALING TO LIMIT ORDERS")
             print(f"{'='*60}")
-            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
             
-            if martingale_assumption == "takeprofit_factor":
+            if martingale_factor == "takeprofit_factor":
                 print(f"  │ TAKEPROFIT FACTOR MODE:")
                 print(f"  │   - Orders will be scaled based on TP profit")
                 print(f"  │   - Drawdown recovery target: ${final_target_risk:.2f}")
@@ -16729,30 +16817,31 @@ def martingale_system(inv_id=None):
                     print(f"     {symbol}: {vol:.2f} lots")
                 
                 # ========== STEP 7: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
+
+                # ========== SCALING LIMIT ORDERS BASED ON ASSUMPTION ==========
                 print(f"\n  📈 STEP: Scaling Limit Orders")
                 print(f"{'─'*60}")
-                
-                if martingale_assumption == "takeprofit_factor":
+                if martingale_factor == "takeprofit_factor":
                     print(f"  TAKEPROFIT FACTOR MODE:")
                     print(f"  │ Drawdown recovery target: ${final_target_risk:.2f}")
                     print(f"  │ Each order's TP profit will recover the drawdown")
                     print(f"  │ Remaining profit after recovery is the scaling target")
-                    print(f"  │ IMPORTANT: NEVER scales DOWN, only UP or keep same")
+                    print(f"  │ IMPORTANT: NEVER scales DOWN below default risk")
+                    print(f"  │ First scales DOWN to default risk if higher, then UP if needed")
                 else:
                     print(f"  STOPLOSS FACTOR MODE (standard):")
                     print(f"  │ Target risk: ${final_target_risk:.2f}")
                     print(f"  │ Will scale orders to match target risk")
-                
                 print(f"{'─'*60}")
-                
+
                 all_symbols = set()
                 for order in limit_orders_data:
                     if isinstance(order, dict) and order.get('symbol'):
                         all_symbols.add(order['symbol'])
-                
+
                 total_scaled = 0
                 scaling_results_by_symbol = {}
-                
+
                 for symbol in all_symbols:
                     print(f"\n  🔹 Scaling {symbol} orders:")
                     
@@ -16774,35 +16863,106 @@ def martingale_system(inv_id=None):
                     # Get a sample order to calculate per-lot amount
                     sample_order = symbol_orders[0]['order']
                     
-                    if martingale_assumption == "takeprofit_factor":
-                        # Use TP for profit calculation
+                    if martingale_factor == "takeprofit_factor":
+                        # ========== TAKEPROFIT FACTOR SCALING ==========
+                        # First, get sample order data
                         sample_entry = sample_order.get('entry')
                         sample_tp = sample_order.get('tp') or sample_order.get('target')
+                        sample_stop = sample_order.get('exit') or sample_order.get('stop_loss')
                         
                         if not sample_entry or not sample_tp:
                             print(f"     No tp found in sample order for {symbol} - skipping")
                             continue
                         
+                        # Calculate per-lot TP profit
                         price_diff = abs(sample_entry - sample_tp)
-                        amount_per_lot = price_diff * symbol_info.trade_contract_size
-                        amount_type = "profit"
-                        print(f"     Using TP profit: Each order recovers ${final_target_risk:.2f} from drawdown")
+                        profit_per_lot = price_diff * symbol_info.trade_contract_size
                         
-                        # Calculate current TP profit for each order
+                        # Calculate per-lot risk for display
+                        if sample_stop:
+                            risk_price_diff = abs(sample_entry - sample_stop)
+                            risk_per_lot = risk_price_diff * symbol_info.trade_contract_size
+                        else:
+                            risk_per_lot = 0
+                        
+                        # Get default risk floor from config
+                        default_risk_floor = default_minimum_risk
+                        if default_risk_floor is None:
+                            default_risk_floor = 20.0  # Fallback
+                        
+                        print(f"     Using Order TP profit: Each order will make ${profit_per_lot:.2f} per lot")
+                        print(f"     Default risk floor: ${default_risk_floor:.2f}")
+                        print(f"     Target profit per order: ${final_target_risk:.2f}")
+                        print(f"     Number of orders: {len(symbol_orders)}")
+                        print()
+                        
+                        # Process each order with the new TP-based scaling
+                        scaled_count = 0
                         for item in symbol_orders:
                             order = item['order']
-                            entry = order.get('entry')
-                            tp = order.get('tp') or order.get('target')
+                            order_index = item['index']
                             volume_key, current_volume = get_volume_field_from_order(order)
+                            
+                            if not volume_key or current_volume <= 0:
+                                continue
+                            
+                            # Get the order's stop for risk calculation
+                            stop = order.get('exit') or order.get('stop_loss')
+                            if stop:
+                                entry = order.get('entry')
+                                risk_price_diff = abs(entry - stop)
+                                risk_per_lot_order = risk_price_diff * symbol_info.trade_contract_size
+                            else:
+                                risk_per_lot_order = 0
+                            
+                            # Apply the TP-based scaling function
+                            new_volume, actual_profit, scaled, remaining, steps = scale_order_volume_to_target_profit(
+                                order, symbol_info, final_target_risk, default_risk_floor, order_index
+                            )
+                            
+                            # Get direction for display
                             direction = get_direction_from_order(order)
                             
-                            if entry and tp and current_volume:
-                                current_profit = abs(entry - tp) * current_volume * symbol_info.trade_contract_size
-                                remaining = current_profit - final_target_risk
-                                print(f"     [{direction}] Order #{item['index']}: TP profit = ${current_profit:.2f}, remaining after recovery = ${remaining:.2f}")
+                            if scaled:
+                                # Update the order volume
+                                order[volume_key] = new_volume
+                                scaled_count += 1
+                                total_scaled += 1
+                                order_type = order.get('order_type', 'Unknown').upper()
+                                
+                                # Calculate new risk at scaled volume
+                                new_risk = risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0
+                                
+                                print(f"\n        ✅ SCALED [{direction}] {order_type} #{order_index}:")
+                                print(f"        └─ Volume: {current_volume:.2f} → {new_volume:.2f} lots")
+                                print(f"        └─ Risk: ${risk_per_lot_order * current_volume:.2f} → ${new_risk:.2f}")
+                                print(f"        └─ TP Profit: ${profit_per_lot * current_volume:.2f} → ${actual_profit:.2f}")
+                                print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
+                                print(f"        └─ Remaining profit after recovery: ${remaining:.2f}")
+                            else:
+                                # Calculate current risk and profit for display
+                                current_risk = risk_per_lot_order * current_volume if risk_per_lot_order > 0 else 0
+                                current_profit = profit_per_lot * current_volume
+                                print(f"\n        ℹ️ [{direction}] Order #{order_index} - NO SCALING NEEDED:")
+                                print(f"        └─ Volume: {current_volume:.2f} lots")
+                                print(f"        └─ Risk: ${current_risk:.2f}")
+                                print(f"        └─ TP Profit: ${current_profit:.2f}")
+                                print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
+                                print(f"        └─ Remaining profit after recovery: ${remaining:.2f}")
                         
+                        if scaled_count > 0:
+                            scaling_results_by_symbol[symbol] = {
+                                'scaled': scaled_count,
+                                'total_orders': len(symbol_orders),
+                                'target_per_order': final_target_risk,
+                                'mode': martingale_factor
+                            }
+                            print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
+                        else:
+                            print(f"\n     ℹ️ No scaling needed for {symbol}")
+                            
                     else:
-                        # Use stoploss for risk calculation (standard)
+                        # ========== STOPLOSS FACTOR SCALING (STANDARD) ==========
                         sample_entry = sample_order.get('entry')
                         sample_stop = sample_order.get('exit') or sample_order.get('stop_loss')
                         
@@ -16811,136 +16971,57 @@ def martingale_system(inv_id=None):
                             continue
                         
                         price_diff = abs(sample_entry - sample_stop)
-                        amount_per_lot = price_diff * symbol_info.trade_contract_size
-                        amount_type = "risk"
-                        print(f"     Risk per lot: ${amount_per_lot:.2f}")
-                    
-                    if amount_per_lot <= 0:
-                        print(f"     Invalid amount per lot - skipping")
-                        continue
-                    
-                    # Calculate target per order
-                    if martingale_assumption == "takeprofit_factor":
-                        # For TP factor: target is the drawdown to recover
-                        target_per_order = final_target_risk
-                        print(f"     Drawdown to recover per order: ${target_per_order:.2f}")
-                    else:
-                        target_per_order = final_target_risk
-                    
-                    print(f"     Number of orders: {len(symbol_orders)}")
-                    
-                    # Apply scaling to ALL orders for this symbol
-                    scaled_count = 0
-                    for item in symbol_orders:
-                        order = item['order']
-                        order_index = item['index']
-                        volume_key, current_volume = get_volume_field_from_order(order)
-                        direction = get_direction_from_order(order)
+                        risk_per_lot = price_diff * symbol_info.trade_contract_size
                         
-                        if not volume_key or current_volume <= 0:
+                        if risk_per_lot <= 0:
+                            print(f"     Invalid risk per lot - skipping")
                             continue
                         
-                        if martingale_assumption == "takeprofit_factor":
-                            # Calculate current TP profit for this specific order
-                            entry = order.get('entry')
-                            tp = order.get('tp') or order.get('target')
+                        print(f"     Risk per lot: ${risk_per_lot:.2f}")
+                        print(f"     Target risk per order: ${final_target_risk:.2f}")
+                        print(f"     Number of orders: {len(symbol_orders)}")
+                        print()
+                        
+                        # Process each order with standard risk-based scaling
+                        scaled_count = 0
+                        for item in symbol_orders:
+                            order = item['order']
+                            order_index = item['index']
+                            volume_key, current_volume = get_volume_field_from_order(order)
+                            direction = get_direction_from_order(order)
                             
-                            if not entry or not tp:
-                                print(f"        [{direction}] Order #{order_index}: no tp found - skipping")
+                            if not volume_key or current_volume <= 0:
                                 continue
                             
-                            current_price_diff = abs(entry - tp)
-                            current_amount_per_lot = current_price_diff * symbol_info.trade_contract_size
+                            # Apply risk-based scaling
+                            new_volume, actual_risk, scaled = scale_order_volume_to_target(
+                                order, symbol_info, final_target_risk
+                            )
                             
-                            if current_amount_per_lot <= 0:
-                                continue
-                            
-                            current_tp_profit = current_amount_per_lot * current_volume
-                            remaining_profit = current_tp_profit - final_target_risk
-                            
-                            # If current TP profit already covers the drawdown
-                            if remaining_profit >= 0:
-                                print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers the ${final_target_risk:.2f} drawdown")
-                                print(f"        └─ Remaining profit after recovery: ${remaining_profit:.2f} - Keeping current volume (NO SCALING)")
-                                continue
-                            
-                            # Need to scale up to recover drawdown and have profit remaining
-                            minimum_remaining = final_target_risk * 0.01  # 1% of drawdown as minimum remaining
-                            required_total_profit = final_target_risk + minimum_remaining
-                            
-                            deficit = final_target_risk - current_tp_profit
-                            print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} is short of the ${final_target_risk:.2f} drawdown recovery target")
-                            print(f"        → Deficit: ${deficit:.2f}")
-                            print(f"        → Scaling up to achieve ${required_total_profit:.2f} total TP profit")
-                            
-                            # Calculate required volume
-                            required_volume = required_total_profit / current_amount_per_lot
-                            required_volume = round(required_volume, 2)
-                            
-                            # Apply volume constraints
-                            min_volume = symbol_info.volume_min if symbol_info else 0.01
-                            volume_step = symbol_info.volume_step if symbol_info else 0.01
-                            steps = round(required_volume / volume_step) if volume_step > 0 else 0
-                            required_volume = max(min_volume, round(steps * volume_step, 2))
-                            
-                            # CRITICAL: NEVER SCALE DOWN
-                            if required_volume < current_volume:
-                                print(f"        Required volume {required_volume:.2f} is LESS than current {current_volume:.2f}")
-                                print(f"        → Keeping current volume (NO DOWNSCALING)")
-                                continue
-                            
-                            # Calculate actual profit at required volume
-                            actual_profit = current_amount_per_lot * required_volume
-                            actual_remaining = actual_profit - final_target_risk
-                            
-                            # Only update if different and volume increased
-                            if abs(current_volume - required_volume) > 0.001:
-                                order[volume_key] = required_volume
+                            if scaled:
+                                order[volume_key] = new_volume
                                 scaled_count += 1
+                                total_scaled += 1
                                 order_type = order.get('order_type', 'Unknown').upper()
-                                print(f"        [{direction}] {order_type} Vol: {current_volume:.2f} → {required_volume:.2f} lots")
-                                print(f"        TP profit before recovery: ${actual_profit:.2f}")
-                                print(f"        └─ Recovers ${final_target_risk:.2f} from drawdown, leaving ${actual_remaining:.2f} profit")
+                                print(f"\n        ✅ SCALED [{direction}] {order_type} #{order_index}:")
+                                print(f"        └─ Volume: {current_volume:.2f} → {new_volume:.2f} lots")
+                                print(f"        └─ Risk: ${risk_per_lot * current_volume:.2f} → ${actual_risk:.2f}")
                             else:
-                                print(f"        Volume unchanged (already at target)")
-                            
+                                current_risk = risk_per_lot * current_volume
+                                print(f"\n        ℹ️ [{direction}] Order #{order_index} - NO SCALING NEEDED:")
+                                print(f"        └─ Volume: {current_volume:.2f} lots")
+                                print(f"        └─ Risk: ${current_risk:.2f} (target: ${final_target_risk:.2f})")
+                        
+                        if scaled_count > 0:
+                            scaling_results_by_symbol[symbol] = {
+                                'scaled': scaled_count,
+                                'total_orders': len(symbol_orders),
+                                'target_per_order': final_target_risk,
+                                'mode': martingale_factor
+                            }
+                            print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
                         else:
-                            # STOPLOSS FACTOR: Standard risk-based scaling
-                            target_volume = target_per_order / amount_per_lot
-                            target_volume = round(target_volume, 2)
-                            
-                            min_volume = symbol_info.volume_min if symbol_info else 0.01
-                            volume_step = symbol_info.volume_step if symbol_info else 0.01
-                            steps = round(target_volume / volume_step) if volume_step > 0 else 0
-                            target_volume = max(min_volume, round(steps * volume_step, 2))
-                            
-                            # CRITICAL: NEVER SCALE DOWN
-                            if target_volume < current_volume:
-                                print(f"        Target volume {target_volume:.2f} is LESS than current {current_volume:.2f}")
-                                print(f"        → Keeping current volume (NO DOWNSCALING)")
-                                continue
-                            
-                            actual_risk = amount_per_lot * target_volume
-                            
-                            if abs(current_volume - target_volume) > 0.001:
-                                order[volume_key] = target_volume
-                                scaled_count += 1
-                                order_type = order.get('order_type', 'Unknown').upper()
-                                print(f"        [{direction}] {order_type} Vol: {current_volume:.2f} → {target_volume:.2f} lots (risk: ${actual_risk:.2f})")
-                            else:
-                                print(f"        Volume unchanged (already at target)")
-                    
-                    if scaled_count > 0:
-                        total_scaled += scaled_count
-                        scaling_results_by_symbol[symbol] = {
-                            'scaled': scaled_count,
-                            'total_orders': len(symbol_orders),
-                            'target_per_order': target_per_order,
-                            'mode': martingale_assumption
-                        }
-                        print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
-                    else:
-                        print(f"     ℹ️ No scaling needed for {symbol}")
+                            print(f"\n     ℹ️ No scaling needed for {symbol}")
                 
                 # Save if any orders were scaled
                 if total_scaled > 0:
@@ -16971,7 +17052,7 @@ def martingale_system(inv_id=None):
                                     elif direction == "STEPDOWN":
                                         stepdown_count += 1
                                     
-                                    if martingale_assumption == "takeprofit_factor":
+                                    if martingale_factor == "takeprofit_factor":
                                         entry = order.get('entry')
                                         tp = order.get('tp') or order.get('target')
                                         if entry and tp:
@@ -16983,9 +17064,9 @@ def martingale_system(inv_id=None):
                                         if entry and stop:
                                             amount = abs(entry - stop) * vol * symbol_info.trade_contract_size
                                             total_amount += amount
-                                    
+                                            
                             print(f"     📊 {symbol} final: {total_vol:.2f} lots")
-                            if martingale_assumption == "takeprofit_factor":
+                            if martingale_factor == "takeprofit_factor":
                                 total_orders = len([o for o in limit_orders_data if isinstance(o, dict) and o.get('symbol') == symbol])
                                 total_recovery = final_target_risk * total_orders
                                 total_remaining = total_amount - total_recovery
@@ -17002,7 +17083,7 @@ def martingale_system(inv_id=None):
                 print(f"\n{'─'*60}")
                 print(f"  📈 STEP: Linear Scaling (Progressive)")
                 print(f"{'─'*60}")
-                if martingale_assumption == "takeprofit_factor":
+                if martingale_factor == "takeprofit_factor":
                     print(f"  Using TP profit: Orders recover drawdown and scale progressively")
                 else:
                     print(f"  Using SL risk (standard behavior)")
@@ -17042,7 +17123,7 @@ def martingale_system(inv_id=None):
                     
                     leader_amount = 0
                     
-                    if martingale_assumption == "takeprofit_factor":
+                    if martingale_factor == "takeprofit_factor":
                         # Calculate leader TP profit
                         first_tp = first_order.get('tp') or first_order.get('target')
                         if first_entry and first_tp:
@@ -17085,13 +17166,13 @@ def martingale_system(inv_id=None):
                         "symbol": symbol,
                         "leader_amount": leader_amount,
                         "linear_scaling_applied": martingale_linear_scaling,
-                        "assumption": martingale_assumption,
+                        "assumption": martingale_factor,
                         "drawdown_recovery_target": final_target_risk
                     }
                     
                     if martingale_linear_scaling:
                         print(f"\n     🎯 APPLYING LINEAR SCALING WITH LEADER AMOUNT:")
-                        if martingale_assumption == "takeprofit_factor":
+                        if martingale_factor == "takeprofit_factor":
                             print(f"     LEADER amount (remaining profit after recovery): ${leader_amount:.2f}")
                         else:
                             print(f"     LEADER amount (risk): ${leader_amount:.2f}")
@@ -17159,7 +17240,7 @@ def martingale_system(inv_id=None):
                                 entry = order.get('entry', 0)
                                 order_type = order.get('order_type', 'Unknown')
                                 
-                                if martingale_assumption == "takeprofit_factor":
+                                if martingale_factor == "takeprofit_factor":
                                     tp = order.get('tp') or order.get('target')
                                     if tp:
                                         amount = abs(entry - tp) * new_volume * symbol_info.trade_contract_size if symbol_info else 0
@@ -17182,10 +17263,10 @@ def martingale_system(inv_id=None):
                 print(f"  ✅ PRE-SCALING COMPLETE")
                 print(f"{'='*60}")
                 print(f"  │ Mode: {martingale_type.upper()}")
-                print(f"  │ Assumption: {martingale_assumption.upper()}")
+                print(f"  │ Assumption: {martingale_factor.upper()}")
                 print(f"  │ Base target: ${base_target_risk:.2f}")
                 print(f"  │ Final target: ${final_target_risk:.2f}")
-                if martingale_assumption == "takeprofit_factor":
+                if martingale_factor == "takeprofit_factor":
                     print(f"  │ Each order recovers ${final_target_risk:.2f} from drawdown")
                     print(f"  │ Remaining profit after recovery is the scaling target")
                     print(f"  │ IMPORTANT: NEVER scaled DOWN, only UP or kept same")
@@ -17202,7 +17283,6 @@ def martingale_system(inv_id=None):
                 import traceback
                 traceback.print_exc()
                 return False
-
         
         def safety_check_pending_orders():
             """
@@ -17381,8 +17461,8 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} RECOVERY - ${current_stage_drawdown:.2f}")
             print(f"  Mode: {martingale_type.upper()}")
-            print(f"  Assumption: {martingale_assumption.upper()}")
-            if martingale_assumption == "takeprofit_factor":
+            print(f"  Assumption: {martingale_factor.upper()}")
+            if martingale_factor == "takeprofit_factor":
                 print(f"  └─ Using TP profit with drawdown deduction")
             else:
                 print(f"  └─ Using SL risk (standard behavior)")
@@ -17454,7 +17534,7 @@ def martingale_system(inv_id=None):
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} COMPLETE")
             print(f"  │ Mode: {martingale_type.upper()}")
-            print(f"  │ Assumption: {martingale_assumption.upper()}")
+            print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Default risk floor: ${default_risk_floor:.2f}")
             print(f"  │ Pre-recorded orders: {record_result.get('recorded', 0)}")
             print(f"  │ Limit orders: {'✓' if limit_orders_updated else '−'}")
@@ -17462,7 +17542,7 @@ def martingale_system(inv_id=None):
             print(f"  │ Orders cancelled (mismatched): {cancel_result.get('deleted', 0)}")
             print(f"  │ Orders kept (matching): {cancel_result.get('kept_matching', 0)}")
             print(f"  │ Orders kept (not in JSON): {cancel_result.get('kept_not_in_json', 0)}")
-            if martingale_assumption == "takeprofit_factor":
+            if martingale_factor == "takeprofit_factor":
                 print(f"  │ └─ TP factor: Drawdown deducted from each order's TP profit")
             print(f"{'='*50}")
 
@@ -17475,7 +17555,7 @@ def martingale_system(inv_id=None):
     print(f"  MARTINGALE SUMMARY")
     print(f"{'='*50}")
     print(f"  Investor: {stats['investor_id']}")
-    print(f"  Assumption: {stats.get('martingale_assumption', 'stoploss_factor').upper()}")
+    print(f"  Assumption: {stats.get('martingale_factor', 'stoploss_factor').upper()}")
     print(f"  Status: {'✓ SUCCESS' if stats['processing_success'] else '✗ FAILED'}")
     
     if stats['martingale_enabled']:
@@ -17483,16 +17563,8 @@ def martingale_system(inv_id=None):
         print(f"  │ Execution start balance: ${stats['execution_start_balance']:.2f}")
         print(f"  │ Later-balance (start + profits): ${stats['later_balance']:.2f}")
         print(f"  │ Current balance: ${stats['current_balance']:.2f}")
-        print(f"  │ Total drawdown from later-balance: ${stats['total_drawdown']:.2f}")
+        print(f"  │ Total drawdown: ${stats['total_drawdown']:.2f}")
         
-        print(f"\n  📈 Trade Statistics (By Monetary Value):")
-        print(f"  │ Total trades: {stats['total_trades_count']}")
-        print(f"  │ Winning trades: {stats['winning_trades_count']} (${stats['total_wins_value']:.2f})")
-        print(f"  │ Losing trades: {stats['losing_trades_count']} (${stats['total_losses_value']:.2f})")
-        print(f"  │ Winrate (by value): {stats['winrate_percentage']:.2f}%")
-        print(f"  │ Lossrate (by value): {stats['lossrate_percentage']:.2f}%")
-        print(f"  │ Total profits: ${stats['total_profits_since_start']:.2f}")
-        print(f"  │ Total losses: ${stats['total_losses_since_start']:.2f}")
         
         print(f"\n  🎯 Staged Drawdown:")
         print(f"  │ Stage max risk: ${stats['stage_max_risk']:.2f}")
@@ -17511,7 +17583,6 @@ def martingale_system(inv_id=None):
         print(f"  │ Orders cancelled: {stats.get('safety_cancellations_count', 0)}")
         
         if stats.get('order_risk_validation'):
-            print(f"\n  🔒 Risk Validation:")
             for symbol, details in stats['order_risk_validation'].items():
                 status = "✓" if details.get('risk_check_passed') else ""
                 print(f"  │ {status} {symbol}: {details['safe_volume']:.2f} lots → ${details['safe_risk']:.2f} risk (limit: ${details['risk_limit']:.2f})")
@@ -17526,8 +17597,8 @@ def martingale_system(inv_id=None):
                 print(f"  │ {symbol} ({file_type}):")
                 if details.get('expected_loss', 0) > 0:
                     print(f"  │   ├─ Expected loss: ${details['expected_loss']:.2f}")
-                if details.get('highest_risk', 0) > 0:
-                    print(f"  │   ├─ Highest risk: ${details['highest_risk']:.2f}")
+                if details.get('initial_risk', 0) > 0:
+                    print(f"  │   ├─ initial risk: ${details['initial_risk']:.2f}")
                 if 'total_extra' in details:
                     print(f"  │   ├─ Total extra: ${details['total_extra']:.2f}")
                 if details.get('additional_volume', 0) > 0:

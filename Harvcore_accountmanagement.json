@@ -1,4 +1,10 @@
 {
+  "engine": [
+        {
+            "name": "HARVHUB",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\harvhub\\Harvcore_harvhub.py"
+        }
+  ],
   "Harvhub-deriv-PoundsUsd-1-2daily-evengale-trades": {
     "selected_risk_reward": [
       1

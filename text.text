@@ -1,0 +1,693 @@
+{
+  "2":     {
+      "id": "2",
+      "broker": "Deriv",
+      "email": "tolulopestandarddemo@gmail.com",
+      "fullname": "T.O",
+      "server": "Deriv-demo",
+      "login": "6170134",
+      "password": "@Ayomide12#",
+      "application_status": "approved",
+      "broker_balance": "0.00",
+      "balance_verification": "applied-for-verification",
+      "profitandloss": "-1215.29",
+      "passkey": "$2y$10$h0TjXC3R8mPqAKDG.nljfuKHf5KmDIg7oQlB0by68WWo7C/64OszS",
+      "email_verified": "0",
+      "submitted_at": "NULL",
+      "balance_display": "NULL",
+      "execution_start_date": "2026-06-19",
+      "analytics_history": "NULL",
+      "revenue_history": [
+        {
+          "id": 1783710697,
+          "execution_start_date": "2026-07-10",
+          "execution_end_date": "2026-08-09",
+          "starting_balance": 9426.6,
+          "current_balance": 9426.6,
+          "profit": 0,
+          "user_share": 0,
+          "server_share": 0,
+          "loyalties": "contract_cancelled",
+          "invested_with": "Grid_trade",
+          "cancelled_at": "2026-07-21 11:03:37",
+          "cancelled_by": "techknowdge12"
+        },
+        {
+          "id": 1783177116,
+          "execution_start_date": "2026-07-04",
+          "execution_end_date": "2026-08-03",
+          "starting_balance": 9426.6,
+          "current_balance": -1215.29,
+          "profit": -1215.29,
+          "user_share": 0,
+          "server_share": 0,
+          "loyalties": "loss_completed",
+          "invested_with": "Grid_trade"
+        }
+      ],
+      "loyalties": "contract_cancelled",
+      "contract_days_left": "NULL",
+      "paymentdetails": "NULL",
+      "message": "NULL",
+      "unauthorized_actions": "1",
+      "notifications": {
+        "1": {
+          "section": "AccountMode",
+          "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "2": {
+          "section": "InvestWith",
+          "message": "You invested in trader Grid_trade's market. Our AI will execute trades according to this trader's market configuration in your terminal.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "3": {
+          "section": "StartDate",
+          "message": "Your trading program is active as of July 10, 2026. Welcome aboard!",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "4": {
+          "section": "Autotrading",
+          "message": "Your auto-trading feature is active. Our AI will automatically execute trades according to your manager configuration.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "5": {
+          "section": "BypassRestriction",
+          "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
+          "time": "2026-07-19 17:50:56",
+          "type": "error",
+          "update": "new"
+        },
+        "6": {
+          "section": "ContractDuration",
+          "message": "Your trading contract duration is set to 30 days. Your contract will expire on August 09, 2026. You have 21 days remaining in your trading contract.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "7": {
+          "section": "TradingTerminal",
+          "message": "Your trading terminal has been configured and is ready for trades executions.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "8": {
+          "section": "BalanceCheck",
+          "message": "? BALANCE VERIFICATION: Your broker balance of $9426.60 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        }
+      },
+      "executions_notification": {
+        "1": {
+          "section": "AccountMode",
+          "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "2": {
+          "section": "InvestWith",
+          "message": "SERVER NOTIFICATION: Investor 2 invests with : Grid_trade",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "3": {
+          "section": "StartDate",
+          "message": "SERVER NOTIFICATION: Investor 2 enrollment confirmed. Start date: July 10, 2026",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "4": {
+          "section": "Autotrading",
+          "message": "SERVER NOTIFICATION: Investor 2 auto-trading is active and ready for automated execution.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "5": {
+          "section": "BypassRestriction",
+          "message": "SERVER NOTIFICATION: Investor 2 has bypass_restriction ENABLED.",
+          "time": "2026-07-19 17:50:56",
+          "type": "error",
+          "update": "new"
+        },
+        "6": {
+          "section": "ContractDuration",
+          "message": "SERVER NOTIFICATION: Investor 2 contract duration configured: 30 days, 21 days remaining.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "7": {
+          "section": "TradingTerminal",
+          "message": "SERVER NOTIFICATION: Investor 2 terminal path configured successfully.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        },
+        "8": {
+          "section": "BalanceCheck",
+          "message": "? BALANCE VERIFICATION: Your broker balance of $9426.60 meets the minimum requirement of $50.00. Trading operations can proceed normally.",
+          "time": "2026-07-19 17:50:56",
+          "type": "success",
+          "update": "new"
+        }
+      },
+      "server_decision": "NULL",
+      "accountmanagement": {
+        "selected_risk_reward": [
+          1
+        ],
+        "hedge_orders_risk_reward": [
+          1
+        ],
+        "timeframe": [
+          "15m"
+        ],
+        "bars": 3,
+        "symbols_dictionary": {
+          "xxxjpy": [],
+          "xxxusd": [
+            "BTCUSD"
+          ],
+          "xxxaud": [],
+          "xxxnzd": [],
+          "usdxxx": [],
+          "xxxchf": [],
+          "xxxcad": [],
+          "xxxbasket": [],
+          "indices": [],
+          "metals": [],
+          "energies": [],
+          "synthetics": []
+        },
+        "settings": {
+          "symbols_grid_strategy": true,
+          "enable_single_position_and_pending": false,
+          "manage_grid_levels_count": {
+            "count": 2
+          },
+          "skip_orders_close_to_position": true,
+          "cancel_orders_close_to_position": true,
+          "also_restrict_opposite_order_too_close_to_position": true,
+          "switch_invalid_to_instant_order": false,
+          "enable_order_type_conversion": false,
+          "restrictions_duration": {
+            "restrict_orders_in_time_range_of": [],
+            "restricted_days": [],
+            "timezone": "african"
+          },
+          "fetch_ohlc_data_and_directional_bias_for_investor": false,
+          "create_hedge_order": false,
+          "enable_latest_fallback_to_older_order": false,
+          "remove_orders_if_additonal_candles_is_more_than": 1,
+          "martingale_config": {
+            "enable_martingale": false,
+            "martingale_for_position_order_scale": true,
+            "martingale_loss_recovery_adder_percentage": "10%",
+            "pre_scaling": {
+              "martingale_pre_scaling": true,
+              "martingale_linear_scaling": true,
+              "martingale_pre_scale_highest_risk_adder": true,
+              "highest_risk_reduction_percentage": "100%",
+              "martingale_pre_scale_expected_loss_adder": true,
+              "expected_loss_reduction_percentage": "0%"
+            }
+          },
+          "enable_breakeven": true,
+          "breakeven_dictionary": [
+            {
+              "reward": 1,
+              "breakeven_at_reward": 0.1
+            },
+            {
+              "reward": 1.8,
+              "breakeven_at_reward": 0.5
+            },
+            {
+              "reward": 2,
+              "breakeven_at_reward": 0.5
+            },
+            {
+              "reward": 2.8,
+              "breakeven_at_reward": 1
+            },
+            {
+              "reward": 3,
+              "breakeven_at_reward": 1.5
+            },
+            {
+              "reward": 3.8,
+              "breakeven_at_reward": 1.7
+            },
+            {
+              "reward": 4,
+              "breakeven_at_reward": 2
+            },
+            {
+              "reward": 4.8,
+              "breakeven_at_reward": 2.2
+            },
+            {
+              "reward": 5,
+              "breakeven_at_reward": 2.5
+            },
+            {
+              "reward": 5.8,
+              "breakeven_at_reward": 2.8
+            },
+            {
+              "reward": 6,
+              "breakeven_at_reward": 3
+            },
+            {
+              "reward": 7,
+              "breakeven_at_reward": 3.5
+            },
+            {
+              "reward": 7.8,
+              "breakeven_at_reward": 3.8
+            },
+            {
+              "reward": 8,
+              "breakeven_at_reward": 4
+            },
+            {
+              "reward": 8.8,
+              "breakeven_at_reward": 4.2
+            },
+            {
+              "reward": 9,
+              "breakeven_at_reward": 4.5
+            },
+            {
+              "reward": 10,
+              "breakeven_at_reward": 5
+            }
+          ],
+          "restrict_order_from_timeframe": "none",
+          "default_price": false,
+          "risk_reward_correction": true,
+          "enable_martingale": false
+        },
+        "minimum_balance_risk_distance": {
+          "1-10000000.99_risk": 0.5
+        },
+        "maximum_balance_risk_distance": {
+          "1-10000000.99_risk": 5
+        },
+        "martingale_per_stage_drawdown_amount": {
+          "1-10000000.99_risk": 250
+        },
+        "account_balance_default_risk_management": {
+          "1-10000000.99_risk": 500
+        },
+        "account_balance_maximum_risk_management": {
+          "1-10000000.99_risk": 550
+        },
+        "grid_prices_setup": {
+          "grid_levels": 4,
+          "grid_multiplier": 500,
+          "bid_prices_order_type": "buy_stop",
+          "ask_prices_order_type": "sell_stop"
+        },
+        "requirements": {
+          "contract_duration": "30",
+          "min_broker_balance": "50.00",
+          "days_remaining": "21",
+          "contract_expired": false
+        },
+        "bypass_restriction": true,
+        "activate_autotrading": true,
+        "broker_balance": 9024.15,
+        "account_mode": "demo",
+        "demo_account": "1",
+        "configuration_title": "Harvhub-config-for-deriv-bitcoin_rr1"
+      },
+      "invested_with": "Grid_trade",
+      "enable_autotrading": "1",
+      "bypass_restriction": "1",
+      "demo_account": "1",
+      "account_mode": "demo",
+      "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 tolulopestandarddemo_at_gmail_dot_com 2 Deriv\\terminal64.exe"
+    },
+  "4":     {
+      "id": "4",
+      "broker": "Deriv",
+      "email": "taiwostandarddemo@gmail.com",
+      "fullname": "Arobieke Taiwo",
+      "server": "Deriv-demo",
+      "login": "201763239",
+      "password": "@Techknowdge12#",
+      "application_status": "approved",
+      "broker_balance": "0.00",
+      "balance_verification": "applied-for-verification",
+      "profitandloss": "-509.06",
+      "passkey": "$2y$10$wDMcXM553dMipQZqQKKmuOCc9JHkw5BEFzl5JSYneFfyKkTx7VBnW",
+      "email_verified": "0",
+      "submitted_at": "NULL",
+      "balance_display": "NULL",
+      "execution_start_date": "2026-06-19",
+      "analytics_history": "NULL",
+      "revenue_history": [
+        {
+          "id": 1783710637,
+          "execution_start_date": "2026-07-10",
+          "execution_end_date": "2026-08-09",
+          "starting_balance": 11535.51,
+          "current_balance": 11535.51,
+          "profit": 0,
+          "user_share": 0,
+          "server_share": 0,
+          "loyalties": "contract_cancelled",
+          "invested_with": "Grid_trade",
+          "cancelled_at": "2026-07-21 11:03:25",
+          "cancelled_by": "techknowdge12"
+        },
+        {
+          "id": 1783177081,
+          "execution_start_date": "2026-07-04",
+          "execution_end_date": "2026-08-03",
+          "starting_balance": 11535.51,
+          "current_balance": -509.06,
+          "profit": -509.06,
+          "user_share": 0,
+          "server_share": 0,
+          "loyalties": "loss_completed",
+          "invested_with": "Grid_trade"
+        }
+      ],
+      "loyalties": "contract_cancelled",
+      "contract_days_left": "NULL",
+      "paymentdetails": "NULL",
+      "message": "NULL",
+      "unauthorized_actions": {
+        "detected": false,
+        "bypass_active": true,
+        "autotrading_active": true,
+        "type": [],
+        "unauthorized_withdrawals": [],
+        "unauthorized_orders": [],
+        "unauthorized_positions": []
+      },
+      "notifications": {
+        "1": {
+          "section": "AccountMode",
+          "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "2": {
+          "section": "InvestWith",
+          "message": "You invested in trader Grid_trade's market. Our AI will execute trades according to this trader's market configuration in your terminal.",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "3": {
+          "section": "StartDate",
+          "message": "Your trading program is active as of 2026-07-10. Welcome aboard!",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "4": {
+          "section": "Autotrading",
+          "message": "Your auto-trading feature is active. Our AI will automatically execute trades according to your manager configuration.",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "5": {
+          "section": "BypassRestriction",
+          "message": "Your account has bypass restrictions enabled. Unauthorized actions will be automatically bypassed without triggering restrictions. Please monitor your account activity.",
+          "time": "2026-07-19 18:01:12",
+          "type": "error",
+          "update": "new"
+        },
+        "6": {
+          "section": "ContractDuration",
+          "message": "Your contract duration is not set. Trading will continue without a contract end date.",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "7": {
+          "section": "TradingTerminal",
+          "message": "Your trading terminal has been configured and is ready for trades executions.",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "8": {
+          "section": "BalanceDiscrepancy",
+          "message": "? BALANCE MISMATCH DETECTED: Your calculated balance ($11513.89) is higher than your MT5 actual balance ($8067.66) by $3446.23. This indicates that an unauthorized activity has been taken..",
+          "time": "2026-07-19 18:01:41",
+          "type": "error",
+          "update": "new"
+        }
+      },
+      "executions_notification": {
+        "1": {
+          "section": "AccountMode",
+          "message": "? ACCOUNT VERIFICATION: Trading will proceed in this account. ",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "2": {
+          "section": "InvestWith",
+          "message": "SERVER NOTIFICATION: Investor 4 invests with : Grid_trade",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "3": {
+          "section": "StartDate",
+          "message": "SERVER NOTIFICATION: Investor 4 enrollment confirmed. Start date: 2026-07-10",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "4": {
+          "section": "Autotrading",
+          "message": "SERVER NOTIFICATION: Investor 4 auto-trading is active and ready for automated execution.",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "5": {
+          "section": "BypassRestriction",
+          "message": "SERVER NOTIFICATION: Investor 4 has bypass_restriction ENABLED.",
+          "time": "2026-07-19 18:01:12",
+          "type": "error",
+          "update": "new"
+        },
+        "6": {
+          "section": "TradingTerminal",
+          "message": "SERVER NOTIFICATION: Investor 4 terminal path configured successfully.",
+          "time": "2026-07-19 18:01:12",
+          "type": "success",
+          "update": "new"
+        },
+        "7": {
+          "section": "BalanceDiscrepancy",
+          "message": "SERVER NOTIFICATION: Investor 4 balance discrepancy of $3446.23 detected. Calculated: $11513.89, MT5 Actual: $8067.66",
+          "time": "2026-07-19 18:01:41",
+          "type": "error",
+          "update": "new"
+        }
+      },
+      "server_decision": "NULL",
+      "accountmanagement": {
+        "selected_risk_reward": [
+          2
+        ],
+        "hedge_orders_risk_reward": [
+          2
+        ],
+        "timeframe": [
+          "15m"
+        ],
+        "bars": 3,
+        "symbols_dictionary": {
+          "xxxjpy": [],
+          "xxxusd": [
+            "BTCUSD"
+          ],
+          "xxxaud": [],
+          "xxxnzd": [],
+          "usdxxx": [],
+          "xxxchf": [],
+          "xxxcad": [],
+          "xxxbasket": [],
+          "indices": [],
+          "metals": [],
+          "energies": [],
+          "synthetics": []
+        },
+        "settings": {
+          "symbols_grid_strategy": true,
+          "enable_single_position_and_pending": false,
+          "manage_grid_levels_count": {
+            "count": 2
+          },
+          "skip_orders_close_to_position": true,
+          "cancel_orders_close_to_position": true,
+          "also_restrict_opposite_order_too_close_to_position": true,
+          "switch_invalid_to_instant_order": false,
+          "enable_order_type_conversion": false,
+          "restrictions_duration": {
+            "restrict_orders_in_time_range_of": [],
+            "restricted_days": [],
+            "timezone": "african"
+          },
+          "fetch_ohlc_data_and_directional_bias_for_investor": false,
+          "create_hedge_order": false,
+          "enable_latest_fallback_to_older_order": false,
+          "remove_orders_if_additonal_candles_is_more_than": 1,
+          "martingale_config": {
+            "enable_martingale": false,
+            "martingale_for_position_order_scale": true,
+            "martingale_loss_recovery_adder_percentage": "10%",
+            "pre_scaling": {
+              "martingale_pre_scaling": true,
+              "martingale_linear_scaling": true,
+              "martingale_pre_scale_highest_risk_adder": true,
+              "highest_risk_reduction_percentage": "100%",
+              "martingale_pre_scale_expected_loss_adder": true,
+              "expected_loss_reduction_percentage": "0%"
+            }
+          },
+          "enable_breakeven": true,
+          "breakeven_dictionary": [
+            {
+              "reward": 1,
+              "breakeven_at_reward": 0.1
+            },
+            {
+              "reward": 1.8,
+              "breakeven_at_reward": 0.5
+            },
+            {
+              "reward": 2,
+              "breakeven_at_reward": 0.5
+            },
+            {
+              "reward": 2.8,
+              "breakeven_at_reward": 1
+            },
+            {
+              "reward": 3,
+              "breakeven_at_reward": 1.5
+            },
+            {
+              "reward": 3.8,
+              "breakeven_at_reward": 1.7
+            },
+            {
+              "reward": 4,
+              "breakeven_at_reward": 2
+            },
+            {
+              "reward": 4.8,
+              "breakeven_at_reward": 2.2
+            },
+            {
+              "reward": 5,
+              "breakeven_at_reward": 2.5
+            },
+            {
+              "reward": 5.8,
+              "breakeven_at_reward": 2.8
+            },
+            {
+              "reward": 6,
+              "breakeven_at_reward": 3
+            },
+            {
+              "reward": 7,
+              "breakeven_at_reward": 3.5
+            },
+            {
+              "reward": 7.8,
+              "breakeven_at_reward": 3.8
+            },
+            {
+              "reward": 8,
+              "breakeven_at_reward": 4
+            },
+            {
+              "reward": 8.8,
+              "breakeven_at_reward": 4.2
+            },
+            {
+              "reward": 9,
+              "breakeven_at_reward": 4.5
+            },
+            {
+              "reward": 10,
+              "breakeven_at_reward": 5
+            }
+          ],
+          "restrict_order_from_timeframe": "none",
+          "default_price": false,
+          "risk_reward_correction": true,
+          "enable_martingale": false
+        },
+        "minimum_balance_risk_distance": {
+          "1-10000000.99_risk": 0.5
+        },
+        "maximum_balance_risk_distance": {
+          "1-10000000.99_risk": 5
+        },
+        "martingale_per_stage_drawdown_amount": {
+          "1-10000000.99_risk": 250
+        },
+        "account_balance_default_risk_management": {
+          "1-10000000.99_risk": 500
+        },
+        "account_balance_maximum_risk_management": {
+          "1-10000000.99_risk": 550
+        },
+        "grid_prices_setup": {
+          "grid_levels": 4,
+          "grid_multiplier": 500,
+          "bid_prices_order_type": "buy_stop",
+          "ask_prices_order_type": "sell_stop"
+        },
+        "requirements": {
+          "contract_duration": "30",
+          "min_broker_balance": "50.00",
+          "days_remaining": "21",
+          "contract_expired": false
+        },
+        "bypass_restriction": true,
+        "activate_autotrading": true,
+        "broker_balance": 9024.15,
+        "account_mode": "demo",
+        "demo_account": "1",
+        "configuration_title": "Harvhub-config-for-deriv-bitcoin_rr2"
+      },
+      "invested_with": "Grid_trade",
+      "enable_autotrading": "1",
+      "bypass_restriction": "1",
+      "demo_account": "1",
+      "account_mode": "demo",
+      "Terminal_path": "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 taiwostandarddemo_at_gmail_dot_com 4 Deriv\\terminal64.exe"
+    }
+}
