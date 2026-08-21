@@ -13196,8 +13196,7 @@ def convert_grid_prices_to_limit_orders(inv_id=None):
     return stats
 # ---       ---#
 
- 
-#RECENT HIGHEST BALANCE 
+# RECENT HIGHEST BALANCE
 def recent_highest_balance_target(inv_id=None):
     """
     Function: Manages recent_highest_balance tracking for investors.
@@ -13212,12 +13211,17 @@ def recent_highest_balance_target(inv_id=None):
        a. If not, update with broker_balance (date unchanged, alarm OFF)
        b. Save to ALL files
     3. Get current MT5 balance
-    4. If current MT5 balance > stored recent_highest_balance:
+    4. Find most recent profitable day from MT5 history
+    5. Update recent_highest_balance_last_update to most recent profitable day date
+    6. If current MT5 balance > stored recent_highest_balance:
        a. Get daily target risk from martingale_config.daily_target_config.daily_target
        b. Check today's profit from MT5 history
-       c. If today's profit >= daily target risk → Record new high, set date to TODAY, ALARM ON
-       d. If today's profit < daily target risk → Record new high ONLY, DON'T update date, ALARM OFF
-    5. If current MT5 balance <= stored high → No change, ALARM OFF
+       c. If today's profit >= daily target risk → Record new high, ALARM ON
+       d. If today's profit < daily target risk → Record new high ONLY, ALARM OFF
+    7. If current MT5 balance >= stored recent_highest_balance AND last update date == today:
+       a. Check if no shortage and no owed debts
+       b. If conditions met → ALARM ON
+    8. Alarm ON only if: no shortage, no owed debts, AND last update date == today
     
     Uses activities.json as source of truth but saves to ALL files
     
@@ -13408,6 +13412,59 @@ def recent_highest_balance_target(inv_id=None):
         except Exception as e:
             print(f"  ❌ Error getting today's profit from MT5 history: {e}")
             return 0.0
+    
+    def get_most_recent_profitable_day(execution_start_date):
+        """
+        Find the most recent profitable day from MT5 history.
+        Returns: (date_string, total_profit) or (None, 0)
+        """
+        try:
+            if not mt5.terminal_info():
+                return None, 0
+            
+            # Parse execution start date
+            if execution_start_date:
+                try:
+                    start_date = datetime.strptime(execution_start_date, "%Y-%m-%d")
+                except:
+                    start_date = datetime.now() - timedelta(days=30)  # Default to 30 days if parse fails
+            else:
+                start_date = datetime.now() - timedelta(days=30)  # Default to 30 days if not available
+            
+            # Get all deals from start_date to now
+            deals = mt5.history_deals_get(start_date, datetime.now())
+            
+            if deals is None or len(deals) == 0:
+                return None, 0
+            
+            # Group by date and calculate daily profit
+            daily_profits = {}
+            for deal in deals:
+                if deal.profit is None:
+                    continue
+                
+                # Get the date of the deal
+                deal_time = datetime.fromtimestamp(deal.time)
+                deal_date = deal_time.strftime("%Y-%m-%d")
+                
+                if deal_date not in daily_profits:
+                    daily_profits[deal_date] = 0.0
+                daily_profits[deal_date] += deal.profit
+            
+            # Sort dates and find most recent profitable day (profit > 0)
+            sorted_dates = sorted(daily_profits.keys(), reverse=True)
+            
+            for date_str in sorted_dates:
+                if daily_profits[date_str] > 0:
+                    # Check if this date is after execution start date
+                    if date_str >= execution_start_date if execution_start_date else True:
+                        return date_str, daily_profits[date_str]
+            
+            return None, 0
+            
+        except Exception as e:
+            print(f"  ❌ Error finding most recent profitable day: {e}")
+            return None, 0
     
     def get_daily_target_config_from_all_fetched(investor_id):
         """
@@ -14196,6 +14253,35 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f} (Cumulative Owing + Shortage)")
         
         # ============================================================
+        # NEW: Find most recent profitable day and print it
+        # ============================================================
+        print(f"\n  📊 MOST RECENT PROFITABLE DAY")
+        print(f"  ─────────────────────────────")
+        most_recent_profit_day, most_recent_profit_amount = get_most_recent_profitable_day(execution_start_date)
+        
+        if most_recent_profit_day:
+            # Format the day name
+            profit_date = datetime.strptime(most_recent_profit_day, "%Y-%m-%d")
+            day_name = profit_date.strftime("%A")
+            
+            # Check if it's today
+            if most_recent_profit_day == today_str:
+                print(f"  📈 Most Recent Profitable Day: TODAY ({day_name})")
+            else:
+                print(f"  📈 Most Recent Profitable Day: {most_recent_profit_day} ({day_name})")
+            print(f"  💰 Profit: ${most_recent_profit_amount:.2f}")
+            
+            # Update the last update date to the most recent profitable day
+            if most_recent_profit_day != existing_last_update:
+                print(f"  🔄 Updating last_update_date from {existing_last_update} to {most_recent_profit_day}")
+                # Update the date in all files without changing the balance
+                sync_all_files(inv_id, existing_recent, most_recent_profit_day, None, None, None)
+                existing_last_update = most_recent_profit_day
+                has_updates = True
+        else:
+            print(f"  ℹ️ No profitable days found since execution start")
+        
+        # ============================================================
         # GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
         # ============================================================
         if broker_balance is not None and existing_recent < broker_balance:
@@ -14297,8 +14383,16 @@ def recent_highest_balance_target(inv_id=None):
             stats["investors_updated"] += 1
             stats["new_high_recorded_only"] += 1
             
-            if profit_met_risk_threshold and alarm_threshold > 0:
-                # BOTH conditions met: Record high, date = TODAY, ALARM ON
+            # Check if alarm should be triggered
+            # Alarm triggers ONLY if: no shortage, no owed debts, AND last update date == today
+            has_shortage = shortage > 0 if include_missed_days else False
+            has_owed_debts = days_owing_target > 0 if include_missed_days else False
+            is_today = existing_last_update == today_str
+            
+            can_trigger_alarm = (not has_shortage) and (not has_owed_debts) and is_today and profit_met_risk_threshold
+            
+            if can_trigger_alarm:
+                # ALL conditions met: Record high, ALARM ON
                 action = "new_high"
                 stats["new_high_alerts"] += 1
                 update_date = today_str
@@ -14322,7 +14416,9 @@ def recent_highest_balance_target(inv_id=None):
                 print(f"  ───────────────────")
                 print(f"  ✅ New high recorded: ${current_balance:.2f}")
                 print(f"  📅 Date set to: {today_str} (TODAY)")
-                print(f"  ✅ Today's profit (${today_profit:.2f}) >= {threshold_desc}")
+                print(f"  ✅ No shortage: {not has_shortage}")
+                print(f"  ✅ No owed debts: {not has_owed_debts}")
+                print(f"  ✅ Last update is today: {is_today}")
                 print(f"  🚨 TRADING SUSPENDED!")
                 
                 message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Today's Profit: ${today_profit:.2f} >= Threshold: ${alarm_threshold:.2f}. TRADING SUSPENDED!"
@@ -14330,9 +14426,23 @@ def recent_highest_balance_target(inv_id=None):
                 msg_type = 'danger'
                 
             else:
-                # New high BUT today's profit < risk: Record only, DON'T update date
+                # New high BUT conditions not met: Record only, DON'T trigger alarm
                 action = "new_high_recorded_only"
+                # Keep the last update date as the most recent profitable day
                 update_date = existing_last_update if existing_last_update else yesterday_str
+                
+                # Determine why alarm was blocked
+                alarm_blocked_reasons = []
+                if has_shortage:
+                    alarm_blocked_reasons.append(f"Shortage exists (${shortage:.2f})")
+                if has_owed_debts:
+                    alarm_blocked_reasons.append(f"Owed debts exist ({days_owing_target} days)")
+                if not is_today:
+                    alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
+                if not profit_met_risk_threshold:
+                    alarm_blocked_reasons.append(f"Today's profit (${today_profit:.2f}) < {threshold_desc}")
+                
+                alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
                 
                 recent_highest_alert = {
                     'is_triggered': False,
@@ -14345,19 +14455,27 @@ def recent_highest_balance_target(inv_id=None):
                     'last_update_date': update_date,
                     'today_profit': today_profit,
                     'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': False,
-                    'alarm_blocked_reason': f"Today's profit (${today_profit:.2f}) < {threshold_desc}"
+                    'profit_met_risk_threshold': profit_met_risk_threshold,
+                    'alarm_blocked_reason': alarm_blocked_reason
                 }
                 
                 print(f"\n  🟡 NEW HIGH RECORDED ONLY - Alarm BLOCKED")
                 print(f"  ──────────────────────────────────────────")
                 print(f"  ✅ New high recorded: ${current_balance:.2f}")
                 print(f"  📅 Date NOT updated - kept as: {update_date}")
-                print(f"  ⚠️ Today's profit (${today_profit:.2f}) < {threshold_desc}")
+                print(f"  ⚠️ Alarm conditions not met:")
+                if has_shortage:
+                    print(f"     • Shortage exists: ${shortage:.2f}")
+                if has_owed_debts:
+                    print(f"     • Owed debts exist: {days_owing_target} days")
+                if not is_today:
+                    print(f"     • Last update date ({existing_last_update}) is not today")
+                if not profit_met_risk_threshold:
+                    print(f"     • Today's profit (${today_profit:.2f}) < {threshold_desc}")
                 print(f"  🔇 Alarm OFF - Trading continues")
                 
-                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM NOT TRIGGERED: Today's Profit (${today_profit:.2f}) < {threshold_desc}. Trading continues."
-                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but today's profit below threshold - Trading continues"
+                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM BLOCKED: {alarm_blocked_reason}. Trading continues."
+                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but alarm blocked - Trading continues"
                 msg_type = 'info'
             
             # Sync to ALL files with new balance and notifications
@@ -14374,9 +14492,13 @@ def recent_highest_balance_target(inv_id=None):
                 "today_profit": today_profit,
                 "daily_target_risk": daily_target_risk,
                 "profit_met_risk_threshold": profit_met_risk_threshold,
-                "alarm_triggered": profit_met_risk_threshold,
+                "alarm_triggered": can_trigger_alarm,
                 "include_missed_days": include_missed_days,
-                "total_needed": total_needed if include_missed_days else None
+                "total_needed": total_needed if include_missed_days else None,
+                "has_shortage": has_shortage,
+                "has_owed_debts": has_owed_debts,
+                "is_today": is_today,
+                "alarm_blocked_reason": alarm_blocked_reason if not can_trigger_alarm else None
             })
             
             has_updates = True
@@ -14384,26 +14506,163 @@ def recent_highest_balance_target(inv_id=None):
             continue
         
         # ============================================================
-        # CASE 3: Current balance <= stored high - No change
+        # CASE 3: Current balance >= stored high (including equal) 
+        # Check if alarm should be triggered (no shortage, no debts, today)
+        # ============================================================
+        elif current_balance >= existing_recent:
+            print(f"\n  📊 CURRENT BALANCE >= STORED HIGH")
+            print(f"  ──────────────────────────────────")
+            print(f"  📅 Last Updated: {existing_last_update}")
+            print(f"  📊 Stored High: ${existing_recent:.2f}")
+            print(f"  📊 Current Balance: ${current_balance:.2f}")
+            
+            # Get today's profit for info
+            today_profit = get_today_profit_from_history()
+            print(f"  💰 Today's Profit: ${today_profit:.2f}")
+            
+            # Check conditions for alarm
+            has_shortage = shortage > 0 if include_missed_days else False
+            has_owed_debts = days_owing_target > 0 if include_missed_days else False
+            is_today = existing_last_update == today_str
+            
+            print(f"\n  📋 ALARM CONDITIONS CHECK:")
+            print(f"  ──────────────────────────")
+            print(f"  • No Shortage: {'✅' if not has_shortage else '❌'} (Shortage: ${shortage:.2f})")
+            print(f"  • No Owed Debts: {'✅' if not has_owed_debts else '❌'} (Owed: {days_owing_target} days)")
+            print(f"  • Last Update is Today: {'✅' if is_today else '❌'} ({existing_last_update} vs {today_str})")
+            
+            can_trigger_alarm = (not has_shortage) and (not has_owed_debts) and is_today
+            
+            if can_trigger_alarm:
+                # ALL conditions met: ALARM ON
+                action = "alarm_triggered_equal_balance"
+                stats["new_high_alerts"] += 1
+                stats["investors_updated"] += 1
+                
+                recent_highest_alert = {
+                    'is_triggered': True,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': 0,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'alarm_triggered_equal_balance',
+                    'last_update_date': existing_last_update,
+                    'today_profit': today_profit,
+                    'daily_target_risk': daily_target_risk,
+                    'profit_met_risk_threshold': True,
+                    'alarm_blocked_reason': None
+                }
+                
+                print(f"\n  🚨 ALARM ACTIVATED!")
+                print(f"  ───────────────────")
+                print(f"  ✅ Current balance (${current_balance:.2f}) >= stored high (${existing_recent:.2f})")
+                print(f"  ✅ No shortage: {not has_shortage}")
+                print(f"  ✅ No owed debts: {not has_owed_debts}")
+                print(f"  ✅ Last update is today: {is_today}")
+                print(f"  🚨 TRADING SUSPENDED!")
+                
+                message = f"🚨 DAILY TARGET MET - Balance ${current_balance:.2f} at stored high. Today's Profit: ${today_profit:.2f}. TRADING SUSPENDED!"
+                exec_message = f"🚨 SERVER ALERT: {inv_id} daily target met at ${current_balance:.2f} - Trading SUSPENDED"
+                msg_type = 'danger'
+                
+                # Sync to ALL files with notification
+                sync_all_files(inv_id, current_balance, existing_last_update, message, exec_message, msg_type)
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": action,
+                    "old_balance": existing_recent,
+                    "new_balance": current_balance,
+                    "difference": 0,
+                    "timestamp": timestamp,
+                    "update_date": existing_last_update,
+                    "today_profit": today_profit,
+                    "daily_target_risk": daily_target_risk,
+                    "profit_met_risk_threshold": True,
+                    "alarm_triggered": True,
+                    "include_missed_days": include_missed_days,
+                    "has_shortage": has_shortage,
+                    "has_owed_debts": has_owed_debts,
+                    "is_today": is_today,
+                    "alarm_blocked_reason": None
+                })
+                
+                has_updates = True
+                stats["investors_checked"] += 1
+                continue
+            
+            else:
+                # Conditions not met - Alarm OFF
+                alarm_blocked_reasons = []
+                if has_shortage:
+                    alarm_blocked_reasons.append(f"Shortage exists (${shortage:.2f})")
+                if has_owed_debts:
+                    alarm_blocked_reasons.append(f"Owed debts exist ({days_owing_target} days)")
+                if not is_today:
+                    alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
+                
+                alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
+                
+                recent_highest_alert = {
+                    'is_triggered': False,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': 0,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'alarm_blocked_equal_balance',
+                    'last_update_date': existing_last_update,
+                    'today_profit': today_profit,
+                    'daily_target_risk': daily_target_risk,
+                    'profit_met_risk_threshold': False,
+                    'alarm_blocked_reason': alarm_blocked_reason
+                }
+                
+                print(f"\n  🟡 ALARM BLOCKED - Conditions not met")
+                print(f"  ─────────────────────────────────────")
+                print(f"  ⚠️ Alarm conditions not met:")
+                if has_shortage:
+                    print(f"     • Shortage exists: ${shortage:.2f}")
+                if has_owed_debts:
+                    print(f"     • Owed debts exist: {days_owing_target} days")
+                if not is_today:
+                    print(f"     • Last update date ({existing_last_update}) is not today")
+                print(f"  🔇 Alarm OFF - Trading continues")
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": "alarm_blocked_equal_balance",
+                    "old_balance": existing_recent,
+                    "new_balance": current_balance,
+                    "difference": 0,
+                    "timestamp": timestamp,
+                    "update_date": existing_last_update,
+                    "today_profit": today_profit,
+                    "daily_target_risk": daily_target_risk,
+                    "profit_met_risk_threshold": False,
+                    "alarm_triggered": False,
+                    "include_missed_days": include_missed_days,
+                    "has_shortage": has_shortage,
+                    "has_owed_debts": has_owed_debts,
+                    "is_today": is_today,
+                    "alarm_blocked_reason": alarm_blocked_reason
+                })
+                
+                stats["investors_checked"] += 1
+                stats["investors_skipped"] += 1
+                continue
+        
+        # ============================================================
+        # CASE 4: Current balance < stored high - No alarm
         # ============================================================
         else:
-            # Calculate expected amount to trigger alarm
-            # Using current balance + total needed (cumulative owing + shortage)
-            if include_missed_days and daily_target_risk is not None:
-                expected_to_trigger = current_balance + total_needed
-                if shortage > 0:
-                    expected_desc = f"Current Balance + Cumulative Owing ({days_owing_target} × ${daily_target_risk:.2f}) + Shortage (${shortage:.2f})"
-                else:
-                    expected_desc = f"Current Balance + Cumulative Owing ({days_owing_target} × ${daily_target_risk:.2f})"
-            else:
-                expected_to_trigger = existing_recent + (daily_target_risk if daily_target_risk else 0)
-                expected_desc = f"Stored High + Today's Daily Target (${daily_target_risk if daily_target_risk else 0:.2f})"
-            
             print(f"\n  📝 RECENT HIGHEST BALANCE EXISTS - Status Check")
             print(f"  ────────────────────────────────────────────────")
             print(f"  📅 Last Updated: {existing_last_update}")
             print(f"  📊 Stored High: ${existing_recent:.2f}")
             print(f"  📊 Current Balance: ${current_balance:.2f}")
+            print(f"  📉 Current balance is below stored high - No alarm")
             
             if daily_target_risk is not None:
                 if include_missed_days:
@@ -14411,28 +14670,12 @@ def recent_highest_balance_target(inv_id=None):
                     print(f"  📋 Include Missed Days: Enabled")
                     if shortage > 0:
                         print(f"  📉 Shortage from Stored High: ${shortage:.2f}")
-                    print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f} (Cumulative Owing + Shortage)")
-                    print(f"  📈 Expected amount to trigger alarm: ${expected_to_trigger:.2f} ({expected_desc})")
-                    print(f"  📊 Need ${total_needed:.2f} more to trigger alarm")
+                    print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f}")
+                    print(f"  📊 Need ${existing_recent - current_balance:.2f} more to reach stored high")
                 else:
                     print(f"  🎯 Daily Target in Current Balance Range: ${daily_target_risk:.2f}")
                     print(f"  📋 Include Missed Days: Disabled")
-                    print(f"  📈 Expected amount to exceed stored high: ${expected_to_trigger:.2f} ({expected_desc})")
-                    if current_balance < existing_recent:
-                        shortage = existing_recent - current_balance
-                        print(f"  📉 Shortage: ${shortage:.2f}")
-                        print(f"  📊 Need ${existing_recent - current_balance:.2f} more to reach stored high")
-                    else:
-                        print(f"  ℹ️ Balance unchanged at stored high: ${current_balance:.2f}")
-                    print(f"  📊 Need ${expected_to_trigger - current_balance:.2f} more to trigger alarm")
-            else:
-                print(f"  🎯 Daily Target in Current Balance Range: Not Available")
-                if current_balance < existing_recent:
-                    shortage = existing_recent - current_balance
-                    print(f"  📉 Shortage: ${shortage:.2f}")
                     print(f"  📊 Need ${existing_recent - current_balance:.2f} more to reach stored high")
-                else:
-                    print(f"  ℹ️ Balance unchanged at stored high: ${current_balance:.2f}")
             
             print(f"\n  🔇 Alarm OFF - Trading allowed")
             stats["investors_skipped"] += 1
@@ -14442,7 +14685,7 @@ def recent_highest_balance_target(inv_id=None):
                 'investor_id': inv_id,
                 'old_balance': existing_recent,
                 'new_balance': current_balance,
-                'difference': existing_recent - current_balance if current_balance < existing_recent else 0,
+                'difference': existing_recent - current_balance,
                 'timestamp': datetime.now().strftime('%I:%M:%S %p'),
                 'action': 'no_change',
                 'last_update_date': existing_last_update,
@@ -14457,13 +14700,11 @@ def recent_highest_balance_target(inv_id=None):
                 "action": "no_change",
                 "stored_high": existing_recent,
                 "current_balance": current_balance,
-                "difference": existing_recent - current_balance if current_balance < existing_recent else 0,
+                "difference": existing_recent - current_balance,
                 "timestamp": timestamp,
                 "update_date": existing_last_update,
                 "daily_target_risk": daily_target_risk,
-                "expected_to_trigger": expected_to_trigger,
                 "include_missed_days": include_missed_days,
-                "total_needed": total_needed if include_missed_days else None,
                 "shortage": shortage if include_missed_days else None,
                 "days_owing_target": days_owing_target if include_missed_days else None
             })
@@ -14529,7 +14770,7 @@ def recent_highest_balance_target(inv_id=None):
     print(f"  Broker balance corrections: {stats['broker_balance_corrections']}")
     print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
     print(f"  New high alerts triggered: {stats['new_high_alerts']}")
-    print(f"  Alarms blocked (profit < threshold): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
+    print(f"  Alarms blocked (conditions not met): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
     print(f"  Investors updated: {stats['investors_updated']}")
     print(f"  Investors skipped: {stats['investors_skipped']}")
     print(f"  activities.json updated: {stats['activities_updated']}")
@@ -14538,15 +14779,15 @@ def recent_highest_balance_target(inv_id=None):
     if stats['new_high_alerts'] > 0:
         print(f"\n  🚨 ALARM ACTIVE: {stats['new_high_alerts']} investor(s)")
         for detail in stats['details']:
-            if detail.get('action') == 'new_high':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) 🔴")
+            if detail.get('alarm_triggered'):
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} 🔴")
     
     blocked = stats['new_high_recorded_only'] - stats['new_high_alerts']
     if blocked > 0:
-        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (profit < threshold)")
+        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (conditions not met)")
         for detail in stats['details']:
-            if detail.get('action') == 'new_high_recorded_only':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Today's Profit ${detail['today_profit']:.2f} < Threshold ${detail.get('total_needed', detail.get('daily_target_risk', 0)):.2f} 🟡")
+            if detail.get('action') in ['new_high_recorded_only', 'alarm_blocked_equal_balance'] and not detail.get('alarm_triggered'):
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} - Blocked: {detail.get('alarm_blocked_reason', 'Unknown')} 🟡")
     
     if stats['broker_balance_corrections'] > 0:
         print(f"\n  🔧 BROKER BALANCE CORRECTIONS: {stats['broker_balance_corrections']} investor(s)")
@@ -14566,7 +14807,7 @@ def recent_highest_balance_target(inv_id=None):
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
     
     return stats
-#==================#
+# ==============
 # MARTINGALE SYSTEM#
 def martingale_system(inv_id=None):
     print(f"\n{'='*10} 🎰 MARTINGALE STAGED DRAWDOWN SYSTEM {'='*10}")
