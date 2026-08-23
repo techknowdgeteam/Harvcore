@@ -3371,29 +3371,49 @@ def move_fetched_investors():
     default_contract_duration = None
     default_min_broker_balance = None
     
+    # CRITICAL: contract_duration MUST come from default_accountmanagement.json
     if os.path.exists(DEFAULT_ACCOUNTMANAGEMENT):
         try:
             default_acct_mgmt = safe_json_load(DEFAULT_ACCOUNTMANAGEMENT, {})
             default_requirements = default_acct_mgmt.get('requirements', {})
-            default_contract_duration = default_requirements.get('contract_duration')
-            default_min_broker_balance = default_requirements.get('min_broker_balance')
             
+            # Get contract_duration from default - THIS IS MANDATORY
+            default_contract_duration = default_requirements.get('contract_duration')
             if default_contract_duration is not None:
                 try:
                     default_contract_duration = int(default_contract_duration)
                 except:
                     default_contract_duration = None
+                    print(f"   ⚠️ Invalid contract_duration in default_accountmanagement.json - must be integer")
+            else:
+                print(f"   ⚠️ contract_duration not found in default_accountmanagement.json - this is REQUIRED")
+            
+            # Get min_broker_balance from default - this is optional
+            default_min_broker_balance = default_requirements.get('min_broker_balance')
             if default_min_broker_balance is not None:
                 try:
                     default_min_broker_balance = float(default_min_broker_balance)
                 except:
                     default_min_broker_balance = None
                     
-            print(f"   📋 Loaded defaults: contract_duration={default_contract_duration}, min_broker_balance={default_min_broker_balance}")
+            print(f"   📋 Loaded defaults: contract_duration={default_contract_duration} (REQUIRED), min_broker_balance={default_min_broker_balance} (OPTIONAL)")
         except Exception as e:
-            print(f"Error loading default_accountmanagement.json: {e}")
+            print(f"   ❌ Error loading default_accountmanagement.json: {e}")
+            return False
     else:
-        print(f"Default accountmanagement file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+        print(f"   ❌ CRITICAL ERROR: Default accountmanagement file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
+        print(f"   ⚠️ contract_duration must be provided in default_accountmanagement.json")
+        return False
+    
+    # Validate that contract_duration exists - this is MANDATORY
+    if default_contract_duration is None:
+        print(f"   ❌ CRITICAL ERROR: contract_duration not found in default_accountmanagement.json")
+        print(f"   ⚠️ Please ensure 'requirements.contract_duration' exists in {DEFAULT_ACCOUNTMANAGEMENT}")
+        return False
+    
+    if default_contract_duration <= 0:
+        print(f"   ❌ CRITICAL ERROR: contract_duration must be greater than 0, got: {default_contract_duration}")
+        return False
     
     # Default activities template
     DEFAULT_ACTIVITIES = {
@@ -3425,16 +3445,16 @@ def move_fetched_investors():
     
     # Check if verified investors file exists
     if not os.path.exists(FETCHED_INVESTORS):
-        print(f" File not found: {FETCHED_INVESTORS}")
+        print(f" ❌ File not found: {FETCHED_INVESTORS}")
         return False
     
     try:
         verified_data = safe_json_load(FETCHED_INVESTORS, {})
         if not verified_data:
-            print(f" No data found in {FETCHED_INVESTORS}")
+            print(f" ❌ No data found in {FETCHED_INVESTORS}")
             return False
     except Exception as e:
-        print(f" Error loading fetched_investors.json: {e}")
+        print(f" ❌ Error loading fetched_investors.json: {e}")
         traceback.print_exc()
         return False
     
@@ -3485,6 +3505,7 @@ def move_fetched_investors():
     
     # FIRST PASS: Check all investors for expiration BEFORE adding to investors.json
     print(f"\n   🔍 Pre-screening investors for contract expiration...")
+    print(f"   📋 Using contract_duration from default: {default_contract_duration} days")
     
     for inv_id, investor_data in verified_data.items():
         # Check if investor has required fields
@@ -3516,20 +3537,8 @@ def move_fetched_investors():
             print(f"   ⏭️ Investor {inv_id} is incomplete - will be handled later")
             continue
         
-        # Check contract expiration
-        contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
-        contract_duration_val = None
-        
-        if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
-            try:
-                contract_days = int(contract_days_raw)
-                if contract_days > 0:
-                    contract_duration_val = contract_days
-            except:
-                pass
-        
-        if contract_duration_val is None and default_contract_duration is not None:
-            contract_duration_val = default_contract_duration
+        # Check contract expiration - ALWAYS use default_contract_duration, ignore investor's value
+        contract_duration_val = default_contract_duration
         
         # Check if expired
         if execution_start and contract_duration_val and contract_duration_val > 0:
@@ -3824,6 +3833,7 @@ def move_fetched_investors():
     # STEP 3: PROCESS COMPLETE INVESTORS (NON-EXPIRED)
     # ============================================
     print(f"\n[3/4] Processing complete investors...")
+    print(f"   📋 Using contract_duration from default: {default_contract_duration} days")
     
     processed_summary = []
     autotrading_disabled_investors = []
@@ -3856,8 +3866,8 @@ def move_fetched_investors():
             execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
             print(f"      execution_start: '{execution_start}'")
             
-            contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
-            print(f"      contract_days_raw: '{contract_days_raw}'")
+            # IGNORE investor's contract_days_left - ALWAYS use default
+            print(f"      ⚠️ Using contract_duration from default: {default_contract_duration} days (ignoring investor's value)")
             
             Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
             print(f"      Terminal_path: '{Terminal_path[:50]}...' if Terminal_path else 'MISSING'")
@@ -3917,21 +3927,11 @@ def move_fetched_investors():
                     final_bypass = False
             print(f"      final_bypass: {final_bypass}")
             
-            # Handle contract_duration
-            contract_duration_val = None
-            if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
-                try:
-                    contract_days = int(contract_days_raw)
-                    if contract_days > 0:
-                        contract_duration_val = contract_days
-                except Exception as e:
-                    print(f"      ⚠️ Could not parse contract_days '{contract_days_raw}': {e}")
+            # ALWAYS use default_contract_duration - IGNORE investor's value
+            contract_duration_val = default_contract_duration
+            print(f"      contract_duration: {contract_duration_val} (from default)")
             
-            if contract_duration_val is None and default_contract_duration is not None:
-                contract_duration_val = default_contract_duration
-                print(f"      Using default contract_duration: {contract_duration_val}")
-            
-            # Check contract expiration (should not be expired here, but double-check)
+            # Check contract expiration
             contract_expired = False
             days_remaining = None
             expiry_date_str = None
@@ -3951,7 +3951,7 @@ def move_fetched_investors():
                 else:
                     print(f"      ✅ Contract active: {days_remaining} days remaining")
             else:
-                print(f"      ℹ️ No contract duration set - skipping expiration check")
+                print(f"      ℹ️ No execution start date - skipping expiration check")
             
             # Handle min_broker_balance
             min_broker_balance = None
@@ -4489,6 +4489,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
     8. Calculates current balance = starting_balance + total_profit_from_closed_trades
     9. Updates notifications for unauthorized actions, balance discrepancies, and status changes
     10. Updates FETCHED_INVESTORS and UPDATED_INVESTORS with split authorized/unauthorized P&L
+    11. Creates daily balance log tracking day-by-day balance changes with unauthorized withdrawals
     
     Args:
         inv_id: Optional specific investor ID to process. If None, processes all investors.
@@ -4612,6 +4613,176 @@ def check_and_record_unauthorized_actions(inv_id=None):
         }
         return True
     
+    # Helper function to group trades by day
+    def group_trades_by_day(trades_list):
+        """Group trades by date (YYYY-MM-DD) and calculate daily P&L with detailed trade info"""
+        daily_groups = {}
+        for trade in trades_list:
+            try:
+                # Extract date from time string
+                time_str = trade.get('time', '')
+                if time_str:
+                    # Parse time string
+                    trade_date = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                    date_key = trade_date.strftime("%Y-%m-%d")
+                    
+                    if date_key not in daily_groups:
+                        daily_groups[date_key] = {
+                            'trades': [],
+                            'total_pnl': 0.0,
+                            'count': 0,
+                            'trade_details': []
+                        }
+                    
+                    daily_groups[date_key]['trades'].append(trade)
+                    daily_groups[date_key]['total_pnl'] += trade.get('profit', 0.0)
+                    daily_groups[date_key]['count'] += 1
+                    
+                    # Store detailed trade info for unauthorized trades
+                    if not trade.get('is_authorized', True):
+                        daily_groups[date_key]['trade_details'].append({
+                            'symbol': trade.get('symbol', ''),
+                            'pnl': trade.get('profit', 0.0),
+                            'unauthorized_magic_number': trade.get('magic', ''),
+                            'authorized_magic_number': trade.get('authorized_magic', ''),
+                            'ticket': trade.get('ticket', '')
+                        })
+            except Exception as e:
+                print(f"│     ⚠️ Error grouping trade by day: {e}")
+                continue
+        
+        return daily_groups
+    
+    # ============================================================
+    # LOAD ALL FILES FIRST (same pattern as recent_highest_balance_target)
+    # ============================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR FILES")
+    print("─"*80)
+    
+    fetched_data = {}
+    updated_data = {}
+    all_fetched_data = {}
+    all_updated_data = {}
+    
+    if os.path.exists(FETCHED_INVESTORS):
+        try:
+            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                fetched_data = json.load(f)
+            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading FETCHED_INVESTORS: {e}")
+    
+    if os.path.exists(UPDATED_INVESTORS):
+        try:
+            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                updated_data = json.load(f)
+            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading UPDATED_INVESTORS: {e}")
+    
+    if os.path.exists(ALL_FETCHED_INVESTORS):
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
+    
+    if os.path.exists(ALL_UPDATED_INVESTORS):
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_updated_data = json.load(f)
+            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ Error loading ALL_UPDATED_INVESTORS: {e}")
+    
+    print("─"*80)
+    
+    # ============================================================
+    # SAFE MERGE HELPER (from recent_highest_balance_target)
+    # ============================================================
+    def safe_merge_dict(existing, updates):
+        """Safely merge updates into existing dict without overwriting other fields"""
+        if not isinstance(existing, dict):
+            return updates.copy() if isinstance(updates, dict) else {}
+        
+        result = existing.copy()
+        for key, value in updates.items():
+            if isinstance(value, dict) and key in result and isinstance(result[key], dict):
+                result[key] = safe_merge_dict(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    # ============================================================
+    # UPDATE ALL FILES HELPER (using the same pattern as recent_highest_balance_target)
+    # ============================================================
+    def update_all_files(inv_id, update_data):
+        """
+        Update ALL files (fetched_data, updated_data, all_fetched_data, all_updated_data)
+        using safe_merge_dict to preserve existing data.
+        This is the EXACT same pattern used in recent_highest_balance_target.
+        """
+        files_updated = 0
+        
+        # Update each data dictionary
+        for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                # Use safe_merge_dict to preserve all existing fields
+                data_dict[inv_id] = safe_merge_dict(data_dict[inv_id], update_data)
+            else:
+                # Create new entry
+                data_dict[inv_id] = update_data.copy() if isinstance(update_data, dict) else update_data
+            files_updated += 1
+        
+        return files_updated
+    
+    # ============================================================
+    # SAVE ALL FILES HELPER (using the same pattern as recent_highest_balance_target)
+    # ============================================================
+    def save_all_files():
+        """Save ALL files using the same pattern as recent_highest_balance_target"""
+        saved_count = 0
+        
+        # Save FETCHED_INVESTORS
+        try:
+            with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(fetched_data, f, indent=4)
+            saved_count += 1
+            print(f" │ ✅ Saved FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
+        
+        # Save UPDATED_INVESTORS
+        try:
+            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(updated_data, f, indent=4)
+            saved_count += 1
+            print(f" │ ✅ Saved UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
+        
+        # Save ALL_FETCHED_INVESTORS
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_fetched_data, f, indent=4)
+            saved_count += 1
+            print(f" │ ✅ Saved ALL_FETCHED_INVESTORS")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
+        
+        # Save ALL_UPDATED_INVESTORS
+        try:
+            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+                json.dump(all_updated_data, f, indent=4)
+            saved_count += 1
+            print(f" │ ✅ Saved ALL_UPDATED_INVESTORS")
+        except Exception as e:
+            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
+        
+        return saved_count
+    
     print("\n" + "="*80)
     print("  🔍 AUTHORIZED ACTIONS AUDIT (MAGIC NUMBER ONLY)".ljust(79) + "=")
     print("="*80)
@@ -4628,7 +4799,9 @@ def check_and_record_unauthorized_actions(inv_id=None):
         "bypass_active_investors": 0,
         "autotrading_active_investors": 0,
         "unauthorized_by_investor": {},
-        "processing_success": False
+        "processing_success": False,
+        "files_updated": 0,
+        "activities_updated": 0
     }
     
     investor_ids = [inv_id] if inv_id else list(usersdictionary.keys())
@@ -4637,24 +4810,6 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print("│\n├─  No investors found.")
         print("="*80)
         return stats
-    
-    # Load or initialize updated_investors.json for tracking audit history
-    updated_investors_data = {}
-    if os.path.exists(UPDATED_INVESTORS):
-        try:
-            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                updated_investors_data = json.load(f)
-        except Exception as e:
-            print(f"Error loading updated_investors.json: {e}")
-    
-    # Load or initialize fetched_investors.json for tracking audit history
-    fetched_investors_data = {}
-    if os.path.exists(FETCHED_INVESTORS):
-        try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                fetched_investors_data = json.load(f)
-        except Exception as e:
-            print(f"Error loading fetched_investors.json: {e}")
     
     for user_brokerid in investor_ids:
         # ============================================================
@@ -4681,6 +4836,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
         existing_activities = {}
         starting_balance = None
         previous_application_status = None
+        existing_daily_balance_log = {}
+        previous_closing_balance = None
         
         if activities_path.exists():
             try:
@@ -4688,10 +4845,21 @@ def check_and_record_unauthorized_actions(inv_id=None):
                     existing_activities = json.load(f)
                     starting_balance = existing_activities.get('broker_balance')
                     previous_application_status = existing_activities.get('application_status')
+                    existing_daily_balance_log = existing_activities.get('daily_balance_log', {})
+                    
+                    # Get previous closing balance from last day in log
+                    if existing_daily_balance_log:
+                        sorted_dates = sorted(existing_daily_balance_log.keys(), key=lambda x: datetime.strptime(x, "%d-%m-%Y"))
+                        if sorted_dates:
+                            last_date = sorted_dates[-1]
+                            previous_closing_balance = existing_daily_balance_log[last_date].get('day_closing_balance')
+                    
                     if starting_balance:
                         print(f"│  💰 Starting balance from activities.json: ${starting_balance:.2f}")
                     if previous_application_status:
                         print(f"│  📋 Previous status: {previous_application_status}")
+                    if previous_closing_balance:
+                        print(f"│  📊 Previous closing balance: ${previous_closing_balance:.2f}")
             except Exception as e:
                 print(f"│  Error reading activities.json: {e}")
         
@@ -4862,7 +5030,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
                             'time': datetime.fromtimestamp(entry_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
                             'magic': trade_magic_number,
                             'unique_magicnumber': trade_magic_number,
-                            'is_authorized': is_authorized
+                            'is_authorized': is_authorized,
+                            'authorized_magic': authorized_magic_number
                         }
                         
                         if is_authorized:
@@ -4875,9 +5044,6 @@ def check_and_record_unauthorized_actions(inv_id=None):
                             elif total_pnl < 0:
                                 lost_trades += 1
                                 symbols_lost[entry_deal.symbol] = symbols_lost.get(entry_deal.symbol, 0.0) + total_pnl
-                            
-                            profit_symbol = "📈" if total_pnl > 0 else "📉" if total_pnl < 0 else "⚖️"
-                            #print(f"│     {profit_symbol} Authorized #{ticket_id}: ${total_pnl:.2f} [Magic: {trade_magic_number}]")
                         else:
                             trade_record['reason'] = f"Magic Number {trade_magic_number} != {authorized_magic_number}"
                             trade_record['unique_magicnumber'] = trade_magic_number
@@ -4885,7 +5051,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
                             total_unauthorized_profit += total_pnl
                             stats["unauthorized_trades_found"] += 1
                             profit_symbol = "🚫" if total_pnl > 0 else "🔴" if total_pnl < 0 else "⚠️"
-                            print(f"│     {profit_symbol} UNAUTHORIZED #{ticket_id}: ${total_pnl:.2f} [Magic: {trade_magic_number}]")
+                            print(f"│     {profit_symbol} UNAUTHORIZED #{ticket_id}: ${total_pnl:.2f} [Magic: {trade_magic_number} (Expected: {authorized_magic_number})]")
                 
                 print(f"│\n├─ 📊 HISTORY SUMMARY")
                 print(f"│  • Authorized trades: {len(authorized_closed_trades)} (Total P&L: ${total_authorized_profit:.2f})")
@@ -4923,7 +5089,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
                     'price': order.price_open,
                     'magic': order.magic,
                     'unique_magicnumber': order.magic,
-                    'reason': f"Magic Number {order.magic} != {authorized_magic_number}"
+                    'reason': f"Magic Number {order.magic} != {authorized_magic_number}",
+                    'authorized_magic': authorized_magic_number
                 })
         
         for pos in open_positions:
@@ -4937,7 +5104,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
                     'profit': pos.profit,
                     'magic': pos.magic,
                     'unique_magicnumber': pos.magic,
-                    'reason': f"Magic Number {pos.magic} != {authorized_magic_number}"
+                    'reason': f"Magic Number {pos.magic} != {authorized_magic_number}",
+                    'authorized_magic': authorized_magic_number
                 })
         
         stats["unauthorized_orders_found"] += len(unauthorized_orders)
@@ -4947,10 +5115,10 @@ def check_and_record_unauthorized_actions(inv_id=None):
         # CALCULATE CORRECT CURRENT BALANCE
         # ============================================================
         if starting_balance is not None:
-            calculated_balance = starting_balance + total_authorized_profit
+            calculated_balance = starting_balance + total_authorized_profit + total_unauthorized_profit
         else:
             calculated_balance = mt5_balance
-            starting_balance = mt5_balance - total_authorized_profit
+            starting_balance = mt5_balance - total_authorized_profit - total_unauthorized_profit
         
         profit_and_loss = total_authorized_profit
         
@@ -4961,16 +5129,140 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print(f"│  • Calculated Current Balance: ${calculated_balance:.2f}")
         print(f"│  • MT5 Actual Balance: ${mt5_balance:.2f}")
         
-        balance_discrepancy = mt5_balance - calculated_balance
-        if abs(balance_discrepancy) > 0.01:
-            print(f"│  ⚠️  Balance discrepancy: ${balance_discrepancy:.2f} (from unauthorized trades/other operations)")
+        # Calculate total unauthorized withdrawals (balance that's missing)
+        total_unauthorized_withdrawals = max(0, calculated_balance - mt5_balance)
+        if total_unauthorized_withdrawals > 0.01:
+            print(f"│  💰 Unauthorized Withdrawals: ${total_unauthorized_withdrawals:.2f}")
+        
+        # ============================================================
+        # CREATE DAILY BALANCE LOG - RECORDS EVERY SINGLE DAY
+        # ============================================================
+        print(f"│\n├─ 📊 CREATING DAILY BALANCE LOG (EVERY DAY)".ljust(79) + "┤")
+        
+        # Group authorized and unauthorized trades by day with detailed info
+        authorized_by_day = group_trades_by_day(authorized_closed_trades)
+        unauthorized_by_day = group_trades_by_day(unauthorized_trades_list)
+        
+        # Get all dates from execution start to today
+        all_dates = set()
+        today = datetime.now()
+        
+        # Parse execution start date
+        if start_datetime:
+            current_date = start_datetime
+        else:
+            current_date = datetime.now()
+        
+        # Generate all dates from execution start to today
+        date_iter = current_date
+        while date_iter <= today:
+            date_key = date_iter.strftime("%Y-%m-%d")
+            all_dates.add(date_key)
+            date_iter += timedelta(days=1)
+        
+        # Create daily balance log for EVERY SINGLE DAY
+        daily_balance_log = {}
+        running_balance = starting_balance if starting_balance is not None else 0
+        
+        # Track cumulative unauthorized withdrawals
+        cumulative_unauthorized_withdrawals = 0.0
+        
+        if all_dates:
+            # Sort dates chronologically
+            sorted_dates = sorted(all_dates)
+            
+            for date_key in sorted_dates:
+                day_starting_balance = running_balance
+                
+                # Get day's authorized P&L (0 if no trades)
+                day_authorized_pnl = authorized_by_day.get(date_key, {}).get('total_pnl', 0.0)
+                
+                # Get day's unauthorized P&L (0 if no trades)
+                day_unauthorized_pnl = unauthorized_by_day.get(date_key, {}).get('total_pnl', 0.0)
+                
+                # Get unauthorized trade details for this day
+                day_unauthorized_trades = unauthorized_by_day.get(date_key, {}).get('trade_details', [])
+                
+                # Calculate expected balance from trading activities
+                expected_balance = day_starting_balance + day_authorized_pnl + day_unauthorized_pnl
+                
+                # Check if there's a balance discrepancy that indicates unauthorized withdrawal
+                # If no P&L but balance decreased -> unauthorized withdrawal
+                day_unauthorized_withdrawals = 0.0
+                
+                # Use MT5 actual balance for the current day if available, otherwise use expected
+                if date_key == today.strftime("%Y-%m-%d"):
+                    day_closing_balance = mt5_balance
+                    # Calculate unauthorized withdrawal for today
+                    if day_closing_balance < expected_balance - 0.01:
+                        day_unauthorized_withdrawals = round(expected_balance - day_closing_balance, 2)
+                        cumulative_unauthorized_withdrawals += day_unauthorized_withdrawals
+                else:
+                    # For past days, we can't know the exact balance, so use expected
+                    day_closing_balance = expected_balance
+                
+                # Determine if unusual activity occurred
+                unusual_activity = (abs(day_unauthorized_pnl) > 0.01 or 
+                                   day_unauthorized_withdrawals > 0.01 or
+                                   len(day_unauthorized_trades) > 0)
+                
+                # Format date for display (DD-MM-YYYY)
+                display_date = datetime.strptime(date_key, "%Y-%m-%d").strftime("%d-%m-%Y")
+                
+                # Build the daily log entry
+                daily_entry = {
+                    "day_starting_balance": round(day_starting_balance, 2),
+                    "day_authorized_trades_pnl": round(day_authorized_pnl, 2),
+                    "day_unauthorized_trades_pnl": round(day_unauthorized_pnl, 2),
+                    "day_unauthorized_trades": day_unauthorized_trades,
+                    "day_unauthorized_withdrawals": round(day_unauthorized_withdrawals, 2),
+                    "day_closing_balance": round(day_closing_balance, 2),
+                    "unusual_activity": unusual_activity,
+                    "authorized_trades_count": authorized_by_day.get(date_key, {}).get('count', 0),
+                    "unauthorized_trades_count": unauthorized_by_day.get(date_key, {}).get('count', 0)
+                }
+                
+                daily_balance_log[display_date] = daily_entry
+                
+                # Update running balance for next day (use the actual closing balance if available)
+                if date_key == today.strftime("%Y-%m-%d"):
+                    running_balance = day_closing_balance
+                else:
+                    running_balance = day_closing_balance
+                
+                # Print daily log entry (with summary for many days)
+                activity_indicator = "⚠️" if unusual_activity else "✅"
+                withdrawal_indicator = f" (Withdrawal: ${day_unauthorized_withdrawals:.2f})" if day_unauthorized_withdrawals > 0.01 else ""
+                trades_indicator = f" (UnAuth Trades: {len(day_unauthorized_trades)})" if len(day_unauthorized_trades) > 0 else ""
+                print(f"│  {activity_indicator} {display_date}: Start ${day_starting_balance:.2f} | "
+                      f"Auth: ${day_authorized_pnl:.2f} | UnAuth: ${day_unauthorized_pnl:.2f} | "
+                      f"Close: ${day_closing_balance:.2f}{withdrawal_indicator}{trades_indicator}")
+            
+            print(f"│  ✅ Daily balance log created with {len(daily_balance_log)} entries (from {sorted_dates[0]} to {sorted_dates[-1]})")
+            print(f"│  📊 Total unauthorized withdrawals detected: ${cumulative_unauthorized_withdrawals:.2f}")
+        else:
+            # Fallback: create single entry for today if no dates generated
+            today_display = datetime.now().strftime("%d-%m-%Y")
+            daily_balance_log[today_display] = {
+                "day_starting_balance": round(starting_balance if starting_balance is not None else 0, 2),
+                "day_authorized_trades_pnl": 0.0,
+                "day_unauthorized_trades_pnl": 0.0,
+                "day_unauthorized_trades": [],
+                "day_unauthorized_withdrawals": 0.0,
+                "day_closing_balance": round(mt5_balance, 2),
+                "unusual_activity": False,
+                "authorized_trades_count": 0,
+                "unauthorized_trades_count": 0
+            }
+            print(f"│  ℹ️ No dates generated, created single entry for today: {today_display}")
         
         # ============================================================
         # DETERMINE STATUS
         # ============================================================
         unauthorized_detected = (len(unauthorized_orders) > 0 or 
                                   len(unauthorized_positions) > 0 or 
-                                  len(unauthorized_trades_list) > 0)
+                                  len(unauthorized_trades_list) > 0 or
+                                  cumulative_unauthorized_withdrawals > 0.01)
         
         if unauthorized_detected:
             if bypass_active:
@@ -4991,6 +5283,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
             unauthorized_type.add('orders')
         if unauthorized_positions:
             unauthorized_type.add('positions')
+        if cumulative_unauthorized_withdrawals > 0.01:
+            unauthorized_type.add('withdrawals')
         
         # ============================================================
         # UPDATE STATS
@@ -5000,18 +5294,21 @@ def check_and_record_unauthorized_actions(inv_id=None):
             stats["unauthorized_by_investor"][user_brokerid] = {
                 'orders': len(unauthorized_orders),
                 'positions': len(unauthorized_positions),
-                'trades': len(unauthorized_trades_list)
+                'trades': len(unauthorized_trades_list),
+                'withdrawals': round(cumulative_unauthorized_withdrawals, 2)
             }
             
             print(f"│\n├─ 🚫 UNAUTHORIZED ITEMS FOUND")
             for order in unauthorized_orders[:3]:
-                print(f"│     Order #{order['ticket']}: {order['symbol']} @ {order['price']} [Magic: {order['magic']}]")
+                print(f"│     Order #{order['ticket']}: {order['symbol']} @ {order['price']} [Magic: {order['magic']} (Expected: {authorized_magic_number})]")
             if len(unauthorized_orders) > 3:
                 print(f"│     ... and {len(unauthorized_orders)-3} more orders")
             for pos in unauthorized_positions[:3]:
-                print(f"│     Position #{pos['ticket']}: {pos['symbol']} ${pos['profit']:.2f} [Magic: {pos['magic']}]")
+                print(f"│     Position #{pos['ticket']}: {pos['symbol']} ${pos['profit']:.2f} [Magic: {pos['magic']} (Expected: {authorized_magic_number})]")
             if len(unauthorized_positions) > 3:
                 print(f"│     ... and {len(unauthorized_positions)-3} more positions")
+            if cumulative_unauthorized_withdrawals > 0.01:
+                print(f"│     💰 Unauthorized Withdrawals: ${cumulative_unauthorized_withdrawals:.2f}")
         else:
             print(f"│  ✅ No unauthorized items found")
         
@@ -5039,9 +5336,9 @@ def check_and_record_unauthorized_actions(inv_id=None):
             unauthorized_profit_total = sum(t.get('profit', 0) for t in unauthorized_trades_list)
             profit_symbol = "📈" if unauthorized_profit_total > 0 else "📉" if unauthorized_profit_total < 0 else "⚖️"
             
-            trade_message = f"🚫 UNAUTHORIZED TRADES DETECTED: {unauthorized_count} unauthorized trade(s) found with total P&L {profit_symbol} ${abs(unauthorized_profit_total):.2f}. This trade does not match our authorized system activity."
+            trade_message = f"🚫 UNAUTHORIZED TRADES DETECTED: {unauthorized_count} unauthorized trade(s) found with total P&L {profit_symbol} ${abs(unauthorized_profit_total):.2f}. These trades have Magic Numbers that do not match your authorized Magic Number ({authorized_magic_number})."
             add_notification(activities_data['notifications'], 'UnauthorizedTrades', trade_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedTrades', f"SERVER NOTIFICATION: Investor {user_brokerid} has {unauthorized_count} unauthorized trades with total P&L ${unauthorized_profit_total:.2f}. Magic mismatch with authorized {authorized_magic_number}.", 'error', timestamp)
+            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedTrades', f"SERVER NOTIFICATION: Investor {user_brokerid} has {unauthorized_count} unauthorized trades with total P&L ${unauthorized_profit_total:.2f}. Magic mismatch: found {[t.get('magic') for t in unauthorized_trades_list[:3]]} vs expected {authorized_magic_number}.", 'error', timestamp)
         
         # ============================================================
         # NOTIFICATION 2: UNAUTHORIZED ORDERS
@@ -5050,7 +5347,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
             order_symbols = list(set(o['symbol'] for o in unauthorized_orders[:3]))
             order_message = f"⚠️ UNAUTHORIZED PENDING ORDERS: {len(unauthorized_orders)} unauthorized pending order(s) detected for symbol(s): {', '.join(order_symbols)}{'...' if len(unauthorized_orders) > 3 else ''}. These orders have Magic Numbers that do not match your authorized Magic Number ({authorized_magic_number}). Please review immediately."
             add_notification(activities_data['notifications'], 'UnauthorizedOrders', order_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedOrders', f"SERVER NOTIFICATION: Investor {user_brokerid} has {len(unauthorized_orders)} unauthorized pending orders. Authorized magic: {authorized_magic_number}", 'error', timestamp)
+            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedOrders', f"SERVER NOTIFICATION: Investor {user_brokerid} has {len(unauthorized_orders)} unauthorized pending orders. Magic mismatch: found {[o.get('magic') for o in unauthorized_orders[:3]]} vs expected {authorized_magic_number}.", 'error', timestamp)
         
         # ============================================================
         # NOTIFICATION 3: UNAUTHORIZED POSITIONS
@@ -5060,22 +5357,15 @@ def check_and_record_unauthorized_actions(inv_id=None):
             profit_symbol = "📈" if position_profit > 0 else "📉" if position_profit < 0 else "⚖️"
             position_message = f"🔴 UNAUTHORIZED OPEN POSITIONS: {len(unauthorized_positions)} unauthorized open position(s) detected with current total P&L {profit_symbol} ${abs(position_profit):.2f}. These positions have Magic Numbers that do not match your authorized Magic Number ({authorized_magic_number})."
             add_notification(activities_data['notifications'], 'UnauthorizedPositions', position_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedPositions', f"SERVER NOTIFICATION: Investor {user_brokerid} has {len(unauthorized_positions)} unauthorized open positions with current P&L ${position_profit:.2f}. Authorized magic: {authorized_magic_number}", 'error', timestamp)
+            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedPositions', f"SERVER NOTIFICATION: Investor {user_brokerid} has {len(unauthorized_positions)} unauthorized open positions with current P&L ${position_profit:.2f}. Magic mismatch: found {[p.get('magic') for p in unauthorized_positions[:3]]} vs expected {authorized_magic_number}.", 'error', timestamp)
         
         # ============================================================
-        # NOTIFICATION 4: BALANCE DISCREPANCY
+        # NOTIFICATION 4: UNAUTHORIZED WITHDRAWALS
         # ============================================================
-        if abs(balance_discrepancy) > 0.01:
-            if mt5_balance > calculated_balance:
-                discrepancy_type = "higher"  # MT5 is higher than calculated
-                comparison = "lower"  # calculated is lower than MT5
-            else:
-                discrepancy_type = "lower"  # MT5 is lower than calculated
-                comparison = "higher"  # calculated is higher than MT5
-            
-            discrepancy_message = f"💰 BALANCE MISMATCH DETECTED: Your calculated balance (${calculated_balance:.2f}) is {comparison} than your MT5 actual balance (${mt5_balance:.2f}) by ${abs(balance_discrepancy):.2f}. This indicates that an unauthorized activity has been taken.."
-            add_notification(activities_data['notifications'], 'BalanceDiscrepancy', discrepancy_message, 'error', timestamp)
-            add_execution_notification(activities_data['executions_notification'], 'BalanceDiscrepancy', f"SERVER NOTIFICATION: Investor {user_brokerid} balance discrepancy of ${abs(balance_discrepancy):.2f} detected. Calculated: ${calculated_balance:.2f}, MT5 Actual: ${mt5_balance:.2f}", 'error', timestamp)
+        if cumulative_unauthorized_withdrawals > 0.01:
+            withdrawal_message = f"💰 UNAUTHORIZED WITHDRAWALS DETECTED: Total unauthorized withdrawals of ${cumulative_unauthorized_withdrawals:.2f} detected. This indicates funds have been removed from your account without proper authorization."
+            add_notification(activities_data['notifications'], 'UnauthorizedWithdrawals', withdrawal_message, 'error', timestamp)
+            add_execution_notification(activities_data['executions_notification'], 'UnauthorizedWithdrawals', f"SERVER NOTIFICATION: Investor {user_brokerid} has unauthorized withdrawals totaling ${cumulative_unauthorized_withdrawals:.2f}.", 'error', timestamp)
         
         # ============================================================
         # NOTIFICATION 5: STATUS CHANGE
@@ -5105,6 +5395,8 @@ def check_and_record_unauthorized_actions(inv_id=None):
                 audit_summary_parts.append(f"{len(unauthorized_orders)} orders")
             if unauthorized_positions:
                 audit_summary_parts.append(f"{len(unauthorized_positions)} positions")
+            if cumulative_unauthorized_withdrawals > 0.01:
+                audit_summary_parts.append(f"${cumulative_unauthorized_withdrawals:.2f} in withdrawals")
             
             if audit_summary_parts:
                 audit_message = f"🔍 AUDIT COMPLETED: System audit detected {', '.join(audit_summary_parts)} requiring attention. Please review your account activity."
@@ -5160,7 +5452,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
             'profitandloss': round(profit_and_loss, 2),
             'authorized_profitandloss': round(total_authorized_profit, 2),
             'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
-            'current_balance': round(calculated_balance, 2),
+            'current_balance': round(mt5_balance, 2),
             'mt5_actual_balance': round(mt5_balance, 2),
             'authorized_magic_number': authorized_magic_number,
             'unique_magicnumber': authorized_magic_number,
@@ -5170,12 +5462,14 @@ def check_and_record_unauthorized_actions(inv_id=None):
             'application_status': application_status,
             'contract_days_left': contract_days_left,
             'last_audit_timestamp': datetime.now().isoformat(),
+            'daily_balance_log': daily_balance_log,
+            'cumulative_unauthorized_withdrawals': round(cumulative_unauthorized_withdrawals, 2),
             'unauthorized_actions': {
                 'detected': unauthorized_detected,
                 'bypass_active': bypass_active,
                 'autotrading_active': autotrading_active,
                 'type': list(unauthorized_type) if unauthorized_type else [],
-                'unauthorized_withdrawals': [],
+                'unauthorized_withdrawals': round(cumulative_unauthorized_withdrawals, 2),
                 'unauthorized_orders': unauthorized_orders,
                 'unauthorized_positions': unauthorized_positions
             },
@@ -5200,58 +5494,55 @@ def check_and_record_unauthorized_actions(inv_id=None):
                 json.dump(activities_data, f, indent=4)
             print(f"│  ✅ activities.json saved with notifications")
             print(f"│     • Starting Balance: ${starting_balance:.2f}")
-            print(f"│     • Current Balance: ${calculated_balance:.2f}")
+            print(f"│     • Current Balance: ${mt5_balance:.2f}")
             print(f"│     • Authorized P&L: ${total_authorized_profit:.2f}")
             print(f"│     • Unauthorized P&L: ${total_unauthorized_profit:.2f}")
+            print(f"│     • Unauthorized Withdrawals: ${cumulative_unauthorized_withdrawals:.2f}")
             print(f"│     • Status: {application_status}")
             print(f"│     • Authorized Magic Number: {authorized_magic_number}")
             print(f"│     • Authorized trades: {trades_structure['summary']['total_trades']}")
             print(f"│     • Unauthorized trades: {len(unauthorized_trades_list)}")
+            print(f"│     • Daily balance log entries: {len(daily_balance_log)} (EVERY DAY from execution start to today)")
             print(f"│     • Notifications added: {len(activities_data['notifications'])} total")
+            stats["activities_updated"] += 1
         except Exception as e:
             print(f"│   Error saving activities.json: {e}")
         
         # ============================================================
-        # UPDATE UPDATED_INVESTORS.JSON - ONLY SPECIFIC FIELDS
+        # UPDATE ALL INVESTOR FILES USING THE SAME PATTERN AS recent_highest_balance_target
         # ============================================================
-        if user_brokerid in updated_investors_data:
-            # Update only specific fields, preserve everything else
-            updated_investors_data[user_brokerid]['authorized_profitandloss'] = round(total_authorized_profit, 2)
-            updated_investors_data[user_brokerid]['unauthorized_profitandloss'] = round(total_unauthorized_profit, 2)
-            updated_investors_data[user_brokerid]['unauthorized_action_detected'] = unauthorized_detected
-            updated_investors_data[user_brokerid]['application_status'] = application_status
-            updated_investors_data[user_brokerid]['last_audit_timestamp'] = datetime.now().isoformat()
-        else:
-            # Record doesn't exist, create minimal entry with only the fields we need
-            updated_investors_data[user_brokerid] = {
-                'id': str(user_brokerid),
-                'authorized_profitandloss': round(total_authorized_profit, 2),
-                'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
-                'unauthorized_action_detected': unauthorized_detected,
-                'application_status': application_status,
-                'last_audit_timestamp': datetime.now().isoformat()
-            }
+        print(f"│\n├─ 🔄 UPDATING ALL INVESTOR FILES".ljust(79) + "┤")
         
-        # ============================================================
-        # UPDATE FETCHED_INVESTORS.JSON - ONLY SPECIFIC FIELDS
-        # ============================================================
-        if user_brokerid in fetched_investors_data:
-            # Update only specific fields, preserve everything else
-            fetched_investors_data[user_brokerid]['authorized_profitandloss'] = round(total_authorized_profit, 2)
-            fetched_investors_data[user_brokerid]['unauthorized_profitandloss'] = round(total_unauthorized_profit, 2)
-            fetched_investors_data[user_brokerid]['unauthorized_action_detected'] = unauthorized_detected
-            fetched_investors_data[user_brokerid]['application_status'] = application_status
-            fetched_investors_data[user_brokerid]['last_audit_timestamp'] = datetime.now().isoformat()
-        else:
-            # Record doesn't exist, create minimal entry with only the fields we need
-            fetched_investors_data[user_brokerid] = {
-                'id': str(user_brokerid),
-                'authorized_profitandloss': round(total_authorized_profit, 2),
-                'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
-                'unauthorized_action_detected': unauthorized_detected,
-                'application_status': application_status,
-                'last_audit_timestamp': datetime.now().isoformat()
-            }
+        # Prepare update data with all fields to sync
+        update_data = {
+            'authorized_profitandloss': round(total_authorized_profit, 2),
+            'unauthorized_profitandloss': round(total_unauthorized_profit, 2),
+            'unauthorized_action_detected': unauthorized_detected,
+            'application_status': application_status,
+            'last_audit_timestamp': datetime.now().isoformat(),
+            'current_balance': round(mt5_balance, 2),
+            'mt5_actual_balance': round(mt5_balance, 2),
+            'authorized_magic_number': authorized_magic_number,
+            'broker_balance': round(starting_balance, 2),
+            'profitandloss': round(profit_and_loss, 2),
+            'daily_balance_log_entries': len(daily_balance_log),
+            'daily_balance_log': daily_balance_log,
+            'unauthorized_orders_count': len(unauthorized_orders),
+            'unauthorized_positions_count': len(unauthorized_positions),
+            'unauthorized_trades_count': len(unauthorized_trades_list),
+            'cumulative_unauthorized_withdrawals': round(cumulative_unauthorized_withdrawals, 2),
+            'bypass_restriction': bypass_active,
+            'activate_autotrading': autotrading_active,
+            'contract_days_left': contract_days_left
+        }
+        
+        # Update all files using safe_merge_dict (preserves all existing data)
+        files_updated = update_all_files(user_brokerid, update_data)
+        stats["files_updated"] += files_updated
+        
+        print(f"│  ✅ Updated {files_updated} investor files with audit data")
+        print(f"│     • Files updated: FETCHED_INVESTORS, UPDATED_INVESTORS, ALL_FETCHED_INVESTORS, ALL_UPDATED_INVESTORS")
+        print(f"│     • Data preserved: All existing fields were preserved")
         
         # Update stats
         stats["bypass_active_investors"] += 1 if bypass_active else 0
@@ -5263,31 +5554,26 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print(f"│  • Application Status: {application_status}")
         print(f"│  • Authorized Magic Number: {authorized_magic_number}")
         print(f"│  • Starting Balance: ${starting_balance:.2f}")
-        print(f"│  • Current Balance: ${calculated_balance:.2f}")
+        print(f"│  • Current Balance: ${mt5_balance:.2f}")
         print(f"│  • Authorized P&L: ${total_authorized_profit:.2f}")
         print(f"│  • Unauthorized P&L: ${total_unauthorized_profit:.2f}")
+        print(f"│  • Unauthorized Withdrawals: ${cumulative_unauthorized_withdrawals:.2f}")
         print(f"│  • Authorized trades: {len(authorized_closed_trades)} ({won_trades}W/{lost_trades}L)")
         print(f"│  • Unauthorized trades: {len(unauthorized_trades_list)}")
         print(f"│  • Unauthorized items: {len(unauthorized_orders)} orders, {len(unauthorized_positions)} positions")
         print(f"│  • Contract Days Left: {contract_days_left}")
+        print(f"│  • Daily balance log entries: {len(daily_balance_log)} (EVERY DAY from execution start to today)")
     
     # ============================================================
-    # SAVE UPDATED_INVESTORS.JSON
+    # SAVE ALL FILES (using the same pattern as recent_highest_balance_target)
     # ============================================================
-    if updated_investors_data:
-        os.makedirs(os.path.dirname(UPDATED_INVESTORS), exist_ok=True)
-        with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-            json.dump(updated_investors_data, f, indent=4)
-        print(f"\n📝 Updated updated_investors.json with audit data for {len(updated_investors_data)} investors")
+    print("\n" + "─"*80)
+    print(" 💾 SAVING ALL UPDATED FILES (PRESERVING EXISTING DATA)")
+    print("─"*80)
     
-    # ============================================================
-    # SAVE FETCHED_INVESTORS.JSON
-    # ============================================================
-    if fetched_investors_data:
-        os.makedirs(os.path.dirname(FETCHED_INVESTORS), exist_ok=True)
-        with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-            json.dump(fetched_investors_data, f, indent=4)
-        print(f"📝 Updated fetched_investors.json with audit data for {len(fetched_investors_data)} investors")
+    saved_count = save_all_files()
+    print(f" │ ✅ Saved {saved_count} files successfully")
+    print(f" │ ✅ All existing data preserved")
     
     # ============================================================
     # FINAL SUMMARY
@@ -5303,11 +5589,14 @@ def check_and_record_unauthorized_actions(inv_id=None):
     print(f"│  Unauthorized positions found: {stats['unauthorized_positions_found']}")
     print(f"│  Bypass active:              {stats['bypass_active_investors']}")
     print(f"│  Auto-trading active:        {stats['autotrading_active_investors']}")
+    print(f"│  Files updated:              {stats['files_updated']}")
+    print(f"│  activities.json updated:    {stats['activities_updated']}")
     
     if stats["unauthorized_by_investor"]:
         print(f"│\n├─ 🚫 UNAUTHORIZED BY INVESTOR")
         for inv_id, counts in stats["unauthorized_by_investor"].items():
-            print(f"│    {inv_id}: {counts.get('trades', 0)} trades, {counts.get('orders', 0)} orders, {counts.get('positions', 0)} positions")
+            withdrawal_info = f", withdrawals: ${counts.get('withdrawals', 0):.2f}" if counts.get('withdrawals', 0) > 0 else ""
+            print(f"│    {inv_id}: {counts.get('trades', 0)} trades, {counts.get('orders', 0)} orders, {counts.get('positions', 0)} positions{withdrawal_info}")
     
     print("="*80 + "\n")
     
@@ -13174,7 +13463,7 @@ def convert_grid_prices_to_limit_orders(inv_id=None):
 # ---       ---#
 
  
-#RECENT HIGHEST BALANCE 
+# RECENT HIGHEST BALANCE
 def recent_highest_balance_target(inv_id=None):
     """
     Function: Manages recent_highest_balance tracking for investors.
@@ -13188,13 +13477,18 @@ def recent_highest_balance_target(inv_id=None):
     2. GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
        a. If not, update with broker_balance (date unchanged, alarm OFF)
        b. Save to ALL files
-    3. Get current MT5 balance
-    4. If current MT5 balance > stored recent_highest_balance:
-       a. Get daily target risk from martingale_config.daily_target_config.daily_target
+    3. Get current MT5 balance (or use recent_highest_balance if use_recent_highest_balance_as_current_balance is enabled)
+    4. Find most recent profitable day from MT5 history
+    5. Update recent_highest_balance_last_update to most recent profitable day date
+    6. If current MT5 balance > stored recent_highest_balance:
+       a. Get daily target risk from daily_target_config (prioritizing outside martingale_config)
        b. Check today's profit from MT5 history
-       c. If today's profit >= daily target risk → Record new high, set date to TODAY, ALARM ON
-       d. If today's profit < daily target risk → Record new high ONLY, DON'T update date, ALARM OFF
-    5. If current MT5 balance <= stored high → No change, ALARM OFF
+       c. If today's profit >= daily target risk → Record new high, ALARM ON
+       d. If today's profit < daily target risk → Record new high ONLY, ALARM OFF
+    7. If current MT5 balance >= stored recent_highest_balance AND last update date == today:
+       a. Check if no shortage and no owed debts
+       b. If conditions met → ALARM ON
+    8. Alarm ON only if: no shortage, no owed debts, AND last update date == today
     
     Uses activities.json as source of truth but saves to ALL files
     
@@ -13342,7 +13636,7 @@ def recent_highest_balance_target(inv_id=None):
         """Get current MT5 account balance"""
         try:
             if not mt5.terminal_info():
-                print(f"  ❌ MT5 not connected")
+                print(f"   MT5 not connected")
                 return None
             
             account_info = mt5.account_info()
@@ -13350,7 +13644,7 @@ def recent_highest_balance_target(inv_id=None):
                 return account_info.balance
             return None
         except Exception as e:
-            print(f"  ❌ Error getting MT5 balance: {e}")
+            print(f"   Error getting MT5 balance: {e}")
             return None
     
     def get_today_profit_from_history():
@@ -13360,7 +13654,7 @@ def recent_highest_balance_target(inv_id=None):
         """
         try:
             if not mt5.terminal_info():
-                print(f"  ❌ MT5 not connected")
+                print(f"   MT5 not connected")
                 return 0.0
             
             # Get today's date range
@@ -13383,12 +13677,106 @@ def recent_highest_balance_target(inv_id=None):
             return total_profit
             
         except Exception as e:
-            print(f"  ❌ Error getting today's profit from MT5 history: {e}")
+            print(f"   Error getting today's profit from MT5 history: {e}")
             return 0.0
+    
+    def get_most_recent_profitable_day(execution_start_date):
+        """
+        Find the most recent profitable day from MT5 history.
+        Returns: (date_string, total_profit) or (None, 0)
+        """
+        try:
+            if not mt5.terminal_info():
+                return None, 0
+            
+            # Parse execution start date
+            if execution_start_date:
+                try:
+                    start_date = datetime.strptime(execution_start_date, "%Y-%m-%d")
+                except:
+                    start_date = datetime.now() - timedelta(days=30)  # Default to 30 days if parse fails
+            else:
+                start_date = datetime.now() - timedelta(days=30)  # Default to 30 days if not available
+            
+            # Get all deals from start_date to now
+            deals = mt5.history_deals_get(start_date, datetime.now())
+            
+            if deals is None or len(deals) == 0:
+                return None, 0
+            
+            # Group by date and calculate daily profit
+            daily_profits = {}
+            for deal in deals:
+                if deal.profit is None:
+                    continue
+                
+                # Get the date of the deal
+                deal_time = datetime.fromtimestamp(deal.time)
+                deal_date = deal_time.strftime("%Y-%m-%d")
+                
+                if deal_date not in daily_profits:
+                    daily_profits[deal_date] = 0.0
+                daily_profits[deal_date] += deal.profit
+            
+            # Sort dates and find most recent profitable day (profit > 0)
+            sorted_dates = sorted(daily_profits.keys(), reverse=True)
+            
+            for date_str in sorted_dates:
+                if daily_profits[date_str] > 0:
+                    # Check if this date is after execution start date
+                    if date_str >= execution_start_date if execution_start_date else True:
+                        return date_str, daily_profits[date_str]
+            
+            return None, 0
+            
+        except Exception as e:
+            print(f"   Error finding most recent profitable day: {e}")
+            return None, 0
+    
+    def get_use_recent_highest_balance_flag_from_all_fetched(investor_id):
+        """
+        Get use_recent_highest_balance_as_current_balance flag from ALL_FETCHED_INVESTORS.
+        Checks both root level and settings level.
+        Returns: bool (True if enabled, False otherwise)
+        """
+        if not os.path.exists(ALL_FETCHED_INVESTORS):
+            return False
+        
+        try:
+            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                all_fetched_data = json.load(f)
+            
+            investor_data = all_fetched_data.get(investor_id)
+            if not investor_data:
+                return False
+            
+            # Check root level first
+            root_flag = investor_data.get('use_recent_highest_balance_as_current_balance', False)
+            if root_flag:
+                return True
+            
+            # Check in settings
+            settings = investor_data.get('settings', {})
+            settings_flag = settings.get('use_recent_highest_balance_as_current_balance', False)
+            if settings_flag:
+                return True
+            
+            # Check in accountmanagement settings (if exists)
+            accountmanagement = investor_data.get('accountmanagement', {})
+            accountmanagement_settings = accountmanagement.get('settings', {})
+            accountmanagement_flag = accountmanagement_settings.get('use_recent_highest_balance_as_current_balance', False)
+            if accountmanagement_flag:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            return False
     
     def get_daily_target_config_from_all_fetched(investor_id):
         """
-        Get daily target config from martingale_config.daily_target_config in ALL_FETCHED_INVESTORS.
+        Get daily target config from ALL_FETCHED_INVESTORS.
+        PRIORITY: Check root level first, then inside martingale_config.
         Returns: (daily_target_risk, include_missed_days, excluded_days) or (None, False, [])
         """
         if not os.path.exists(ALL_FETCHED_INVESTORS):
@@ -13402,53 +13790,151 @@ def recent_highest_balance_target(inv_id=None):
             if not investor_data:
                 return None, False, []
             
-            # Get current MT5 balance to find which risk range applies
-            current_bal = get_mt5_balance()
+            # Get current balance (either MT5 or recent_highest_balance)
+            current_bal = get_current_effective_balance(investor_id)
             if current_bal is None:
                 return None, False, []
             
-            # Get accountmanagement
+            daily_target_risk = None
+            include_missed_days = False
+            excluded_days = []
+            daily_target_config = None
+            
+            # PRIORITY 1: Check root level daily_target_config
+            root_daily_target = investor_data.get('daily_target_config', {})
+            if root_daily_target:
+                daily_target_config = root_daily_target
+                include_missed_days = root_daily_target.get('include_missed_days', False)
+                excluded_days = root_daily_target.get('excluded_days', [])
+                daily_target = root_daily_target.get('daily_target', {})
+                
+                if daily_target:
+                    # Find the matching risk range
+                    for range_str, risk_value in daily_target.items():
+                        try:
+                            # Parse range like "1-10000000.99_risk" -> get "1-10000000.99"
+                            if '_risk' in range_str:
+                                range_part = range_str.split('_')[0]
+                            else:
+                                range_part = range_str
+                            
+                            # Split by '-' to get low and high values
+                            if '-' in range_part:
+                                low_str, high_str = range_part.split('-')
+                                low = float(low_str)
+                                high = float(high_str)
+                            else:
+                                # Handle single value range
+                                low = float(range_part)
+                                high = float(range_part)
+                            
+                            if low <= current_bal <= high:
+                                daily_target_risk = float(risk_value)
+                                return daily_target_risk, include_missed_days, excluded_days
+                        except Exception as e:
+                            continue
+            
+            # PRIORITY 2: Check in settings.martingale_config
+            settings = investor_data.get('settings', {})
+            martingale_config = settings.get('martingale_config', {})
+            martingale_daily_target = martingale_config.get('daily_target_config', {})
+            
+            if martingale_daily_target:
+                daily_target_config = martingale_daily_target
+                include_missed_days = martingale_daily_target.get('include_missed_days', False)
+                excluded_days = martingale_daily_target.get('excluded_days', [])
+                daily_target = martingale_daily_target.get('daily_target', {})
+                
+                if daily_target:
+                    # Find the matching risk range
+                    for range_str, risk_value in daily_target.items():
+                        try:
+                            # Parse range like "1-10000000.99_risk" -> get "1-10000000.99"
+                            if '_risk' in range_str:
+                                range_part = range_str.split('_')[0]
+                            else:
+                                range_part = range_str
+                            
+                            # Split by '-' to get low and high values
+                            if '-' in range_part:
+                                low_str, high_str = range_part.split('-')
+                                low = float(low_str)
+                                high = float(high_str)
+                            else:
+                                # Handle single value range
+                                low = float(range_part)
+                                high = float(range_part)
+                            
+                            if low <= current_bal <= high:
+                                daily_target_risk = float(risk_value)
+                                return daily_target_risk, include_missed_days, excluded_days
+                        except Exception as e:
+                            continue
+            
+            # PRIORITY 3: Check in accountmanagement.settings.martingale_config
             accountmanagement = investor_data.get('accountmanagement', {})
+            accountmanagement_settings = accountmanagement.get('settings', {})
+            accountmanagement_martingale = accountmanagement_settings.get('martingale_config', {})
+            accountmanagement_daily_target = accountmanagement_martingale.get('daily_target_config', {})
             
-            # Navigate to daily target config in martingale_config
-            martingale_config = accountmanagement.get('settings', {}).get('martingale_config', {})
-            daily_target_config = martingale_config.get('daily_target_config', {})
-            daily_target = daily_target_config.get('daily_target', {})
-            include_missed_days = daily_target_config.get('include_missed_days', False)
-            excluded_days = daily_target_config.get('excluded_days', [])
+            if accountmanagement_daily_target:
+                daily_target_config = accountmanagement_daily_target
+                include_missed_days = accountmanagement_daily_target.get('include_missed_days', False)
+                excluded_days = accountmanagement_daily_target.get('excluded_days', [])
+                daily_target = accountmanagement_daily_target.get('daily_target', {})
+                
+                if daily_target:
+                    # Find the matching risk range
+                    for range_str, risk_value in daily_target.items():
+                        try:
+                            # Parse range like "1-10000000.99_risk" -> get "1-10000000.99"
+                            if '_risk' in range_str:
+                                range_part = range_str.split('_')[0]
+                            else:
+                                range_part = range_str
+                            
+                            # Split by '-' to get low and high values
+                            if '-' in range_part:
+                                low_str, high_str = range_part.split('-')
+                                low = float(low_str)
+                                high = float(high_str)
+                            else:
+                                # Handle single value range
+                                low = float(range_part)
+                                high = float(range_part)
+                            
+                            if low <= current_bal <= high:
+                                daily_target_risk = float(risk_value)
+                                return daily_target_risk, include_missed_days, excluded_days
+                        except Exception as e:
+                            continue
             
-            if not daily_target:
-                return None, include_missed_days, excluded_days
-            
-            # Find the matching risk range
-            for range_str, risk_value in daily_target.items():
-                try:
-                    # Parse range like "1-10000000.99_risk" -> get "1-10000000.99"
-                    if '_risk' in range_str:
-                        range_part = range_str.split('_')[0]
-                    else:
-                        range_part = range_str
-                    
-                    # Split by '-' to get low and high values
-                    if '-' in range_part:
-                        low_str, high_str = range_part.split('-')
-                        low = float(low_str)
-                        high = float(high_str)
-                    else:
-                        # Handle single value range
-                        low = float(range_part)
-                        high = float(range_part)
-                    
-                    if low <= current_bal <= high:
-                        daily_target_risk = float(risk_value)
-                        return daily_target_risk, include_missed_days, excluded_days
-                except Exception as e:
-                    continue
-            
-            return None, include_missed_days, excluded_days
+            return None, False, []
             
         except Exception as e:
             return None, False, []
+    
+    def get_current_effective_balance(investor_id):
+        """
+        Get the effective current balance based on use_recent_highest_balance_as_current_balance flag.
+        If flag is True and recent_highest_balance exists, use that.
+        Otherwise, fall back to MT5 balance.
+        Returns: balance (float) or None
+        """
+        # Check if use_recent_highest_balance flag is enabled
+        use_recent = get_use_recent_highest_balance_flag_from_all_fetched(investor_id)
+        
+        if use_recent:
+            # Try to get recent_highest_balance from activities.json
+            recent_balance, _ = get_recent_balance_from_activities(investor_id)
+            if recent_balance is not None:
+                print(f"  🔄 Using recent_highest_balance (${recent_balance:.2f}) as current balance (flag enabled)")
+                return recent_balance
+            else:
+                print(f"  ⚠️ use_recent_highest_balance flag is enabled but no recent_highest_balance found. Falling back to MT5 balance.")
+        
+        # Fall back to MT5 balance
+        return get_mt5_balance()
     
     def get_recent_balance_from_activities(inv_id):
         """
@@ -13532,9 +14018,10 @@ def recent_highest_balance_target(inv_id=None):
         except Exception as e:
             return None
     
-    def get_day_appearances(start_date, end_date, excluded_days):
+    def get_day_appearances(start_date, end_date, excluded_days, recorded_dates=None):
         """
         Calculate appearances of each excluded day between two dates.
+        Also considers recorded dates as excluded.
         Returns: dict {day_name: count}
         """
         appearances = {}
@@ -13550,10 +14037,20 @@ def recent_highest_balance_target(inv_id=None):
             for day in excluded_days:
                 appearances[day.lower()] = 0
             
+            # Also add recorded dates as excluded
+            recorded_dates_set = set(recorded_dates) if recorded_dates else set()
+            
             # Count appearances
             current = start
             while current <= end:
+                date_str = current.strftime("%Y-%m-%d")
                 day_name = current.strftime("%A").lower()
+                
+                # Skip if date is already recorded (permanent)
+                if date_str in recorded_dates_set:
+                    current += timedelta(days=1)
+                    continue
+                
                 if day_name in appearances:
                     appearances[day_name] += 1
                 current += timedelta(days=1)
@@ -13563,9 +14060,9 @@ def recent_highest_balance_target(inv_id=None):
         except Exception as e:
             return {}
     
-    def get_working_days_since_start(start_date, end_date, excluded_days):
+    def get_working_days_since_start(start_date, end_date, excluded_days, recorded_dates=None):
         """
-        Calculate number of working days between two dates (excluding specified days)
+        Calculate number of working days between two dates (excluding specified days and recorded dates)
         Returns: (total_days, excluded_count, working_days)
         """
         if not start_date or not end_date:
@@ -13578,6 +14075,9 @@ def recent_highest_balance_target(inv_id=None):
             # Convert excluded days to lowercase for comparison
             excluded = [day.lower() for day in excluded_days]
             
+            # Add recorded dates as excluded
+            recorded_dates_set = set(recorded_dates) if recorded_dates else set()
+            
             total_days = 0
             excluded_count = 0
             working_days = 0
@@ -13585,6 +14085,13 @@ def recent_highest_balance_target(inv_id=None):
             # Count days from start to end (inclusive)
             current = start
             while current <= end:
+                date_str = current.strftime("%Y-%m-%d")
+                
+                # Skip if date is already recorded (permanent)
+                if date_str in recorded_dates_set:
+                    current += timedelta(days=1)
+                    continue
+                
                 total_days += 1
                 day_name = current.strftime("%A").lower()
                 if day_name in excluded:
@@ -13645,7 +14152,7 @@ def recent_highest_balance_target(inv_id=None):
         
         return highest_balance, highest_date, source_file
     
-    def update_activities_json(inv_id, new_balance, update_date):
+    def update_activities_json(inv_id, new_balance, update_date, daily_target_met=None):
         """
         Update activities.json with recent_highest_balance and date.
         This is the SOURCE OF TRUTH.
@@ -13687,13 +14194,23 @@ def recent_highest_balance_target(inv_id=None):
                     "trades": [],
                     "daily_stats": {},
                     "weekly_stats": {},
-                    "monthly_stats": {}
+                    "monthly_stats": {},
+                    "daily_target_met": daily_target_met if daily_target_met else {}
                 }
             
             # UPDATE ONLY the specific fields - PRESERVE EVERYTHING ELSE
             activities['recent_highest_balance'] = str(round(new_balance, 2))
             activities['recent_highest_balance_last_update'] = update_date
             activities['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Update daily_target_met if provided (MERGE, never overwrite)
+            if daily_target_met is not None:
+                if 'daily_target_met' not in activities:
+                    activities['daily_target_met'] = {}
+                # Merge: preserve existing, add new
+                for date_str, value in daily_target_met.items():
+                    if date_str not in activities['daily_target_met']:
+                        activities['daily_target_met'][date_str] = value
             
             # Update peak_balance if new balance is higher
             if 'peak_balance' in activities:
@@ -13713,38 +14230,63 @@ def recent_highest_balance_target(inv_id=None):
             return True
             
         except Exception as e:
-            print(f"  ❌ Failed to update activities.json: {e}")
+            print(f"   Failed to update activities.json: {e}")
             stats["errors"].append(f"Failed to update activities.json for {inv_id}: {e}")
             return False
     
-    def sync_all_files(inv_id, balance, date, message, exec_message, msg_type):
+    def sync_all_files(inv_id, balance, date, message, exec_message, msg_type, daily_target_met=None):
         """
-        Sync ALL files with the new balance data.
-        This ensures ALL files have the same recent_highest_balance data.
+        Sync ALL files with the new balance data and daily_target_met.
+        This ensures ALL files have the same recent_highest_balance data and daily_target_met.
         """
         files_updated = 0
         
         # Update activities.json (SOURCE OF TRUTH)
-        if update_activities_json(inv_id, balance, date):
+        if update_activities_json(inv_id, balance, date, daily_target_met):
             files_updated += 1
             stats["activities_updated"] += 1
         
-        # Update all investor files
-        update_investor_data(fetched_data, inv_id, balance, date)
-        update_investor_data(updated_data, inv_id, balance, date)
-        update_investor_data(all_fetched_data, inv_id, balance, date)
-        update_investor_data(all_updated_data, inv_id, balance, date)
+        # Update ALL investor files with daily_target_met if provided
+        # Use a list of tuples (data_dict, file_name) for tracking
+        file_updates = [
+            (fetched_data, "FETCHED_INVESTORS"),
+            (updated_data, "UPDATED_INVESTORS"),
+            (all_fetched_data, "ALL_FETCHED_INVESTORS"),
+            (all_updated_data, "ALL_UPDATED_INVESTORS")
+        ]
         
-        # Add notifications to ALL files if provided
-        if message and exec_message:
-            for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
-                if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+        for data_dict, file_name in file_updates:
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                # Update balance fields
+                data_dict[inv_id]['recent_highest_balance'] = str(round(balance, 2))
+                data_dict[inv_id]['recent_highest_balance_last_update'] = date
+                
+                # Update daily_target_met if provided (MERGE, never overwrite)
+                if daily_target_met is not None:
+                    if 'daily_target_met' not in data_dict[inv_id]:
+                        data_dict[inv_id]['daily_target_met'] = {}
+                    # Merge: preserve existing, add new
+                    for date_str, value in daily_target_met.items():
+                        if date_str not in data_dict[inv_id]['daily_target_met']:
+                            data_dict[inv_id]['daily_target_met'][date_str] = value
+                
+                # Update notifications if provided
+                if message and exec_message:
                     if 'notifications' not in data_dict[inv_id]:
                         data_dict[inv_id]['notifications'] = {}
                     if 'executions_notification' not in data_dict[inv_id]:
                         data_dict[inv_id]['executions_notification'] = {}
                     add_notification(data_dict[inv_id]['notifications'], 'RecentBalance', message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     add_execution_notification(data_dict[inv_id]['executions_notification'], 'RecentBalance', exec_message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            else:
+                # Create new entry
+                new_entry = {
+                    'recent_highest_balance': str(round(balance, 2)),
+                    'recent_highest_balance_last_update': date
+                }
+                if daily_target_met is not None:
+                    new_entry['daily_target_met'] = daily_target_met
+                data_dict[inv_id] = new_entry
         
         stats["files_updated"] += 4  # activities.json + 4 investor files
         return files_updated
@@ -13841,8 +14383,255 @@ def recent_highest_balance_target(inv_id=None):
             return True
             
         except Exception as e:
-            print(f"  ❌ Error updating {file_path}: {e}")
+            print(f"   Error updating {file_path}: {e}")
             return False
+    
+    def sync_daily_target_met_to_all_files(inv_id, daily_target_met):
+        """
+        Synchronize daily_target_met to ALL files without touching balance fields.
+        This is called after recording new daily target met dates.
+        """
+        if not daily_target_met:
+            return 0
+        
+        files_updated = 0
+        
+        # Update ALL investor files with daily_target_met
+        file_updates = [
+            (fetched_data, "FETCHED_INVESTORS"),
+            (updated_data, "UPDATED_INVESTORS"),
+            (all_fetched_data, "ALL_FETCHED_INVESTORS"),
+            (all_updated_data, "ALL_UPDATED_INVESTORS")
+        ]
+        
+        for data_dict, file_name in file_updates:
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                # Ensure daily_target_met exists
+                if 'daily_target_met' not in data_dict[inv_id]:
+                    data_dict[inv_id]['daily_target_met'] = {}
+                # Merge: preserve existing, add new
+                for date_str, value in daily_target_met.items():
+                    if date_str not in data_dict[inv_id]['daily_target_met']:
+                        data_dict[inv_id]['daily_target_met'][date_str] = value
+                        files_updated += 1
+            else:
+                # Create new entry with daily_target_met
+                data_dict[inv_id] = {
+                    'daily_target_met': daily_target_met
+                }
+                files_updated += 1
+        
+        return files_updated
+    
+    def record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days):
+        """
+        Record dates when daily target was met in ALL files' daily_target_met field.
+        Only records working days (excluding excluded days and already recorded dates) from execution start date up to today.
+        Once a date is recorded, it is permanent and will never be modified or removed.
+        Ensures ALL files (fetched_data, updated_data, all_fetched_data, all_updated_data, activities.json) are updated.
+        """
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            activities_path = inv_root / "activities.json"
+            
+            if not activities_path.exists():
+                print(f"  ⚠️ activities.json not found for {inv_id}")
+                return False
+            
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities = json.load(f)
+            
+            # Get existing recorded dates from activities.json (NEVER modify or remove these)
+            existing_recorded = activities.get('daily_target_met', {})
+            existing_dates = set(existing_recorded.keys())
+            
+            # Also check ALL other files for existing recorded dates
+            all_files_recorded = set()
+            for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                    file_recorded = data_dict[inv_id].get('daily_target_met', {})
+                    all_files_recorded.update(file_recorded.keys())
+            
+            # Combine all recorded dates (union of all files)
+            all_recorded_dates = existing_dates.union(all_files_recorded)
+            
+            # Convert excluded days to lowercase for comparison
+            excluded = [day.lower() for day in excluded_days]
+            
+            # Parse execution start date
+            if execution_start_date:
+                try:
+                    start = datetime.strptime(execution_start_date, "%Y-%m-%d")
+                except:
+                    start = datetime.now() - timedelta(days=30)
+            else:
+                start = datetime.now() - timedelta(days=30)
+            
+            # End date is today
+            end = datetime.now()
+            
+            # Track new days to record
+            new_records = {}
+            days_recorded = 0
+            
+            # Iterate through each day from start to end
+            current = start
+            while current <= end:
+                date_str = current.strftime("%Y-%m-%d")
+                day_name = current.strftime("%A").lower()
+                
+                # Skip if already recorded in ANY file (PERMANENT - NEVER MODIFY)
+                if date_str in all_recorded_dates:
+                    current += timedelta(days=1)
+                    continue
+                
+                # Skip excluded days (Saturday, Sunday, etc.)
+                if day_name in excluded:
+                    current += timedelta(days=1)
+                    continue
+                
+                # This is a working day, record it as daily target met
+                # Format: "${daily_target_risk}"
+                new_records[date_str] = f"${daily_target_risk:.2f}"
+                days_recorded += 1
+                print(f"  📝 Recorded daily target met for {date_str}: ${daily_target_risk:.2f}")
+                
+                current += timedelta(days=1)
+            
+            # If we have new records, sync to ALL files (MERGE, never overwrite)
+            if days_recorded > 0:
+                # First, update the local data dicts
+                for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                    if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                        if 'daily_target_met' not in data_dict[inv_id]:
+                            data_dict[inv_id]['daily_target_met'] = {}
+                        # Merge: preserve existing, add new
+                        for date_str, value in new_records.items():
+                            if date_str not in data_dict[inv_id]['daily_target_met']:
+                                data_dict[inv_id]['daily_target_met'][date_str] = value
+                    else:
+                        # Create new entry with daily_target_met
+                        data_dict[inv_id] = {
+                            'daily_target_met': new_records
+                        }
+                
+                # Also update activities.json
+                if 'daily_target_met' not in activities:
+                    activities['daily_target_met'] = {}
+                for date_str, value in new_records.items():
+                    if date_str not in activities['daily_target_met']:
+                        activities['daily_target_met'][date_str] = value
+                
+                # Save activities.json with new records
+                with open(activities_path, 'w', encoding='utf-8') as f:
+                    json.dump(activities, f, indent=4)
+                
+                # Save ALL investor files
+                file_paths = [
+                    (FETCHED_INVESTORS, fetched_data),
+                    (UPDATED_INVESTORS, updated_data),
+                    (ALL_FETCHED_INVESTORS, all_fetched_data),
+                    (ALL_UPDATED_INVESTORS, all_updated_data)
+                ]
+                
+                for file_path, data_dict in file_paths:
+                    try:
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            json.dump(data_dict, f, indent=4)
+                    except Exception as e:
+                        print(f"  ⚠️ Error saving {file_path}: {e}")
+                        stats["errors"].append(f"Failed to save {file_path}: {e}")
+                
+                print(f"  ✅ Recorded {days_recorded} new daily target met dates for {inv_id} in ALL files")
+                stats["files_updated"] += days_recorded * 4  # 4 files * number of records
+                return True
+            else:
+                # Even if no new records, ensure ALL files are in sync with activities.json
+                # This ensures all files have the same data
+                activities_recorded = activities.get('daily_target_met', {})
+                if activities_recorded:
+                    # Check if all files have the same records
+                    needs_sync = False
+                    for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                        if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                            file_recorded = data_dict[inv_id].get('daily_target_met', {})
+                            # Check if any date is missing
+                            for date_str in activities_recorded:
+                                if date_str not in file_recorded:
+                                    needs_sync = True
+                                    break
+                        else:
+                            needs_sync = True
+                            break
+                    
+                    if needs_sync:
+                        print(f"  🔄 Syncing existing daily_target_met records to ALL files")
+                        # Sync all existing records to all files
+                        for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                                if 'daily_target_met' not in data_dict[inv_id]:
+                                    data_dict[inv_id]['daily_target_met'] = {}
+                                for date_str, value in activities_recorded.items():
+                                    if date_str not in data_dict[inv_id]['daily_target_met']:
+                                        data_dict[inv_id]['daily_target_met'][date_str] = value
+                            else:
+                                data_dict[inv_id] = {
+                                    'daily_target_met': activities_recorded
+                                }
+                        
+                        # Save ALL investor files
+                        file_paths = [
+                            (FETCHED_INVESTORS, fetched_data),
+                            (UPDATED_INVESTORS, updated_data),
+                            (ALL_FETCHED_INVESTORS, all_fetched_data),
+                            (ALL_UPDATED_INVESTORS, all_updated_data)
+                        ]
+                        
+                        for file_path, data_dict in file_paths:
+                            try:
+                                with open(file_path, 'w', encoding='utf-8') as f:
+                                    json.dump(data_dict, f, indent=4)
+                            except Exception as e:
+                                print(f"  ⚠️ Error saving {file_path}: {e}")
+                                stats["errors"].append(f"Failed to save {file_path}: {e}")
+                        
+                        print(f"  ✅ Synced existing daily_target_met records to ALL files")
+                
+                print(f"  ℹ️ No new daily target met dates to record for {inv_id}")
+                return True
+            
+        except Exception as e:
+            print(f"   Error recording daily target met for {inv_id}: {e}")
+            stats["errors"].append(f"Failed to record daily target met for {inv_id}: {e}")
+            return False
+    
+    def get_recorded_dates_from_all_files(inv_id):
+        """
+        Get all recorded dates from daily_target_met in ALL files.
+        Returns: set of date strings (union of all files)
+        """
+        all_recorded = set()
+        
+        # Check activities.json first
+        try:
+            inv_root = Path(INV_PATH) / inv_id
+            activities_path = inv_root / "activities.json"
+            
+            if activities_path.exists():
+                with open(activities_path, 'r', encoding='utf-8') as f:
+                    activities = json.load(f)
+                recorded = activities.get('daily_target_met', {})
+                all_recorded.update(recorded.keys())
+        except Exception as e:
+            pass
+        
+        # Check ALL other files
+        for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                recorded = data_dict[inv_id].get('daily_target_met', {})
+                all_recorded.update(recorded.keys())
+        
+        return all_recorded
     
     # ================================================================
     # LOAD ALL INVESTOR FILES
@@ -13934,19 +14723,29 @@ def recent_highest_balance_target(inv_id=None):
         print(f" 📊 INVESTOR: {inv_id}")
         print(f"{'─'*80}")
         
-        # STEP 1: Get current MT5 balance
-        current_balance = get_mt5_balance()
+        # STEP 1: Check if use_recent_highest_balance flag is enabled
+        use_recent = get_use_recent_highest_balance_flag_from_all_fetched(inv_id)
+        if use_recent:
+            print(f"  🔄 use_recent_highest_balance_as_current_balance: ENABLED")
+        else:
+            print(f"  🔄 use_recent_highest_balance_as_current_balance: DISABLED")
+        
+        # STEP 2: Get effective current balance (either MT5 or recent_highest_balance)
+        current_balance = get_current_effective_balance(inv_id)
         if current_balance is None:
-            print(f"  ❌ Could not get MT5 balance - Skipping investor {inv_id}")
-            stats["errors"].append(f"Could not get MT5 balance for {inv_id}")
+            print(f"   Could not get effective balance - Skipping investor {inv_id}")
+            stats["errors"].append(f"Could not get effective balance for {inv_id}")
             stats["investors_skipped"] += 1
             continue
         
-        # STEP 2: Get broker_balance from FETCHED_INVESTORS (root level - this is the starting balance)
+        # STEP 3: Get broker_balance from FETCHED_INVESTORS (root level - this is the starting balance)
         broker_balance = get_broker_balance_from_fetched(inv_id)
         
-        # STEP 3: Get execution start date from activities.json
+        # STEP 4: Get execution start date from activities.json
         execution_start_date = get_execution_start_date_from_all_fetched(inv_id)
+        
+        # STEP 5: Get recorded dates from ALL files (to exclude from calculations)
+        recorded_dates = get_recorded_dates_from_all_files(inv_id)
         
         # Calculate days since execution start
         days_since_start = None
@@ -13959,10 +14758,10 @@ def recent_highest_balance_target(inv_id=None):
             except Exception as e:
                 pass
         
-        # STEP 4: Get daily target config
+        # STEP 6: Get daily target config (prioritizing root level)
         daily_target_risk, include_missed_days, excluded_days = get_daily_target_config_from_all_fetched(inv_id)
         
-        # STEP 5: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
+        # STEP 7: Get stored recent_highest_balance from activities.json (SOURCE OF TRUTH)
         existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
         source_name = "activities.json (SOURCE OF TRUTH)"
         
@@ -14001,26 +14800,26 @@ def recent_highest_balance_target(inv_id=None):
             print(f"\n  📝 RECENT HIGHEST BALANCE DOES NOT EXIST - INITIALIZING")
             print(f"  ─────────────────────────────────────────────────────")
             
-            print(f"  💰 Current MT5 Balance: ${current_balance:.2f}")
+            print(f"  💰 Current Effective Balance: ${current_balance:.2f}")
             if broker_balance is not None:
                 print(f"  📊 Broker Balance: ${broker_balance:.2f}")
             else:
                 print(f"  📊 Broker Balance: Not Available")
             
             # Determine which balance to use for initialization
-            # Use the HIGHER of broker_balance or current MT5 balance
+            # Use the HIGHER of broker_balance or current effective balance
             if broker_balance is not None:
                 init_balance = max(broker_balance, current_balance)
                 if init_balance == broker_balance and broker_balance > current_balance:
                     print(f"  ℹ️ Using broker_balance (${broker_balance:.2f}) - Higher than current balance (${current_balance:.2f})")
                 elif init_balance == current_balance and current_balance > broker_balance:
-                    print(f"  ℹ️ Using current MT5 balance (${current_balance:.2f}) - Higher than broker_balance (${broker_balance:.2f})")
+                    print(f"  ℹ️ Using current effective balance (${current_balance:.2f}) - Higher than broker_balance (${broker_balance:.2f})")
                 else:
                     print(f"  ℹ️ Balances equal: using ${init_balance:.2f}")
             else:
-                # No broker_balance available, use current MT5 balance
+                # No broker_balance available, use current effective balance
                 init_balance = current_balance
-                print(f"  ℹ️ No broker_balance available, using current MT5 balance: ${init_balance:.2f}")
+                print(f"  ℹ️ No broker_balance available, using current effective balance: ${init_balance:.2f}")
             
             print(f"\n  ✅ INITIALIZED: Recent Highest Balance = ${init_balance:.2f}")
             print(f"  📅 Date set to: {yesterday_str} (YESTERDAY)")
@@ -14039,11 +14838,16 @@ def recent_highest_balance_target(inv_id=None):
                 'daily_target_risk': None,
                 'profit_met_risk_threshold': False,
                 'alarm_blocked_reason': None,
-                'init_source': 'broker_balance' if (broker_balance is not None and broker_balance >= current_balance) else 'mt5_balance'
+                'init_source': 'broker_balance' if (broker_balance is not None and broker_balance >= current_balance) else 'effective_balance',
+                'use_recent_highest_balance': use_recent
             }
             
             # Sync to ALL files
             sync_all_files(inv_id, init_balance, yesterday_str, None, None, None)
+            
+            # Record daily_target_met for this investor if daily_target_risk is available
+            if daily_target_risk is not None:
+                record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days)
             
             stats["investors_updated"] += 1
             stats["investors_checked"] += 1
@@ -14086,6 +14890,17 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  🚫 Excluded Days: None")
         
         # ============================================================
+        # Print Already Recorded Dates (Permanent Records) from ALL files
+        # ============================================================
+        all_recorded = get_recorded_dates_from_all_files(inv_id)
+        if all_recorded:
+            print(f"\n  📊 PERMANENTLY RECORDED DATES (Daily Target Met) - ALL FILES")
+            print(f"  ─────────────────────────────────────────────────────────────────")
+            for date_str in sorted(all_recorded):
+                print(f"  ✅ {date_str}")
+            print(f"  📝 Total Recorded: {len(all_recorded)} date(s)")
+        
+        # ============================================================
         # Calculate Day Appearances and Working Days
         # ============================================================
         day_appearances = {}
@@ -14100,14 +14915,15 @@ def recent_highest_balance_target(inv_id=None):
         total_needed = 0
         
         if include_missed_days and execution_start_date and daily_target_risk is not None:
-            # Get day appearances
-            day_appearances = get_day_appearances(execution_start_date, today_str, excluded_days)
+            # Get day appearances (excluding recorded dates and excluded days)
+            day_appearances = get_day_appearances(execution_start_date, today_str, excluded_days, all_recorded)
             
-            # Calculate working days
+            # Calculate working days (excluding recorded dates and excluded days)
             total_days, excluded_count, working_days = get_working_days_since_start(
                 execution_start_date, 
                 today_str, 
-                excluded_days
+                excluded_days,
+                all_recorded
             )
             
             # Calculate shortage from stored high
@@ -14122,7 +14938,7 @@ def recent_highest_balance_target(inv_id=None):
                 print(f"\n  📊 PROFIT CALCULATION")
                 print(f"  ────────────────────")
                 print(f"  💰 Starting Balance (Broker): ${broker_balance:.2f}")
-                print(f"  💰 Current Balance: ${current_balance:.2f}")
+                print(f"  💰 Current Effective Balance: ${current_balance:.2f}")
                 print(f"  📈 Total Profit/Loss: ${total_profit:.2f}")
                 
                 if total_profit > 0 and daily_target_risk > 0:
@@ -14142,9 +14958,14 @@ def recent_highest_balance_target(inv_id=None):
                 
                 # Total needed = cumulative owing + shortage
                 total_needed = cumulative_target_owing + shortage
-        else:
-            # If include_missed_days is False, use today's profit only
-            total_needed = daily_target_risk if daily_target_risk else 0
+        
+        # ============================================================
+        # RECORD DAILY TARGET MET DATES (UPDATED to sync to ALL files)
+        # ============================================================
+        if daily_target_risk is not None:
+            record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days)
+            # Refresh recorded dates from ALL files after recording
+            all_recorded = get_recorded_dates_from_all_files(inv_id)
         
         # ============================================================
         # Print Day Appearances if include_missed_days is enabled
@@ -14166,11 +14987,40 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  🚫 Excluded Days Count: {excluded_count}")
             print(f"  ✅ Working Days: {working_days}")
             print(f"  📈 Days Met Daily Target: {days_met_target}")
-            print(f"  ❌ Days Owing Daily Target: {days_owing_target}")
+            print(f"   Days Owing Daily Target: {days_owing_target}")
             print(f"  💰 Cumulative Target Owing: ${cumulative_target_owing:.2f} ({days_owing_target} × ${daily_target_risk:.2f})")
             if shortage > 0:
                 print(f"  📉 Shortage from Stored High: ${shortage:.2f}")
             print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f} (Cumulative Owing + Shortage)")
+        
+        # ============================================================
+        # NEW: Find most recent profitable day and print it
+        # ============================================================
+        print(f"\n  📊 MOST RECENT PROFITABLE DAY")
+        print(f"  ─────────────────────────────")
+        most_recent_profit_day, most_recent_profit_amount = get_most_recent_profitable_day(execution_start_date)
+        
+        if most_recent_profit_day:
+            # Format the day name
+            profit_date = datetime.strptime(most_recent_profit_day, "%Y-%m-%d")
+            day_name = profit_date.strftime("%A")
+            
+            # Check if it's today
+            if most_recent_profit_day == today_str:
+                print(f"  📈 Most Recent Profitable Day: TODAY ({day_name})")
+            else:
+                print(f"  📈 Most Recent Profitable Day: {most_recent_profit_day} ({day_name})")
+            print(f"  💰 Profit: ${most_recent_profit_amount:.2f}")
+            
+            # Update the last update date to the most recent profitable day
+            if most_recent_profit_day != existing_last_update:
+                print(f"  🔄 Updating last_update_date from {existing_last_update} to {most_recent_profit_day}")
+                # Update the date in all files without changing the balance
+                sync_all_files(inv_id, existing_recent, most_recent_profit_day, None, None, None)
+                existing_last_update = most_recent_profit_day
+                has_updates = True
+        else:
+            print(f"  ℹ️ No profitable days found since execution start")
         
         # ============================================================
         # GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
@@ -14208,7 +15058,8 @@ def recent_highest_balance_target(inv_id=None):
                 'today_profit': None,
                 'daily_target_risk': None,
                 'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': 'Corrected to broker_balance'
+                'alarm_blocked_reason': 'Corrected to broker_balance',
+                'use_recent_highest_balance': use_recent
             }
             
             print(f"\n  ✅ CORRECTED: Recent Highest Balance = ${broker_balance:.2f}")
@@ -14222,14 +15073,15 @@ def recent_highest_balance_target(inv_id=None):
                 "new_balance": broker_balance,
                 "difference": broker_balance - old_recent,
                 "timestamp": timestamp,
-                "update_date": correction_date
+                "update_date": correction_date,
+                "use_recent_highest_balance": use_recent
             })
             
             # Continue to check if current balance > corrected balance
             # (fall through to the next check)
         
         # ============================================================
-        # CASE 2: Check if current MT5 > stored high
+        # CASE 2: Check if current effective balance > stored high
         # ============================================================
         if current_balance > existing_recent:
             difference = current_balance - existing_recent
@@ -14237,7 +15089,7 @@ def recent_highest_balance_target(inv_id=None):
             print(f"\n  📈 NEW HIGHER BALANCE DETECTED!")
             print(f"  ──────────────────────────────")
             print(f"  📊 Stored High: ${existing_recent:.2f}")
-            print(f"  📊 Current Balance: ${current_balance:.2f}")
+            print(f"  📊 Current Effective Balance: ${current_balance:.2f}")
             print(f"  📈 Increase: ${difference:.2f}")
             
             # STEP 6: Get today's profit from MT5 history
@@ -14274,8 +15126,15 @@ def recent_highest_balance_target(inv_id=None):
             stats["investors_updated"] += 1
             stats["new_high_recorded_only"] += 1
             
-            if profit_met_risk_threshold and alarm_threshold > 0:
-                # BOTH conditions met: Record high, date = TODAY, ALARM ON
+            # Check if alarm should be triggered            # Alarm triggers ONLY if: no shortage, no owed debts, AND last update date == today
+            has_shortage = shortage > 0 if include_missed_days else False
+            has_owed_debts = days_owing_target > 0 if include_missed_days else False
+            is_today = existing_last_update == today_str
+            
+            can_trigger_alarm = (not has_shortage) and (not has_owed_debts) and is_today and profit_met_risk_threshold
+            
+            if can_trigger_alarm:
+                # ALL conditions met: Record high, ALARM ON
                 action = "new_high"
                 stats["new_high_alerts"] += 1
                 update_date = today_str
@@ -14292,14 +15151,17 @@ def recent_highest_balance_target(inv_id=None):
                     'today_profit': today_profit,
                     'daily_target_risk': daily_target_risk,
                     'profit_met_risk_threshold': True,
-                    'alarm_blocked_reason': None
+                    'alarm_blocked_reason': None,
+                    'use_recent_highest_balance': use_recent
                 }
                 
                 print(f"\n  🚨 ALARM ACTIVATED!")
                 print(f"  ───────────────────")
                 print(f"  ✅ New high recorded: ${current_balance:.2f}")
                 print(f"  📅 Date set to: {today_str} (TODAY)")
-                print(f"  ✅ Today's profit (${today_profit:.2f}) >= {threshold_desc}")
+                print(f"  ✅ No shortage: {not has_shortage}")
+                print(f"  ✅ No owed debts: {not has_owed_debts}")
+                print(f"  ✅ Last update is today: {is_today}")
                 print(f"  🚨 TRADING SUSPENDED!")
                 
                 message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Today's Profit: ${today_profit:.2f} >= Threshold: ${alarm_threshold:.2f}. TRADING SUSPENDED!"
@@ -14307,9 +15169,23 @@ def recent_highest_balance_target(inv_id=None):
                 msg_type = 'danger'
                 
             else:
-                # New high BUT today's profit < risk: Record only, DON'T update date
+                # New high BUT conditions not met: Record only, DON'T trigger alarm
                 action = "new_high_recorded_only"
+                # Keep the last update date as the most recent profitable day
                 update_date = existing_last_update if existing_last_update else yesterday_str
+                
+                # Determine why alarm was blocked
+                alarm_blocked_reasons = []
+                if has_shortage:
+                    alarm_blocked_reasons.append(f"Shortage exists (${shortage:.2f})")
+                if has_owed_debts:
+                    alarm_blocked_reasons.append(f"Owed debts exist ({days_owing_target} days)")
+                if not is_today:
+                    alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
+                if not profit_met_risk_threshold:
+                    alarm_blocked_reasons.append(f"Today's profit (${today_profit:.2f}) < {threshold_desc}")
+                
+                alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
                 
                 recent_highest_alert = {
                     'is_triggered': False,
@@ -14322,19 +15198,28 @@ def recent_highest_balance_target(inv_id=None):
                     'last_update_date': update_date,
                     'today_profit': today_profit,
                     'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': False,
-                    'alarm_blocked_reason': f"Today's profit (${today_profit:.2f}) < {threshold_desc}"
+                    'profit_met_risk_threshold': profit_met_risk_threshold,
+                    'alarm_blocked_reason': alarm_blocked_reason,
+                    'use_recent_highest_balance': use_recent
                 }
                 
                 print(f"\n  🟡 NEW HIGH RECORDED ONLY - Alarm BLOCKED")
                 print(f"  ──────────────────────────────────────────")
                 print(f"  ✅ New high recorded: ${current_balance:.2f}")
                 print(f"  📅 Date NOT updated - kept as: {update_date}")
-                print(f"  ⚠️ Today's profit (${today_profit:.2f}) < {threshold_desc}")
+                print(f"  ⚠️ Alarm conditions not met:")
+                if has_shortage:
+                    print(f"     • Shortage exists: ${shortage:.2f}")
+                if has_owed_debts:
+                    print(f"     • Owed debts exist: {days_owing_target} days")
+                if not is_today:
+                    print(f"     • Last update date ({existing_last_update}) is not today")
+                if not profit_met_risk_threshold:
+                    print(f"     • Today's profit (${today_profit:.2f}) < {threshold_desc}")
                 print(f"  🔇 Alarm OFF - Trading continues")
                 
-                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM NOT TRIGGERED: Today's Profit (${today_profit:.2f}) < {threshold_desc}. Trading continues."
-                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but today's profit below threshold - Trading continues"
+                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM BLOCKED: {alarm_blocked_reason}. Trading continues."
+                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but alarm blocked - Trading continues"
                 msg_type = 'info'
             
             # Sync to ALL files with new balance and notifications
@@ -14351,9 +15236,14 @@ def recent_highest_balance_target(inv_id=None):
                 "today_profit": today_profit,
                 "daily_target_risk": daily_target_risk,
                 "profit_met_risk_threshold": profit_met_risk_threshold,
-                "alarm_triggered": profit_met_risk_threshold,
+                "alarm_triggered": can_trigger_alarm,
                 "include_missed_days": include_missed_days,
-                "total_needed": total_needed if include_missed_days else None
+                "total_needed": total_needed if include_missed_days else None,
+                "has_shortage": has_shortage,
+                "has_owed_debts": has_owed_debts,
+                "is_today": is_today,
+                "alarm_blocked_reason": alarm_blocked_reason if not can_trigger_alarm else None,
+                "use_recent_highest_balance": use_recent
             })
             
             has_updates = True
@@ -14361,26 +15251,167 @@ def recent_highest_balance_target(inv_id=None):
             continue
         
         # ============================================================
-        # CASE 3: Current balance <= stored high - No change
+        # CASE 3: Current balance >= stored high (including equal) 
+        # Check if alarm should be triggered (no shortage, no debts, today)
+        # ============================================================
+        elif current_balance >= existing_recent:
+            print(f"\n  📊 CURRENT BALANCE >= STORED HIGH")
+            print(f"  ──────────────────────────────────")
+            print(f"  📅 Last Updated: {existing_last_update}")
+            print(f"  📊 Stored High: ${existing_recent:.2f}")
+            print(f"  📊 Current Effective Balance: ${current_balance:.2f}")
+            
+            # Get today's profit for info
+            today_profit = get_today_profit_from_history()
+            print(f"  💰 Today's Profit: ${today_profit:.2f}")
+            
+            # Check conditions for alarm
+            has_shortage = shortage > 0 if include_missed_days else False
+            has_owed_debts = days_owing_target > 0 if include_missed_days else False
+            is_today = existing_last_update == today_str
+            
+            print(f"\n  📋 ALARM CONDITIONS CHECK:")
+            print(f"  ──────────────────────────")
+            print(f"  • No Shortage: {'✅' if not has_shortage else '❌'} (Shortage: ${shortage:.2f})")
+            print(f"  • No Owed Debts: {'✅' if not has_owed_debts else '❌'} (Owed: {days_owing_target} days)")
+            print(f"  • Last Update is Today: {'✅' if is_today else '❌'} ({existing_last_update} vs {today_str})")
+            
+            can_trigger_alarm = (not has_shortage) and (not has_owed_debts) and is_today
+            
+            if can_trigger_alarm:
+                # ALL conditions met: ALARM ON
+                action = "alarm_triggered_equal_balance"
+                stats["new_high_alerts"] += 1
+                stats["investors_updated"] += 1
+                
+                recent_highest_alert = {
+                    'is_triggered': True,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': 0,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'alarm_triggered_equal_balance',
+                    'last_update_date': existing_last_update,
+                    'today_profit': today_profit,
+                    'daily_target_risk': daily_target_risk,
+                    'profit_met_risk_threshold': True,
+                    'alarm_blocked_reason': None,
+                    'use_recent_highest_balance': use_recent
+                }
+                
+                print(f"\n  🚨 ALARM ACTIVATED!")
+                print(f"  ───────────────────")
+                print(f"  ✅ Current balance (${current_balance:.2f}) >= stored high (${existing_recent:.2f})")
+                print(f"  ✅ No shortage: {not has_shortage}")
+                print(f"  ✅ No owed debts: {not has_owed_debts}")
+                print(f"  ✅ Last update is today: {is_today}")
+                print(f"  🚨 TRADING SUSPENDED!")
+                
+                message = f"🚨 DAILY TARGET MET - Balance ${current_balance:.2f} at stored high. Today's Profit: ${today_profit:.2f}. TRADING SUSPENDED!"
+                exec_message = f"🚨 SERVER ALERT: {inv_id} daily target met at ${current_balance:.2f} - Trading SUSPENDED"
+                msg_type = 'danger'
+                
+                # Sync to ALL files with notification
+                sync_all_files(inv_id, current_balance, existing_last_update, message, exec_message, msg_type)
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": action,
+                    "old_balance": existing_recent,
+                    "new_balance": current_balance,
+                    "difference": 0,
+                    "timestamp": timestamp,
+                    "update_date": existing_last_update,
+                    "today_profit": today_profit,
+                    "daily_target_risk": daily_target_risk,
+                    "profit_met_risk_threshold": True,
+                    "alarm_triggered": True,
+                    "include_missed_days": include_missed_days,
+                    "has_shortage": has_shortage,
+                    "has_owed_debts": has_owed_debts,
+                    "is_today": is_today,
+                    "alarm_blocked_reason": None,
+                    "use_recent_highest_balance": use_recent
+                })
+                
+                has_updates = True
+                stats["investors_checked"] += 1
+                continue
+            
+            else:
+                # Conditions not met - Alarm OFF
+                alarm_blocked_reasons = []
+                if has_shortage:
+                    alarm_blocked_reasons.append(f"Shortage exists (${shortage:.2f})")
+                if has_owed_debts:
+                    alarm_blocked_reasons.append(f"Owed debts exist ({days_owing_target} days)")
+                if not is_today:
+                    alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
+                
+                alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
+                
+                recent_highest_alert = {
+                    'is_triggered': False,
+                    'investor_id': inv_id,
+                    'old_balance': existing_recent,
+                    'new_balance': current_balance,
+                    'difference': 0,
+                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                    'action': 'alarm_blocked_equal_balance',
+                    'last_update_date': existing_last_update,
+                    'today_profit': today_profit,
+                    'daily_target_risk': daily_target_risk,
+                    'profit_met_risk_threshold': False,
+                    'alarm_blocked_reason': alarm_blocked_reason,
+                    'use_recent_highest_balance': use_recent
+                }
+                
+                print(f"\n  🟡 ALARM BLOCKED - Conditions not met")
+                print(f"  ─────────────────────────────────────")
+                print(f"  ⚠️ Alarm conditions not met:")
+                if has_shortage:
+                    print(f"     • Shortage exists: ${shortage:.2f}")
+                if has_owed_debts:
+                    print(f"     • Owed debts exist: {days_owing_target} days")
+                if not is_today:
+                    print(f"     • Last update date ({existing_last_update}) is not today")
+                print(f"  🔇 Alarm OFF - Trading continues")
+                
+                stats["details"].append({
+                    "investor_id": inv_id,
+                    "action": "alarm_blocked_equal_balance",
+                    "old_balance": existing_recent,
+                    "new_balance": current_balance,
+                    "difference": 0,
+                    "timestamp": timestamp,
+                    "update_date": existing_last_update,
+                    "today_profit": today_profit,
+                    "daily_target_risk": daily_target_risk,
+                    "profit_met_risk_threshold": False,
+                    "alarm_triggered": False,
+                    "include_missed_days": include_missed_days,
+                    "has_shortage": has_shortage,
+                    "has_owed_debts": has_owed_debts,
+                    "is_today": is_today,
+                    "alarm_blocked_reason": alarm_blocked_reason,
+                    "use_recent_highest_balance": use_recent
+                })
+                
+                stats["investors_checked"] += 1
+                stats["investors_skipped"] += 1
+                continue
+        
+        # ============================================================
+        # CASE 4: Current balance < stored high - No alarm
         # ============================================================
         else:
-            # Calculate expected amount to trigger alarm
-            # Using current balance + total needed (cumulative owing + shortage)
-            if include_missed_days and daily_target_risk is not None:
-                expected_to_trigger = current_balance + total_needed
-                if shortage > 0:
-                    expected_desc = f"Current Balance + Cumulative Owing ({days_owing_target} × ${daily_target_risk:.2f}) + Shortage (${shortage:.2f})"
-                else:
-                    expected_desc = f"Current Balance + Cumulative Owing ({days_owing_target} × ${daily_target_risk:.2f})"
-            else:
-                expected_to_trigger = existing_recent + (daily_target_risk if daily_target_risk else 0)
-                expected_desc = f"Stored High + Today's Daily Target (${daily_target_risk if daily_target_risk else 0:.2f})"
-            
             print(f"\n  📝 RECENT HIGHEST BALANCE EXISTS - Status Check")
             print(f"  ────────────────────────────────────────────────")
             print(f"  📅 Last Updated: {existing_last_update}")
             print(f"  📊 Stored High: ${existing_recent:.2f}")
-            print(f"  📊 Current Balance: ${current_balance:.2f}")
+            print(f"  📊 Current Effective Balance: ${current_balance:.2f}")
+            print(f"  📉 Current balance is below stored high - No alarm")
             
             if daily_target_risk is not None:
                 if include_missed_days:
@@ -14388,28 +15419,12 @@ def recent_highest_balance_target(inv_id=None):
                     print(f"  📋 Include Missed Days: Enabled")
                     if shortage > 0:
                         print(f"  📉 Shortage from Stored High: ${shortage:.2f}")
-                    print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f} (Cumulative Owing + Shortage)")
-                    print(f"  📈 Expected amount to trigger alarm: ${expected_to_trigger:.2f} ({expected_desc})")
-                    print(f"  📊 Need ${total_needed:.2f} more to trigger alarm")
+                    print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f}")
+                    print(f"  📊 Need ${existing_recent - current_balance:.2f} more to reach stored high")
                 else:
                     print(f"  🎯 Daily Target in Current Balance Range: ${daily_target_risk:.2f}")
                     print(f"  📋 Include Missed Days: Disabled")
-                    print(f"  📈 Expected amount to exceed stored high: ${expected_to_trigger:.2f} ({expected_desc})")
-                    if current_balance < existing_recent:
-                        shortage = existing_recent - current_balance
-                        print(f"  📉 Shortage: ${shortage:.2f}")
-                        print(f"  📊 Need ${existing_recent - current_balance:.2f} more to reach stored high")
-                    else:
-                        print(f"  ℹ️ Balance unchanged at stored high: ${current_balance:.2f}")
-                    print(f"  📊 Need ${expected_to_trigger - current_balance:.2f} more to trigger alarm")
-            else:
-                print(f"  🎯 Daily Target in Current Balance Range: Not Available")
-                if current_balance < existing_recent:
-                    shortage = existing_recent - current_balance
-                    print(f"  📉 Shortage: ${shortage:.2f}")
                     print(f"  📊 Need ${existing_recent - current_balance:.2f} more to reach stored high")
-                else:
-                    print(f"  ℹ️ Balance unchanged at stored high: ${current_balance:.2f}")
             
             print(f"\n  🔇 Alarm OFF - Trading allowed")
             stats["investors_skipped"] += 1
@@ -14419,14 +15434,15 @@ def recent_highest_balance_target(inv_id=None):
                 'investor_id': inv_id,
                 'old_balance': existing_recent,
                 'new_balance': current_balance,
-                'difference': existing_recent - current_balance if current_balance < existing_recent else 0,
+                'difference': existing_recent - current_balance,
                 'timestamp': datetime.now().strftime('%I:%M:%S %p'),
                 'action': 'no_change',
                 'last_update_date': existing_last_update,
                 'today_profit': None,
                 'daily_target_risk': daily_target_risk,
                 'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': None
+                'alarm_blocked_reason': None,
+                'use_recent_highest_balance': use_recent
             }
             
             stats["details"].append({
@@ -14434,15 +15450,14 @@ def recent_highest_balance_target(inv_id=None):
                 "action": "no_change",
                 "stored_high": existing_recent,
                 "current_balance": current_balance,
-                "difference": existing_recent - current_balance if current_balance < existing_recent else 0,
+                "difference": existing_recent - current_balance,
                 "timestamp": timestamp,
                 "update_date": existing_last_update,
                 "daily_target_risk": daily_target_risk,
-                "expected_to_trigger": expected_to_trigger,
                 "include_missed_days": include_missed_days,
-                "total_needed": total_needed if include_missed_days else None,
                 "shortage": shortage if include_missed_days else None,
-                "days_owing_target": days_owing_target if include_missed_days else None
+                "days_owing_target": days_owing_target if include_missed_days else None,
+                "use_recent_highest_balance": use_recent
             })
             
             stats["investors_checked"] += 1
@@ -14462,7 +15477,7 @@ def recent_highest_balance_target(inv_id=None):
                 json.dump(fetched_data, f, indent=4)
             print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
         except Exception as e:
-            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
+            print(f" │  Error saving FETCHED_INVESTORS: {e}")
             stats["errors"].append(f"Failed to save FETCHED_INVESTORS: {e}")
         
         # Save UPDATED_INVESTORS - PRESERVES ALL EXISTING DATA
@@ -14471,7 +15486,7 @@ def recent_highest_balance_target(inv_id=None):
                 json.dump(updated_data, f, indent=4)
             print(f" │ ✅ Updated: {UPDATED_INVESTORS}")
         except Exception as e:
-            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
+            print(f" │  Error saving UPDATED_INVESTORS: {e}")
             stats["errors"].append(f"Failed to save UPDATED_INVESTORS: {e}")
         
         # Save ALL_FETCHED_INVESTORS - PRESERVES ALL EXISTING DATA
@@ -14480,7 +15495,7 @@ def recent_highest_balance_target(inv_id=None):
                 json.dump(all_fetched_data, f, indent=4)
             print(f" │ ✅ Updated: {ALL_FETCHED_INVESTORS}")
         except Exception as e:
-            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
+            print(f" │  Error saving ALL_FETCHED_INVESTORS: {e}")
             stats["errors"].append(f"Failed to save ALL_FETCHED_INVESTORS: {e}")
         
         # Save ALL_UPDATED_INVESTORS - PRESERVES ALL EXISTING DATA
@@ -14489,14 +15504,83 @@ def recent_highest_balance_target(inv_id=None):
                 json.dump(all_updated_data, f, indent=4)
             print(f" │ ✅ Updated: {ALL_UPDATED_INVESTORS}")
         except Exception as e:
-            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
+            print(f" │  Error saving ALL_UPDATED_INVESTORS: {e}")
             stats["errors"].append(f"Failed to save ALL_UPDATED_INVESTORS: {e}")
         
         print(f"\n │ ✅ All investor files updated successfully (existing data preserved).")
         print(f" │ ✅ activities.json (SOURCE OF TRUTH) updated for {stats['activities_updated']} investor(s)")
         stats["processing_success"] = True
     else:
-        print("\n │ ℹ️ No updates needed. All files are up to date.")
+        # Even if no updates, ensure daily_target_met is synced across ALL files
+        print("\n" + "─"*80)
+        print(" 🔄 SYNCING DAILY_TARGET_MET ACROSS ALL FILES")
+        print("─"*80)
+        
+        # Check each investor for daily_target_met consistency
+        for inv_id in investors_to_process:
+            # Get recorded dates from activities.json
+            inv_root = Path(INV_PATH) / inv_id
+            activities_path = inv_root / "activities.json"
+            if activities_path.exists():
+                try:
+                    with open(activities_path, 'r', encoding='utf-8') as f:
+                        activities = json.load(f)
+                    
+                    activities_recorded = activities.get('daily_target_met', {})
+                    if activities_recorded:
+                        # Check if all files have these records
+                        needs_sync = False
+                        for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                                file_recorded = data_dict[inv_id].get('daily_target_met', {})
+                                for date_str in activities_recorded:
+                                    if date_str not in file_recorded:
+                                        needs_sync = True
+                                        break
+                            else:
+                                needs_sync = True
+                                break
+                            if needs_sync:
+                                break
+                        
+                        if needs_sync:
+                            print(f"  🔄 Syncing daily_target_met for {inv_id} to ALL files")
+                            # Sync all existing records to all files
+                            for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
+                                if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
+                                    if 'daily_target_met' not in data_dict[inv_id]:
+                                        data_dict[inv_id]['daily_target_met'] = {}
+                                    for date_str, value in activities_recorded.items():
+                                        if date_str not in data_dict[inv_id]['daily_target_met']:
+                                            data_dict[inv_id]['daily_target_met'][date_str] = value
+                                else:
+                                    data_dict[inv_id] = {
+                                        'daily_target_met': activities_recorded
+                                    }
+                            
+                            # Save ALL investor files
+                            file_paths = [
+                                (FETCHED_INVESTORS, fetched_data),
+                                (UPDATED_INVESTORS, updated_data),
+                                (ALL_FETCHED_INVESTORS, all_fetched_data),
+                                (ALL_UPDATED_INVESTORS, all_updated_data)
+                            ]
+                            
+                            for file_path, data_dict in file_paths:
+                                try:
+                                    with open(file_path, 'w', encoding='utf-8') as f:
+                                        json.dump(data_dict, f, indent=4)
+                                    print(f"  ✅ Updated: {file_path}")
+                                except Exception as e:
+                                    print(f"  ⚠️ Error saving {file_path}: {e}")
+                            
+                            stats["files_updated"] += 4
+                            has_updates = True
+                except Exception as e:
+                    pass
+        
+        if not has_updates:
+            print("\n │ ℹ️ No updates needed. All files are up to date.")
         stats["processing_success"] = True
     
     # Summary
@@ -14506,7 +15590,7 @@ def recent_highest_balance_target(inv_id=None):
     print(f"  Broker balance corrections: {stats['broker_balance_corrections']}")
     print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
     print(f"  New high alerts triggered: {stats['new_high_alerts']}")
-    print(f"  Alarms blocked (profit < threshold): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
+    print(f"  Alarms blocked (conditions not met): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
     print(f"  Investors updated: {stats['investors_updated']}")
     print(f"  Investors skipped: {stats['investors_skipped']}")
     print(f"  activities.json updated: {stats['activities_updated']}")
@@ -14515,15 +15599,15 @@ def recent_highest_balance_target(inv_id=None):
     if stats['new_high_alerts'] > 0:
         print(f"\n  🚨 ALARM ACTIVE: {stats['new_high_alerts']} investor(s)")
         for detail in stats['details']:
-            if detail.get('action') == 'new_high':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) 🔴")
+            if detail.get('alarm_triggered'):
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} 🔴")
     
     blocked = stats['new_high_recorded_only'] - stats['new_high_alerts']
     if blocked > 0:
-        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (profit < threshold)")
+        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (conditions not met)")
         for detail in stats['details']:
-            if detail.get('action') == 'new_high_recorded_only':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (+${detail['difference']:.2f}) - Today's Profit ${detail['today_profit']:.2f} < Threshold ${detail.get('total_needed', detail.get('daily_target_risk', 0)):.2f} 🟡")
+            if detail.get('action') in ['new_high_recorded_only', 'alarm_blocked_equal_balance'] and not detail.get('alarm_triggered'):
+                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} - Blocked: {detail.get('alarm_blocked_reason', 'Unknown')} 🟡")
     
     if stats['broker_balance_corrections'] > 0:
         print(f"\n  🔧 BROKER BALANCE CORRECTIONS: {stats['broker_balance_corrections']} investor(s)")
@@ -14632,6 +15716,118 @@ def martingale_system(inv_id=None):
         if not acc_mgmt_path.exists():
             print(f"  ✗ Account config missing. Skipping.")
             continue
+        
+        def get_effective_current_balance():
+            """
+            Get the effective current balance based on use_recent_highest_balance_as_current_balance flag.
+            If flag is True and recent_highest_balance exists, use that.
+            Otherwise, fall back to MT5 balance.
+            Returns: balance (float) or None
+            """
+            # Check if use_recent_highest_balance flag is enabled in ALL_FETCHED_INVESTORS
+            use_recent = False
+            
+            if os.path.exists(ALL_FETCHED_INVESTORS):
+                try:
+                    with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                        all_fetched_data = json.load(f)
+                    
+                    investor_data = all_fetched_data.get(user_brokerid)
+                    if investor_data:
+                        # Check root level first
+                        root_flag = investor_data.get('use_recent_highest_balance_as_current_balance', False)
+                        if root_flag:
+                            use_recent = True
+                        else:
+                            # Check in settings
+                            settings = investor_data.get('settings', {})
+                            settings_flag = settings.get('use_recent_highest_balance_as_current_balance', False)
+                            if settings_flag:
+                                use_recent = True
+                            else:
+                                # Check in accountmanagement settings
+                                accountmanagement = investor_data.get('accountmanagement', {})
+                                accountmanagement_settings = accountmanagement.get('settings', {})
+                                accountmanagement_flag = accountmanagement_settings.get('use_recent_highest_balance_as_current_balance', False)
+                                if accountmanagement_flag:
+                                    use_recent = True
+                except Exception as e:
+                    pass
+            
+            if use_recent:
+                # Try to get recent_highest_balance from activities.json
+                try:
+                    inv_root = Path(INV_PATH) / user_brokerid
+                    activities_path = inv_root / "activities.json"
+                    
+                    if activities_path.exists():
+                        with open(activities_path, 'r', encoding='utf-8') as f:
+                            activities = json.load(f)
+                        
+                        recent_balance = activities.get('recent_highest_balance')
+                        if recent_balance is not None:
+                            try:
+                                balance = float(recent_balance)
+                                print(f"  🔄 Using recent_highest_balance (${balance:.2f}) as current balance (flag enabled)")
+                                return balance
+                            except (ValueError, TypeError):
+                                print(f"  ⚠️ recent_highest_balance has invalid value, falling back to MT5 balance")
+                except Exception as e:
+                    print(f"  ⚠️ Error reading recent_highest_balance: {e}")
+            
+            # Fall back to MT5 balance
+            account_info = mt5.account_info()
+            if account_info:
+                return account_info.balance
+            return None
+            
+        def get_open_positions_total_risk():
+            """
+            Calculate total risk of all open positions.
+            Returns: (total_risk, list_of_position_risks)
+            """
+            positions = mt5.positions_get()
+            if positions is None or len(positions) == 0:
+                return 0, []
+            
+            total_risk = 0
+            position_risks = []
+            
+            for pos in positions:
+                symbol = pos.symbol
+                symbol_info = mt5.symbol_info(symbol)
+                if not symbol_info:
+                    continue
+                
+                # Skip if no stop loss
+                if pos.sl is None or pos.sl == 0:
+                    continue
+                
+                # Calculate risk based on position type
+                if pos.type == mt5.POSITION_TYPE_BUY:
+                    price_diff = pos.price_open - pos.sl
+                else:  # SELL
+                    price_diff = pos.sl - pos.price_open
+                
+                if price_diff <= 0:
+                    continue
+                
+                contract_size = symbol_info.trade_contract_size
+                risk = price_diff * pos.volume * contract_size
+                total_risk += risk
+                
+                position_risks.append({
+                    'ticket': pos.ticket,
+                    'symbol': symbol,
+                    'volume': pos.volume,
+                    'entry': pos.price_open,
+                    'sl': pos.sl,
+                    'type': 'BUY' if pos.type == 0 else 'SELL',
+                    'risk': risk
+                })
+            
+            return total_risk, position_risks
+
 
         # ========== SECTION 1: LOAD CONFIGURATION ==========
         def load_configuration():
@@ -14676,13 +15872,13 @@ def martingale_system(inv_id=None):
                     include_missed_days = daily_target_config.get("include_missed_days", False)
                     daily_target = daily_target_config.get("daily_target", {})
                     
-                    # Find daily target for current balance range
+                    # Find daily target for current balance range using EFFECTIVE current balance
                     daily_target_risk = None
                     if daily_target and target_daily_profit:
-                        # Get current balance from MT5
-                        account_info = mt5.account_info()
-                        if account_info:
-                            current_balance = account_info.balance
+                        # Get effective current balance
+                        effective_balance = get_effective_current_balance()
+                        if effective_balance is not None:
+                            current_balance_for_range = effective_balance
                             
                             for range_str, risk_value in daily_target.items():
                                 try:
@@ -14702,7 +15898,7 @@ def martingale_system(inv_id=None):
                                         low = float(range_part)
                                         high = float(range_part)
                                     
-                                    if low <= current_balance <= high:
+                                    if low <= current_balance_for_range <= high:
                                         daily_target_risk = float(risk_value)
                                         break
                                 except Exception:
@@ -14753,10 +15949,10 @@ def martingale_system(inv_id=None):
                 default_minimum_risk = 2
                 
                 if default_risk_map:
-                    # Get current balance for range matching
-                    account_info = mt5.account_info()
-                    if account_info:
-                        current_balance = account_info.balance
+                    # Get effective current balance for range matching
+                    effective_balance = get_effective_current_balance()
+                    if effective_balance is not None:
+                        current_balance_for_range = effective_balance
                         
                         for range_str, risk_value in default_risk_map.items():
                             try:
@@ -14765,7 +15961,7 @@ def martingale_system(inv_id=None):
                                 low = float(low_str)
                                 high = float(high_str)
                                 
-                                if low <= current_balance <= high:
+                                if low <= current_balance_for_range <= high:
                                     default_minimum_risk = float(risk_value)
                                     break
                             except Exception:
@@ -14863,75 +16059,64 @@ def martingale_system(inv_id=None):
         print(f"  │ Default min risk floor: ${default_minimum_risk:.2f}")
 
 
-        # ========== SECTION 2: GET CURRENT BALANCE ==========
+        # ========== SECTION 2: GET EFFECTIVE CURRENT BALANCE ==========
         print(f"\n  📊 STEP 1: Balance Analysis")
         print(f"  {'─'*40}")
-        
-        account_info = mt5.account_info()
-        if not account_info:
-            print(f"  ✗ Failed to get account info - MT5 not initialized?")
+
+        effective_balance = get_effective_current_balance()
+        if effective_balance is None:
+            print(f"  ✗ Failed to get effective balance - MT5 not initialized?")
             stats["errors"] += 1
             continue
-        
-        current_balance = account_info.balance
+
+        current_balance = effective_balance
         stats["current_balance"] = current_balance
-        print(f"  │ Current balance: ${current_balance:.2f}")
+        print(f"  │ Current effective balance: ${current_balance:.2f}")
 
-        def get_open_positions_total_risk():
-            """
-            Calculate total risk of all open positions.
-            Returns: (total_risk, list_of_position_risks)
-            """
-            positions = mt5.positions_get()
-            if positions is None or len(positions) == 0:
-                return 0, []
-            
-            total_risk = 0
-            position_risks = []
-            
-            for pos in positions:
-                symbol = pos.symbol
-                symbol_info = mt5.symbol_info(symbol)
-                if not symbol_info:
-                    continue
-                
-                # Skip if no stop loss
-                if pos.sl is None or pos.sl == 0:
-                    continue
-                
-                # Calculate risk based on position type
-                if pos.type == mt5.POSITION_TYPE_BUY:
-                    price_diff = pos.price_open - pos.sl
-                else:  # SELL
-                    price_diff = pos.sl - pos.price_open
-                
-                if price_diff <= 0:
-                    continue
-                
-                contract_size = symbol_info.trade_contract_size
-                risk = price_diff * pos.volume * contract_size
-                total_risk += risk
-                
-                position_risks.append({
-                    'ticket': pos.ticket,
-                    'symbol': symbol,
-                    'volume': pos.volume,
-                    'entry': pos.price_open,
-                    'sl': pos.sl,
-                    'type': 'BUY' if pos.type == 0 else 'SELL',
-                    'risk': risk
-                })
-            
-            return total_risk, position_risks
+        # Check if we're using recent_highest_balance as current balance
+        use_recent_flag = False
+        if os.path.exists(ALL_FETCHED_INVESTORS):
+            try:
+                with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                    all_fetched_data_temp = json.load(f)
+                investor_data_temp = all_fetched_data_temp.get(user_brokerid)
+                if investor_data_temp:
+                    root_flag = investor_data_temp.get('use_recent_highest_balance_as_current_balance', False)
+                    if root_flag:
+                        use_recent_flag = True
+                    else:
+                        settings_temp = investor_data_temp.get('settings', {})
+                        settings_flag = settings_temp.get('use_recent_highest_balance_as_current_balance', False)
+                        if settings_flag:
+                            use_recent_flag = True
+            except Exception as e:
+                pass
 
+        if use_recent_flag:
+            print(f"  │ Using recent_highest_balance as current balance (flag enabled)")
+        else:
+            print(f"  │ Using MT5 balance as current balance")
         # ========== SECTION 3: GET EXECUTION START BALANCE & DRAWDOWN ==========
         def get_starting_balance_and_drawdown():
             """
             Unified: Both modes read from activities.json for consistency
-            Now with pre-drawdown assumption support
+            Now with pre-drawdown assumption support and effective current balance
             """
             activities_path = inv_root / "activities.json"
-            starting_balance = current_balance
+            
+            # Get effective current balance (either MT5 or recent_highest_balance)
+            effective_balance = get_effective_current_balance()
+            if effective_balance is None:
+                print(f"  ⚠️ Could not get effective balance, falling back to MT5")
+                account_info = mt5.account_info()
+                if not account_info:
+                    print(f"  ✗ Failed to get account info - MT5 not initialized?")
+                    return None, None
+                current_balance_for_drawdown = account_info.balance
+            else:
+                current_balance_for_drawdown = effective_balance
+            
+            starting_balance = current_balance_for_drawdown
             
             # ALWAYS read from activities.json (both modes)
             if activities_path.exists():
@@ -14952,19 +16137,19 @@ def martingale_system(inv_id=None):
                             print(f"  │ Starting balance from activities.json (recent_highest_balance): ${starting_balance:.2f}")
                         else:
                             print(f"  │ No balance found in activities.json, using current balance")
-                            starting_balance = current_balance
+                            starting_balance = current_balance_for_drawdown
                     
                 except Exception as e:
                     print(f"  │ Could not load activities.json: {e}")
-                    starting_balance = current_balance
+                    starting_balance = current_balance_for_drawdown
             else:
                 print(f"  │ No activities.json found, using current balance")
-                starting_balance = current_balance
+                starting_balance = current_balance_for_drawdown
             
-            # Calculate drawdown
-            drawdown = max(0, starting_balance - current_balance)
+            # Calculate drawdown using effective current balance
+            drawdown = max(0, starting_balance - current_balance_for_drawdown)
             print(f"  │ Starting balance: ${starting_balance:.2f}")
-            print(f"  │ Current balance: ${current_balance:.2f}")
+            print(f"  │ Current effective balance: ${current_balance_for_drawdown:.2f}")
             print(f"  │ Drawdown: ${drawdown:.2f}")
             
             # ========== NEW: Pre-drawdown assumption ==========
@@ -14993,7 +16178,7 @@ def martingale_system(inv_id=None):
                 print(f"  │ Using existing drawdown: ${drawdown:.2f}")
             
             return starting_balance, drawdown
-
+            
         # Execute based on martingale type
         if martingale_type == "balance_based":
             # Simple balance-based mode
@@ -15026,13 +16211,19 @@ def martingale_system(inv_id=None):
         else:
             # Original loss_streak behavior with pre-drawdown support
             def get_execution_start_balance_and_stats():
-                """Original loss_streak function with pre-drawdown support"""
+                """Original loss_streak function with pre-drawdown support and effective balance"""
                 activities_path = inv_root / "activities.json"
-                starting_balance = current_balance
+                
+                # Get effective current balance
+                effective_balance_for_stats = get_effective_current_balance()
+                if effective_balance_for_stats is None:
+                    effective_balance_for_stats = current_balance
+                
+                starting_balance = effective_balance_for_stats
                 total_profits = 0.0
                 total_losses = 0.0
                 net_deposits = 0.0
-                later_balance = current_balance
+                later_balance = effective_balance_for_stats
                 winrate = 0
                 lossrate = 0
                 total_wins_value = 0
@@ -15052,22 +16243,22 @@ def martingale_system(inv_id=None):
                                 print(f"  │ Starting balance from activities.json: ${starting_balance:.2f}")
                             except (ValueError, TypeError):
                                 print(f"  │ Could not parse recent_highest_balance, using current balance")
-                                starting_balance = current_balance
+                                starting_balance = effective_balance_for_stats
                         else:
                             print(f"  │ No recent_highest_balance in activities.json, using current balance")
-                            starting_balance = current_balance
+                            starting_balance = effective_balance_for_stats
                         
                     except Exception as e:
                         print(f"  │ Could not load activities.json: {e}")
-                        starting_balance = current_balance
+                        starting_balance = effective_balance_for_stats
                 else:
                     print(f"  │ No activities.json found, using current balance")
-                    starting_balance = current_balance
+                    starting_balance = effective_balance_for_stats
                 
                 later_balance = starting_balance + total_profits
                 
                 print(f"  │ Starting balance: ${starting_balance:.2f}")
-                print(f"  │ Current balance: ${current_balance:.2f}")
+                print(f"  │ Current effective balance: ${effective_balance_for_stats:.2f}")
                 print(f"  │ Later-balance (start + profits): ${later_balance:.2f}")
                 
                 return starting_balance, total_profits, total_losses, net_deposits, later_balance, winrate, lossrate, total_wins_value, total_losses_value, winning_trades_count, losing_trades_count
@@ -15161,27 +16352,33 @@ def martingale_system(inv_id=None):
         print(f"  {'─'*40}")
         
         def get_stage_max_risk():
-            """Get martingale maximum risk per stage based on current balance"""
+            """Get martingale maximum risk per stage based on effective current balance"""
             martingale_risk_map = config.get("martingale_per_stage_drawdown_amount", {})
             
             if martingale_risk_map:
-                for range_str, risk_value in martingale_risk_map.items():
-                    try:
-                        raw_range = range_str.split("_")[0]
-                        low_str, high_str = raw_range.split("-")
-                        low = float(low_str)
-                        high = float(high_str)
-                        
-                        if low <= current_balance <= high:
-                            risk = float(risk_value)
-                            return risk
-                    except Exception:
-                        continue
-                
-                return 100.0
+                # Get effective current balance
+                effective_balance = get_effective_current_balance()
+                if effective_balance is not None:
+                    current_balance_for_range = effective_balance
+                    
+                    for range_str, risk_value in martingale_risk_map.items():
+                        try:
+                            raw_range = range_str.split("_")[0]
+                            low_str, high_str = raw_range.split("-")
+                            low = float(low_str)
+                            high = float(high_str)
+                            
+                            if low <= current_balance_for_range <= high:
+                                risk = float(risk_value)
+                                return risk
+                        except Exception:
+                            continue
+                    
+                    return 100.0
+                else:
+                    return 100.0
             else:
                 return 100.0
-        
         stage_max_risk = get_stage_max_risk()
         stats["martingale_maximum_risk"] = stage_max_risk
         stats["stage_max_risk"] = stage_max_risk
@@ -16089,14 +17286,15 @@ def martingale_system(inv_id=None):
                 stats["errors"] += 1
                 return False
 
-        def calculate_daily_target_requirement(inv_root, current_balance, broker_balance, daily_target_risk, include_missed_days, excluded_days):
+        def calculate_daily_target_requirement(inv_root, effective_balance, broker_balance, daily_target_risk, include_missed_days, excluded_days):
             """
             Calculate the daily target requirement based on:
             1. Today's profit from MT5 history
             2. Missed days from execution start date (if include_missed_days is True)
             
-            NOTE: Shortage from recent_highest_balance is NOT included here as it's 
-            handled by the main martingale drawdown calculation.
+            EXCLUDES already recorded days from daily_target_met (same logic as recent_highest_balance)
+            
+            Uses effective current balance (either MT5 or recent_highest_balance)
             
             Returns: (total_required_profit, days_owing, details_dict)
             """
@@ -16108,7 +17306,9 @@ def martingale_system(inv_id=None):
                 'working_days': 0,
                 'excluded_count': 0,
                 'total_days': 0,
-                'execution_start_date': None
+                'execution_start_date': None,
+                'recorded_dates': set(),  # NEW: Track recorded dates
+                'permanent_records': []   # NEW: List of permanently recorded dates
             }
             
             # Get today's profit from MT5 history
@@ -16141,15 +17341,28 @@ def martingale_system(inv_id=None):
             activities_path = inv_root / "activities.json"
             execution_start_date = None
             
+            # NEW: Get recorded dates from daily_target_met (same logic as recent_highest_balance)
+            recorded_dates = set()
+            permanent_records = []
+            
             if activities_path.exists():
                 try:
                     with open(activities_path, 'r', encoding='utf-8') as f:
                         activities = json.load(f)
                     execution_start_date = activities.get('execution_start_date')
+                    
+                    # NEW: Get recorded dates from daily_target_met
+                    daily_target_met = activities.get('daily_target_met', {})
+                    if daily_target_met:
+                        recorded_dates = set(daily_target_met.keys())
+                        permanent_records = sorted(recorded_dates)
+                        print(f"  │ 📝 Permanently recorded dates (daily_target_met): {len(recorded_dates)} date(s)")
                 except Exception as e:
                     pass
             
             details['execution_start_date'] = execution_start_date
+            details['recorded_dates'] = recorded_dates
+            details['permanent_records'] = permanent_records
             
             total_required = 0
             days_owing = 0
@@ -16160,7 +17373,7 @@ def martingale_system(inv_id=None):
                     start = datetime.strptime(execution_start_date, "%Y-%m-%d")
                     end = datetime.now()
                     
-                    # Calculate working days
+                    # Calculate working days, EXCLUDING recorded dates (same logic as recent_highest_balance)
                     total_days = 0
                     excluded_count = 0
                     working_days = 0
@@ -16168,6 +17381,13 @@ def martingale_system(inv_id=None):
                     
                     current = start
                     while current <= end:
+                        date_str = current.strftime("%Y-%m-%d")
+                        
+                        # NEW: Skip if date is already recorded (permanent) - SAME LOGIC as recent_highest_balance
+                        if date_str in recorded_dates:
+                            current += timedelta(days=1)
+                            continue
+                        
                         total_days += 1
                         day_name = current.strftime("%A").lower()
                         if day_name in excluded:
@@ -16180,9 +17400,15 @@ def martingale_system(inv_id=None):
                     details['excluded_count'] = excluded_count
                     details['working_days'] = working_days
                     
-                    # Calculate cumulative profit from broker balance
+                    print(f"  │ 📊 Working Days Calculation (excluding recorded dates):")
+                    print(f"  │   ├─ Total days: {total_days}")
+                    print(f"  │   ├─ Excluded days: {excluded_count}")
+                    print(f"  │   ├─ Recorded dates excluded: {len(recorded_dates)}")
+                    print(f"  │   └─ Working days: {working_days}")
+                    
+                    # Calculate cumulative profit from broker balance using effective balance
                     if broker_balance is not None:
-                        total_profit = current_balance - broker_balance
+                        total_profit = effective_balance - broker_balance
                         
                         if total_profit > 0 and daily_target_risk > 0:
                             days_met_target = int(total_profit // daily_target_risk)
@@ -16197,9 +17423,16 @@ def martingale_system(inv_id=None):
                         details['cumulative_owing'] = cumulative_owing
                         
                         total_required = cumulative_owing
+                        
+                        print(f"  │ 📊 Target Calculation:")
+                        print(f"  │   ├─ Total Profit: ${total_profit:.2f}")
+                        print(f"  │   ├─ Daily Target: ${daily_target_risk:.2f}")
+                        print(f"  │   ├─ Days Met Target: {days_met_target}")
+                        print(f"  │   ├─ Days Owing: {days_owing}")
+                        print(f"  │   └─ Cumulative Owing: ${cumulative_owing:.2f}")
                     
                 except Exception as e:
-                    pass
+                    print(f"  ⚠️ Error calculating working days: {e}")
             else:
                 # Include missed days disabled - just use today's target
                 if daily_target_risk is not None:
@@ -16212,8 +17445,6 @@ def martingale_system(inv_id=None):
             details['total_required'] = total_required
             
             return total_required, days_owing, details
-
-
             
         # ========== SECTION 7: PRE-SCALING (LIMIT ORDERS ONLY) ==========
         def process_pre_scaling():
@@ -16371,15 +17602,22 @@ def martingale_system(inv_id=None):
                 - 100% retention = keep 100%, remove 0%
                 - 90% retention = keep 90%, remove 10%
                 - 0% retention = keep 0%, remove 100%
+                Uses effective current balance for range matching.
                 """
                 initial_risk_orders = {}
                 
                 if not limit_orders_data or not isinstance(limit_orders_data, list):
                     return initial_risk_orders
                 
-                # ========== GET DEFAULT RISK FROM CONFIG BASED ON CURRENT BALANCE ==========
+                # ========== GET DEFAULT RISK FROM CONFIG BASED ON EFFECTIVE CURRENT BALANCE ==========
                 default_risk_map = config.get("account_balance_default_risk_management", {})
                 default_risk_value = 0
+                
+                # Get effective current balance
+                effective_balance_for_risk = get_effective_current_balance()
+                if effective_balance_for_risk is None:
+                    print(f"  ⚠️ Could not get effective balance for initial risk analysis")
+                    return initial_risk_orders
                 
                 if default_risk_map:
                     for range_str, risk_value in default_risk_map.items():
@@ -16389,15 +17627,15 @@ def martingale_system(inv_id=None):
                             low = float(low_str)
                             high = float(high_str)
                             
-                            if low <= current_balance <= high:
+                            if low <= effective_balance_for_risk <= high:
                                 default_risk_value = float(risk_value)
-                                print(f"  │ Default risk from config for balance ${current_balance:.2f}: ${default_risk_value:.2f}")
+                                print(f"  │ Default risk from config for effective balance ${effective_balance_for_risk:.2f}: ${default_risk_value:.2f}")
                                 break
                         except Exception:
                             continue
                 
                 if default_risk_value == 0:
-                    print(f"  │ ⚠️ No default risk found for balance ${current_balance:.2f}, using 0")
+                    print(f"  │ ⚠️ No default risk found for effective balance ${effective_balance_for_risk:.2f}, using 0")
                     return initial_risk_orders
                 
                 # ========== GROUP ORDERS BY SYMBOL ==========
@@ -16478,7 +17716,7 @@ def martingale_system(inv_id=None):
                             initial_risk_orders[symbol] = initial_risk_order_info
                 
                 return initial_risk_orders
-
+                
             def get_volume_field_from_order(order):
                 for key, value in order.items():
                     if '_volume' in key.lower() and isinstance(value, (int, float)):
@@ -16529,11 +17767,17 @@ def martingale_system(inv_id=None):
                 return profit
 
             def get_default_risk_from_config():
-                """Get default risk from account_balance_default_risk_management"""
+                """Get default risk from account_balance_default_risk_management using effective balance"""
                 default_risk_map = config.get("account_balance_default_risk_management", {})
                 
                 if not default_risk_map:
                     print(f"  ⚠️ No default risk map found in config!")
+                    return None
+                
+                # Get effective current balance
+                effective_balance_for_risk = get_effective_current_balance()
+                if effective_balance_for_risk is None:
+                    print(f"  ⚠️ Could not get effective balance for default risk")
                     return None
                 
                 for range_str, risk_value in default_risk_map.items():
@@ -16543,7 +17787,7 @@ def martingale_system(inv_id=None):
                         low = float(low_str)
                         high = float(high_str)
                         
-                        if low <= current_balance <= high:
+                        if low <= effective_balance_for_risk <= high:
                             default_risk = float(risk_value)
                             # Apply multiplier if in stoploss_factor mode
                             if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
@@ -16552,7 +17796,7 @@ def martingale_system(inv_id=None):
                     except Exception:
                         continue
                 
-                print(f"  ⚠️ No default risk found for balance ${current_balance:.2f}")
+                print(f"  ⚠️ No default risk found for balance ${effective_balance_for_risk:.2f}")
                 return None
                 
             def scale_order_volume_to_target(order, symbol_info, target_risk):
