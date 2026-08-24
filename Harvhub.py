@@ -3371,49 +3371,29 @@ def move_fetched_investors():
     default_contract_duration = None
     default_min_broker_balance = None
     
-    # CRITICAL: contract_duration MUST come from default_accountmanagement.json
     if os.path.exists(DEFAULT_ACCOUNTMANAGEMENT):
         try:
             default_acct_mgmt = safe_json_load(DEFAULT_ACCOUNTMANAGEMENT, {})
             default_requirements = default_acct_mgmt.get('requirements', {})
-            
-            # Get contract_duration from default - THIS IS MANDATORY
             default_contract_duration = default_requirements.get('contract_duration')
+            default_min_broker_balance = default_requirements.get('min_broker_balance')
+            
             if default_contract_duration is not None:
                 try:
                     default_contract_duration = int(default_contract_duration)
                 except:
                     default_contract_duration = None
-                    print(f"   ⚠️ Invalid contract_duration in default_accountmanagement.json - must be integer")
-            else:
-                print(f"   ⚠️ contract_duration not found in default_accountmanagement.json - this is REQUIRED")
-            
-            # Get min_broker_balance from default - this is optional
-            default_min_broker_balance = default_requirements.get('min_broker_balance')
             if default_min_broker_balance is not None:
                 try:
                     default_min_broker_balance = float(default_min_broker_balance)
                 except:
                     default_min_broker_balance = None
                     
-            print(f"   📋 Loaded defaults: contract_duration={default_contract_duration} (REQUIRED), min_broker_balance={default_min_broker_balance} (OPTIONAL)")
+            print(f"   📋 Loaded defaults: contract_duration={default_contract_duration}, min_broker_balance={default_min_broker_balance}")
         except Exception as e:
-            print(f"   ❌ Error loading default_accountmanagement.json: {e}")
-            return False
+            print(f"Error loading default_accountmanagement.json: {e}")
     else:
-        print(f"   ❌ CRITICAL ERROR: Default accountmanagement file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
-        print(f"   ⚠️ contract_duration must be provided in default_accountmanagement.json")
-        return False
-    
-    # Validate that contract_duration exists - this is MANDATORY
-    if default_contract_duration is None:
-        print(f"   ❌ CRITICAL ERROR: contract_duration not found in default_accountmanagement.json")
-        print(f"   ⚠️ Please ensure 'requirements.contract_duration' exists in {DEFAULT_ACCOUNTMANAGEMENT}")
-        return False
-    
-    if default_contract_duration <= 0:
-        print(f"   ❌ CRITICAL ERROR: contract_duration must be greater than 0, got: {default_contract_duration}")
-        return False
+        print(f"Default accountmanagement file not found: {DEFAULT_ACCOUNTMANAGEMENT}")
     
     # Default activities template
     DEFAULT_ACTIVITIES = {
@@ -3445,16 +3425,16 @@ def move_fetched_investors():
     
     # Check if verified investors file exists
     if not os.path.exists(FETCHED_INVESTORS):
-        print(f" ❌ File not found: {FETCHED_INVESTORS}")
+        print(f" File not found: {FETCHED_INVESTORS}")
         return False
     
     try:
         verified_data = safe_json_load(FETCHED_INVESTORS, {})
         if not verified_data:
-            print(f" ❌ No data found in {FETCHED_INVESTORS}")
+            print(f" No data found in {FETCHED_INVESTORS}")
             return False
     except Exception as e:
-        print(f" ❌ Error loading fetched_investors.json: {e}")
+        print(f" Error loading fetched_investors.json: {e}")
         traceback.print_exc()
         return False
     
@@ -3505,7 +3485,6 @@ def move_fetched_investors():
     
     # FIRST PASS: Check all investors for expiration BEFORE adding to investors.json
     print(f"\n   🔍 Pre-screening investors for contract expiration...")
-    print(f"   📋 Using contract_duration from default: {default_contract_duration} days")
     
     for inv_id, investor_data in verified_data.items():
         # Check if investor has required fields
@@ -3537,8 +3516,20 @@ def move_fetched_investors():
             print(f"   ⏭️ Investor {inv_id} is incomplete - will be handled later")
             continue
         
-        # Check contract expiration - ALWAYS use default_contract_duration, ignore investor's value
-        contract_duration_val = default_contract_duration
+        # Check contract expiration
+        contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
+        contract_duration_val = None
+        
+        if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
+            try:
+                contract_days = int(contract_days_raw)
+                if contract_days > 0:
+                    contract_duration_val = contract_days
+            except:
+                pass
+        
+        if contract_duration_val is None and default_contract_duration is not None:
+            contract_duration_val = default_contract_duration
         
         # Check if expired
         if execution_start and contract_duration_val and contract_duration_val > 0:
@@ -3833,7 +3824,6 @@ def move_fetched_investors():
     # STEP 3: PROCESS COMPLETE INVESTORS (NON-EXPIRED)
     # ============================================
     print(f"\n[3/4] Processing complete investors...")
-    print(f"   📋 Using contract_duration from default: {default_contract_duration} days")
     
     processed_summary = []
     autotrading_disabled_investors = []
@@ -3866,8 +3856,8 @@ def move_fetched_investors():
             execution_start = normalize_date(investor_data.get('execution_start_date', investor_data.get('EXECUTION_START_DATE', '')))
             print(f"      execution_start: '{execution_start}'")
             
-            # IGNORE investor's contract_days_left - ALWAYS use default
-            print(f"      ⚠️ Using contract_duration from default: {default_contract_duration} days (ignoring investor's value)")
+            contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
+            print(f"      contract_days_raw: '{contract_days_raw}'")
             
             Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
             print(f"      Terminal_path: '{Terminal_path[:50]}...' if Terminal_path else 'MISSING'")
@@ -3927,11 +3917,21 @@ def move_fetched_investors():
                     final_bypass = False
             print(f"      final_bypass: {final_bypass}")
             
-            # ALWAYS use default_contract_duration - IGNORE investor's value
-            contract_duration_val = default_contract_duration
-            print(f"      contract_duration: {contract_duration_val} (from default)")
+            # Handle contract_duration
+            contract_duration_val = None
+            if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
+                try:
+                    contract_days = int(contract_days_raw)
+                    if contract_days > 0:
+                        contract_duration_val = contract_days
+                except Exception as e:
+                    print(f"      ⚠️ Could not parse contract_days '{contract_days_raw}': {e}")
             
-            # Check contract expiration
+            if contract_duration_val is None and default_contract_duration is not None:
+                contract_duration_val = default_contract_duration
+                print(f"      Using default contract_duration: {contract_duration_val}")
+            
+            # Check contract expiration (should not be expired here, but double-check)
             contract_expired = False
             days_remaining = None
             expiry_date_str = None
@@ -3951,7 +3951,7 @@ def move_fetched_investors():
                 else:
                     print(f"      ✅ Contract active: {days_remaining} days remaining")
             else:
-                print(f"      ℹ️ No execution start date - skipping expiration check")
+                print(f"      ℹ️ No contract duration set - skipping expiration check")
             
             # Handle min_broker_balance
             min_broker_balance = None
@@ -4469,6 +4469,7 @@ def move_fetched_investors():
     print(f"{'='*60}")
     
     return True
+
 
 def check_and_record_unauthorized_actions(inv_id=None):
     """
@@ -14041,92 +14042,109 @@ def recent_highest_balance_target(inv_id=None):
         except Exception as e:
             return None
     
-    def get_day_appearances(start_date, end_date, excluded_days, recorded_dates=None):
+    def parse_date_flexible(date_str):
         """
-        Calculate appearances of each excluded day between two dates.
-        Also considers recorded dates as excluded.
-        Returns: dict {day_name: count}
+        Parse date string in multiple formats.
+        Returns: datetime object or None
         """
-        appearances = {}
+        if not date_str:
+            return None
         
-        if not start_date or not end_date or not excluded_days:
-            return appearances
+        formats = [
+            "%Y-%m-%d",
+            "%B %d, %Y",
+            "%B %d %Y",
+            "%Y/%m/%d",
+            "%d/%m/%Y",
+            "%m/%d/%Y",
+            "%d-%m-%Y",
+            "%m-%d-%Y"
+        ]
         
-        try:
-            start = datetime.strptime(start_date, "%Y-%m-%d")
-            end = datetime.strptime(end_date, "%Y-%m-%d")
-            
-            # Initialize counts for each excluded day
-            for day in excluded_days:
-                appearances[day.lower()] = 0
-            
-            # Also add recorded dates as excluded
-            recorded_dates_set = set(recorded_dates) if recorded_dates else set()
-            
-            # Count appearances
-            current = start
-            while current <= end:
-                date_str = current.strftime("%Y-%m-%d")
-                day_name = current.strftime("%A").lower()
-                
-                # Skip if date is already recorded (permanent)
-                if date_str in recorded_dates_set:
-                    current += timedelta(days=1)
-                    continue
-                
-                if day_name in appearances:
-                    appearances[day_name] += 1
-                current += timedelta(days=1)
-            
-            return appearances
-            
-        except Exception as e:
-            return {}
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except:
+                continue
+        
+        return None
     
-    def get_working_days_since_start(start_date, end_date, excluded_days, recorded_dates=None):
+    def calculate_working_days(start_date_str, end_date_str, excluded_days, recorded_dates=None):
         """
-        Calculate number of working days between two dates (excluding specified days and recorded dates)
-        Returns: (total_days, excluded_count, working_days)
-        """
-        if not start_date or not end_date:
-            return 0, 0, 0
+        Calculate working days dynamically.
+        Working days = Total days - Excluded days - Recorded days
         
-        try:
-            start = datetime.strptime(start_date, "%Y-%m-%d")
-            end = datetime.strptime(end_date, "%Y-%m-%d")
+        Args:
+            start_date_str: Start date string
+            end_date_str: End date string (today)
+            excluded_days: List of days to exclude (e.g., ['Saturday', 'Sunday'])
+            recorded_dates: Set of already recorded dates (to exclude)
+        
+        Returns:
+            dict: {
+                'total_days': int,
+                'excluded_count': int,
+                'recorded_count': int,
+                'working_days': int,
+                'excluded_day_counts': dict,
+                'working_day_list': list
+            }
+        """
+        result = {
+            'total_days': 0,
+            'excluded_count': 0,
+            'recorded_count': 0,
+            'working_days': 0,
+            'excluded_day_counts': {},
+            'working_day_list': []
+        }
+        
+        if not start_date_str or not end_date_str:
+            return result
+        
+        start_date = parse_date_flexible(start_date_str)
+        end_date = parse_date_flexible(end_date_str)
+        
+        if not start_date or not end_date:
+            return result
+        
+        # Normalize excluded days to lowercase
+        excluded = [day.lower() for day in excluded_days]
+        
+        # Initialize counts for each excluded day
+        for day in excluded:
+            result['excluded_day_counts'][day] = 0
+        
+        # Convert recorded dates to set for faster lookup
+        recorded_set = set(recorded_dates) if recorded_dates else set()
+        
+        # Iterate through each day from start to end (inclusive)
+        current = start_date
+        while current <= end_date:
+            date_str = current.strftime("%Y-%m-%d")
+            day_name = current.strftime("%A").lower()
             
-            # Convert excluded days to lowercase for comparison
-            excluded = [day.lower() for day in excluded_days]
+            result['total_days'] += 1
             
-            # Add recorded dates as excluded
-            recorded_dates_set = set(recorded_dates) if recorded_dates else set()
-            
-            total_days = 0
-            excluded_count = 0
-            working_days = 0
-            
-            # Count days from start to end (inclusive)
-            current = start
-            while current <= end:
-                date_str = current.strftime("%Y-%m-%d")
-                
-                # Skip if date is already recorded (permanent)
-                if date_str in recorded_dates_set:
-                    current += timedelta(days=1)
-                    continue
-                
-                total_days += 1
-                day_name = current.strftime("%A").lower()
-                if day_name in excluded:
-                    excluded_count += 1
-                else:
-                    working_days += 1
+            # Check if this date is recorded (permanent exclusion)
+            if date_str in recorded_set:
+                result['recorded_count'] += 1
                 current += timedelta(days=1)
+                continue
             
-            return total_days, excluded_count, working_days
+            # Check if this is an excluded day (e.g., weekend)
+            if day_name in excluded:
+                result['excluded_count'] += 1
+                if day_name in result['excluded_day_counts']:
+                    result['excluded_day_counts'][day_name] += 1
+            else:
+                # This is a working day
+                result['working_days'] += 1
+                result['working_day_list'].append(date_str)
             
-        except Exception as e:
-            return 0, 0, 0
+            current += timedelta(days=1)
+        
+        return result
     
     def update_investor_data(data_dict, inv_id, new_balance, update_date):
         """Update recent_highest_balance and date in a data dictionary (PRESERVES ALL OTHER FIELDS)"""
@@ -14446,14 +14464,27 @@ def recent_highest_balance_target(inv_id=None):
         
         return files_updated
     
-    def record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days):
+    def record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days, total_profit):
         """
-        Record dates when daily target was met in ALL files' daily_target_met field.
-        Only records working days (excluding excluded days and already recorded dates) from execution start date up to today.
+        Record dates when daily target was met based on actual profit.
+        Only records the number of days that profit can cover, starting from the earliest unrecorded day.
         Once a date is recorded, it is permanent and will never be modified or removed.
         Ensures ALL files (fetched_data, updated_data, all_fetched_data, all_updated_data, activities.json) are updated.
+        
+        Args:
+            inv_id: Investor ID
+            daily_target_risk: Daily target amount
+            execution_start_date: Start date of execution
+            excluded_days: List of excluded days (e.g., Saturday, Sunday)
+            total_profit: Total profit from broker_balance to current balance
+        
+        Returns:
+            bool: True if successful
         """
         try:
+            if not execution_start_date or daily_target_risk is None or daily_target_risk <= 0:
+                return False
+            
             inv_root = Path(INV_PATH) / inv_id
             activities_path = inv_root / "activities.json"
             
@@ -14464,88 +14495,94 @@ def recent_highest_balance_target(inv_id=None):
             with open(activities_path, 'r', encoding='utf-8') as f:
                 activities = json.load(f)
             
-            # Get existing recorded dates from activities.json (NEVER modify or remove these)
-            existing_recorded = activities.get('daily_target_met', {})
-            existing_dates = set(existing_recorded.keys())
+            # Get existing recorded dates from ALL files
+            all_recorded = get_recorded_dates_from_all_files(inv_id)
             
-            # Also check ALL other files for existing recorded dates
-            all_files_recorded = set()
-            for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
-                if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-                    file_recorded = data_dict[inv_id].get('daily_target_met', {})
-                    all_files_recorded.update(file_recorded.keys())
+            # Calculate how many days the profit can cover
+            days_to_record = int(total_profit // daily_target_risk)
             
-            # Combine all recorded dates (union of all files)
-            all_recorded_dates = existing_dates.union(all_files_recorded)
+            if days_to_record <= 0:
+                print(f"  ℹ️ Profit (${total_profit:.2f}) is less than daily target (${daily_target_risk:.2f}) - No new records")
+                return True
             
-            # Convert excluded days to lowercase for comparison
+            # Get all working days from execution start to today
+            start_date = parse_date_flexible(execution_start_date)
+            if not start_date:
+                print(f"  ⚠️ Could not parse execution start date: {execution_start_date}")
+                return False
+            
+            end_date = datetime.now()
             excluded = [day.lower() for day in excluded_days]
             
-            # Parse execution start date
-            if execution_start_date:
-                try:
-                    start = datetime.strptime(execution_start_date, "%Y-%m-%d")
-                except:
-                    start = datetime.now() - timedelta(days=30)
-            else:
-                start = datetime.now() - timedelta(days=30)
-            
-            # End date is today
-            end = datetime.now()
-            
-            # Track new days to record
-            new_records = {}
-            days_recorded = 0
-            
-            # Iterate through each day from start to end
-            current = start
-            while current <= end:
+            # Build list of all working days in order
+            all_working_days = []
+            current = start_date
+            while current <= end_date:
                 date_str = current.strftime("%Y-%m-%d")
                 day_name = current.strftime("%A").lower()
                 
-                # Skip if already recorded in ANY file (PERMANENT - NEVER MODIFY)
-                if date_str in all_recorded_dates:
-                    current += timedelta(days=1)
-                    continue
-                
-                # Skip excluded days (Saturday, Sunday, etc.)
-                if day_name in excluded:
-                    current += timedelta(days=1)
-                    continue
-                
-                # This is a working day, record it as daily target met
-                # Format: "${daily_target_risk}"
-                new_records[date_str] = f"${daily_target_risk:.2f}"
-                days_recorded += 1
-                print(f"  📝 Recorded daily target met for {date_str}: ${daily_target_risk:.2f}")
+                if day_name not in excluded:
+                    all_working_days.append(date_str)
                 
                 current += timedelta(days=1)
             
-            # If we have new records, sync to ALL files (MERGE, never overwrite)
-            if days_recorded > 0:
-                # First, update the local data dicts
+            # Filter out already recorded days
+            recorded_set = set(all_recorded)
+            unrecorded_working_days = [d for d in all_working_days if d not in recorded_set]
+            
+            if not unrecorded_working_days:
+                print(f"  ℹ️ No unrecorded working days found")
+                return True
+            
+            # Calculate how many more days we can record
+            days_to_record_now = min(days_to_record - len(all_recorded), len(unrecorded_working_days))
+            
+            if days_to_record_now <= 0:
+                print(f"  ✅ All possible days already recorded ({len(all_recorded)} days)")
+                return True
+            
+            # Get the first N unrecorded working days
+            new_record_dates = unrecorded_working_days[:days_to_record_now]
+            
+            print(f"  📊 Total Profit: ${total_profit:.2f}")
+            print(f"  🎯 Daily Target: ${daily_target_risk:.2f}")
+            print(f"  📈 Days that can be covered: {days_to_record}")
+            print(f"  📝 Already recorded: {len(all_recorded)} date(s)")
+            print(f"  📝 New dates to record: {len(new_record_dates)} date(s)")
+            
+            # Create new records
+            new_records = {}
+            for date_str in new_record_dates:
+                new_records[date_str] = f"${daily_target_risk:.2f}"
+                # Get day name for display
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                day_name = date_obj.strftime("%A")
+                print(f"  📝 Recording {date_str} ({day_name}): ${daily_target_risk:.2f}")
+            
+            # Sync to ALL files
+            if new_records:
+                print(f"\n  ✅ Recording {len(new_records)} new daily target met dates for {inv_id}")
+                
+                # Update local data dicts
                 for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
                     if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
                         if 'daily_target_met' not in data_dict[inv_id]:
                             data_dict[inv_id]['daily_target_met'] = {}
-                        # Merge: preserve existing, add new
                         for date_str, value in new_records.items():
                             if date_str not in data_dict[inv_id]['daily_target_met']:
                                 data_dict[inv_id]['daily_target_met'][date_str] = value
                     else:
-                        # Create new entry with daily_target_met
                         data_dict[inv_id] = {
-                            'daily_target_met': new_records
+                            'daily_target_met': new_records.copy()
                         }
                 
-                # Also update activities.json
+                # Update activities.json
                 if 'daily_target_met' not in activities:
                     activities['daily_target_met'] = {}
                 for date_str, value in new_records.items():
                     if date_str not in activities['daily_target_met']:
                         activities['daily_target_met'][date_str] = value
                 
-                # Save activities.json with new records
                 with open(activities_path, 'w', encoding='utf-8') as f:
                     json.dump(activities, f, indent=4)
                 
@@ -14565,64 +14602,12 @@ def recent_highest_balance_target(inv_id=None):
                         print(f"  ⚠️ Error saving {file_path}: {e}")
                         stats["errors"].append(f"Failed to save {file_path}: {e}")
                 
-                print(f"  ✅ Recorded {days_recorded} new daily target met dates for {inv_id} in ALL files")
-                stats["files_updated"] += days_recorded * 4  # 4 files * number of records
+                stats["files_updated"] += len(new_records) * 4  # 4 files * number of records
                 return True
             else:
-                # Even if no new records, ensure ALL files are in sync with activities.json
-                # This ensures all files have the same data
-                activities_recorded = activities.get('daily_target_met', {})
-                if activities_recorded:
-                    # Check if all files have the same records
-                    needs_sync = False
-                    for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
-                        if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-                            file_recorded = data_dict[inv_id].get('daily_target_met', {})
-                            # Check if any date is missing
-                            for date_str in activities_recorded:
-                                if date_str not in file_recorded:
-                                    needs_sync = True
-                                    break
-                        else:
-                            needs_sync = True
-                            break
-                    
-                    if needs_sync:
-                        print(f"  🔄 Syncing existing daily_target_met records to ALL files")
-                        # Sync all existing records to all files
-                        for data_dict in [fetched_data, updated_data, all_fetched_data, all_updated_data]:
-                            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-                                if 'daily_target_met' not in data_dict[inv_id]:
-                                    data_dict[inv_id]['daily_target_met'] = {}
-                                for date_str, value in activities_recorded.items():
-                                    if date_str not in data_dict[inv_id]['daily_target_met']:
-                                        data_dict[inv_id]['daily_target_met'][date_str] = value
-                            else:
-                                data_dict[inv_id] = {
-                                    'daily_target_met': activities_recorded
-                                }
-                        
-                        # Save ALL investor files
-                        file_paths = [
-                            (FETCHED_INVESTORS, fetched_data),
-                            (UPDATED_INVESTORS, updated_data),
-                            (ALL_FETCHED_INVESTORS, all_fetched_data),
-                            (ALL_UPDATED_INVESTORS, all_updated_data)
-                        ]
-                        
-                        for file_path, data_dict in file_paths:
-                            try:
-                                with open(file_path, 'w', encoding='utf-8') as f:
-                                    json.dump(data_dict, f, indent=4)
-                            except Exception as e:
-                                print(f"  ⚠️ Error saving {file_path}: {e}")
-                                stats["errors"].append(f"Failed to save {file_path}: {e}")
-                        
-                        print(f"  ✅ Synced existing daily_target_met records to ALL files")
-                
-                print(f"  ℹ️ No new daily target met dates to record for {inv_id}")
+                print(f"  ℹ️ No new dates to record")
                 return True
-            
+                
         except Exception as e:
             print(f"   Error recording daily target met for {inv_id}: {e}")
             stats["errors"].append(f"Failed to record daily target met for {inv_id}: {e}")
@@ -14770,16 +14755,19 @@ def recent_highest_balance_target(inv_id=None):
         # STEP 5: Get recorded dates from ALL files (to exclude from calculations)
         recorded_dates = get_recorded_dates_from_all_files(inv_id)
         
+        # Calculate total profit
+        total_profit = 0
+        if broker_balance is not None:
+            total_profit = current_balance - broker_balance
+        
         # Calculate days since execution start
         days_since_start = None
         today_name = datetime.now().strftime("%A")
         if execution_start_date:
-            try:
-                start_date = datetime.strptime(execution_start_date, "%Y-%m-%d")
+            start_date = parse_date_flexible(execution_start_date)
+            if start_date:
                 today = datetime.now()
                 days_since_start = (today - start_date).days
-            except Exception as e:
-                pass
         
         # STEP 6: Get daily target config (prioritizing root level)
         daily_target_risk, include_missed_days, excluded_days = get_daily_target_config_from_all_fetched(inv_id)
@@ -14868,9 +14856,9 @@ def recent_highest_balance_target(inv_id=None):
             # Sync to ALL files
             sync_all_files(inv_id, init_balance, yesterday_str, None, None, None)
             
-            # Record daily_target_met for this investor if daily_target_risk is available
-            if daily_target_risk is not None:
-                record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days)
+            # Record daily_target_met for this investor based on total profit
+            if daily_target_risk is not None and broker_balance is not None:
+                record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days, total_profit)
             
             stats["investors_updated"] += 1
             stats["investors_checked"] += 1
@@ -14924,11 +14912,12 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  📝 Total Recorded: {len(all_recorded)} date(s)")
         
         # ============================================================
-        # Calculate Day Appearances and Working Days
+        # Calculate Working Days Dynamically
         # ============================================================
         day_appearances = {}
         total_days = 0
         excluded_count = 0
+        recorded_count = 0
         working_days = 0
         days_met_target = 0
         days_owing_target = 0
@@ -14938,16 +14927,39 @@ def recent_highest_balance_target(inv_id=None):
         total_needed = 0
         
         if include_missed_days and execution_start_date and daily_target_risk is not None:
-            # Get day appearances (excluding recorded dates and excluded days)
-            day_appearances = get_day_appearances(execution_start_date, today_str, excluded_days, all_recorded)
-            
-            # Calculate working days (excluding recorded dates and excluded days)
-            total_days, excluded_count, working_days = get_working_days_since_start(
+            # Calculate working days dynamically using the new function
+            work_result = calculate_working_days(
                 execution_start_date, 
                 today_str, 
-                excluded_days,
+                excluded_days, 
                 all_recorded
             )
+            
+            total_days = work_result['total_days']
+            excluded_count = work_result['excluded_count']
+            recorded_count = work_result['recorded_count']
+            working_days = work_result['working_days']
+            day_appearances = work_result['excluded_day_counts']
+            
+            print(f"\n  📊 WORKING DAYS CALCULATION (DYNAMIC)")
+            print(f"  ─────────────────────────────────────")
+            print(f"  📆 Total Days (Start → Today): {total_days}")
+            print(f"  🚫 Excluded Days: {excluded_count}")
+            for day, count in day_appearances.items():
+                if count > 0:
+                    print(f"     • {day.capitalize()}: {count} day(s)")
+            print(f"  📝 Already Recorded: {recorded_count} date(s)")
+            print(f"  ✅ Working Days: {working_days}")
+            
+            # Days Met Target = Recorded Days (since each recorded day = one target met)
+            days_met_target = recorded_count
+            
+            # Days Owing Target = Working Days (since working days are the days NOT covered by profit)
+            days_owing_target = working_days
+            
+            # Calculate cumulative target amounts
+            cumulative_target_met = days_met_target * daily_target_risk
+            cumulative_target_owing = days_owing_target * daily_target_risk
             
             # Calculate shortage from stored high
             if existing_recent is not None and current_balance < existing_recent:
@@ -14955,40 +14967,51 @@ def recent_highest_balance_target(inv_id=None):
             else:
                 shortage = 0
             
-            # Calculate how many days have been met based on profit from broker balance
-            if broker_balance is not None:
-                total_profit = current_balance - broker_balance
-                print(f"\n  📊 PROFIT CALCULATION")
-                print(f"  ────────────────────")
-                print(f"  💰 Starting Balance (Broker): ${broker_balance:.2f}")
-                print(f"  💰 Current Effective Balance: ${current_balance:.2f}")
-                print(f"  📈 Total Profit/Loss: ${total_profit:.2f}")
-                
-                if total_profit > 0 and daily_target_risk > 0:
-                    # How many full daily targets have been met
-                    days_met_target = int(total_profit // daily_target_risk)
-                    cumulative_target_met = days_met_target * daily_target_risk
-                    
-                    # Owing days = working days - days met target
-                    days_owing_target = working_days - days_met_target
-                    if days_owing_target < 0:
-                        days_owing_target = 0
-                    
-                    cumulative_target_owing = days_owing_target * daily_target_risk
-                else:
-                    days_owing_target = working_days
-                    cumulative_target_owing = working_days * daily_target_risk
-                
-                # Total needed = cumulative owing + shortage
-                total_needed = cumulative_target_owing + shortage
+            # Total needed = cumulative owing + shortage
+            total_needed = cumulative_target_owing + shortage
+            
+            print(f"\n  📊 PROFIT CALCULATION")
+            print(f"  ────────────────────")
+            print(f"  💰 Starting Balance (Broker): ${broker_balance:.2f}")
+            print(f"  💰 Current Effective Balance: ${current_balance:.2f}")
+            print(f"  📈 Total Profit/Loss: ${total_profit:.2f}")
+            
+            print(f"\n  📊 TARGET SUMMARY")
+            print(f"  ─────────────────")
+            print(f"  📈 Days Met Daily Target: {days_met_target}")
+            print(f"  📉 Days Owing Daily Target: {days_owing_target}")
+            print(f"  💰 Cumulative Target Owing: ${cumulative_target_owing:.2f} ({days_owing_target} × ${daily_target_risk:.2f})")
+            if shortage > 0:
+                print(f"  📉 Shortage from Stored High: ${shortage:.2f}")
+            print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f} (Cumulative Owing + Shortage)")
         
         # ============================================================
-        # RECORD DAILY TARGET MET DATES (UPDATED to sync to ALL files)
+        # Record new daily target met dates based on current profit
         # ============================================================
-        if daily_target_risk is not None:
-            record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days)
-            # Refresh recorded dates from ALL files after recording
-            all_recorded = get_recorded_dates_from_all_files(inv_id)
+        if daily_target_risk is not None and broker_balance is not None:
+            # Record any new days that profit can cover
+            days_to_record = int(total_profit // daily_target_risk) if total_profit > 0 else 0
+            
+            if days_to_record > recorded_count:
+                print(f"\n  📝 RECORDING NEW DAILY TARGET MET DATES")
+                print(f"  ──────────────────────────────────────────")
+                print(f"  📊 Current Profit: ${total_profit:.2f}")
+                print(f"  🎯 Daily Target: ${daily_target_risk:.2f}")
+                print(f"  📈 Days that can be covered: {days_to_record}")
+                print(f"  📝 Already recorded: {recorded_count} date(s)")
+                print(f"  📝 Need to record: {days_to_record - recorded_count} more date(s)")
+                
+                record_daily_target_met(inv_id, daily_target_risk, execution_start_date, excluded_days, total_profit)
+                
+                # Refresh recorded dates after recording
+                all_recorded = get_recorded_dates_from_all_files(inv_id)
+                recorded_count = len(all_recorded)
+                has_updates = True
+                print(f"\n  ✅ After recording: {recorded_count} record(s) total")
+            elif recorded_count == days_to_record:
+                print(f"\n  ✅ All possible days already recorded ({recorded_count} days)")
+            else:
+                print(f"\n  ✅ No changes needed - {recorded_count} days recorded, profit covers {days_to_record} days")
         
         # ============================================================
         # Print Day Appearances if include_missed_days is enabled
@@ -15006,15 +15029,13 @@ def recent_highest_balance_target(inv_id=None):
         if include_missed_days and execution_start_date and daily_target_risk is not None:
             print(f"\n  📊 WORKING DAYS SUMMARY")
             print(f"  ───────────────────────")
-            print(f"  📆 Total Days (Start → Today): {total_days}")
-            print(f"  🚫 Excluded Days Count: {excluded_count}")
-            print(f"  ✅ Working Days: {working_days}")
+            print(f"  📆 Working Days: {working_days}")
             print(f"  📈 Days Met Daily Target: {days_met_target}")
-            print(f"   Days Owing Daily Target: {days_owing_target}")
-            print(f"  💰 Cumulative Target Owing: ${cumulative_target_owing:.2f} ({days_owing_target} × ${daily_target_risk:.2f})")
+            print(f"  📉 Days Owing Daily Target: {days_owing_target}")
+            print(f"  💰 Cumulative Target Owing: ${cumulative_target_owing:.2f}")
             if shortage > 0:
-                print(f"  📉 Shortage from Stored High: ${shortage:.2f}")
-            print(f"  🎯 Total Needed to Trigger Alarm: ${total_needed:.2f} (Cumulative Owing + Shortage)")
+                print(f"  📉 Shortage: ${shortage:.2f}")
+            print(f"  🎯 Total Needed: ${total_needed:.2f}")
         
         # ============================================================
         # NEW: Find most recent profitable day and print it
@@ -15149,7 +15170,7 @@ def recent_highest_balance_target(inv_id=None):
             stats["investors_updated"] += 1
             stats["new_high_recorded_only"] += 1
             
-            # Check if alarm should be triggered            # Alarm triggers ONLY if: no shortage, no owed debts, AND last update date == today
+            # Check if alarm should be triggered
             has_shortage = shortage > 0 if include_missed_days else False
             has_owed_debts = days_owing_target > 0 if include_missed_days else False
             is_today = existing_last_update == today_str
@@ -15293,13 +15314,24 @@ def recent_highest_balance_target(inv_id=None):
             has_owed_debts = days_owing_target > 0 if include_missed_days else False
             is_today = existing_last_update == today_str
             
-            print(f"\n  📋 ALARM CONDITIONS CHECK:")
-            print(f"  ──────────────────────────")
-            print(f"  • No Shortage: {'✅' if not has_shortage else '❌'} (Shortage: ${shortage:.2f})")
-            print(f"  • No Owed Debts: {'✅' if not has_owed_debts else '❌'} (Owed: {days_owing_target} days)")
-            print(f"  • Last Update is Today: {'✅' if is_today else '❌'} ({existing_last_update} vs {today_str})")
+            # Check if today's profit >= threshold
+            profit_met_risk_threshold = False
+            if include_missed_days and daily_target_risk is not None:
+                alarm_threshold = total_needed
+                if today_profit >= alarm_threshold:
+                    profit_met_risk_threshold = True
+            elif daily_target_risk is not None:
+                if today_profit >= daily_target_risk:
+                    profit_met_risk_threshold = True
             
-            can_trigger_alarm = (not has_shortage) and (not has_owed_debts) and is_today
+            print(f"\n  📋 ALARM CONDITIONS RESULT:")
+            print(f"  ──────────────────────────")
+            print(f"  • Shortage exists: {'NO ✅' if not has_shortage else f'YES  (${shortage:.2f})'}")
+            print(f"  • Owed debts exist: {'NO ✅' if not has_owed_debts else f'YES  ({days_owing_target} days)'}")
+            print(f"  • Last update is today: {'YES ✅' if is_today else f'NO  ({existing_last_update})'}")
+            print(f"  • Today's profit >= threshold: {'YES ✅' if profit_met_risk_threshold else 'NO  ❌'}")
+            
+            can_trigger_alarm = (not has_shortage) and (not has_owed_debts) and is_today and profit_met_risk_threshold
             
             if can_trigger_alarm:
                 # ALL conditions met: ALARM ON
@@ -15329,6 +15361,7 @@ def recent_highest_balance_target(inv_id=None):
                 print(f"  ✅ No shortage: {not has_shortage}")
                 print(f"  ✅ No owed debts: {not has_owed_debts}")
                 print(f"  ✅ Last update is today: {is_today}")
+                print(f"  ✅ Today's profit >= threshold: {profit_met_risk_threshold}")
                 print(f"  🚨 TRADING SUSPENDED!")
                 
                 message = f"🚨 DAILY TARGET MET - Balance ${current_balance:.2f} at stored high. Today's Profit: ${today_profit:.2f}. TRADING SUSPENDED!"
@@ -15371,6 +15404,8 @@ def recent_highest_balance_target(inv_id=None):
                     alarm_blocked_reasons.append(f"Owed debts exist ({days_owing_target} days)")
                 if not is_today:
                     alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
+                if not profit_met_risk_threshold:
+                    alarm_blocked_reasons.append(f"Today's profit (${today_profit:.2f}) < threshold")
                 
                 alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
                 
@@ -15385,20 +15420,22 @@ def recent_highest_balance_target(inv_id=None):
                     'last_update_date': existing_last_update,
                     'today_profit': today_profit,
                     'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': False,
+                    'profit_met_risk_threshold': profit_met_risk_threshold,
                     'alarm_blocked_reason': alarm_blocked_reason,
                     'use_recent_highest_balance': use_recent
                 }
                 
                 print(f"\n  🟡 ALARM BLOCKED - Conditions not met")
                 print(f"  ─────────────────────────────────────")
-                print(f"  ⚠️ Alarm conditions not met:")
+                print(f"  ⚠️ Alarm blocked because:")
                 if has_shortage:
                     print(f"     • Shortage exists: ${shortage:.2f}")
                 if has_owed_debts:
                     print(f"     • Owed debts exist: {days_owing_target} days")
                 if not is_today:
                     print(f"     • Last update date ({existing_last_update}) is not today")
+                if not profit_met_risk_threshold:
+                    print(f"     • Today's profit (${today_profit:.2f}) < threshold")
                 print(f"  🔇 Alarm OFF - Trading continues")
                 
                 stats["details"].append({
@@ -15411,7 +15448,7 @@ def recent_highest_balance_target(inv_id=None):
                     "update_date": existing_last_update,
                     "today_profit": today_profit,
                     "daily_target_risk": daily_target_risk,
-                    "profit_met_risk_threshold": False,
+                    "profit_met_risk_threshold": profit_met_risk_threshold,
                     "alarm_triggered": False,
                     "include_missed_days": include_missed_days,
                     "has_shortage": has_shortage,
@@ -17315,6 +17352,8 @@ def martingale_system(inv_id=None):
             1. Today's profit from MT5 history
             2. Missed days from execution start date (if include_missed_days is True)
             
+            Working days = Total days - Excluded days - Recorded days (or days met target)
+            
             EXCLUDES already recorded days from daily_target_met (same logic as recent_highest_balance)
             
             Uses effective current balance (either MT5 or recent_highest_balance)
@@ -17330,8 +17369,10 @@ def martingale_system(inv_id=None):
                 'excluded_count': 0,
                 'total_days': 0,
                 'execution_start_date': None,
-                'recorded_dates': set(),  # NEW: Track recorded dates
-                'permanent_records': []   # NEW: List of permanently recorded dates
+                'recorded_dates': set(),
+                'permanent_records': [],
+                'days_met_target': 0,  # NEW: Track days met target
+                'total_profit_used': 0  # NEW: Track profit used for calculation
             }
             
             # Get today's profit from MT5 history
@@ -17363,8 +17404,6 @@ def martingale_system(inv_id=None):
             # Get execution start date from activities.json
             activities_path = inv_root / "activities.json"
             execution_start_date = None
-            
-            # NEW: Get recorded dates from daily_target_met (same logic as recent_highest_balance)
             recorded_dates = set()
             permanent_records = []
             
@@ -17374,7 +17413,7 @@ def martingale_system(inv_id=None):
                         activities = json.load(f)
                     execution_start_date = activities.get('execution_start_date')
                     
-                    # NEW: Get recorded dates from daily_target_met
+                    # Get recorded dates from daily_target_met
                     daily_target_met = activities.get('daily_target_met', {})
                     if daily_target_met:
                         recorded_dates = set(daily_target_met.keys())
@@ -17393,10 +17432,47 @@ def martingale_system(inv_id=None):
             
             if include_missed_days and execution_start_date and daily_target_risk is not None:
                 try:
-                    start = datetime.strptime(execution_start_date, "%Y-%m-%d")
+                    # ========== FIX: Parse execution start date with multiple formats ==========
+                    start = None
+                    if isinstance(execution_start_date, str):
+                        # Try multiple date formats
+                        date_formats = [
+                            '%Y-%m-%d',
+                            '%B %d, %Y',
+                            '%b %d, %Y',
+                            '%Y-%m-%d %H:%M:%S',
+                            '%Y/%m/%d',
+                            '%d-%m-%Y',
+                            '%d/%m/%Y',
+                            '%m-%d-%Y',
+                            '%m/%d/%Y',
+                            '%B %d %Y',
+                            '%b %d %Y',
+                            '%d %B %Y',
+                            '%d %b %Y'
+                        ]
+                        for fmt in date_formats:
+                            try:
+                                start = datetime.strptime(execution_start_date, fmt)
+                                break
+                            except ValueError:
+                                continue
+                        
+                        if start is None:
+                            # Try using dateutil if available
+                            try:
+                                from dateutil import parser
+                                start = parser.parse(execution_start_date)
+                            except:
+                                pass
+                    
+                    if start is None:
+                        print(f"  ⚠️ Could not parse execution start date: {execution_start_date}")
+                        return 0, 0, details
+                    
                     end = datetime.now()
                     
-                    # Calculate working days, EXCLUDING recorded dates (same logic as recent_highest_balance)
+                    # Calculate working days: working_days = total_days - excluded_days - recorded_days
                     total_days = 0
                     excluded_count = 0
                     working_days = 0
@@ -17406,7 +17482,7 @@ def martingale_system(inv_id=None):
                     while current <= end:
                         date_str = current.strftime("%Y-%m-%d")
                         
-                        # NEW: Skip if date is already recorded (permanent) - SAME LOGIC as recent_highest_balance
+                        # Skip if date is already recorded (permanent)
                         if date_str in recorded_dates:
                             current += timedelta(days=1)
                             continue
@@ -17423,23 +17499,39 @@ def martingale_system(inv_id=None):
                     details['excluded_count'] = excluded_count
                     details['working_days'] = working_days
                     
-                    print(f"  │ 📊 Working Days Calculation (excluding recorded dates):")
+                    print(f"  │ 📊 Working Days Calculation:")
                     print(f"  │   ├─ Total days: {total_days}")
                     print(f"  │   ├─ Excluded days: {excluded_count}")
                     print(f"  │   ├─ Recorded dates excluded: {len(recorded_dates)}")
                     print(f"  │   └─ Working days: {working_days}")
                     
-                    # Calculate cumulative profit from broker balance using effective balance
+                    # ========== Calculate days met target from profit ==========
+                    # days_met_target = total_profit // daily_target_risk
+                    # This represents how many days of target have been achieved
                     if broker_balance is not None:
                         total_profit = effective_balance - broker_balance
+                        details['total_profit_used'] = total_profit
                         
                         if total_profit > 0 and daily_target_risk > 0:
                             days_met_target = int(total_profit // daily_target_risk)
-                            days_owing = working_days - days_met_target
-                            if days_owing < 0:
-                                days_owing = 0
+                            details['days_met_target'] = days_met_target
+                            
+                            # The days met target should be reflected in recorded_dates
+                            # But we already have recorded_dates which is the permanent record
+                            # The working_days already excludes recorded_dates
+                            # So days_owing = working_days (since recorded_dates are already excluded)
+                            days_owing = working_days  # This is the number of days NOT covered by profit
+                            
+                            print(f"  │ 📊 Target Calculation:")
+                            print(f"  │   ├─ Total Profit: ${total_profit:.2f}")
+                            print(f"  │   ├─ Daily Target: ${daily_target_risk:.2f}")
+                            print(f"  │   ├─ Days Met Target (from profit): {days_met_target}")
+                            print(f"  │   ├─ Days Owing (working days): {days_owing}")
+                            print(f"  │   └─ Days Met Target matches recorded days: {'✅' if days_met_target == len(recorded_dates) else '⚠️'}")
                         else:
                             days_owing = working_days
+                            details['days_met_target'] = 0
+                            print(f"  │ 📊 No profit or no daily target - all {working_days} days are owing")
                         
                         cumulative_owing = days_owing * daily_target_risk
                         details['days_owing'] = days_owing
@@ -17447,23 +17539,27 @@ def martingale_system(inv_id=None):
                         
                         total_required = cumulative_owing
                         
-                        print(f"  │ 📊 Target Calculation:")
-                        print(f"  │   ├─ Total Profit: ${total_profit:.2f}")
-                        print(f"  │   ├─ Daily Target: ${daily_target_risk:.2f}")
-                        print(f"  │   ├─ Days Met Target: {days_met_target}")
+                        print(f"  │ 📊 Final Result:")
                         print(f"  │   ├─ Days Owing: {days_owing}")
                         print(f"  │   └─ Cumulative Owing: ${cumulative_owing:.2f}")
                     
                 except Exception as e:
                     print(f"  ⚠️ Error calculating working days: {e}")
+                    import traceback
+                    traceback.print_exc()
             else:
                 # Include missed days disabled - just use today's target
                 if daily_target_risk is not None:
-                    total_required = daily_target_risk
-                    
-                    # Also check if today's profit already meets target
+                    # Check if today's profit already meets target
                     if today_profit >= daily_target_risk:
                         total_required = 0  # Already met today's target
+                        print(f"  │ ✅ Today's profit (${today_profit:.2f}) already meets daily target (${daily_target_risk:.2f})")
+                    else:
+                        total_required = daily_target_risk - today_profit
+                        print(f"  │ Remaining to meet today's target: ${total_required:.2f}")
+                    
+                    details['days_owing'] = 1 if total_required > 0 else 0
+                    details['cumulative_owing'] = total_required
             
             details['total_required'] = total_required
             
@@ -18218,29 +18314,41 @@ def martingale_system(inv_id=None):
                             activities = json.load(f)
                         execution_start_date = activities.get('execution_start_date')
                         
+                        # ========== FIX: Parse execution start date with multiple formats ==========
                         if execution_start_date:
                             try:
                                 if isinstance(execution_start_date, str):
-                                    if has_dateutil:
-                                        start_datetime = date_parser.parse(execution_start_date)
-                                        start_timestamp = int(start_datetime.timestamp())
-                                    else:
-                                        date_str = execution_start_date.strip()
-                                        date_formats = [
-                                            '%B %d, %Y', '%b %d, %Y', '%B %d %Y', '%b %d %Y',
-                                            '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%Y/%m/%d %H:%M:%S',
-                                            '%Y/%m/%d', '%d-%m-%Y %H:%M:%S', '%d-%m-%Y',
-                                            '%d/%m/%Y %H:%M:%S', '%d/%m/%Y',
-                                            '%m-%d-%Y %H:%M:%S', '%m-%d-%Y',
-                                            '%m/%d/%Y %H:%M:%S', '%m/%d/%Y',
-                                        ]
-                                        for fmt in date_formats:
-                                            try:
-                                                start_datetime = datetime.strptime(date_str, fmt)
-                                                start_timestamp = int(start_datetime.timestamp())
-                                                break
-                                            except ValueError:
-                                                continue
+                                    # Try multiple date formats
+                                    date_formats = [
+                                        '%Y-%m-%d',
+                                        '%B %d, %Y',
+                                        '%b %d, %Y',
+                                        '%Y-%m-%d %H:%M:%S',
+                                        '%Y/%m/%d',
+                                        '%d-%m-%Y',
+                                        '%d/%m/%Y',
+                                        '%m-%d-%Y',
+                                        '%m/%d/%Y',
+                                        '%B %d %Y',
+                                        '%b %d %Y',
+                                        '%d %B %Y',
+                                        '%d %b %Y'
+                                    ]
+                                    for fmt in date_formats:
+                                        try:
+                                            start_datetime = datetime.strptime(execution_start_date, fmt)
+                                            start_timestamp = int(start_datetime.timestamp())
+                                            break
+                                        except ValueError:
+                                            continue
+                                    
+                                    # Try using dateutil if available and previous parsing failed
+                                    if start_timestamp is None and has_dateutil:
+                                        try:
+                                            start_datetime = date_parser.parse(execution_start_date)
+                                            start_timestamp = int(start_datetime.timestamp())
+                                        except:
+                                            pass
                             except:
                                 pass
                     
@@ -32043,8 +32151,8 @@ def process_single_investor(inv_folder):
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
         #recent_highest_balance_target(inv_id=inv_id)
-        #martingale_system(inv_id=inv_id)
-        trades_analytics(inv_id=inv_id)
+        martingale_system(inv_id=inv_id)
+        #trades_analytics(inv_id=inv_id)
         #duplicate_order_to_reach_default_risk(inv_id=inv_id)
         
         mt5.shutdown()
