@@ -3080,6 +3080,7 @@ def move_fetched_investors():
     - Contract has expired (current date > execution_start_date + contract_duration)
     
     Uses DEFAULT_ACCOUNTMANAGEMENT as fallback for contract_duration and min_broker_balance
+    Hardcoded minimum contract duration: 30 days (enforced for all investors)
     
     Handles database values: "1"/1 = True, "0"/0 = False
     """
@@ -3091,6 +3092,9 @@ def move_fetched_investors():
     import traceback
     import sys
     from datetime import datetime, timedelta
+    
+    # HARDCODED MINIMUM CONTRACT DURATION (30 days)
+    HARDCODED_MIN_CONTRACT_DURATION = 30
     
     print(f"\n{'='*60}")
     print(f"MOVE VERIFIED INVESTORS".center(60))
@@ -3516,7 +3520,7 @@ def move_fetched_investors():
             print(f"   ⏭️ Investor {inv_id} is incomplete - will be handled later")
             continue
         
-        # Check contract expiration
+        # Check contract expiration with MINIMUM DURATION ENFORCEMENT
         contract_days_raw = investor_data.get('contract_days_left', investor_data.get('CONTRACT_DAYS_LEFT', '')).strip()
         contract_duration_val = None
         
@@ -3524,12 +3528,26 @@ def move_fetched_investors():
             try:
                 contract_days = int(contract_days_raw)
                 if contract_days > 0:
-                    contract_duration_val = contract_days
+                    # ENFORCE MINIMUM CONTRACT DURATION (30 days)
+                    if contract_days < HARDCODED_MIN_CONTRACT_DURATION:
+                        print(f"   ⚠️ Investor {inv_id} contract duration ({contract_days} days) is less than minimum ({HARDCODED_MIN_CONTRACT_DURATION} days) - using hardcoded minimum")
+                        contract_duration_val = HARDCODED_MIN_CONTRACT_DURATION
+                    else:
+                        contract_duration_val = contract_days
             except:
                 pass
         
-        if contract_duration_val is None and default_contract_duration is not None:
-            contract_duration_val = default_contract_duration
+        # If no contract duration found, use hardcoded minimum
+        if contract_duration_val is None:
+            print(f"   ℹ️ Investor {inv_id} has no contract duration - using hardcoded minimum ({HARDCODED_MIN_CONTRACT_DURATION} days)")
+            contract_duration_val = HARDCODED_MIN_CONTRACT_DURATION
+        
+        # Also check against default if it's larger than hardcoded minimum
+        if default_contract_duration is not None and default_contract_duration > HARDCODED_MIN_CONTRACT_DURATION:
+            # If default is larger than our hardcoded minimum, use default
+            if contract_duration_val < default_contract_duration:
+                print(f"   ⚠️ Investor {inv_id} contract duration ({contract_duration_val} days) is less than default ({default_contract_duration} days) - using default")
+                contract_duration_val = default_contract_duration
         
         # Check if expired
         if execution_start and contract_duration_val and contract_duration_val > 0:
@@ -3631,6 +3649,9 @@ def move_fetched_investors():
             activities_data = DEFAULT_ACTIVITIES.copy()
             activities_data.update(existing_activities)
             
+            # Set minimum contract duration for incomplete investors
+            activities_data["contract_duration"] = HARDCODED_MIN_CONTRACT_DURATION
+            
             if 'notifications' not in activities_data:
                 activities_data['notifications'] = {}
             if 'executions_notification' not in activities_data:
@@ -3698,6 +3719,10 @@ def move_fetched_investors():
                     if login: accountmanagement_data['login'] = str(login).strip()
                     if password: accountmanagement_data['password'] = password
                     if server: accountmanagement_data['server'] = server
+                # Set minimum contract duration
+                if 'requirements' not in accountmanagement_data:
+                    accountmanagement_data['requirements'] = {}
+                accountmanagement_data['requirements']['contract_duration'] = str(HARDCODED_MIN_CONTRACT_DURATION)
                 safe_json_write(str(accountmanagement_path), accountmanagement_data)
             
             # Update investors.json if credentials are present
@@ -3808,6 +3833,7 @@ def move_fetched_investors():
         updated_record["error_messages"] = [f"Missing required fields: {missing_fields_readable}"]
         updated_record["status"] = "incomplete_registration"
         updated_record["processed"] = False
+        updated_record["contract_duration"] = HARDCODED_MIN_CONTRACT_DURATION  # Set minimum duration
         
         # FIX: Add notification data to the record
         inv_root = Path(INV_PATH) / inv_id
@@ -3917,19 +3943,34 @@ def move_fetched_investors():
                     final_bypass = False
             print(f"      final_bypass: {final_bypass}")
             
-            # Handle contract_duration
+            # Handle contract_duration with MINIMUM ENFORCEMENT
             contract_duration_val = None
+            
             if contract_days_raw and str(contract_days_raw).upper() not in ['NULL', 'NONE', '']:
                 try:
                     contract_days = int(contract_days_raw)
                     if contract_days > 0:
-                        contract_duration_val = contract_days
+                        # ENFORCE MINIMUM CONTRACT DURATION (30 days)
+                        if contract_days < HARDCODED_MIN_CONTRACT_DURATION:
+                            print(f"      ⚠️ Contract duration ({contract_days} days) is less than minimum ({HARDCODED_MIN_CONTRACT_DURATION} days) - using hardcoded minimum")
+                            contract_duration_val = HARDCODED_MIN_CONTRACT_DURATION
+                        else:
+                            contract_duration_val = contract_days
                 except Exception as e:
                     print(f"      ⚠️ Could not parse contract_days '{contract_days_raw}': {e}")
             
-            if contract_duration_val is None and default_contract_duration is not None:
-                contract_duration_val = default_contract_duration
-                print(f"      Using default contract_duration: {contract_duration_val}")
+            # If no valid contract duration found, use hardcoded minimum
+            if contract_duration_val is None:
+                print(f"      ℹ️ No contract duration found - using hardcoded minimum ({HARDCODED_MIN_CONTRACT_DURATION} days)")
+                contract_duration_val = HARDCODED_MIN_CONTRACT_DURATION
+            
+            # If default is larger than hardcoded minimum, use default (but never below minimum)
+            if default_contract_duration is not None and default_contract_duration > HARDCODED_MIN_CONTRACT_DURATION:
+                if contract_duration_val < default_contract_duration:
+                    print(f"      ⚠️ Contract duration ({contract_duration_val} days) is less than default ({default_contract_duration} days) - using default")
+                    contract_duration_val = default_contract_duration
+            
+            print(f"      Using contract_duration: {contract_duration_val}")
             
             # Check contract expiration (should not be expired here, but double-check)
             contract_expired = False
@@ -4265,6 +4306,7 @@ def move_fetched_investors():
             updated_record["account_mode"] = account_mode if account_mode else "unknown"
             updated_record["demo_account"] = str(demo_account_raw) if demo_account_raw is not None else "0"
             updated_record["demo_account_restricted"] = demo_account_restricted
+            updated_record["contract_duration"] = contract_duration_val  # Store the enforced duration
             
             # Convert booleans to database format '1'/'0' for these specific fields
             updated_record["enable_autotrading"] = bool_to_db_string(final_activate) if final_activate is not None else investor_data.get('enable_autotrading', '0')
@@ -4469,7 +4511,6 @@ def move_fetched_investors():
     print(f"{'='*60}")
     
     return True
-
 
 def check_and_record_unauthorized_actions(inv_id=None):
     """
@@ -32151,9 +32192,9 @@ def process_single_investor(inv_folder):
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
         #recent_highest_balance_target(inv_id=inv_id)
-        martingale_system(inv_id=inv_id)
+        #martingale_system(inv_id=inv_id)
         #trades_analytics(inv_id=inv_id)
-        #duplicate_order_to_reach_default_risk(inv_id=inv_id)
+        check_and_record_unauthorized_actions(inv_id=inv_id)
         
         mt5.shutdown()
         
