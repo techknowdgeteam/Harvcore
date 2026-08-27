@@ -7115,7 +7115,7 @@ def main_loop():
 
 
 if __name__ == "__main__":
-    main_loop()
+    update_fresh_data_from_fetched_to_all_files()
 
 
     
