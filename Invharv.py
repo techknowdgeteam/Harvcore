@@ -13509,38 +13509,26 @@ def recent_highest_balance_target(inv_id=None):
     """
     Function: Manages recent_highest_balance tracking for investors.
     
-    FLOW:
-    1. If recent_highest_balance doesn't exist in activities.json → Initialize:
-       a. Get broker_balance from FETCHED_INVESTORS
-       b. Get current MT5 balance
-       c. Use the HIGHER of broker_balance or current MT5 balance
-       d. Date = YESTERDAY (alarm OFF)
-    2. GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
-       a. If not, update with broker_balance (date unchanged, alarm OFF)
-       b. Save to ALL files
-    3. Get current MT5 balance (fallback only if recent_highest_balance doesn't exist)
-    4. Find most recent profitable day from MT5 history
-    5. Update recent_highest_balance_last_update to most recent profitable day date
-    6. If current MT5 balance > stored recent_highest_balance:
-       a. Get daily target risk from daily_target_config (prioritizing accountmanagement root level)
-       b. Check today's profit from MT5 history
-       c. If today's profit >= daily target risk → Record new high, ALARM ON
-       d. If today's profit < daily target risk → Record new high ONLY, ALARM OFF
-    7. If current MT5 balance >= stored recent_highest_balance AND last update date == today:
-       a. Check if no shortage and no owed debts
-       b. If conditions met → ALARM ON
-    8. Alarm ON only if: no shortage, no owed debts, AND last update date == today
+    TWO CLEARLY SEPARATED SECTIONS:
     
-    Uses activities.json as source of truth but saves to ALL files
+    SECTION 1: MT5 BALANCE MANAGEMENT (NO DAILY TARGETS)
+    - Initialize recent_highest_balance if it doesn't exist (use MT5 balance)
+    - If MT5 balance < starting_balance, use starting_balance instead
+    - Check if current MT5 balance > stored recent_highest_balance
+    - If yes, update recent_highest_balance immediately (value only)
+    - Date is NOT updated here unless it's a true new high with no debts
     
-    NEW DAILY TARGET STRUCTURE:
-    - Week starts from execution start date (NOT Sunday)
-    - Each week is 7 days: start_date -> start_date + 6 days
-    - Listed days in config are filters for which days to include
-    - Days not listed are ignored/skipped
-    - Tracks status: 'met', 'owed', 'pending'
-    - Profit is split across week days based on their targets
-    - Days are ordered starting from the execution start day (e.g., if start is Friday: Friday, Saturday, Sunday, Monday, Tuesday, Wednesday, Thursday)
+    SECTION 2: DAILY TARGET CALCULATIONS (NO MT5 BALANCE)
+    - Uses recent_highest_balance as the current balance (NO MT5 fallback)
+    - Profit = recent_highest_balance - starting_balance (broker balance)
+    - Split profit across weeks from execution start date
+    - For each day in order from week 1 day 1 to today:
+      - Allocate target amount to each day from profit
+      - If profit allocation reaches today and meets today's target:
+        - Update recent_highest_balance_last_update to today
+        - Trigger alarm
+      - If profit allocation doesn't reach today's target:
+        - Alarm OFF, date NOT updated
     
     Args:
         inv_id: Optional specific investor ID to process.
@@ -13570,7 +13558,7 @@ def recent_highest_balance_target(inv_id=None):
         'alarm_blocked_reason': None
     }
     
-    print(f"\n{'='*10} 📊 RECENT BROKER BALANCE TARGET (DAILY RESET) {'='*10}")
+    print(f"\n{'='*10} 📊 RECENT HIGHEST BALANCE TARGET {'='*10}")
     if inv_id:
         print(f" 🎯 Target Investor: {inv_id}")
     
@@ -13683,7 +13671,7 @@ def recent_highest_balance_target(inv_id=None):
         return True
     
     def get_mt5_balance():
-        """Get current MT5 account balance"""
+        """Get current MT5 account balance - ONLY USED IN SECTION 1"""
         try:
             if not mt5.terminal_info():
                 print(f"   MT5 not connected")
@@ -13804,77 +13792,6 @@ def recent_highest_balance_target(inv_id=None):
             print(f"   Error getting daily target config: {e}")
             return None
     
-    def get_today_profit_from_history():
-        """Get today's profit from MT5 history."""
-        try:
-            if not mt5.terminal_info():
-                print(f"   MT5 not connected")
-                return 0.0
-            
-            today = datetime.now()
-            start_of_day = datetime(today.year, today.month, today.day, 0, 0, 0)
-            
-            deals = mt5.history_deals_get(start_of_day, datetime.now())
-            
-            if deals is None or len(deals) == 0:
-                print(f"  ℹ️ No deals found for today")
-                return 0.0
-            
-            total_profit = 0.0
-            for deal in deals:
-                if deal.profit is not None:
-                    total_profit += deal.profit
-            
-            return total_profit
-            
-        except Exception as e:
-            print(f"   Error getting today's profit from MT5 history: {e}")
-            return 0.0
-    
-    def get_most_recent_profitable_day(execution_start_date):
-        """Find the most recent profitable day from MT5 history."""
-        try:
-            if not mt5.terminal_info():
-                return None, 0
-            
-            if execution_start_date:
-                try:
-                    start_date = datetime.strptime(execution_start_date, "%Y-%m-%d")
-                except:
-                    start_date = datetime.now() - timedelta(days=30)
-            else:
-                start_date = datetime.now() - timedelta(days=30)
-            
-            deals = mt5.history_deals_get(start_date, datetime.now())
-            
-            if deals is None or len(deals) == 0:
-                return None, 0
-            
-            daily_profits = {}
-            for deal in deals:
-                if deal.profit is None:
-                    continue
-                
-                deal_time = datetime.fromtimestamp(deal.time)
-                deal_date = deal_time.strftime("%Y-%m-%d")
-                
-                if deal_date not in daily_profits:
-                    daily_profits[deal_date] = 0.0
-                daily_profits[deal_date] += deal.profit
-            
-            sorted_dates = sorted(daily_profits.keys(), reverse=True)
-            
-            for date_str in sorted_dates:
-                if daily_profits[date_str] > 0:
-                    if date_str >= execution_start_date if execution_start_date else True:
-                        return date_str, daily_profits[date_str]
-            
-            return None, 0
-            
-        except Exception as e:
-            print(f"   Error finding most recent profitable day: {e}")
-            return None, 0
-    
     def get_broker_balance_from_fetched(inv_id):
         """Get broker_balance from FETCHED_INVESTORS (root level)"""
         if not os.path.exists(FETCHED_INVESTORS):
@@ -13915,6 +13832,30 @@ def recent_highest_balance_target(inv_id=None):
             execution_start_date = activities.get('execution_start_date')
             if execution_start_date:
                 return str(execution_start_date)
+            
+            return None
+            
+        except Exception as e:
+            return None
+    
+    def get_starting_balance_from_activities(investor_id):
+        """Get execution_start_balance from activities.json"""
+        try:
+            inv_root = Path(INV_PATH) / investor_id
+            activities_path = inv_root / "activities.json"
+            
+            if not activities_path.exists():
+                return None
+            
+            with open(activities_path, 'r', encoding='utf-8') as f:
+                activities = json.load(f)
+            
+            starting_balance = activities.get('execution_start_balance')
+            if starting_balance:
+                try:
+                    return float(starting_balance)
+                except (ValueError, TypeError):
+                    return None
             
             return None
             
@@ -13972,18 +13913,253 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  ⚠️ Error reading activities.json for {inv_id}: {e}")
             return None, None
     
-    def get_current_effective_balance(investor_id):
-        """Get the effective current balance."""
-        recent_balance, _ = get_recent_balance_from_activities(investor_id)
-        if recent_balance is not None:
-            print(f"  🔄 Using recent_highest_balance (${recent_balance:.2f}) as current balance")
-            return recent_balance
-        else:
-            print(f"  ⚠️ No recent_highest_balance found. Falling back to MT5 balance.")
-            return get_mt5_balance()
+    def get_days_ordered_from_start(start_date, listed_days):
+        """
+        Get the ordered list of days starting from the execution start date.
+        
+        Example: If start_date is Friday and listed_days are Sunday-Saturday:
+        Returns: ['Friday', 'Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']
+        
+        Args:
+            start_date: datetime object of the execution start date
+            listed_days: list of day names (lowercase) that are listed in the config
+        
+        Returns:
+            list of day names (proper case) in order starting from start_date day
+        """
+        if not start_date:
+            return listed_days
+        
+        # Get the day name of the start date
+        start_day_name = start_date.strftime("%A").lower()
+        
+        # Define the standard order of days starting from Sunday
+        standard_days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+        
+        # Find the index of the start day in standard order
+        try:
+            start_index = standard_days.index(start_day_name)
+        except ValueError:
+            # If start day not found, default to Sunday
+            start_index = 0
+        
+        # Create ordered list: from start day, then wrap around
+        ordered_days = standard_days[start_index:] + standard_days[:start_index]
+        
+        # Filter to only include listed days, preserving the order
+        listed_days_lower = [day.lower() for day in listed_days]
+        result = []
+        for day in ordered_days:
+            if day in listed_days_lower:
+                result.append(day.capitalize())
+        
+        return result
     
-    def update_activities_json(inv_id, new_balance, update_date, daily_target_met=None):
-        """Update activities.json with recent_highest_balance and date."""
+    def calculate_daily_target_status(investor_data, profit, execution_start_date, inv_id=None):
+        """
+        SECTION 2: Calculate daily target status WITHOUT using MT5 balance or history trades.
+        
+        Uses ONLY:
+        - recent_highest_balance (passed as part of investor_data or from activities)
+        - starting_balance (broker balance from activities)
+        - daily_target_config
+        
+        Profit = recent_highest_balance - starting_balance
+        Split profit across weeks from execution start date.
+        For each day in order from week 1 day 1 to today:
+          - Allocate target amount to each day from profit
+          - If profit allocation reaches today:
+            - Check if today's target is met
+            - If yes: Update recent_highest_balance_last_update to today, trigger alarm
+            - If no: Alarm OFF, date NOT updated
+        
+        Returns:
+            dict: {
+                'weekly_targets': dict with week structure and statuses,
+                'today_met': bool,
+                'alarm_trigger': bool,
+                'total_owed': float,  # Remaining amount needed (target - allocated)
+                'total_owed_with_shortage': float,  # Same as total_owed (kept for compatibility)
+                'today_target_met': bool
+            }
+        """
+        result = {
+            'weekly_targets': {},
+            'today_met': False,
+            'alarm_trigger': False,
+            'total_owed': 0.0,
+            'total_owed_with_shortage': 0.0,
+            'today_target_met': False
+        }
+        
+        if not execution_start_date:
+            print(f"  ⚠️ No execution start date, cannot calculate daily targets")
+            return result
+        
+        start_date = parse_date_flexible(execution_start_date)
+        if not start_date:
+            print(f"  ⚠️ Could not parse execution start date: {execution_start_date}")
+            return result
+        
+        current_date = datetime.now()
+        today_str = current_date.strftime("%Y-%m-%d")
+        current_week = get_week_number_from_date(start_date, current_date)
+        
+        print(f"\n  📊 CALCULATING DAILY TARGET STATUS (SECTION 2)")
+        print(f"  ──────────────────────────────────────────")
+        print(f"  📅 Execution Start: {start_date.strftime('%Y-%m-%d')} ({start_date.strftime('%A')})")
+        print(f"  📅 Current Date: {current_date.strftime('%Y-%m-%d')} ({current_date.strftime('%A')})")
+        print(f"  📆 Current Week: {current_week}")
+        print(f"  💰 Total Profit: ${profit:.2f}")
+        print(f"  📌 Week starts on: {start_date.strftime('%A')} (execution start day)")
+        
+        # Get the daily target config
+        daily_target_config = investor_data.get('daily_target_config', {})
+        include_missed_days = daily_target_config.get('include_missed_days', False) if daily_target_config else False
+        
+        # Process each week
+        for week_num in range(1, current_week + 1):
+            week_key = f"week_{week_num}"
+            week_targets = get_weekly_targets_from_config(investor_data, week_num)
+            
+            if not week_targets:
+                print(f"  ⚠️ No targets found for {week_key} - skipping")
+                continue
+            
+            result['weekly_targets'][week_key] = {}
+            
+            # Week starts from execution start date + (week_num - 1) * 7 days
+            week_start_date = start_date + timedelta(days=(week_num - 1) * 7)
+            week_end_date = week_start_date + timedelta(days=6)
+            
+            print(f"\n  📆 {week_key.upper()}: {week_start_date.strftime('%Y-%m-%d')} ({week_start_date.strftime('%A')}) to {week_end_date.strftime('%Y-%m-%d')} ({week_end_date.strftime('%A')})")
+            
+            # Get the day names that are listed in the config for this week
+            listed_days = list(week_targets.keys())
+            
+            # Get days ordered starting from the start day
+            ordered_days = get_days_ordered_from_start(week_start_date, listed_days)
+            print(f"  📋 Ordered days (starting from {week_start_date.strftime('%A')}): {', '.join(ordered_days)}")
+            
+            # Create entries for ONLY listed days, in the correct order
+            remaining_profit = profit
+            
+            # Calculate total target for this week
+            total_week_target = sum(week_targets.get(day.lower(), 0) for day in ordered_days)
+            
+            # Process each day in order
+            for day_name_proper in ordered_days:
+                day_name_lower = day_name_proper.lower()
+                
+                # Get the actual date for this day in the week
+                day_index = None
+                for offset in range(7):
+                    check_date = week_start_date + timedelta(days=offset)
+                    if check_date.strftime("%A").lower() == day_name_lower:
+                        day_index = offset
+                        break
+                
+                if day_index is None:
+                    continue
+                
+                check_date = week_start_date + timedelta(days=day_index)
+                day_date_str = check_date.strftime("%Y-%m-%d")
+                target = week_targets.get(day_name_lower, 0)
+                
+                # Determine status based on profit allocation
+                is_past_or_today = check_date <= current_date
+                
+                if is_past_or_today:
+                    if remaining_profit >= target:
+                        status = 'met'
+                        profit_allocated = target
+                        remaining_profit -= target
+                    else:
+                        status = 'owed'
+                        profit_allocated = remaining_profit
+                        remaining_profit = 0
+                else:
+                    status = 'pending'
+                    profit_allocated = 0.0
+                
+                # Store the day data
+                result['weekly_targets'][week_key][day_name_proper] = {
+                    "date": day_date_str,
+                    "daily_target": target,
+                    "status": status,
+                    "profit_allocated": profit_allocated,
+                    "is_listed": True,
+                    "remaining_needed": max(0, target - profit_allocated)  # The amount still needed to meet this day's target
+                }
+                
+                # CHECK IF TODAY'S TARGET IS MET
+                if day_date_str == today_str:
+                    if status == 'met':
+                        result['today_met'] = True
+                        result['today_target_met'] = True
+                        print(f"\n  ✅ TODAY ({day_name_proper}): Target MET! Profit allocation: ${profit_allocated:.2f} >= ${target:.2f}")
+                    else:
+                        result['today_met'] = False
+                        result['today_target_met'] = False
+                        print(f"\n  ❌ TODAY ({day_name_proper}): Target NOT MET. Profit allocation: ${profit_allocated:.2f} < ${target:.2f}")
+                        print(f"     Remaining needed: ${target - profit_allocated:.2f}")
+            
+            # Print week summary
+            week_met = sum(1 for d in result['weekly_targets'][week_key].values() if d['status'] == 'met')
+            week_owed = sum(1 for d in result['weekly_targets'][week_key].values() if d['status'] == 'owed')
+            week_pending = sum(1 for d in result['weekly_targets'][week_key].values() if d['status'] == 'pending')
+            week_profit_allocated = sum(d['profit_allocated'] for d in result['weekly_targets'][week_key].values())
+            
+            print(f"\n  💰 Week {week_num} allocated: ${week_profit_allocated:.2f}, Remaining profit: ${remaining_profit:.2f}")
+            print(f"  📊 Week {week_num} summary: {week_met} MET, {week_owed} OWED, {week_pending} PENDING")
+            
+            # Update profit for next weeks
+            profit = remaining_profit
+        
+        # After processing all weeks, calculate owed amounts
+        # total_owed = sum of remaining amounts needed for all owed days (target - allocated)
+        total_owed = 0.0
+        
+        for week_key, week_data in result['weekly_targets'].items():
+            for day, day_data in week_data.items():
+                if day_data.get('is_listed', True) and day_data['status'] == 'owed':
+                    # The remaining amount needed to meet this day's target
+                    total_owed += (day_data['daily_target'] - day_data['profit_allocated'])
+        
+        result['total_owed'] = total_owed
+        result['total_owed_with_shortage'] = total_owed  # Same value, kept for compatibility
+        
+        # Alarm condition: today_met AND no owed debts (total_owed == 0)
+        if result['today_met'] and total_owed == 0:
+            result['alarm_trigger'] = True
+            print(f"\n  🚨 ALARM TRIGGERED: Today's target met and no owed debts!")
+        else:
+            result['alarm_trigger'] = False
+            if not result['today_met']:
+                print(f"\n  🔇 Alarm OFF: Today's target not met")
+            if total_owed > 0:
+                print(f"\n  🔇 Alarm OFF: Owed debts exist (${total_owed:.2f} remaining needed)")
+        
+        print(f"\n  📊 FINAL STATUS:")
+        print(f"  ──────────────────")
+        print(f"  Today's Target Met: {'YES ✅' if result['today_met'] else 'NO ❌'}")
+        print(f"  Total Owed (remaining needed): ${total_owed:.2f}")
+        print(f"  Alarm Trigger: {'YES 🚨' if result['alarm_trigger'] else 'NO 🔇'}")
+        
+        return result
+    
+    def update_activities_json(inv_id, new_balance, update_date, daily_target_met=None, update_balance=True, update_date_field=True):
+        """
+        Update activities.json with recent_highest_balance and/or date.
+        
+        Args:
+            inv_id: Investor ID
+            new_balance: New balance value
+            update_date: Date to set
+            daily_target_met: Optional daily_target_met dict
+            update_balance: If True, update recent_highest_balance
+            update_date_field: If True, update recent_highest_balance_last_update
+        """
         try:
             inv_root = Path(INV_PATH) / inv_id
             activities_path = inv_root / "activities.json"
@@ -14023,26 +14199,34 @@ def recent_highest_balance_target(inv_id=None):
                 }
             
             # UPDATE balance fields
-            activities['recent_highest_balance'] = str(round(new_balance, 2))
-            activities['recent_highest_balance_last_update'] = update_date
+            if update_balance:
+                activities['recent_highest_balance'] = str(round(new_balance, 2))
+            
+            if update_date_field:
+                activities['recent_highest_balance_last_update'] = update_date
+            
             activities['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # COMPLETE OVERWRITE of daily_target_met with the new config data
+            # Update daily_target_met if provided
             if daily_target_met is not None and isinstance(daily_target_met, dict):
+                # Ensure the required fields exist
+                if 'daily_target_owed' not in daily_target_met:
+                    daily_target_met['daily_target_owed'] = 0.0
+                if 'daily_target_owed_and_shortage' not in daily_target_met:
+                    daily_target_met['daily_target_owed_and_shortage'] = 0.0
                 activities['daily_target_met'] = daily_target_met
-            else:
-                activities['daily_target_met'] = {}
             
             # Update peak_balance if new balance is higher
-            if 'peak_balance' in activities:
-                try:
-                    current_peak = float(activities['peak_balance'])
-                    if new_balance > current_peak:
+            if update_balance:
+                if 'peak_balance' in activities:
+                    try:
+                        current_peak = float(activities['peak_balance'])
+                        if new_balance > current_peak:
+                            activities['peak_balance'] = str(round(new_balance, 2))
+                            activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except (ValueError, TypeError):
                         activities['peak_balance'] = str(round(new_balance, 2))
                         activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                except (ValueError, TypeError):
-                    activities['peak_balance'] = str(round(new_balance, 2))
-                    activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             with open(activities_path, 'w', encoding='utf-8') as f:
                 json.dump(activities, f, indent=4)
@@ -14067,11 +14251,11 @@ def recent_highest_balance_target(inv_id=None):
                 result[key] = value
         return result
     
-    def sync_all_files(inv_id, balance, date, message, exec_message, msg_type, daily_target_met=None):
+    def sync_all_files(inv_id, balance, date, message, exec_message, msg_type, daily_target_met=None, update_balance=True, update_date_field=True):
         """Sync ALL files with the new balance data and daily_target_met."""
         files_updated = 0
         
-        if update_activities_json(inv_id, balance, date, daily_target_met):
+        if update_activities_json(inv_id, balance, date, daily_target_met, update_balance, update_date_field):
             files_updated += 1
             stats["activities_updated"] += 1
         
@@ -14085,14 +14269,19 @@ def recent_highest_balance_target(inv_id=None):
         for data_dict, file_name in file_updates:
             if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
                 # Update balance fields
-                data_dict[inv_id]['recent_highest_balance'] = str(round(balance, 2))
-                data_dict[inv_id]['recent_highest_balance_last_update'] = date
+                if update_balance:
+                    data_dict[inv_id]['recent_highest_balance'] = str(round(balance, 2))
+                if update_date_field:
+                    data_dict[inv_id]['recent_highest_balance_last_update'] = date
                 
-                # COMPLETE OVERWRITE of daily_target_met with the new config data
+                # Update daily_target_met if provided
                 if daily_target_met is not None and isinstance(daily_target_met, dict):
+                    # Ensure the required fields exist
+                    if 'daily_target_owed' not in daily_target_met:
+                        daily_target_met['daily_target_owed'] = 0.0
+                    if 'daily_target_owed_and_shortage' not in daily_target_met:
+                        daily_target_met['daily_target_owed_and_shortage'] = 0.0
                     data_dict[inv_id]['daily_target_met'] = daily_target_met
-                else:
-                    data_dict[inv_id]['daily_target_met'] = {}
                 
                 # Update notifications if provided
                 if message and exec_message:
@@ -14103,12 +14292,17 @@ def recent_highest_balance_target(inv_id=None):
                     add_notification(data_dict[inv_id]['notifications'], 'RecentBalance', message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                     add_execution_notification(data_dict[inv_id]['executions_notification'], 'RecentBalance', exec_message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             else:
-                # Create new entry with daily_target_met
+                # Create new entry
                 new_entry = {
                     'recent_highest_balance': str(round(balance, 2)),
                     'recent_highest_balance_last_update': date,
                     'daily_target_met': daily_target_met.copy() if daily_target_met else {}
                 }
+                # Ensure the required fields exist
+                if 'daily_target_owed' not in new_entry['daily_target_met']:
+                    new_entry['daily_target_met']['daily_target_owed'] = 0.0
+                if 'daily_target_owed_and_shortage' not in new_entry['daily_target_met']:
+                    new_entry['daily_target_met']['daily_target_owed_and_shortage'] = 0.0
                 data_dict[inv_id] = new_entry
         
         stats["files_updated"] += 4
@@ -14177,193 +14371,6 @@ def recent_highest_balance_target(inv_id=None):
             
         except Exception as e:
             return {}
-    
-    def get_days_ordered_from_start(start_date, listed_days):
-        """
-        Get the ordered list of days starting from the execution start date.
-        
-        Example: If start_date is Friday and listed_days are Sunday-Saturday:
-        Returns: ['Friday', 'Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']
-        
-        Args:
-            start_date: datetime object of the execution start date
-            listed_days: list of day names (lowercase) that are listed in the config
-        
-        Returns:
-            list of day names (proper case) in order starting from start_date day
-        """
-        if not start_date:
-            return listed_days
-        
-        # Get the day name of the start date
-        start_day_name = start_date.strftime("%A").lower()
-        
-        # Define the standard order of days starting from Sunday
-        standard_days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
-        
-        # Find the index of the start day in standard order
-        try:
-            start_index = standard_days.index(start_day_name)
-        except ValueError:
-            # If start day not found, default to Sunday
-            start_index = 0
-        
-        # Create ordered list: from start day, then wrap around
-        ordered_days = standard_days[start_index:] + standard_days[:start_index]
-        
-        # Filter to only include listed days, preserving the order
-        listed_days_lower = [day.lower() for day in listed_days]
-        result = []
-        for day in ordered_days:
-            if day in listed_days_lower:
-                result.append(day.capitalize())
-        
-        return result
-    
-    def split_profit_into_weekly_targets(investor_data, profit, execution_start_date, include_missed_days, inv_id=None):
-        """
-        Split profit into weekly targets based on the new daily target structure.
-        
-        CRITICAL: The daily_target_config is the DICTATOR. It COMPLETELY OVERWRITES
-        any existing daily_target_met data. Days not in the config are removed entirely.
-        
-        Week starts from execution_start_date (NOT Sunday).
-        Each week is exactly 7 days: start_date -> start_date + 6 days.
-        Listed days in config are filters - only analyze days that appear in the config.
-        Days not listed are ignored/skipped and REMOVED from daily_target_met.
-        
-        Days are ordered starting from the execution start day (e.g., if start is Friday:
-        Friday, Saturday, Sunday, Monday, Tuesday, Wednesday, Thursday)
-        
-        Example: If execution_start_date is Friday (2026-08-07):
-        WEEK_1: 2026-08-07 (Friday) to 2026-08-13 (Thursday)
-        - Only analyze days listed in config (e.g., Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday)
-        - Days not listed: "not listed, no analysis" - REMOVED from daily_target_met
-        
-        WEEK_2: 2026-08-14 (Friday) to 2026-08-20 (Thursday)
-        - Same pattern: starts Friday, ends Thursday
-        - Only analyze listed days
-        
-        IMPORTANT: This function COMPLETELY OVERWRITES daily_target_met based on the config.
-        It does NOT preserve any days that were in the old daily_target_met but are not in the config.
-        
-        Returns: dict with week structure and statuses (only listed days are included)
-        """
-        result = {}
-        
-        if not execution_start_date:
-            print(f"  ⚠️ No execution start date, cannot split profit")
-            return result
-        
-        start_date = parse_date_flexible(execution_start_date)
-        if not start_date:
-            print(f"  ⚠️ Could not parse execution start date: {execution_start_date}")
-            return result
-        
-        current_date = datetime.now()
-        current_week = get_week_number_from_date(start_date, current_date)
-        
-        print(f"\n  📊 SPLITTING PROFIT INTO WEEKLY TARGETS")
-        print(f"  ──────────────────────────────────────────")
-        print(f"  📅 Execution Start: {start_date.strftime('%Y-%m-%d')} ({start_date.strftime('%A')})")
-        print(f"  📅 Current Date: {current_date.strftime('%Y-%m-%d')} ({current_date.strftime('%A')})")
-        print(f"  📆 Current Week: {current_week}")
-        print(f"  💰 Total Profit: ${profit:.2f}")
-        print(f"  📋 Include Missed Days: {'Enabled' if include_missed_days else 'Disabled'}")
-        print(f"  📌 Week starts on: {start_date.strftime('%A')} (execution start day)")
-        
-        # Get the daily target config directly - this is the DICTATOR
-        daily_target_config = investor_data.get('daily_target_config', {})
-        
-        # Process each week
-        for week_num in range(1, current_week + 1):
-            week_key = f"week_{week_num}"
-            week_targets = get_weekly_targets_from_config(investor_data, week_num)
-            
-            if not week_targets:
-                print(f"  ⚠️ No targets found for {week_key} - skipping")
-                continue
-            
-            result[week_key] = {}
-            
-            # Week starts from execution start date + (week_num - 1) * 7 days
-            week_start_date = start_date + timedelta(days=(week_num - 1) * 7)
-            week_end_date = week_start_date + timedelta(days=6)
-            
-            print(f"\n  📆 {week_key.upper()}: {week_start_date.strftime('%Y-%m-%d')} ({week_start_date.strftime('%A')}) to {week_end_date.strftime('%Y-%m-%d')} ({week_end_date.strftime('%A')})")
-            
-            # Get the day names that are listed in the config for this week
-            listed_days = list(week_targets.keys())
-            
-            # Get days ordered starting from the start day
-            ordered_days = get_days_ordered_from_start(week_start_date, listed_days)
-            print(f"  📋 Ordered days (starting from {week_start_date.strftime('%A')}): {', '.join(ordered_days)}")
-            
-            # Create entries for ONLY listed days, in the correct order
-            remaining_profit = profit
-            
-            # Calculate total target for this week
-            total_week_target = sum(week_targets.get(day.lower(), 0) for day in ordered_days)
-            
-            # Process each day in order
-            for day_name_proper in ordered_days:
-                day_name_lower = day_name_proper.lower()
-                
-                # Get the actual date for this day in the week
-                day_index = None
-                for offset in range(7):
-                    check_date = week_start_date + timedelta(days=offset)
-                    if check_date.strftime("%A").lower() == day_name_lower:
-                        day_index = offset
-                        break
-                
-                if day_index is None:
-                    continue
-                
-                check_date = week_start_date + timedelta(days=day_index)
-                day_date_str = check_date.strftime("%Y-%m-%d")
-                target = week_targets.get(day_name_lower, 0)
-                
-                # Determine status based on config (the DICTATOR)
-                # Status is determined fresh from config, not from existing data
-                is_past_or_today = check_date <= current_date
-                
-                if is_past_or_today:
-                    # Check if this day's target was met
-                    if remaining_profit >= target:
-                        status = 'met'
-                        profit_allocated = target
-                        remaining_profit -= target
-                    else:
-                        status = 'owed'
-                        profit_allocated = remaining_profit
-                        remaining_profit = 0
-                else:
-                    status = 'pending'
-                    profit_allocated = 0.0
-                
-                # Store the day data
-                result[week_key][day_name_proper] = {
-                    "date": day_date_str,
-                    "daily_target": target,
-                    "status": status,
-                    "profit_allocated": profit_allocated,
-                    "is_listed": True
-                }
-            
-            # Print week summary
-            week_met = sum(1 for d in result[week_key].values() if d['status'] == 'met')
-            week_owed = sum(1 for d in result[week_key].values() if d['status'] == 'owed')
-            week_pending = sum(1 for d in result[week_key].values() if d['status'] == 'pending')
-            week_profit_allocated = sum(d['profit_allocated'] for d in result[week_key].values())
-            
-            print(f"  💰 Week {week_num} allocated: ${week_profit_allocated:.2f}, Remaining profit: ${remaining_profit:.2f}")
-            print(f"  📊 Week {week_num} summary: {week_met} MET, {week_owed} OWED, {week_pending} PENDING")
-            
-            # Update profit for next weeks
-            profit = remaining_profit
-        
-        return result
     
     # ================================================================
     # LOAD ALL INVESTOR FILES
@@ -14453,84 +14460,58 @@ def recent_highest_balance_target(inv_id=None):
         print(f" 📊 INVESTOR: {inv_id}")
         print(f"{'─'*80}")
         
-        current_balance = get_current_effective_balance(inv_id)
-        if current_balance is None:
-            print(f"   Could not get effective balance - Skipping investor {inv_id}")
-            stats["errors"].append(f"Could not get effective balance for {inv_id}")
+        # ============================================================
+        # SECTION 1: MT5 BALANCE MANAGEMENT
+        # ============================================================
+        print(f"\n  🔵 SECTION 1: MT5 BALANCE MANAGEMENT")
+        print(f"  ─────────────────────────────────────")
+        
+        # Get MT5 balance (ONLY used in Section 1)
+        mt5_balance = get_mt5_balance()
+        if mt5_balance is None:
+            print(f"  ⚠️ Could not get MT5 balance - Skipping investor {inv_id}")
+            stats["errors"].append(f"Could not get MT5 balance for {inv_id}")
             stats["investors_skipped"] += 1
             continue
         
+        print(f"  💰 Current MT5 Balance: ${mt5_balance:.2f}")
+        
+        # Get broker balance and execution start date
         broker_balance = get_broker_balance_from_fetched(inv_id)
         execution_start_date = get_execution_start_date_from_activities(inv_id)
         
-        total_profit = 0
-        if broker_balance is not None:
-            total_profit = current_balance - broker_balance
-        
-        days_since_start = None
-        today_name = datetime.now().strftime("%A")
-        if execution_start_date:
-            start_date = parse_date_flexible(execution_start_date)
-            if start_date:
-                today = datetime.now()
-                days_since_start = (today - start_date).days
-                total_days_including_today = days_since_start + 1
-                current_week = get_week_number_from_date(start_date, today)
-        
-        # Get daily target config - PRIORITY: accountmanagement root level first
-        daily_target_config = get_investor_daily_target_config(inv_id)
-        include_missed_days = daily_target_config.get('include_missed_days', False) if daily_target_config else False
-        
+        # Get existing recent_highest_balance
         existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
-        source_name = "activities.json (SOURCE OF TRUTH)"
         
-        if existing_recent is None:
-            print(f"\n  📝 RECENT HIGHEST BALANCE DOES NOT EXIST")
-            
-            highest_from_files, highest_date, source_file = get_highest_balance_from_all_files(inv_id)
-            
-            if highest_from_files is not None:
-                print(f"  📁 Found data in {source_file}: ${highest_from_files:.2f} (date: {highest_date})")
-                print(f"  🔄 Migrating data to ALL files (including activities.json)...")
-                
-                sync_all_files(inv_id, highest_from_files, highest_date, None, None, None)
-                existing_recent = highest_from_files
-                existing_last_update = highest_date
-                source_name = f"{source_file} (MIGRATED to ALL files)"
-                stats["field_created"] += 1
-                stats["activities_updated"] += 1
-                has_updates = True
-                
-                print(f"  ✅ MIGRATION COMPLETE - All files now have balance: ${existing_recent:.2f}")
-            else:
-                print(f"  ℹ️ No data found in ANY file - Will initialize")
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # ============================================================
-        # CASE 1: Field doesn't exist - INITIALIZE
-        # ============================================================
+        # Initialize if doesn't exist
         if existing_recent is None:
             print(f"\n  📝 RECENT HIGHEST BALANCE DOES NOT EXIST - INITIALIZING")
             print(f"  ─────────────────────────────────────────────────────")
+            print(f"  💰 Current MT5 Balance: ${mt5_balance:.2f}")
             
-            print(f"  💰 Current Effective Balance: ${current_balance:.2f}")
+            # Calculate starting balance
             if broker_balance is not None:
-                print(f"  📊 Broker Balance: ${broker_balance:.2f}")
+                starting_balance = broker_balance
             else:
-                print(f"  📊 Broker Balance: Not Available")
+                starting_balance = mt5_balance
             
-            if broker_balance is not None:
-                init_balance = max(broker_balance, current_balance)
-                if init_balance == broker_balance and broker_balance > current_balance:
-                    print(f"  ℹ️ Using broker_balance (${broker_balance:.2f}) - Higher than current balance (${current_balance:.2f})")
-                elif init_balance == current_balance and current_balance > broker_balance:
-                    print(f"  ℹ️ Using current effective balance (${current_balance:.2f}) - Higher than broker_balance (${broker_balance:.2f})")
-                else:
-                    print(f"  ℹ️ Balances equal: using ${init_balance:.2f}")
+            print(f"  📊 Starting Balance (Broker): ${starting_balance:.2f}")
+            
+            # IMPORTANT: If MT5 balance < starting balance, use starting balance instead
+            if mt5_balance < starting_balance:
+                init_balance = starting_balance
+                print(f"\n  ⚠️ MT5 Balance (${mt5_balance:.2f}) is less than Starting Balance (${starting_balance:.2f})")
+                print(f"  🔧 Using Starting Balance as initial Recent Highest Balance: ${init_balance:.2f}")
             else:
-                init_balance = current_balance
-                print(f"  ℹ️ No broker_balance available, using current effective balance: ${init_balance:.2f}")
+                init_balance = mt5_balance
+                print(f"\n  ✅ Using MT5 Balance as initial Recent Highest Balance: ${init_balance:.2f}")
+            
+            total_profit = init_balance - starting_balance
+            print(f"  📈 Total Profit: ${total_profit:.2f}")
+            
+            # Create initial activities with execution_start_date if not exists
+            if not execution_start_date:
+                execution_start_date = datetime.now().strftime("%Y-%m-%d")
             
             print(f"\n  ✅ INITIALIZED: Recent Highest Balance = ${init_balance:.2f}")
             print(f"  📅 Date set to: {yesterday_str} (YESTERDAY)")
@@ -14549,22 +14530,17 @@ def recent_highest_balance_target(inv_id=None):
                 'daily_target_risk': None,
                 'profit_met_risk_threshold': False,
                 'alarm_blocked_reason': None,
-                'init_source': 'broker_balance' if (broker_balance is not None and broker_balance >= current_balance) else 'effective_balance'
+                'init_source': 'mt5_balance' if mt5_balance >= starting_balance else 'starting_balance'
             }
             
-            # Initialize weekly targets - COMPLETE OVERWRITE based on config
-            weekly_targets = {}
-            if daily_target_config and total_profit > 0:
-                weekly_targets = split_profit_into_weekly_targets(
-                    {'daily_target_config': daily_target_config},
-                    total_profit,
-                    execution_start_date,
-                    include_missed_days,
-                    inv_id
-                )
+            # Initialize daily_target_met with required fields
+            daily_target_met = {
+                "daily_target_owed": 0.0,
+                "daily_target_owed_and_shortage": 0.0
+            }
             
-            # Sync to ALL files with COMPLETE OVERWRITTEN daily_target_met
-            sync_all_files(inv_id, init_balance, yesterday_str, None, None, None, weekly_targets)
+            # Sync to ALL files
+            sync_all_files(inv_id, init_balance, yesterday_str, None, None, None, daily_target_met)
             
             stats["investors_updated"] += 1
             stats["investors_checked"] += 1
@@ -14572,614 +14548,212 @@ def recent_highest_balance_target(inv_id=None):
             has_updates = True
             continue
         
-        # ============================================================
-        # FIELD EXISTS - Print FULL DETAILED EXECUTION INFO
-        # ============================================================
-        print(f"\n  📅 EXECUTION DETAILS")
-        print(f"  ────────────────────")
-        if execution_start_date:
-            start_date_display = parse_date_flexible(execution_start_date)
-            if start_date_display:
-                print(f"  📅 Execution Start Date: {execution_start_date} ({start_date_display.strftime('%A')})")
-            else:
-                print(f"  📅 Execution Start Date: {execution_start_date}")
-            if broker_balance is not None:
-                print(f"  💰 Starting Balance (Broker): ${broker_balance:.2f}")
-            else:
-                print(f"  💰 Starting Balance (Broker): Not Available")
-            print(f"  📊 Stored High: ${existing_recent:.2f}")
-            if broker_balance is not None:
-                print(f"  📈 P&L: ${total_profit:.2f}")
-            if days_since_start is not None:
-                day_word = "day" if days_since_start == 1 else "days"
-                print(f"  📆 {days_since_start} {day_word} ago")
-                if total_days_including_today is not None:
-                    print(f"  📆 {total_days_including_today} days including today")
-            print(f"  📆 Today: {today_name}")
-            
-            if execution_start_date:
-                start_date = parse_date_flexible(execution_start_date)
-                if start_date:
-                    current_date = datetime.now()
-                    current_week = get_week_number_from_date(start_date, current_date)
-                    print(f"  📆 Current Week: Week {current_week}")
-        else:
-            print(f"  📅 Execution Start Date: Not Available")
-            print(f"  📆 Today: {today_name}")
+        # Check if MT5 balance > stored recent_highest_balance
+        print(f"\n  📊 Checking for new high...")
+        print(f"  📊 Stored Recent Highest: ${existing_recent:.2f}")
+        print(f"  📊 Current MT5 Balance: ${mt5_balance:.2f}")
         
-        # ============================================================
-        # Print Daily Target Config
-        # ============================================================
-        print(f"\n  🎯 DAILY TARGET CONFIG")
-        print(f"  ─────────────────────")
-        if daily_target_config:
-            include_status = "Enabled" if include_missed_days else "Disabled"
-            print(f"  📋 Include Missed Days: {include_status}")
-            
-            if execution_start_date:
-                start_date = parse_date_flexible(execution_start_date)
-                if start_date:
-                    current_date = datetime.now()
-                    current_week = get_week_number_from_date(start_date, current_date)
-                    print(f"  📆 Current Week: {current_week}")
-                    
-                    week_targets = get_weekly_targets_from_config(
-                        {'daily_target_config': daily_target_config},
-                        current_week
-                    )
-                    if week_targets:
-                        print(f"\n  📊 CURRENT WEEK TARGETS:")
-                        for day_name, target in week_targets.items():
-                            print(f"    • {day_name.capitalize()}: ${target:.2f}")
-        else:
-            print(f"  📊 Daily Target: Not Available")
-            print(f"  📍 Looking in: accountmanagement.daily_target_config")
-        
-        # ============================================================
-        # CALCULATE WEEKLY TARGETS - ALWAYS DO THIS FOR EVERY EXECUTION
-        # COMPLETE OVERWRITE BASED ON CONFIG (DICTATOR)
-        # ============================================================
-        weekly_targets = {}
-        if daily_target_config and total_profit > 0:
-            weekly_targets = split_profit_into_weekly_targets(
-                {'daily_target_config': daily_target_config},
-                total_profit,
-                execution_start_date,
-                include_missed_days,
-                inv_id
-            )
-            if weekly_targets:
-                print(f"\n  📊 WEEKLY TARGET BREAKDOWN (P&L SPLIT):")
-                print(f"  ─────────────────────────────────────────")
-                total_owed = 0
-                total_met = 0
-                total_pending = 0
-                total_owed_amount = 0.0
-                
-                for week_key, week_data in weekly_targets.items():
-                    print(f"\n  📆 {week_key.upper()}:")
-                    week_total = 0
-                    week_met = 0
-                    week_owed = 0
-                    week_pending = 0
-                    
-                    for day, day_data in week_data.items():
-                        status = day_data['status']
-                        allocated = day_data['profit_allocated']
-                        target = day_data['daily_target']
-                        date_str = day_data['date']
-                        is_listed = day_data.get('is_listed', True)
-                        
-                        if not is_listed:
-                            print(f"    ℹ️ {day} ({date_str}): NOT LISTED, no analysis")
-                            continue
-                        
-                        status_emoji = "✅" if status == 'met' else "⚠️" if status == 'owed' else "⏳" if status == 'pending' else "ℹ️"
-                        status_text = "MET" if status == 'met' else "OWED" if status == 'owed' else "PENDING"
-                        
-                        print(f"    {status_emoji} {day} ({date_str}):")
-                        print(f"       Target: ${target:.2f}")
-                        print(f"       Allocated: ${allocated:.2f}")
-                        print(f"       Status: {status_text}")
-                        
-                        if status == 'met':
-                            week_met += 1
-                            total_met += 1
-                        elif status == 'owed':
-                            week_owed += 1
-                            total_owed += 1
-                            week_total += (target - allocated)
-                            total_owed_amount += (target - allocated)
-                        elif status == 'pending':
-                            week_pending += 1
-                            total_pending += 1
-                    
-                    print(f"    ─────────────────────────────────────")
-                    print(f"    Week Summary: {week_met} MET, {week_owed} OWED, {week_pending} PENDING")
-                    if week_owed > 0:
-                        print(f"    ⚠️ Owed Amount: ${week_total:.2f}")
-                
-                print(f"\n  📊 OVERALL SUMMARY:")
-                print(f"  ──────────────────")
-                print(f"  ✅ Days MET: {total_met}")
-                print(f"  ⚠️ Days OWED: {total_owed}")
-                print(f"  ⏳ Days PENDING: {total_pending}")
-                print(f"  💰 Total Owed: ${total_owed_amount:.2f}")
-        
-        # ============================================================
-        # ALWAYS SAVE weekly_targets TO ALL FILES - COMPLETE OVERWRITE
-        # ============================================================
-        if weekly_targets:
-            print(f"\n  💾 Saving weekly targets to ALL files (COMPLETE OVERWRITE)...")
-            sync_all_files(inv_id, existing_recent, existing_last_update, None, None, None, weekly_targets)
-            has_updates = True
-            stats["investors_updated"] += 1
-        
-        # ============================================================
-        # GLOBAL CHECK: Ensure recent_highest_balance >= broker_balance
-        # ============================================================
-        if broker_balance is not None and existing_recent < broker_balance:
-            print(f"\n  ⚠️ RECENT HIGHEST BALANCE IS LESS THAN BROKER BALANCE")
-            print(f"  ─────────────────────────────────────────────────────")
-            print(f"  📊 Recorded: ${existing_recent:.2f}")
-            print(f"  📊 Broker Balance: ${broker_balance:.2f}")
-            print(f"  🔧 SHORTAGE: ${broker_balance - existing_recent:.2f} - Correcting...")
-            
-            correction_date = existing_last_update if existing_last_update else yesterday_str
-            
-            sync_all_files(inv_id, broker_balance, correction_date, None, None, None, weekly_targets)
-            
-            old_recent = existing_recent
-            existing_recent = broker_balance
-            
-            stats["investors_updated"] += 1
-            stats["broker_balance_corrections"] += 1
-            has_updates = True
-            
-            recent_highest_alert = {
-                'is_triggered': False,
-                'investor_id': inv_id,
-                'old_balance': old_recent,
-                'new_balance': broker_balance,
-                'difference': broker_balance - old_recent,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                'action': 'broker_balance_correction',
-                'last_update_date': correction_date,
-                'today_profit': None,
-                'daily_target_risk': None,
-                'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': 'Corrected to broker_balance'
-            }
-            
-            print(f"\n  ✅ CORRECTED: Recent Highest Balance = ${broker_balance:.2f}")
-            print(f"  📅 Date: {correction_date}")
-            print(f"  🔇 Alarm OFF - Trading continues")
-            
-            stats["details"].append({
-                "investor_id": inv_id,
-                "action": "broker_balance_correction",
-                "old_balance": old_recent,
-                "new_balance": broker_balance,
-                "difference": broker_balance - old_recent,
-                "timestamp": timestamp,
-                "update_date": correction_date
-            })
-        
-        # ============================================================
-        # Find most recent profitable day and print it
-        # ============================================================
-        print(f"\n  📊 MOST RECENT PROFITABLE DAY")
-        print(f"  ─────────────────────────────")
-        most_recent_profit_day, most_recent_profit_amount = get_most_recent_profitable_day(execution_start_date)
-        
-        if most_recent_profit_day:
-            profit_date = datetime.strptime(most_recent_profit_day, "%Y-%m-%d")
-            day_name = profit_date.strftime("%A")
-            
-            if most_recent_profit_day == today_str:
-                print(f"  📈 Most Recent Profitable Day: TODAY ({day_name})")
-            else:
-                print(f"  📈 Most Recent Profitable Day: {most_recent_profit_day} ({day_name})")
-            print(f"  💰 Profit: ${most_recent_profit_amount:.2f}")
-            
-            if most_recent_profit_day != existing_last_update:
-                print(f"  🔄 Updating last_update_date from {existing_last_update} to {most_recent_profit_day}")
-                sync_all_files(inv_id, existing_recent, most_recent_profit_day, None, None, None, weekly_targets)
-                existing_last_update = most_recent_profit_day
-                has_updates = True
-        else:
-            print(f"  ℹ️ No profitable days found since execution start")
-        
-        # ============================================================
-        # CASE 2: Check if current effective balance > stored high
-        # ============================================================
-        if current_balance > existing_recent:
-            difference = current_balance - existing_recent
-            
+        if mt5_balance > existing_recent:
             print(f"\n  📈 NEW HIGHER BALANCE DETECTED!")
             print(f"  ──────────────────────────────")
-            print(f"  📊 Stored High: ${existing_recent:.2f}")
-            print(f"  📊 Current Effective Balance: ${current_balance:.2f}")
-            print(f"  📈 Increase: ${difference:.2f}")
+            print(f"  🆕 New Balance: ${mt5_balance:.2f} (↑${mt5_balance - existing_recent:.2f})")
+            print(f"  📅 Date NOT updated yet - waiting for daily target check")
             
-            today_profit = get_today_profit_from_history()
-            
-            print(f"\n  📊 TODAY'S PERFORMANCE")
-            print(f"  ──────────────────────")
-            print(f"  💰 Today's Profit: ${today_profit:.2f}")
-            
-            if daily_target_config and execution_start_date:
-                start_date = parse_date_flexible(execution_start_date)
-                if start_date:
-                    current_date = datetime.now()
-                    current_week = get_week_number_from_date(start_date, current_date)
-                    week_targets = get_weekly_targets_from_config(
-                        {'daily_target_config': daily_target_config},
-                        current_week
-                    )
-                    today_name_lower = get_day_of_week_lower(current_date)
-                    daily_target_risk = week_targets.get(today_name_lower) if week_targets else None
-                    if daily_target_risk is not None:
-                        print(f"  🎯 Today's Daily Target: ${daily_target_risk:.2f}")
-                    else:
-                        print(f"  🎯 Today's Daily Target: Not Available")
-                else:
-                    daily_target_risk = None
-            else:
-                daily_target_risk = None
-            
-            threshold = daily_target_risk if daily_target_risk else 0
-            
-            profit_met_risk_threshold = False
-            if threshold > 0:
-                if today_profit >= threshold:
-                    profit_met_risk_threshold = True
-                    print(f"\n  ✅ Today's profit (${today_profit:.2f}) >= Daily Target (${threshold:.2f})")
-                else:
-                    print(f"\n  ⚠️ Today's profit (${today_profit:.2f}) < Daily Target (${threshold:.2f})")
-            else:
-                print(f"\n  ⚠️ No threshold found - Alarm BLOCKED")
-            
+            # Update recent_highest_balance value ONLY (NOT the date)
+            # This is a pure value update based on MT5 balance
             stats["investors_updated"] += 1
             stats["new_high_recorded_only"] += 1
-            
-            # Calculate shortage and owed debts from the fresh weekly_targets
-            shortage = 0
-            has_owed_debts = False
-            
-            if weekly_targets:
-                for week_key, week_data in weekly_targets.items():
-                    for day, day_data in week_data.items():
-                        if day_data.get('is_listed', True) and day_data['status'] == 'owed':
-                            has_owed_debts = True
-                            shortage += day_data['daily_target'] - day_data['profit_allocated']
-            
-            is_today = existing_last_update == today_str
-            
-            can_trigger_alarm = (not has_owed_debts) and is_today and profit_met_risk_threshold
-            
-            if can_trigger_alarm:
-                action = "new_high"
-                stats["new_high_alerts"] += 1
-                update_date = today_str
-                
-                recent_highest_alert = {
-                    'is_triggered': True,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': difference,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'new_high',
-                    'last_update_date': today_str,
-                    'today_profit': today_profit,
-                    'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': True,
-                    'alarm_blocked_reason': None
-                }
-                
-                print(f"\n  🚨 ALARM ACTIVATED!")
-                print(f"  ───────────────────")
-                print(f"  ✅ New high recorded: ${current_balance:.2f}")
-                print(f"  📅 Date set to: {today_str} (TODAY)")
-                print(f"  ✅ No owed debts: {not has_owed_debts}")
-                print(f"  ✅ Last update is today: {is_today}")
-                print(f"  🚨 TRADING SUSPENDED!")
-                
-                message = f"🚨 NEW DAILY RECORD BALANCE: ${current_balance:.2f} (↑${difference:.2f}). Today's Profit: ${today_profit:.2f} >= Threshold: ${threshold:.2f}. TRADING SUSPENDED!"
-                exec_message = f"🚨 SERVER ALERT: {inv_id} new daily high ${current_balance:.2f} - Trading SUSPENDED"
-                msg_type = 'danger'
-                
-                # Sync with new high
-                sync_all_files(inv_id, current_balance, update_date, message, exec_message, msg_type, weekly_targets if weekly_targets else None)
-                
-            else:
-                action = "new_high_recorded_only"
-                update_date = existing_last_update if existing_last_update else yesterday_str
-                
-                alarm_blocked_reasons = []
-                if has_owed_debts:
-                    alarm_blocked_reasons.append(f"Owed debts exist (${shortage:.2f} shortage)")
-                if not is_today:
-                    alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
-                if not profit_met_risk_threshold:
-                    alarm_blocked_reasons.append(f"Today's profit (${today_profit:.2f}) < Daily Target (${threshold:.2f})")
-                
-                alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
-                
-                recent_highest_alert = {
-                    'is_triggered': False,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': difference,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'new_high_recorded_only',
-                    'last_update_date': update_date,
-                    'today_profit': today_profit,
-                    'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': profit_met_risk_threshold,
-                    'alarm_blocked_reason': alarm_blocked_reason
-                }
-                
-                print(f"\n  🟡 NEW HIGH RECORDED ONLY - Alarm BLOCKED")
-                print(f"  ──────────────────────────────────────────")
-                print(f"  ✅ New high recorded: ${current_balance:.2f}")
-                print(f"  📅 Date NOT updated - kept as: {update_date}")
-                print(f"  ⚠️ Alarm conditions not met:")
-                if has_owed_debts:
-                    print(f"     • Owed debts exist: ${shortage:.2f} shortage")
-                if not is_today:
-                    print(f"     • Last update date ({existing_last_update}) is not today")
-                if not profit_met_risk_threshold:
-                    print(f"     • Today's profit (${today_profit:.2f}) < Daily Target (${threshold:.2f})")
-                print(f"  🔇 Alarm OFF - Trading continues")
-                
-                message = f"📈 NEW HIGH RECORDED: ${current_balance:.2f} (↑${difference:.2f}). ALARM BLOCKED: {alarm_blocked_reason}. Trading continues."
-                exec_message = f"ℹ️ SERVER NOTIFICATION: {inv_id} new high ${current_balance:.2f} but alarm blocked - Trading continues"
-                msg_type = 'info'
-                
-                # Sync with new high recorded (keep balance, update targets)
-                sync_all_files(inv_id, current_balance, update_date, message, exec_message, msg_type, weekly_targets if weekly_targets else None)
-            
-            stats["details"].append({
-                "investor_id": inv_id,
-                "action": action,
-                "old_balance": existing_recent,
-                "new_balance": current_balance,
-                "difference": difference,
-                "timestamp": timestamp,
-                "update_date": update_date,
-                "today_profit": today_profit,
-                "daily_target_risk": daily_target_risk,
-                "profit_met_risk_threshold": profit_met_risk_threshold,
-                "alarm_triggered": can_trigger_alarm,
-                "include_missed_days": include_missed_days,
-                "has_owed_debts": has_owed_debts,
-                "shortage": shortage,
-                "is_today": is_today,
-                "alarm_blocked_reason": alarm_blocked_reason if not can_trigger_alarm else None
-            })
-            
             has_updates = True
+            
+            # Update balance in all files but KEEP the existing date
+            sync_all_files(inv_id, mt5_balance, existing_last_update, None, None, None, None, update_balance=True, update_date_field=False)
+            
+            # Update the local variable for Section 2
+            existing_recent = mt5_balance
+            
+            print(f"  ✅ Balance updated to: ${mt5_balance:.2f}")
+            print(f"  📅 Date preserved: {existing_last_update}")
+        
+        # ============================================================
+        # SECTION 2: DAILY TARGET CALCULATIONS
+        # ============================================================
+        print(f"\n  🟢 SECTION 2: DAILY TARGET CALCULATIONS")
+        print(f"  ────────────────────────────────────────")
+        print(f"  📊 Using recent_highest_balance: ${existing_recent:.2f}")
+        
+        # Get daily target config
+        daily_target_config = get_investor_daily_target_config(inv_id)
+        
+        if not daily_target_config:
+            print(f"  ⚠️ No daily target config found - Skipping daily target calculations")
+            stats["investors_skipped"] += 1
             stats["investors_checked"] += 1
             continue
         
-        # ============================================================
-        # CASE 3: Current balance >= stored high (including equal)
-        # ============================================================
-        elif current_balance >= existing_recent:
-            print(f"\n  📊 CURRENT BALANCE >= STORED HIGH")
-            print(f"  ──────────────────────────────────")
-            print(f"  📅 Last Updated: {existing_last_update}")
-            print(f"  📊 Stored High: ${existing_recent:.2f}")
-            print(f"  📊 Current Effective Balance: ${current_balance:.2f}")
-            
-            today_profit = get_today_profit_from_history()
-            print(f"  💰 Today's Profit: ${today_profit:.2f}")
-            
-            # Calculate shortage and owed debts from the fresh weekly_targets
-            shortage = 0
-            has_owed_debts = False
-            
-            if weekly_targets:
-                for week_key, week_data in weekly_targets.items():
-                    for day, day_data in week_data.items():
-                        if day_data.get('is_listed', True) and day_data['status'] == 'owed':
-                            has_owed_debts = True
-                            shortage += day_data['daily_target'] - day_data['profit_allocated']
-            
-            is_today = existing_last_update == today_str
-            
-            profit_met_risk_threshold = False
-            if daily_target_config and execution_start_date:
-                start_date = parse_date_flexible(execution_start_date)
-                if start_date:
-                    current_date = datetime.now()
-                    current_week = get_week_number_from_date(start_date, current_date)
-                    week_targets = get_weekly_targets_from_config(
-                        {'daily_target_config': daily_target_config},
-                        current_week
-                    )
-                    today_name_lower = get_day_of_week_lower(current_date)
-                    daily_target_risk = week_targets.get(today_name_lower) if week_targets else None
-                    if daily_target_risk and today_profit >= daily_target_risk:
-                        profit_met_risk_threshold = True
-            else:
-                daily_target_risk = None
-            
-            print(f"\n  📋 ALARM CONDITIONS RESULT:")
-            print(f"  ──────────────────────────")
-            print(f"  • Owed debts exist: {'NO ✅' if not has_owed_debts else f'YES  (${shortage:.2f} shortage)'}")
-            print(f"  • Last update is today: {'YES ✅' if is_today else f'NO  ({existing_last_update})'}")
-            print(f"  • Today's profit >= threshold: {'YES ✅' if profit_met_risk_threshold else 'NO  ❌'}")
-            
-            can_trigger_alarm = (not has_owed_debts) and is_today and profit_met_risk_threshold
-            
-            if can_trigger_alarm:
-                action = "alarm_triggered_equal_balance"
-                stats["new_high_alerts"] += 1
-                stats["investors_updated"] += 1
-                
-                recent_highest_alert = {
-                    'is_triggered': True,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': 0,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'alarm_triggered_equal_balance',
-                    'last_update_date': existing_last_update,
-                    'today_profit': today_profit,
-                    'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': True,
-                    'alarm_blocked_reason': None
-                }
-                
-                print(f"\n  🚨 ALARM ACTIVATED!")
-                print(f"  ───────────────────")
-                print(f"  ✅ Current balance (${current_balance:.2f}) >= stored high (${existing_recent:.2f})")
-                print(f"  ✅ No owed debts: {not has_owed_debts}")
-                print(f"  ✅ Last update is today: {is_today}")
-                print(f"  ✅ Today's profit >= threshold: {profit_met_risk_threshold}")
-                print(f"  🚨 TRADING SUSPENDED!")
-                
-                message = f"🚨 DAILY TARGET MET - Balance ${current_balance:.2f} at stored high. Today's Profit: ${today_profit:.2f}. TRADING SUSPENDED!"
-                exec_message = f"🚨 SERVER ALERT: {inv_id} daily target met at ${current_balance:.2f} - Trading SUSPENDED"
-                msg_type = 'danger'
-                
-                # Sync with alarm
-                sync_all_files(inv_id, current_balance, existing_last_update, message, exec_message, msg_type, weekly_targets if weekly_targets else None)
-                
-                stats["details"].append({
-                    "investor_id": inv_id,
-                    "action": action,
-                    "old_balance": existing_recent,
-                    "new_balance": current_balance,
-                    "difference": 0,
-                    "timestamp": timestamp,
-                    "update_date": existing_last_update,
-                    "today_profit": today_profit,
-                    "daily_target_risk": daily_target_risk,
-                    "profit_met_risk_threshold": True,
-                    "alarm_triggered": True,
-                    "include_missed_days": include_missed_days,
-                    "has_owed_debts": has_owed_debts,
-                    "shortage": shortage,
-                    "is_today": is_today,
-                    "alarm_blocked_reason": None
-                })
-                
-                has_updates = True
-                stats["investors_checked"] += 1
-                continue
-            
-            else:
-                alarm_blocked_reasons = []
-                if has_owed_debts:
-                    alarm_blocked_reasons.append(f"Owed debts exist (${shortage:.2f} shortage)")
-                if not is_today:
-                    alarm_blocked_reasons.append(f"Last update date ({existing_last_update}) is not today")
-                if not profit_met_risk_threshold:
-                    alarm_blocked_reasons.append(f"Today's profit (${today_profit:.2f}) < threshold")
-                
-                alarm_blocked_reason = ", ".join(alarm_blocked_reasons) if alarm_blocked_reasons else "Unknown reason"
-                
-                recent_highest_alert = {
-                    'is_triggered': False,
-                    'investor_id': inv_id,
-                    'old_balance': existing_recent,
-                    'new_balance': current_balance,
-                    'difference': 0,
-                    'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'alarm_blocked_equal_balance',
-                    'last_update_date': existing_last_update,
-                    'today_profit': today_profit,
-                    'daily_target_risk': daily_target_risk,
-                    'profit_met_risk_threshold': profit_met_risk_threshold,
-                    'alarm_blocked_reason': alarm_blocked_reason
-                }
-                
-                print(f"\n  🟡 ALARM BLOCKED - Conditions not met")
-                print(f"  ─────────────────────────────────────")
-                print(f"  ⚠️ Alarm blocked because:")
-                if has_owed_debts:
-                    print(f"     • Owed debts exist: ${shortage:.2f} shortage")
-                if not is_today:
-                    print(f"     • Last update date ({existing_last_update}) is not today")
-                if not profit_met_risk_threshold:
-                    print(f"     • Today's profit (${today_profit:.2f}) < threshold")
-                print(f"  🔇 Alarm OFF - Trading continues")
-                
-                stats["details"].append({
-                    "investor_id": inv_id,
-                    "action": "alarm_blocked_equal_balance",
-                    "old_balance": existing_recent,
-                    "new_balance": current_balance,
-                    "difference": 0,
-                    "timestamp": timestamp,
-                    "update_date": existing_last_update,
-                    "today_profit": today_profit,
-                    "daily_target_risk": daily_target_risk,
-                    "profit_met_risk_threshold": profit_met_risk_threshold,
-                    "alarm_triggered": False,
-                    "include_missed_days": include_missed_days,
-                    "has_owed_debts": has_owed_debts,
-                    "shortage": shortage,
-                    "is_today": is_today,
-                    "alarm_blocked_reason": alarm_blocked_reason
-                })
-                
-                stats["investors_checked"] += 1
+        # Get starting balance from activities
+        starting_balance = get_starting_balance_from_activities(inv_id)
+        if starting_balance is None:
+            # Fallback to broker_balance
+            starting_balance = get_broker_balance_from_fetched(inv_id)
+            if starting_balance is None:
+                print(f"  ⚠️ No starting balance found - Cannot calculate profit")
                 stats["investors_skipped"] += 1
+                stats["investors_checked"] += 1
                 continue
         
-        # ============================================================
-        # CASE 4: Current balance < stored high - No alarm
-        # ============================================================
+        # Calculate total profit: recent_highest_balance - starting_balance
+        total_profit = existing_recent - starting_balance
+        print(f"  💰 Starting Balance: ${starting_balance:.2f}")
+        print(f"  💰 Total Profit: ${total_profit:.2f}")
+        
+        # Get execution start date
+        if not execution_start_date:
+            execution_start_date = datetime.now().strftime("%Y-%m-%d")
+            print(f"  ⚠️ No execution start date found - using today: {execution_start_date}")
+        
+        # Get today's profit (ONLY for display/notification purposes)
+        # NOTE: This is NOT used for daily target calculations, only for user feedback
+        today_profit = 0.0
+        try:
+            if mt5.terminal_info():
+                today = datetime.now()
+                start_of_day = datetime(today.year, today.month, today.day, 0, 0, 0)
+                deals = mt5.history_deals_get(start_of_day, datetime.now())
+                if deals:
+                    for deal in deals:
+                        if deal.profit is not None:
+                            today_profit += deal.profit
+        except Exception as e:
+            print(f"  ⚠️ Could not get today's profit for display: {e}")
+        
+        # Calculate daily target status using the new function
+        # This uses ONLY: recent_highest_balance, starting_balance, daily_target_config, execution_start_date
+        result = calculate_daily_target_status(
+            {'daily_target_config': daily_target_config},
+            total_profit,
+            execution_start_date,
+            inv_id
+        )
+        
+        weekly_targets = result['weekly_targets']
+        today_met = result['today_met']
+        alarm_trigger = result['alarm_trigger']
+        total_owed = result['total_owed']
+        total_owed_with_shortage = result['total_owed_with_shortage']
+        today_target_met = result['today_target_met']
+        
+        # Print detailed breakdown
+        if weekly_targets:
+            print(f"\n  📊 WEEKLY TARGET BREAKDOWN:")
+            print(f"  ──────────────────────────")
+            for week_key, week_data in weekly_targets.items():
+                print(f"\n  📆 {week_key.upper()}:")
+                for day, day_data in week_data.items():
+                    status = day_data['status']
+                    allocated = day_data['profit_allocated']
+                    target = day_data['daily_target']
+                    date_str = day_data['date']
+                    is_listed = day_data.get('is_listed', True)
+                    remaining_needed = day_data.get('remaining_needed', 0)
+                    
+                    if not is_listed:
+                        print(f"    ℹ️ {day} ({date_str}): NOT LISTED, no analysis")
+                        continue
+                    
+                    status_emoji = "✅" if status == 'met' else "⚠️" if status == 'owed' else "⏳"
+                    status_text = "MET" if status == 'met' else "OWED" if status == 'owed' else "PENDING"
+                    
+                    print(f"    {status_emoji} {day} ({date_str}):")
+                    print(f"       Target: ${target:.2f}")
+                    print(f"       Allocated: ${allocated:.2f}")
+                    print(f"       Status: {status_text}")
+                    if status == 'owed':
+                        print(f"       Remaining Needed: ${remaining_needed:.2f}")
+        
+        # Build daily_target_met with required fields
+        daily_target_met = weekly_targets.copy() if weekly_targets else {}
+        daily_target_met['daily_target_owed'] = total_owed
+        daily_target_met['daily_target_owed_and_shortage'] = total_owed_with_shortage
+        
+        # Determine action based on daily target results
+        if alarm_trigger:
+            # Alarm triggers: Update date to today, trigger alarm
+            print(f"\n  🚨 ALARM TRIGGERED!")
+            print(f"  ───────────────────")
+            print(f"  ✅ Today's target met: {today_met}")
+            print(f"  ✅ No owed debts: {total_owed == 0}")
+            print(f"  📅 Updating recent_highest_balance_last_update to TODAY: {today_str}")
+            print(f"  🚨 TRADING SUSPENDED!")
+            
+            recent_highest_alert = {
+                'is_triggered': True,
+                'investor_id': inv_id,
+                'old_balance': existing_recent,
+                'new_balance': existing_recent,
+                'difference': 0,
+                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'alarm_triggered',
+                'last_update_date': today_str,
+                'today_profit': today_profit,
+                'daily_target_risk': None,
+                'profit_met_risk_threshold': True,
+                'alarm_blocked_reason': None
+            }
+            
+            message = f"🚨 DAILY TARGET MET - Balance ${existing_recent:.2f}. Today's Profit: ${today_profit:.2f}. TRADING SUSPENDED!"
+            exec_message = f"🚨 SERVER ALERT: {inv_id} daily target met at ${existing_recent:.2f} - Trading SUSPENDED"
+            msg_type = 'danger'
+            
+            # Sync with alarm: Update date to today
+            sync_all_files(inv_id, existing_recent, today_str, message, exec_message, msg_type, daily_target_met, update_balance=False, update_date_field=True)
+            
+            stats["new_high_alerts"] += 1
+            stats["investors_updated"] += 1
+            
         else:
-            print(f"\n  📝 RECENT HIGHEST BALANCE EXISTS - Status Check")
-            print(f"  ────────────────────────────────────────────────")
-            print(f"  📅 Last Updated: {existing_last_update}")
-            print(f"  📊 Stored High: ${existing_recent:.2f}")
-            print(f"  📊 Current Effective Balance: ${current_balance:.2f}")
-            print(f"  📉 Current balance is below stored high - No alarm")
-            
-            # Calculate shortage even when below stored high
-            shortage = existing_recent - current_balance
-            print(f"  📉 Shortage: ${shortage:.2f}")
-            
-            print(f"  🔇 Alarm OFF - Trading allowed")
-            stats["investors_skipped"] += 1
+            # Alarm OFF: Date NOT updated, alarm stays off
+            print(f"\n  🔇 ALARM OFF - Trading continues")
+            if not today_met:
+                print(f"  ❌ Today's target not met")
+            if total_owed > 0:
+                print(f"  ⚠️ Owed debts exist: ${total_owed:.2f} remaining needed")
+            print(f"  📅 Date NOT updated - kept as: {existing_last_update}")
             
             recent_highest_alert = {
                 'is_triggered': False,
                 'investor_id': inv_id,
                 'old_balance': existing_recent,
-                'new_balance': current_balance,
-                'difference': existing_recent - current_balance,
+                'new_balance': existing_recent,
+                'difference': 0,
                 'timestamp': datetime.now().strftime('%I:%M:%S %p'),
-                'action': 'no_change',
+                'action': 'alarm_off',
                 'last_update_date': existing_last_update,
-                'today_profit': None,
+                'today_profit': today_profit,
                 'daily_target_risk': None,
-                'profit_met_risk_threshold': False,
-                'alarm_blocked_reason': None
+                'profit_met_risk_threshold': today_met,
+                'alarm_blocked_reason': f"Today's target not met" if not today_met else f"Owed debts: ${total_owed:.2f}"
             }
             
-            stats["details"].append({
-                "investor_id": inv_id,
-                "action": "no_change",
-                "stored_high": existing_recent,
-                "current_balance": current_balance,
-                "difference": existing_recent - current_balance,
-                "shortage": shortage,
-                "timestamp": timestamp,
-                "update_date": existing_last_update
-            })
-            
-            stats["investors_checked"] += 1
-            continue
+            # Sync with alarm off: Keep existing date, update targets only
+            sync_all_files(inv_id, existing_recent, existing_last_update, None, None, None, daily_target_met, update_balance=False, update_date_field=False)
+        
+        stats["investors_checked"] += 1
+        stats["investors_updated"] += 1
+        has_updates = True
+        
+        stats["details"].append({
+            "investor_id": inv_id,
+            "action": "alarm_triggered" if alarm_trigger else "alarm_off",
+            "recent_highest_balance": existing_recent,
+            "starting_balance": starting_balance,
+            "total_profit": total_profit,
+            "today_target_met": today_met,
+            "alarm_triggered": alarm_trigger,
+            "total_owed": total_owed,
+            "total_owed_with_shortage": total_owed_with_shortage,
+            "last_update_date": today_str if alarm_trigger else existing_last_update,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
     
     # ================================================================
     # SAVE ALL UPDATES - PRESERVES ALL EXISTING DATA
@@ -15232,10 +14806,8 @@ def recent_highest_balance_target(inv_id=None):
     print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
     print(f"  Investors checked: {stats['investors_checked']}")
     print(f"  Field created: {stats['field_created']}")
-    print(f"  Broker balance corrections: {stats['broker_balance_corrections']}")
     print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
     print(f"  New high alerts triggered: {stats['new_high_alerts']}")
-    print(f"  Alarms blocked (conditions not met): {stats['new_high_recorded_only'] - stats['new_high_alerts']}")
     print(f"  Investors updated: {stats['investors_updated']}")
     print(f"  Investors skipped: {stats['investors_skipped']}")
     print(f"  activities.json updated: {stats['activities_updated']}")
@@ -15245,26 +14817,13 @@ def recent_highest_balance_target(inv_id=None):
         print(f"\n  🚨 ALARM ACTIVE: {stats['new_high_alerts']} investor(s)")
         for detail in stats['details']:
             if detail.get('alarm_triggered'):
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} 🔴")
+                print(f"     • {detail['investor_id']}: Balance: ${detail['recent_highest_balance']:.2f} 🔴")
     
-    blocked = stats['new_high_recorded_only'] - stats['new_high_alerts']
-    if blocked > 0:
-        print(f"\n  🟡 ALARMS BLOCKED: {blocked} new highs (conditions not met)")
+    if stats['new_high_recorded_only'] > 0:
+        print(f"\n  📈 NEW HIGHS RECORDED: {stats['new_high_recorded_only']} investor(s)")
         for detail in stats['details']:
-            if detail.get('action') in ['new_high_recorded_only', 'alarm_blocked_equal_balance'] and not detail.get('alarm_triggered'):
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} - Blocked: {detail.get('alarm_blocked_reason', 'Unknown')} 🟡")
-    
-    if stats['broker_balance_corrections'] > 0:
-        print(f"\n  🔧 BROKER BALANCE CORRECTIONS: {stats['broker_balance_corrections']} investor(s)")
-        for detail in stats['details']:
-            if detail.get('action') == 'broker_balance_correction':
-                print(f"     • {detail['investor_id']}: ${detail['old_balance']:.2f} → ${detail['new_balance']:.2f} (corrected to broker balance) 🔧")
-    
-    if stats['field_created'] > 0:
-        print(f"\n  📝 FIELDS CREATED: {stats['field_created']} investor(s)")
-        for detail in stats['details']:
-            if detail.get('action') == 'initialized':
-                print(f"     • {detail['investor_id']}: Initialized with ${detail['new_balance']:.2f} 📝")
+            if detail.get('action') == 'alarm_off' and detail.get('total_owed', 0) == 0:
+                print(f"     • {detail['investor_id']}: New high ${detail['recent_highest_balance']:.2f} recorded (alarm OFF) 📈")
     
     if recent_highest_alert['is_triggered']:
         print(f"\n  🚨 ALARM ACTIVE: {recent_highest_alert['investor_id']} - Trading SUSPENDED")
@@ -15284,21 +14843,13 @@ def martingale_system(inv_id=None):
         "investors_processed": 0,
         "martingale_enabled": False,
         "martingale_type": "loss_streak",
-        "target_daily_profit": False,
-        "daily_target_risk": 0.0,
-        "include_missed_days": False,
-        "excluded_days": [],
-        "today_profit": 0.0,
-        "daily_required": 0.0,
-        "days_owing": 0,
-        "cumulative_owing": 0.0,
         "martingale_maximum_risk": 0,
         "martingale_loss_recovery_adder_percentage": 0,
         "martingale_for_position_order_scale": False,
         "martingale_pre_scaling": False,
         "enable_initial_risk_retention": False,
         "initial_risk_retention_percentage": 0,
-        "pre_drawdown_assumption": False,  # NEW
+        "pre_drawdown_assumption": False,
         "has_loss": False,
         "execution_start_balance": 0.0,
         "later_balance": 0.0,
@@ -15306,6 +14857,7 @@ def martingale_system(inv_id=None):
         "total_profits_since_start": 0.0,
         "total_losses_since_start": 0.0,
         "total_drawdown": 0.0,
+        "daily_target_owed": 0.0,  # NEW FIELD
         "current_stage": 1,
         "current_stage_drawdown": 0.0,
         "stage_max_risk": 0.0,
@@ -15479,80 +15031,6 @@ def martingale_system(inv_id=None):
                         martingale_linear_scaling = False
                         pre_drawdown_assumption = False
                     
-                    # ========== DAILY TARGET CONFIG - CHECK MULTIPLE LOCATIONS ==========
-                    daily_target_config = None
-                    
-                    # PRIORITY 1: Check root level of accountmanagement (where it actually is)
-                    if config.get("daily_target_config"):
-                        daily_target_config = config.get("daily_target_config")
-                        print(f"  │ Daily target config found at accountmanagement root level")
-                    
-                    # PRIORITY 2: Check in martingale_config
-                    if not daily_target_config and martingale_config.get("daily_target_config"):
-                        daily_target_config = martingale_config.get("daily_target_config")
-                        print(f"  │ Daily target config found in martingale_config")
-                    
-                    # PRIORITY 3: Check in settings root level
-                    if not daily_target_config and settings.get("daily_target_config"):
-                        daily_target_config = settings.get("daily_target_config")
-                        print(f"  │ Daily target config found in settings")
-                    
-                    # PRIORITY 4: Check in ALL_FETCHED_INVESTORS
-                    if not daily_target_config and ALL_FETCHED_INVESTORS and os.path.exists(ALL_FETCHED_INVESTORS):
-                        try:
-                            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                                all_fetched = json.load(f)
-                            investor_data = all_fetched.get(user_brokerid)
-                            if investor_data:
-                                # Check root level
-                                if investor_data.get("daily_target_config"):
-                                    daily_target_config = investor_data.get("daily_target_config")
-                                    print(f"  │ Daily target config found in ALL_FETCHED_INVESTORS root")
-                                # Check accountmanagement
-                                elif investor_data.get("accountmanagement", {}).get("daily_target_config"):
-                                    daily_target_config = investor_data.get("accountmanagement", {}).get("daily_target_config")
-                                    print(f"  │ Daily target config found in ALL_FETCHED_INVESTORS accountmanagement")
-                        except Exception as e:
-                            print(f"  │ Could not check ALL_FETCHED_INVESTORS: {e}")
-                    
-                    # Parse daily target config values
-                    target_daily_profit = daily_target_config.get("target_daily_profit", False) if daily_target_config else False
-                    excluded_days = daily_target_config.get("excluded_days", []) if daily_target_config else []
-                    include_missed_days = daily_target_config.get("include_missed_days", False) if daily_target_config else False
-                    daily_target = daily_target_config.get("daily_target", {}) if daily_target_config else {}
-                    
-                    # Find daily target for current balance range using EFFECTIVE current balance
-                    daily_target_risk = None
-                    if daily_target and target_daily_profit:
-                        # Get effective current balance
-                        effective_balance = get_effective_current_balance()
-                        if effective_balance is not None:
-                            current_balance_for_range = effective_balance
-                            
-                            for range_str, risk_value in daily_target.items():
-                                try:
-                                    # Parse range like "1-10000000.99_risk" -> get "1-10000000.99"
-                                    if '_risk' in range_str:
-                                        range_part = range_str.split('_')[0]
-                                    else:
-                                        range_part = range_str
-                                    
-                                    # Split by '-' to get low and high values
-                                    if '-' in range_part:
-                                        low_str, high_str = range_part.split('-')
-                                        low = float(low_str)
-                                        high = float(high_str)
-                                    else:
-                                        # Handle single value range
-                                        low = float(range_part)
-                                        high = float(range_part)
-                                    
-                                    if low <= current_balance_for_range <= high:
-                                        daily_target_risk = float(risk_value)
-                                        break
-                                except Exception:
-                                    continue
-                    
                 else:
                     # ========== FALLBACK: No martingale_config found ==========
                     martingale_enabled = settings.get("enable_martingale", False)
@@ -15566,11 +15044,6 @@ def martingale_system(inv_id=None):
                     martingale_linear_scaling = False
                     pre_drawdown_assumption = False
                     stoploss_factor_multiplier = 1.0
-                    target_daily_profit = False
-                    excluded_days = []
-                    include_missed_days = False
-                    daily_target_risk = None
-                    daily_target_config = None
                 
                 # ========== PARSE PERCENTAGE VALUES ==========
                 recovery_adder_percentage = 0
@@ -15617,22 +15090,9 @@ def martingale_system(inv_id=None):
                             except Exception:
                                 continue
                 
-                # ========== PRINT DAILY TARGET CONFIG ==========
-                if target_daily_profit and daily_target_risk is not None:
-                    print(f"  │ Daily Target Profit: ENABLED")
-                    print(f"  │   ├─ Daily Target: ${daily_target_risk:.2f}")
-                    print(f"  │   ├─ Include Missed Days: {'ON' if include_missed_days else 'OFF'}")
-                    if excluded_days:
-                        print(f"  │   └─ Excluded Days: {', '.join([day.capitalize() for day in excluded_days])}")
-                elif target_daily_profit:
-                    print(f"  │ Daily Target Profit: ENABLED (No target found for current balance)")
-                else:
-                    print(f"  │ Daily Target Profit: DISABLED")
-                
                 # ========== RETURN ALL CONFIG VALUES ==========
                 return {
                     "config": config,
-                    "daily_target_config": daily_target_config,  # Include the full config
                     "martingale_enabled": martingale_enabled,
                     "martingale_type": martingale_type,
                     "martingale_factor": martingale_factor,
@@ -15644,17 +15104,12 @@ def martingale_system(inv_id=None):
                     "default_minimum_risk": default_minimum_risk,
                     "martingale_linear_scaling": martingale_linear_scaling,
                     "pre_drawdown_assumption": pre_drawdown_assumption,
-                    "stoploss_factor_multiplier": stoploss_factor_multiplier,
-                    # NEW DAILY TARGET FIELDS
-                    "target_daily_profit": target_daily_profit,
-                    "excluded_days": excluded_days,
-                    "include_missed_days": include_missed_days,
-                    "daily_target_risk": daily_target_risk
+                    "stoploss_factor_multiplier": stoploss_factor_multiplier
                 }
             except Exception as e:
                 print(f"  ✗ Failed to read config: {e}")
                 return None
-               
+                
         config_data = load_configuration()
         if config_data is None:
             stats["errors"] += 1
@@ -15684,13 +15139,9 @@ def martingale_system(inv_id=None):
             "initial_risk_retention_percentage": initial_risk_retention_percentage,
             "default_minimum_risk": default_minimum_risk,
             "martingale_linear_scaling": martingale_linear_scaling,
-            "pre_drawdown_assumption": pre_drawdown_assumption,
-            "target_daily_profit": config_data.get("target_daily_profit", False),
-            "daily_target_risk": config_data.get("daily_target_risk", 0.0),
-            "include_missed_days": config_data.get("include_missed_days", False),
-            "excluded_days": config_data.get("excluded_days", [])
+            "pre_drawdown_assumption": pre_drawdown_assumption
         })
-
+        
         if not martingale_enabled:
             print(f"  ⏭️ Martingale DISABLED")
             stats["processing_success"] = True
@@ -15752,6 +15203,7 @@ def martingale_system(inv_id=None):
             """
             Uses recent_highest_balance from activities.json as current balance.
             Starting balance comes from broker_balance in FETCHED_INVESTORS.
+            Adds daily_target_owed from activities.json to drawdown.
             """
             activities_path = inv_root / "activities.json"
             
@@ -15793,11 +15245,30 @@ def martingale_system(inv_id=None):
                 starting_balance = current_balance_for_drawdown
                 print(f"  │ No starting balance found, using current balance: ${starting_balance:.2f}")
             
+            # ========== GET DAILY TARGET OWED ==========
+            daily_target_owed = 0.0
+            if activities_path.exists():
+                try:
+                    with open(activities_path, 'r', encoding='utf-8') as f:
+                        activities = json.load(f)
+                    daily_target_data = activities.get('daily_target_met', {})
+                    daily_target_owed = daily_target_data.get('daily_target_owed', 0.0)
+                    if daily_target_owed > 0:
+                        print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+                    else:
+                        print(f"  │ Daily target owed: $0.00 (no outstanding target)")
+                except Exception as e:
+                    print(f"  │ Could not read daily_target_owed: {e}")
+            
             # Calculate drawdown
-            drawdown = max(0, starting_balance - current_balance_for_drawdown)
+            base_drawdown = max(0, starting_balance - current_balance_for_drawdown)
+            total_drawdown_with_target = base_drawdown + daily_target_owed
+            
             print(f"  │ Starting balance: ${starting_balance:.2f}")
             print(f"  │ Current effective balance: ${current_balance_for_drawdown:.2f}")
-            print(f"  │ Drawdown: ${drawdown:.2f}")
+            print(f"  │ Base drawdown: ${base_drawdown:.2f}")
+            print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+            print(f"  │ Total Target recovery: Drawdown + Daily target owed = ${total_drawdown_with_target:.2f}")
             
             # ========== Pre-drawdown assumption ==========
             if pre_drawdown_assumption:
@@ -15812,28 +15283,43 @@ def martingale_system(inv_id=None):
                         print(f"  │   ├─ {pos['symbol']} {pos['type']}: ${pos['risk']:.2f} risk")
                     print(f"  │ Total open positions risk: ${positions_risk:.2f}")
                     
-                    original_drawdown = drawdown
-                    drawdown = drawdown + positions_risk
-                    print(f"  │ Pre-drawdown = existing drawdown + positions risk")
-                    print(f"  │ ${original_drawdown:.2f} + ${positions_risk:.2f} = ${drawdown:.2f}")
+                    original_drawdown = total_drawdown_with_target
+                    total_drawdown_with_target = total_drawdown_with_target + positions_risk
+                    print(f"  │ Pre-drawdown = total drawdown + positions risk")
+                    print(f"  │ ${original_drawdown:.2f} + ${positions_risk:.2f} = ${total_drawdown_with_target:.2f}")
                 else:
                     print(f"  │ No open positions with stop losses found")
-                    print(f"  │ Pre-drawdown = existing drawdown (${drawdown:.2f})")
+                    print(f"  │ Pre-drawdown = existing total drawdown (${total_drawdown_with_target:.2f})")
             else:
                 print(f"  │ Pre-drawdown assumption DISABLED")
-                print(f"  │ Using existing drawdown: ${drawdown:.2f}")
+                print(f"  │ Using total drawdown: ${total_drawdown_with_target:.2f}")
             
-            return starting_balance, drawdown
-        
+            return starting_balance, total_drawdown_with_target
+
+
+
         # Execute based on martingale type
         if martingale_type == "balance_based":
             # Simple balance-based mode
             execution_start_balance, total_drawdown = get_starting_balance_and_drawdown()
             
+            # Get daily_target_owed for stats
+            daily_target_owed = 0.0
+            activities_path = inv_root / "activities.json"
+            if activities_path.exists():
+                try:
+                    with open(activities_path, 'r', encoding='utf-8') as f:
+                        activities = json.load(f)
+                    daily_target_data = activities.get('daily_target_met', {})
+                    daily_target_owed = daily_target_data.get('daily_target_owed', 0.0)
+                except Exception:
+                    pass
+            
             # Set stats for balance_based mode
             stats["execution_start_balance"] = execution_start_balance
             stats["total_drawdown"] = total_drawdown
-            stats["later_balance"] = execution_start_balance  # For consistency
+            stats["daily_target_owed"] = daily_target_owed
+            stats["later_balance"] = execution_start_balance
             stats["total_profits_since_start"] = 0
             stats["total_losses_since_start"] = 0
             stats["winrate_percentage"] = 0
@@ -15847,13 +15333,14 @@ def martingale_system(inv_id=None):
             print(f"\n  📉 Drawdown Analysis (Balance-Based):")
             print(f"  │ Starting balance (recent_highest_balance): ${execution_start_balance:.2f}")
             print(f"  │ Current balance: ${current_balance:.2f}")
-            print(f"  │ Total drawdown: ${total_drawdown:.2f}")
+            print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+            print(f"  │ Total drawdown (including daily target): ${total_drawdown:.2f}")
             
             if total_drawdown == 0:
                 print(f"  │ ✓ No drawdown - account is at or above starting balance")
             else:
                 print(f"  │ Drawdown detected: ${total_drawdown:.2f} ({(total_drawdown/execution_start_balance*100):.2f}% from start)")
-
+            
         else:
             # Original loss_streak behavior with pre-drawdown support
             # ========== SECTION 3: GET EXECUTION START BALANCE FOR LOSS_STREAK ==========
@@ -15898,13 +15385,27 @@ def martingale_system(inv_id=None):
                     starting_balance = effective_balance_for_stats
                     print(f"  │ No starting balance found, using current balance: ${starting_balance:.2f}")
                 
+                # ========== GET DAILY TARGET OWED ==========
+                daily_target_owed = 0.0
+                if activities_path.exists():
+                    try:
+                        with open(activities_path, 'r', encoding='utf-8') as f:
+                            activities = json.load(f)
+                        daily_target_data = activities.get('daily_target_met', {})
+                        daily_target_owed = daily_target_data.get('daily_target_owed', 0.0)
+                        if daily_target_owed > 0:
+                            print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+                        else:
+                            print(f"  │ Daily target owed: $0.00 (no outstanding target)")
+                    except Exception as e:
+                        print(f"  │ Could not read daily_target_owed: {e}")
+                
                 # Calculate total profit/loss
                 total_profit = effective_balance_for_stats - starting_balance
                 
                 total_profits = max(0, total_profit)
                 total_losses = max(0, -total_profit)
                 
-                # Stats from trades (keep for compatibility but not used for daily target)
                 winrate = 0
                 lossrate = 0
                 total_wins_value = 0
@@ -15918,17 +15419,23 @@ def martingale_system(inv_id=None):
                 print(f"  │ Current effective balance: ${effective_balance_for_stats:.2f}")
                 print(f"  │ Total P&L: ${total_profit:.2f}")
                 print(f"  │ Later-balance (start + profits): ${later_balance:.2f}")
+                print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
                 
                 return (starting_balance, total_profits, total_losses, 0, later_balance, 
                         winrate, lossrate, total_wins_value, total_losses_value, 
-                        winning_trades_count, losing_trades_count)
-
-            execution_start_balance, total_profits_since_start, total_losses_since_start, net_deposits, later_balance, winrate, lossrate, total_wins_value, total_losses_value, winning_trades_count, losing_trades_count = get_execution_start_balance_and_stats()
+                        winning_trades_count, losing_trades_count, daily_target_owed)
             
+            # Get the data (ONCE, not twice)
+            (execution_start_balance, total_profits_since_start, total_losses_since_start, 
+            net_deposits, later_balance, winrate, lossrate, total_wins_value, 
+            total_losses_value, winning_trades_count, losing_trades_count, daily_target_owed) = get_execution_start_balance_and_stats()
+            
+            # Store stats
             stats["execution_start_balance"] = execution_start_balance
             stats["later_balance"] = later_balance
             stats["total_profits_since_start"] = total_profits_since_start
             stats["total_losses_since_start"] = total_losses_since_start
+            stats["daily_target_owed"] = daily_target_owed
             stats["winrate_percentage"] = winrate
             stats["lossrate_percentage"] = lossrate
             stats["total_wins_value"] = total_wins_value
@@ -15937,10 +15444,14 @@ def martingale_system(inv_id=None):
             stats["winning_trades_count"] = winning_trades_count
             stats["losing_trades_count"] = losing_trades_count
             
-            total_drawdown = later_balance - current_balance
-            total_drawdown = max(0, total_drawdown)
+            # Calculate base drawdown
+            base_drawdown = later_balance - current_balance
+            base_drawdown = max(0, base_drawdown)
             
-            # ========== NEW: Pre-drawdown assumption ==========
+            # Add daily target owed to drawdown
+            total_drawdown = base_drawdown + daily_target_owed
+            
+            # ========== Pre-drawdown assumption ==========
             if pre_drawdown_assumption:
                 print(f"\n  🔄 PRE-DRAWDOWN ASSUMPTION ENABLED:")
                 print(f"  │ Calculating risk from open positions...")
@@ -15965,42 +15476,16 @@ def martingale_system(inv_id=None):
                 print(f"  │ Pre-drawdown assumption DISABLED")
                 print(f"  │ Using existing drawdown: ${total_drawdown:.2f}")
             
+            # Update stats with final total_drawdown
             stats["total_drawdown"] = total_drawdown
             
             print(f"\n  📉 Drawdown Analysis (Later-Balance Method):")
             print(f"  │ Execution start balance: ${execution_start_balance:.2f}")
             print(f"  │ Later-balance (start + profits): ${later_balance:.2f}")
             print(f"  │ Current balance: ${current_balance:.2f}")
-            print(f"  │ Total drawdown: ${total_drawdown:.2f}")
-            
-            if total_drawdown == 0:
-                print(f"  │ ✓ No drawdown - account is at or above later-balance")
-            else:
-                print(f"  │ Drawdown detected: ${total_drawdown:.2f} ({(total_drawdown/later_balance*100):.2f}% from later-balance)")
-                
-            execution_start_balance, total_profits_since_start, total_losses_since_start, net_deposits, later_balance, winrate, lossrate, total_wins_value, total_losses_value, winning_trades_count, losing_trades_count = get_execution_start_balance_and_stats()
-            
-            stats["execution_start_balance"] = execution_start_balance
-            stats["later_balance"] = later_balance
-            stats["total_profits_since_start"] = total_profits_since_start
-            stats["total_losses_since_start"] = total_losses_since_start
-            stats["winrate_percentage"] = winrate
-            stats["lossrate_percentage"] = lossrate
-            stats["total_wins_value"] = total_wins_value
-            stats["total_losses_value"] = total_losses_value
-            stats["total_trades_count"] = winning_trades_count + losing_trades_count
-            stats["winning_trades_count"] = winning_trades_count
-            stats["losing_trades_count"] = losing_trades_count
-            
-            total_drawdown = later_balance - current_balance
-            total_drawdown = max(0, total_drawdown)
-            stats["total_drawdown"] = total_drawdown
-            
-            print(f"\n  📉 Drawdown Analysis (Later-Balance Method):")
-            print(f"  │ Execution start balance: ${execution_start_balance:.2f}")
-            print(f"  │ Later-balance (start + profits): ${later_balance:.2f}")
-            print(f"  │ Current balance: ${current_balance:.2f}")
-            print(f"  │ Total drawdown from later-balance: ${total_drawdown:.2f}")
+            print(f"  │ Base drawdown: ${base_drawdown:.2f}")
+            print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+            print(f"  │ Total drawdown (including daily target): ${total_drawdown:.2f}")
             
             if total_drawdown == 0:
                 print(f"  │ ✓ No drawdown - account is at or above later-balance")
@@ -16946,391 +16431,10 @@ def martingale_system(inv_id=None):
                 stats["errors"] += 1
                 return False
         
-        def parse_date_flexible(date_str):
-            """Parse date string in multiple formats."""
-            if not date_str:
-                return None
-            
-            formats = [
-                "%Y-%m-%d",
-                "%B %d, %Y",
-                "%B %d %Y",
-                "%Y/%m/%d",
-                "%d/%m/%Y",
-                "%m/%d/%Y",
-                "%d-%m-%Y",
-                "%m-%d-%Y",
-                "%Y-%m-%d %H:%M:%S",
-                "%Y-%m-%d %H:%M:%S.%f"
-            ]
-            
-            for fmt in formats:
-                try:
-                    return datetime.strptime(date_str, fmt)
-                except:
-                    continue
-            
-            # Try using dateutil if available
-            try:
-                from dateutil import parser
-                return parser.parse(date_str)
-            except:
-                pass
-            
-            return None
-        
-        # ========== SECTION 6: DAILY TARGET CALCULATION (UPDATED) ==========
-        def calculate_daily_target_requirement(inv_root, effective_balance, broker_balance, daily_target_config, include_missed_days, excluded_days):
-            """
-            Calculate daily target requirement using the weekly structure.
-            EXACTLY MATCHES the logic used in recent_highest_balance's split_profit_into_weekly_targets().
-            
-            CRITICAL: Does NOT skip days based on daily_target_met.
-            The daily_target_met is only for reference/display, NOT for calculation skipping.
-            """
-            details = {
-                'today_profit': 0,
-                'days_owing': 0,
-                'cumulative_owing': 0,
-                'total_required': 0,
-                'working_days': 0,
-                'excluded_count': 0,
-                'total_days': 0,
-                'execution_start_date': None,
-                'recorded_dates': set(),
-                'permanent_records': [],
-                'days_met_target': 0,
-                'total_profit_used': 0,
-                'weeks_processed': 0,
-                'days_processed': 0
-            }
-            
-            # Get execution start date from activities.json
-            activities_path = inv_root / "activities.json"
-            execution_start_date = None
-            recorded_dates = set()
-            permanent_records = []
-            
-            if activities_path.exists():
-                try:
-                    with open(activities_path, 'r', encoding='utf-8') as f:
-                        activities = json.load(f)
-                    execution_start_date = activities.get('execution_start_date')
-                    
-                    # Get recorded dates from daily_target_met (for reference only)
-                    daily_target_met = activities.get('daily_target_met', {})
-                    if daily_target_met:
-                        for week_key, week_data in daily_target_met.items():
-                            if isinstance(week_data, dict):
-                                for day_name, day_data in week_data.items():
-                                    if isinstance(day_data, dict) and day_data.get('date'):
-                                        recorded_dates.add(day_data['date'])
-                        permanent_records = sorted(recorded_dates)
-                        print(f"  │ 📝 Permanently recorded dates (daily_target_met): {len(recorded_dates)} date(s)")
-                except Exception as e:
-                    pass
-            
-            details['execution_start_date'] = execution_start_date
-            details['recorded_dates'] = recorded_dates
-            details['permanent_records'] = permanent_records
-            
-            total_required = 0
-            days_owing = 0
-            cumulative_owing = 0
-            
-            # Calculate total P&L
-            total_pnl = effective_balance - broker_balance if broker_balance is not None else 0
-            details['total_profit_used'] = total_pnl
-            
-            print(f"\n  📊 DAILY TARGET CALCULATION (Using Weekly Structure)")
-            print(f"  ├─ Total P&L: ${total_pnl:.2f} ({effective_balance:.2f} - {broker_balance:.2f})")
-            
-            if not execution_start_date:
-                print(f"  ⚠️ No execution start date found")
-                return 0, 0, details
-            
-            # Parse execution start date
-            start = parse_date_flexible(execution_start_date)
-            if not start:
-                print(f"  ⚠️ Could not parse execution start date: {execution_start_date}")
-                return 0, 0, details
-            
-            current_date = datetime.now()
-            current_week = get_week_number_from_date(start, current_date)
-            
-            print(f"  ├─ Execution Start: {start.strftime('%Y-%m-%d')} ({start.strftime('%A')})")
-            print(f"  ├─ Current Date: {current_date.strftime('%Y-%m-%d')} ({current_date.strftime('%A')})")
-            print(f"  ├─ Current Week: {current_week}")
-            print(f"  ├─ Include Missed Days: {'Enabled' if include_missed_days else 'Disabled'}")
-            
-            # ========== FIX: Get weekly targets using the CORRECT config structure ==========
-            weekly_targets = get_weekly_targets_from_config(daily_target_config, current_week)
-            
-            if not weekly_targets:
-                print(f"  ⚠️ No weekly targets found in config")
-                return 0, 0, details
-            
-            # Build ordered days starting from execution start day
-            listed_days = list(weekly_targets.keys())
-            ordered_days = get_days_ordered_from_start(start, listed_days)
-            
-            print(f"  ├─ Ordered days: {', '.join([d.capitalize() for d in ordered_days])}")
-            print(f"  ├─ Daily target values: {', '.join([f'{d.capitalize()}: ${weekly_targets.get(d.lower(), 0):.2f}' for d in ordered_days])}")
-            
-            # Calculate total target for all processed days
-            # CRITICAL: Use the EXACT SAME logic as split_profit_into_weekly_targets()
-            total_pnl_remaining = total_pnl
-            days_processed = 0
-            
-            # Process each week from 1 to current_week
-            for week_num in range(1, current_week + 1):
-                week_key = f"week_{week_num}"
-                week_targets = get_weekly_targets_from_config(daily_target_config, week_num)
-                
-                if not week_targets:
-                    continue
-                
-                # Week start and end dates
-                week_start = start + timedelta(days=(week_num - 1) * 7)
-                week_end = week_start + timedelta(days=6)
-                
-                print(f"\n  │ 📆 {week_key.upper()}: {week_start.strftime('%Y-%m-%d')} to {week_end.strftime('%Y-%m-%d')}")
-                
-                # Get ordered days for this week (EXACT same as split_profit_into_weekly_targets)
-                week_ordered_days = get_days_ordered_from_start(week_start, list(week_targets.keys()))
-                
-                for day_name in week_ordered_days:
-                    day_name_lower = day_name.lower()
-                    
-                    # Get the actual date for this day in the week
-                    day_index = None
-                    for offset in range(7):
-                        check_date = week_start + timedelta(days=offset)
-                        if check_date.strftime("%A").lower() == day_name_lower:
-                            day_index = offset
-                            break
-                    
-                    if day_index is None:
-                        continue
-                    
-                    day_date = week_start + timedelta(days=day_index)
-                    day_date_str = day_date.strftime("%Y-%m-%d")
-                    
-                    # ========== CRITICAL FIX: DO NOT SKIP DAYS BASED ON daily_target_met ==========
-                    # The daily_target_met is for REFERENCE only.
-                    # We MUST calculate owing based on P&L allocation, NOT skip days.
-                    
-                    # Skip if date is after current date (future days) - this is the ONLY valid skip
-                    if day_date > current_date:
-                        continue
-                    
-                    # Check if day is excluded
-                    if day_name_lower in [d.lower() for d in excluded_days]:
-                        details['excluded_count'] += 1
-                        continue
-                    
-                    daily_target = week_targets.get(day_name_lower, 0)
-                    if daily_target <= 0:
-                        continue
-                    
-                    days_processed += 1
-                    details['days_processed'] += 1
-                    
-                    # ========== EXACT SAME LOGIC as split_profit_into_weekly_targets() ==========
-                    # Determine status based on P&L remaining
-                    if total_pnl_remaining >= daily_target:
-                        status = 'met'
-                        profit_allocated = daily_target
-                        total_pnl_remaining -= daily_target
-                        details['days_met_target'] += 1
-                    else:
-                        status = 'owed'
-                        profit_allocated = total_pnl_remaining
-                        total_pnl_remaining = 0
-                        days_owing += 1
-                        cumulative_owing += daily_target - profit_allocated
-                    
-                    details[f'day_{day_date_str}'] = {
-                        'week': week_num,
-                        'day': day_name.capitalize(),
-                        'date': day_date_str,
-                        'target': daily_target,
-                        'status': status,
-                        'allocated': profit_allocated,
-                        'is_recorded': day_date_str in recorded_dates  # Just for reference
-                    }
-                    
-                    print(f"  │   ├─ {day_name.capitalize()} ({day_date_str}): ${daily_target:.2f} → {status.upper()} (allocated: ${profit_allocated:.2f})")
-                    
-                    # Stop processing if we've reached current day in current week
-                    if week_num == current_week and day_date >= current_date:
-                        break
-                
-                # Break outer loop if we've processed up to current week
-                if week_num == current_week:
-                    break
-            
-            total_required = cumulative_owing
-            details['days_owing'] = days_owing
-            details['cumulative_owing'] = cumulative_owing
-            details['total_required'] = total_required
-            details['working_days'] = days_processed
-            
-            print(f"\n  │ 📊 FINAL DAILY TARGET RESULT:")
-            print(f"  │   ├─ Total P&L Used: ${total_pnl:.2f}")
-            print(f"  │   ├─ Days Processed: {days_processed}")
-            print(f"  │   ├─ Days Owing: {days_owing}")
-            print(f"  │   └─ Cumulative Owing: ${cumulative_owing:.2f}")
-            
-            return total_required, days_owing, details
-
-        # ========== HELPER: GET WEEKLY TARGETS FROM CONFIG ==========
-        def get_weekly_targets_from_config(daily_target_config, week_number):
-            """
-            Extract all day targets for a specific week from the config structure.
-            
-            Supports the EXACT structure used by recent_highest_balance:
-            week_N: {
-                "daily_target": {
-                    "monday": { "1-10000000.99_risk": 40 },
-                    "tuesday": { "1-10000000.99_risk": 40 },
-                    ...
-                }
-            }
-            
-            Returns dict of {day_name_lower: target_value}
-            """
-            if not daily_target_config:
-                return {}
-            
-            week_key = f"week_{week_number}"
-            week_config = daily_target_config.get(week_key, {})
-            
-            if not week_config:
-                return {}
-            
-            # Get the daily_target from week_config
-            weekly_targets = week_config.get('daily_target', {})
-            if not weekly_targets:
-                return {}
-            
-            targets = {}
-            
-            for day_name_lower, day_config in weekly_targets.items():
-                # Normalize day name
-                day_name_lower = day_name_lower.lower().strip()
-                
-                # CASE 1: day_config is a dict with range keys like {"1-10000000.99_risk": 40}
-                if isinstance(day_config, dict):
-                    # Extract the first numeric value from the dict
-                    for range_key, value in day_config.items():
-                        if isinstance(value, (int, float)):
-                            targets[day_name_lower] = float(value)
-                            break
-                        elif isinstance(value, str):
-                            try:
-                                targets[day_name_lower] = float(value)
-                                break
-                            except ValueError:
-                                continue
-                    # If still not found, check if there's a '_risk' key
-                    if day_name_lower not in targets:
-                        for key, value in day_config.items():
-                            if '_risk' in key and isinstance(value, (int, float)):
-                                targets[day_name_lower] = float(value)
-                                break
-                
-                # CASE 2: day_config is a direct number
-                elif isinstance(day_config, (int, float)):
-                    targets[day_name_lower] = float(day_config)
-                
-                # CASE 3: day_config is a string that can be parsed
-                elif isinstance(day_config, str):
-                    try:
-                        targets[day_name_lower] = float(day_config)
-                    except ValueError:
-                        pass
-            
-            return targets
-
-        # ========== HELPER: GET DAYS ORDERED FROM START ==========
-        def get_days_ordered_from_start(start_date, listed_days):
-            """
-            Get the ordered list of days starting from the execution start date.
-            
-            Example: If start_date is Friday and listed_days are Sunday-Saturday:
-            Returns: ['Friday', 'Saturday', 'Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday']
-            
-            Args:
-                start_date: datetime object of the execution start date
-                listed_days: list of day names (lowercase) that are listed in the config
-            
-            Returns:
-                list of day names (proper case) in order starting from start_date day
-            """
-            if not start_date:
-                return [d.capitalize() for d in listed_days]
-            
-            # Get the day name of the start date
-            start_day_name = start_date.strftime("%A").lower()
-            
-            # Define the standard order of days starting from Sunday
-            standard_days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
-            
-            # Find the index of the start day in standard order
-            try:
-                start_index = standard_days.index(start_day_name)
-            except ValueError:
-                start_index = 0
-            
-            # Create ordered list: from start day, then wrap around
-            ordered_days = standard_days[start_index:] + standard_days[:start_index]
-            
-            # Filter to only include listed days, preserving the order
-            listed_days_lower = [day.lower() for day in listed_days]
-            result = []
-            for day in ordered_days:
-                if day in listed_days_lower:
-                    result.append(day.capitalize())
-            
-            return result
-
-        # ========== HELPER: GET WEEK NUMBER FROM DATE ==========
-        def get_week_number_from_date(start_date, target_date):
-            """
-            Calculate the week number based on the difference between start date and target date.
-            Week 1 starts on the execution start date.
-            Week 2 starts 7 days later, etc.
-            
-            Returns: int (1-based week number)
-            """
-            if not start_date or not target_date:
-                return 1
-            
-            diff_days = (target_date - start_date).days
-            if diff_days < 0:
-                return 1
-            
-            # Week 1: days 0-6, Week 2: days 7-13, etc.
-            week_number = (diff_days // 7) + 1
-            return week_number
-        
         # ========== SECTION 7: PRE-SCALING (LIMIT ORDERS ONLY) ==========
         def process_pre_scaling():
             """
             Process pre-scaling based on martingale type and assumption.
-            NOW INTEGRATES DAILY TARGET PROFIT CONFIGURATION using the new weekly structure.
-            
-            NEVER uses MT5 history trades for profit calculation.
-            Uses total P&L from recent_highest_balance - broker_balance.
-            
-            FLOW:
-            1. If target_daily_profit is ENABLED:
-            a. Calculate daily target requirement using the weekly structure
-            b. Split total P&L across days from week 1 to current week
-            c. Add cumulative owing to drawdown as the base target
-            2. If target_daily_profit is DISABLED:
-            a. Use existing drawdown-based logic
             
             Assumption modes:
             - stoploss_factor: Uses exit (stop loss) for risk calculation
@@ -17346,12 +16450,6 @@ def martingale_system(inv_id=None):
             stoploss_multiplier = config_data.get("stoploss_factor_multiplier", 1.0)
             martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)
             
-            # Get daily target config
-            target_daily_profit = config_data.get("target_daily_profit", False)
-            daily_target_risk = config_data.get("daily_target_risk", None)
-            include_missed_days = config_data.get("include_missed_days", False)
-            excluded_days = config_data.get("excluded_days", [])
-            
             print(f"\n{'='*60}")
             print(f"  🎯 PRE-SCALING ANALYSIS")
             print(f"{'='*60}")
@@ -17364,13 +16462,6 @@ def martingale_system(inv_id=None):
                 print(f"  │   └─ Remaining profit after recovery becomes the scaling target")
             else:
                 print(f"  │   └─ Using SL risk (standard behavior)")
-            
-            # Print daily target config
-            print(f"  │ Daily Target Profit: {'✓ ENABLED' if target_daily_profit else '✗ DISABLED'}")
-            if target_daily_profit:
-                print(f"  │   ├─ Include Missed Days: {'✓' if include_missed_days else '✗'}")
-                if excluded_days:
-                    print(f"  │   └─ Excluded Days: {', '.join([d.capitalize() for d in excluded_days])}")
             
             print(f"  │ Linear scaling: {'✓ ENABLED' if martingale_linear_scaling else '✗ DISABLED'}")
             print(f"  │ Initial risk adder: {'✓ ENABLED' if enable_initial_risk_retention else '✗ DISABLED'}")
@@ -18316,100 +17407,20 @@ def martingale_system(inv_id=None):
 
             # ========== MAIN EXECUTION ==========
             
-            # STEP 1: Calculate Daily Target Requirement (if enabled)
-            daily_required = 0
-            daily_details = {}
-            days_owing = 0
-            
-            if target_daily_profit:
-                print(f"\n  📊 DAILY TARGET PROFIT ANALYSIS (Using Weekly Structure)")
-                print(f"{'─'*60}")
-                
-                # Get broker balance from FETCHED_INVESTORS
-                broker_balance = None
-                if FETCHED_INVESTORS and os.path.exists(FETCHED_INVESTORS):
-                    try:
-                        with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                            fetched_data = json.load(f)
-                        investor_data = fetched_data.get(user_brokerid)
-                        if investor_data:
-                            broker_balance = investor_data.get('broker_balance')
-                            if broker_balance is not None:
-                                broker_balance = float(broker_balance)
-                    except Exception:
-                        pass
-                
-                # Get the daily target config from the right location
-                daily_target_config = None
-                
-                # PRIORITY 1: Check root level of accountmanagement (where it actually is)
-                if config.get("daily_target_config"):
-                    daily_target_config = config.get("daily_target_config")
-                
-                # PRIORITY 2: Check in config_data (which loaded from accountmanagement)
-                if not daily_target_config and config_data.get("daily_target_config"):
-                    daily_target_config = config_data.get("daily_target_config")
-                
-                # PRIORITY 3: Check in ALL_FETCHED_INVESTORS
-                if not daily_target_config and ALL_FETCHED_INVESTORS and os.path.exists(ALL_FETCHED_INVESTORS):
-                    try:
-                        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                            all_fetched_data = json.load(f)
-                        investor_data = all_fetched_data.get(user_brokerid)
-                        if investor_data:
-                            if investor_data.get("daily_target_config"):
-                                daily_target_config = investor_data.get("daily_target_config")
-                            elif investor_data.get("accountmanagement", {}).get("daily_target_config"):
-                                daily_target_config = investor_data.get("accountmanagement", {}).get("daily_target_config")
-                    except Exception:
-                        pass
-                
-                # Calculate daily target requirement using the helper function
-                if daily_target_config:
-                    daily_required, days_owing, daily_details = calculate_daily_target_requirement(
-                        inv_root, current_balance, broker_balance, daily_target_config,
-                        include_missed_days, excluded_days
-                    )
-                    
-                    print(f"  │ Daily Target: {daily_target_risk if daily_target_risk else 'Not Set'}")
-                    
-                    if include_missed_days:
-                        print(f"  │ Include Missed Days: ENABLED")
-                        print(f"  │ Days Processed: {daily_details.get('days_processed', 0)}")
-                        print(f"  │ Days Owing: {days_owing}")
-                        print(f"  │ Cumulative Owing: ${daily_details.get('cumulative_owing', 0):.2f}")
-                        print(f"  │ Total Required: ${daily_required:.2f}")
-                    else:
-                        print(f"  │ Include Missed Days: DISABLED")
-                        if daily_details.get('days_processed', 0) > 0:
-                            print(f"  │ Days Processed: {daily_details.get('days_processed', 0)}")
-                            print(f"  │ Days Owing: {days_owing}")
-                            print(f"  │ Cumulative Owing: ${daily_details.get('cumulative_owing', 0):.2f}")
-            else:
-                print(f"\n  │ Daily target profit DISABLED")
-            
-            # STEP 2: Get BASE TARGET RISK based on martingale type
+            # STEP 1: Get BASE TARGET RISK based on martingale type
             # Note: total_drawdown already includes pre-drawdown assumption if enabled
             # The drawdown IS the shortage from recent_highest_balance
             
             if martingale_type == "balance_based":
-                # For balance_based: base target is drawdown + daily requirement
+                # For balance_based: base target is drawdown
                 print(f"\n  📊 BALANCE-BASED TARGET CALCULATION")
                 
                 base_target_risk = total_drawdown
                 print(f"  │ Drawdown: ${total_drawdown:.2f}")
                 
-                # Add daily target requirement if enabled (cumulative owing days only)
-                if target_daily_profit and daily_required > 0:
-                    print(f"  │ Daily Target Required (Cumulative Owing): ${daily_required:.2f}")
-                    base_target_risk = base_target_risk + daily_required
-                    print(f"  │ Combined Target: ${base_target_risk:.2f}")
-                else:
-                    print(f"  │ No daily target added")
-                
-                # If no drawdown AND no daily target, use default risk
+                # If no drawdown, use default risk
                 if base_target_risk == 0:
-                    print(f"\n  📊 No drawdown or daily target - using default risk from config")
+                    print(f"\n  📊 No drawdown - using default risk from config")
                     default_risk = get_default_risk_from_config()
                     if default_risk is None:
                         print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
@@ -18420,8 +17431,6 @@ def martingale_system(inv_id=None):
                 
                 print(f"\n  📊 BALANCE-BASED BASE TARGET:")
                 print(f"  │ Drawdown amount: ${total_drawdown:.2f}")
-                if target_daily_profit and daily_required > 0:
-                    print(f"  │ Daily target component (cumulative owing): ${daily_required:.2f}")
                 print(f"  │ Base target risk: ${base_target_risk:.2f}")
                 
             else:
@@ -18433,17 +17442,9 @@ def martingale_system(inv_id=None):
                 base_target_risk = total_drawdown
                 print(f"  │ Drawdown: ${total_drawdown:.2f}")
                 
-                # Add daily target requirement if enabled (cumulative owing days only)
-                if target_daily_profit and daily_required > 0:
-                    print(f"  │ Daily Target Required (Cumulative Owing): ${daily_required:.2f}")
-                    base_target_risk = base_target_risk + daily_required
-                    print(f"  │ Combined Target: ${base_target_risk:.2f}")
-                else:
-                    print(f"  │ No daily target added")
-                
-                # If no drawdown AND no daily target, use default risk
+                # If no drawdown, use default risk
                 if base_target_risk == 0:
-                    print(f"\n  📊 No drawdown or daily target - using default risk from config")
+                    print(f"\n  📊 No drawdown - using default risk from config")
                     default_risk = get_default_risk_from_config()
                     if default_risk is None:
                         print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
@@ -18454,11 +17455,9 @@ def martingale_system(inv_id=None):
                 
                 print(f"\n  📊 LOSS_STREAK BASE TARGET:")
                 print(f"  │ Total drawdown: ${total_drawdown:.2f}")
-                if target_daily_profit and daily_required > 0:
-                    print(f"  │ Daily target component (cumulative owing): ${daily_required:.2f}")
                 print(f"  │ Base target risk: ${base_target_risk:.2f}")
             
-            # STEP 3: Load limit orders
+            # STEP 2: Load limit orders
             limit_orders_path, limit_orders_data = load_limit_orders()
             
             if not limit_orders_data or not isinstance(limit_orders_data, list):
@@ -18477,12 +17476,6 @@ def martingale_system(inv_id=None):
             print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
             print(f"  │ Retention Logic: percentage = how much to KEEP (100% = keep all, 0% = keep nothing)")
-            
-            if target_daily_profit:
-                print(f"  │ Daily Target Mode: ENABLED")
-                print(f"  │   ├─ Days Owing: {days_owing}")
-                print(f"  │   └─ Cumulative Owing: ${daily_required:.2f}")
-            
             print(f"  │ Pre-drawdown already included in base target: {total_drawdown:.2f}")
 
             # Start with base target
@@ -18491,7 +17484,7 @@ def martingale_system(inv_id=None):
             applied_recovery_adder = 0
             initial_risk_value = 0
 
-            # STEP 4: Add initial risk from Limit Orders (if enabled)
+            # STEP 3: Add initial risk from Limit Orders (if enabled)
             if enable_initial_risk_retention:
                 # Analyze initial risk from limit orders
                 limit_initial_risk_orders = analyze_initial_risk_from_risk_config(limit_orders_data)
@@ -18522,7 +17515,7 @@ def martingale_system(inv_id=None):
                 
                 initial_risk_value = total_initial_risk
 
-            # STEP 5: Apply Recovery Adder to final target
+            # STEP 4: Apply Recovery Adder to final target
             if recovery_adder_percentage > 0:
                 applied_recovery_adder = final_target_risk * (recovery_adder_percentage / 100)
                 final_target_risk_before_adder = final_target_risk
@@ -18534,18 +17527,12 @@ def martingale_system(inv_id=None):
             print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
             print(f"{'='*60}")
             
-            # ========== STEP 6: APPLY SMART SCALING TO LIMIT ORDERS ==========
+            # ========== STEP 5: APPLY SMART SCALING TO LIMIT ORDERS ==========
             print(f"\n{'='*60}")
             print(f"  🎯 APPLYING SMART SCALING TO LIMIT ORDERS")
             print(f"{'='*60}")
             print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
-            
-            if target_daily_profit:
-                print(f"  │ Daily Target Included: YES (${daily_required:.2f})")
-                print(f"  │   └─ Days Owing: {days_owing}")
-            else:
-                print(f"  │ Daily Target Included: NO")
             
             if martingale_factor == "takeprofit_factor":
                 print(f"  │ TAKEPROFIT FACTOR MODE:")
@@ -18563,7 +17550,7 @@ def martingale_system(inv_id=None):
             print(f"{'─'*60}")
             
             try:
-                # ========== STEP 7: REMOVE INVALID PRICE LEVELS ==========
+                # ========== STEP 6: REMOVE INVALID PRICE LEVELS ==========
                 print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
                 print(f"{'─'*60}")
                 
@@ -18590,7 +17577,7 @@ def martingale_system(inv_id=None):
                 for symbol, vol in current_limit_volumes.items():
                     print(f"     {symbol}: {vol:.2f} lots")
                 
-                # ========== STEP 8: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
+                # ========== STEP 7: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
                 print(f"\n  📈 STEP: Scaling Limit Orders")
                 print(f"{'─'*60}")
                 if martingale_factor == "takeprofit_factor":
@@ -18666,9 +17653,6 @@ def martingale_system(inv_id=None):
                         print(f"     Target profit per order: ${final_target_risk:.2f}")
                         print(f"     Number of orders: {len(symbol_orders)}")
                         
-                        if target_daily_profit:
-                            print(f"     Daily Target Component (Cumulative Owing): ${daily_required:.2f}")
-                        
                         print()
                         
                         # Process each order with the TP-based scaling
@@ -18713,12 +17697,6 @@ def martingale_system(inv_id=None):
                                 print(f"        └─ Risk: ${risk_per_lot_order * current_volume:.2f} → ${new_risk:.2f}")
                                 print(f"        └─ TP Profit: ${profit_per_lot * current_volume:.2f} → ${actual_profit:.2f}")
                                 print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
-                                if target_daily_profit:
-                                    daily_recovered = min(actual_profit, final_target_risk)
-                                    daily_remaining = max(0, actual_profit - final_target_risk)
-                                    print(f"        └─ Daily target recovered: ${daily_recovered:.2f}")
-                                    if daily_remaining > 0:
-                                        print(f"        └─ Remaining profit after daily target: ${daily_remaining:.2f}")
                             else:
                                 # Calculate current risk and profit for display
                                 current_risk = risk_per_lot_order * current_volume if risk_per_lot_order > 0 else 0
@@ -18728,21 +17706,13 @@ def martingale_system(inv_id=None):
                                 print(f"        └─ Risk: ${current_risk:.2f}")
                                 print(f"        └─ TP Profit: ${current_profit:.2f}")
                                 print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
-                                if target_daily_profit:
-                                    daily_recovered = min(current_profit, final_target_risk)
-                                    daily_remaining = max(0, current_profit - final_target_risk)
-                                    print(f"        └─ Daily target recovered: ${daily_recovered:.2f}")
-                                    if daily_remaining > 0:
-                                        print(f"        └─ Remaining profit after daily target: ${daily_remaining:.2f}")
                         
                         if scaled_count > 0:
                             scaling_results_by_symbol[symbol] = {
                                 'scaled': scaled_count,
                                 'total_orders': len(symbol_orders),
                                 'target_per_order': final_target_risk,
-                                'mode': martingale_factor,
-                                'daily_target_included': target_daily_profit,
-                                'daily_required': daily_required if target_daily_profit else None
+                                'mode': martingale_factor
                             }
                             print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
                         else:
@@ -18767,9 +17737,6 @@ def martingale_system(inv_id=None):
                         print(f"     Risk per lot: ${risk_per_lot:.2f}")
                         print(f"     Target risk per order: ${final_target_risk:.2f}")
                         print(f"     Number of orders: {len(symbol_orders)}")
-                        
-                        if target_daily_profit:
-                            print(f"     Daily Target Component (Cumulative Owing): ${daily_required:.2f}")
                         
                         print()
                         
@@ -18797,24 +17764,18 @@ def martingale_system(inv_id=None):
                                 print(f"\n        ✅ SCALED [{direction}] {order_type} #{order_index}:")
                                 print(f"        └─ Volume: {current_volume:.2f} → {new_volume:.2f} lots")
                                 print(f"        └─ Risk: ${risk_per_lot * current_volume:.2f} → ${actual_risk:.2f}")
-                                if target_daily_profit:
-                                    print(f"        └─ Daily target component (cumulative owing): ${daily_required:.2f} included")
                             else:
                                 current_risk = risk_per_lot * current_volume
                                 print(f"\n        ℹ️ [{direction}] Order #{order_index} - NO SCALING NEEDED:")
                                 print(f"        └─ Volume: {current_volume:.2f} lots")
                                 print(f"        └─ Risk: ${current_risk:.2f} (target: ${final_target_risk:.2f})")
-                                if target_daily_profit:
-                                    print(f"        └─ Daily target component (cumulative owing): ${daily_required:.2f} included")
                         
                         if scaled_count > 0:
                             scaling_results_by_symbol[symbol] = {
                                 'scaled': scaled_count,
                                 'total_orders': len(symbol_orders),
                                 'target_per_order': final_target_risk,
-                                'mode': martingale_factor,
-                                'daily_target_included': target_daily_profit,
-                                'daily_required': daily_required if target_daily_profit else None
+                                'mode': martingale_factor
                             }
                             print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
                         else:
@@ -18861,7 +17822,7 @@ def martingale_system(inv_id=None):
                                         if entry and stop:
                                             amount = abs(entry - stop) * vol * symbol_info.trade_contract_size
                                             total_amount += amount
-                                                    
+                                            
                             print(f"     📊 {symbol} final: {total_vol:.2f} lots")
                             if martingale_factor == "takeprofit_factor":
                                 total_orders = len([o for o in limit_orders_data if isinstance(o, dict) and o.get('symbol') == symbol])
@@ -18869,18 +17830,14 @@ def martingale_system(inv_id=None):
                                 total_remaining = total_amount - total_recovery
                                 print(f"        Total TP profit before recovery: ${total_amount:.2f}")
                                 print(f"        Total recovered from drawdown: ${total_recovery:.2f}")
-                                if target_daily_profit:
-                                    print(f"        Daily target included (cumulative owing): ${daily_required:.2f} per order")
                                 print(f"        Total remaining profit after recovery: ${total_remaining:.2f}")
                             else:
                                 print(f"        Total risk: ${total_amount:.2f}")
-                                if target_daily_profit:
-                                    print(f"        Daily target included (cumulative owing): ${daily_required:.2f}")
                             print(f"        STEPUP: {stepup_count} orders, STEPDOWN: {stepdown_count} orders")
                 else:
                     print(f"\n  ℹ️ No scaling needed - all orders already at target")
                 
-                # ========== STEP 9: LINEAR SCALING ==========
+                # ========== STEP 8: LINEAR SCALING ==========
                 print(f"\n{'─'*60}")
                 print(f"  📈 STEP: Linear Scaling (Progressive)")
                 print(f"{'─'*60}")
@@ -18968,11 +17925,7 @@ def martingale_system(inv_id=None):
                         "leader_amount": leader_amount,
                         "linear_scaling_applied": martingale_linear_scaling,
                         "assumption": martingale_factor,
-                        "drawdown_recovery_target": final_target_risk,
-                        "daily_target_included": target_daily_profit,
-                        "daily_required": daily_required if target_daily_profit else None,
-                        "days_owing": days_owing if target_daily_profit else None,
-                        "cumulative_owing": daily_details.get('cumulative_owing', 0) if target_daily_profit else None
+                        "drawdown_recovery_target": final_target_risk
                     }
                     
                     if martingale_linear_scaling:
@@ -19021,7 +17974,7 @@ def martingale_system(inv_id=None):
                     
                     pre_scaling_details[f"{symbol}_limit"] = calculation_details
                 
-                # ========== STEP 10: APPLY UPDATES ==========
+                # ========== STEP 9: APPLY UPDATES ==========
                 print(f"\n{'─'*60}")
                 print(f"  💾 APPLYING FINAL UPDATES")
                 print(f"{'─'*60}")
@@ -19052,9 +18005,6 @@ def martingale_system(inv_id=None):
                                         remaining = amount - final_target_risk
                                         print(f"        │ [{direction}] {symbol} @ {entry:.5f}: {old_volume:.2f} → {new_volume:.2f} lots")
                                         print(f"        │   └─ TP profit: ${amount:.2f}, Recovers: ${final_target_risk:.2f}, Remaining: ${remaining:.2f}")
-                                        if target_daily_profit:
-                                            daily_recovered = min(amount, final_target_risk)
-                                            print(f"        │   └─ Daily target recovered: ${daily_recovered:.2f}")
                                 else:
                                     print(f"        │ [{direction}] {symbol} @ {entry:.5f}: {old_volume:.2f} → {new_volume:.2f} lots")
                     
@@ -19074,11 +18024,6 @@ def martingale_system(inv_id=None):
                 print(f"  │ Assumption: {martingale_factor.upper()}")
                 print(f"  │ Base target: ${base_target_risk:.2f}")
                 print(f"  │ Final target: ${final_target_risk:.2f}")
-                if target_daily_profit:
-                    print(f"  │ Daily Target Included: YES (Cumulative Owing: ${daily_required:.2f})")
-                    print(f"  │ Days Owing: {days_owing}")
-                else:
-                    print(f"  │ Daily Target Included: NO")
                 if martingale_factor == "takeprofit_factor":
                     print(f"  │ Each order recovers ${final_target_risk:.2f} from drawdown")
                     print(f"  │ Remaining profit after recovery is the scaling target")
@@ -19095,8 +18040,7 @@ def martingale_system(inv_id=None):
                 print(f"  ✗ Pre-scaling error: {e}")
                 import traceback
                 traceback.print_exc()
-                return False
-            
+                return False    
 
         def safety_check_pending_orders():
             """
@@ -19371,14 +18315,15 @@ def martingale_system(inv_id=None):
     print(f"  Investor: {stats['investor_id']}")
     print(f"  Assumption: {stats.get('martingale_factor', 'stoploss_factor').upper()}")
     print(f"  Status: {'✓ SUCCESS' if stats['processing_success'] else '✗ FAILED'}")
-    
+
     if stats['martingale_enabled']:
         print(f"\n  📊 Balance:")
         print(f"  │ Execution start balance: ${stats['execution_start_balance']:.2f}")
         print(f"  │ Later-balance (start + profits): ${stats['later_balance']:.2f}")
         print(f"  │ Current balance: ${stats['current_balance']:.2f}")
+        if stats.get('daily_target_owed', 0) > 0:
+            print(f"  │ Daily target owed: ${stats['daily_target_owed']:.2f}")
         print(f"  │ Total drawdown: ${stats['total_drawdown']:.2f}")
-        
         
         print(f"\n  🎯 Staged Drawdown:")
         print(f"  │ Stage max risk: ${stats['stage_max_risk']:.2f}")
@@ -19417,10 +18362,10 @@ def martingale_system(inv_id=None):
                     print(f"  │   ├─ Total extra: ${details['total_extra']:.2f}")
                 if details.get('additional_volume', 0) > 0:
                     print(f"  │   └─ Additional volume: {details['additional_volume']:.2f} lots")
-    
+
     print(f"\n  Errors: {stats['errors']}")
     print(f"{'='*50}\n")
-    
+
     return stats
 # MARTINGALE #
 
