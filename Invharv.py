@@ -14832,7 +14832,7 @@ def recent_highest_balance_target(inv_id=None):
     
     return stats
 #==================#
-# MARTINGALE SYSTEM#
+# MARTINGALE SYSTEM #
 def martingale_system(inv_id=None):
     print(f"\n{'='*10} 🎰 MARTINGALE STAGED DRAWDOWN SYSTEM {'='*10}")
     if inv_id:
@@ -14865,15 +14865,11 @@ def martingale_system(inv_id=None):
         "default_minimum_risk": 0,
         "used_minimum_risk": False,
         "limit_orders_modified": False,
-        "pending_orders_modified": False,
         "risk_check_passed": False,
         "risk_exceeded": False,
         "order_risk_validation": {},
-        "pending_order_sync_results": {},
         "pre_scaling_applied": False,
         "pre_scaling_details": {},
-        "safety_cancellations": {},
-        "safety_cancellations_count": 0,
         "orders_modified_count": 0,
         "winrate_percentage": 0.0,
         "lossrate_percentage": 0.0,
@@ -14898,8 +14894,6 @@ def martingale_system(inv_id=None):
         
         # Reset per-investor variables
         pre_scaling_details = {}
-        safety_cancellations = {}
-        safety_cancellations_count = 0
         
         # Get broker config
         broker_cfg = usersdictionary.get(user_brokerid)
@@ -15595,402 +15589,6 @@ def martingale_system(inv_id=None):
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
-        def record_authorized_pending_orders_local():
-            """
-            Records all authorized pending orders from MT5 to limit_orders.json files.
-            Uses existing MT5 connection - assumes already initialized by caller.
-            Returns: dict with statistics
-            """
-            print(f"\n  📝 HELPER: Recording Authorized Pending Orders")
-            print(f"  {'─'*40}")
-            
-            broker_cfg = usersdictionary.get(user_brokerid)
-            if not broker_cfg:
-                print(f"  │ ✗ No broker configuration found")
-                return {'success': False, 'error': 'No broker config'}
-            
-            login_id = broker_cfg.get('LOGIN_ID', '')
-            if not login_id:
-                print(f"  │ ✗ No LOGIN_ID found")
-                return {'success': False, 'error': 'No LOGIN_ID'}
-            
-            try:
-                authorized_magic_number = int(str(login_id) + str(user_brokerid))
-                print(f"  │ Authorized Magic Number: {authorized_magic_number}")
-            except (ValueError, TypeError) as e:
-                print(f"  │ ✗ Error creating magic number: {e}")
-                return {'success': False, 'error': str(e)}
-            
-            acc = mt5.account_info()
-            if acc is None:
-                print(f"  │ ✗ MT5 not initialized or no account connected")
-                return {'success': False, 'error': 'MT5 not connected'}
-            elif acc.login != int(login_id):
-                print(f"  │ ✗ Account mismatch: {acc.login} vs expected {login_id}")
-                return {'success': False, 'error': 'Account mismatch'}
-            else:
-                print(f"  │ ✓ Connected to correct account: {acc.login}")
-            
-            pending_orders = mt5.orders_get()
-            if not pending_orders:
-                print(f"  │ ℹ️ No pending orders found")
-                return {'success': True, 'orders_found': 0, 'recorded': 0}
-            
-            print(f"  │ Found {len(pending_orders)} pending order(s)")
-            
-            inv_root = Path(INV_PATH) / user_brokerid
-
-            # Get strategy name from invested_with
-            strategy_name = None
-            if FETCHED_INVESTORS:
-                try:
-                    with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                        investor_users = json.load(f)
-                    
-                    investor_cfg = investor_users.get(user_brokerid)
-                    if investor_cfg:
-                        strategy_name = investor_cfg.get("invested_with", "")
-                except Exception as e:
-                    pass
-
-            if not strategy_name:
-                print(f"   SKIPPED - No strategy name found from invested_with for {user_brokerid}")
-                return {'success': False, 'error': 'No strategy name'}
-
-            # ONLY use strategy_name folder - NO FALLBACKS
-            limit_orders_path = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
-            valid_limit_files = [limit_orders_path] if limit_orders_path.exists() else []
-
-            if not valid_limit_files:
-                print(f"  ✗ No limit_orders.json found at {limit_orders_path}")
-                return {'success': False, 'error': 'No limit_orders.json found'}
-            
-            if not valid_limit_files:
-                print(f"  │ ✗ No limit_orders.json files found to append to")
-                return {'success': False, 'error': 'No limit_orders.json files'}
-            
-            print(f"  │ Found {len(valid_limit_files)} limit_orders.json file(s)")
-            
-            existing_tickets = set()
-            symbol_to_file_map = {}
-            
-            for limit_file in valid_limit_files:
-                try:
-                    with open(limit_file, 'r', encoding='utf-8') as f:
-                        existing_data = json.load(f)
-                    if isinstance(existing_data, list):
-                        for record in existing_data:
-                            if isinstance(record, dict) and 'ticket' in record:
-                                existing_tickets.add(record['ticket'])
-                        for record in existing_data:
-                            if isinstance(record, dict) and 'symbol' in record:
-                                if record['symbol'] not in symbol_to_file_map:
-                                    symbol_to_file_map[record['symbol']] = limit_file
-                except Exception as e:
-                    print(f"  │ ⚠️ Could not read {limit_file.name}: {e}")
-            
-            print(f"  │ Existing tickets: {len(existing_tickets)}")
-            
-            orders_to_record = []
-            authorized_count = 0
-            unauthorized_skipped = 0
-            duplicate_skipped = 0
-            
-            for order in pending_orders:
-                order_ticket = order.ticket
-                order_symbol = order.symbol
-                order_magic = order.magic
-                order_volume = order.volume_initial
-                order_price = order.price_open
-                order_sl = order.sl
-                order_tp = order.tp
-                order_type = order.type
-                
-                order_type_map = {
-                    mt5.ORDER_TYPE_BUY_LIMIT: "buy_limit",
-                    mt5.ORDER_TYPE_SELL_LIMIT: "sell_limit",
-                    mt5.ORDER_TYPE_BUY_STOP: "buy_stop",
-                    mt5.ORDER_TYPE_SELL_STOP: "sell_stop",
-                    mt5.ORDER_TYPE_BUY_STOP_LIMIT: "buy_stop_limit",
-                    mt5.ORDER_TYPE_SELL_STOP_LIMIT: "sell_stop_limit"
-                }
-                order_type_str = order_type_map.get(order_type)
-                
-                if order_type_str is None:
-                    continue
-                
-                if order_magic != authorized_magic_number:
-                    unauthorized_skipped += 1
-                    continue
-                
-                if order_ticket in existing_tickets:
-                    duplicate_skipped += 1
-                    continue
-                
-                authorized_count += 1
-                
-                target_file = symbol_to_file_map.get(order_symbol)
-                if target_file is None and valid_limit_files:
-                    target_file = valid_limit_files[0]
-                else:
-                    continue
-                
-                import uuid
-                order_record = {
-                    'symbol': order_symbol,
-                    'order_type': order_type_str,
-                    'entry': order_price,
-                    '_volume': order_volume,
-                    'exit': order_sl if order_sl else 0,
-                    'target': order_tp if order_tp else 0,
-                    'ticket': order_ticket,
-                    'magic': order_magic,
-                    'time_setup': datetime.fromtimestamp(order.time_setup).strftime('%Y-%m-%d %H:%M:%S') if hasattr(order, 'time_setup') else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'original_symbol': order_symbol,
-                    'recorded_timestamp': datetime.now().isoformat(),
-                    'record_id': str(uuid.uuid4()),
-                    'status': 'pending'
-                }
-                
-                if order_sl and order_tp and order_sl != 0 and order_tp != 0:
-                    is_buy = 'buy' in order_type_str
-                    if is_buy:
-                        risk = order_price - order_sl
-                        reward = order_tp - order_price
-                    else:
-                        risk = order_sl - order_price
-                        reward = order_price - order_tp
-                    if risk > 0:
-                        order_record['risk_reward'] = round(reward / risk, 2)
-                
-                orders_to_record.append({
-                    'record': order_record,
-                    'target_file': target_file,
-                    'symbol': order_symbol,
-                    'ticket': order_ticket
-                })
-            
-            if not orders_to_record:
-                print(f"  │ ℹ️ No new authorized orders to record (Auth: {authorized_count}, Dup: {duplicate_skipped}, UnAuth: {unauthorized_skipped})")
-                return {'success': True, 'orders_found': len(pending_orders), 'recorded': 0}
-            
-            orders_by_file = {}
-            for order_item in orders_to_record:
-                file_path_str = str(order_item['target_file'])
-                if file_path_str not in orders_by_file:
-                    orders_by_file[file_path_str] = {
-                        'file': order_item['target_file'],
-                        'orders': []
-                    }
-                orders_by_file[file_path_str]['orders'].append(order_item)
-            
-            records_appended = 0
-            for file_key, file_data in orders_by_file.items():
-                target_file = file_data['file']
-                orders_list = file_data['orders']
-                
-                existing_signals = []
-                if target_file.exists():
-                    with open(target_file, 'r', encoding='utf-8') as f:
-                        existing_signals = json.load(f)
-                
-                for order_item in orders_list:
-                    existing_signals.append(order_item['record'])
-                    records_appended += 1
-                
-                with open(target_file, 'w', encoding='utf-8') as f:
-                    json.dump(existing_signals, f, indent=4)
-                
-                print(f"  │ ✓ Appended {len(orders_list)} record(s) to {target_file.parent.name}")
-            
-            print(f"  │ ✓ Total recorded: {records_appended} new orders (Auth: {authorized_count}, Dup skipped: {duplicate_skipped})")
-            return {
-                'success': True, 
-                'orders_found': len(pending_orders), 
-                'recorded': records_appended,
-                'authorized': authorized_count,
-                'duplicates_skipped': duplicate_skipped,
-                'unauthorized_skipped': unauthorized_skipped
-            }
-        
-        def cancel_all_pending_orders_local():
-            """
-            Cancels pending orders ONLY if:
-            1. The order ticket exists in recorded limit_orders.json files
-            2. The volume in MT5 does NOT match the volume in the JSON file
-            Orders not found in JSON or with matching volumes are kept.
-            Uses existing MT5 connection.
-            Returns: dict with statistics
-            """
-            print(f"  {'─'*40}")
-            
-            if not mt5.terminal_info():
-                print(f"  │ ✗ MT5 not connected")
-                return {'success': False, 'error': 'MT5 not connected', 'deleted': 0}
-            
-            acc = mt5.account_info()
-            if not acc:
-                print(f"  │ ✗ Cannot get account info")
-                return {'success': False, 'error': 'No account info', 'deleted': 0}
-            
-            print(f"  │ Connected to account: {acc.login}")
-            
-            inv_root = Path(INV_PATH) / user_brokerid
-
-            # Get strategy name from invested_with
-            strategy_name = None
-            if FETCHED_INVESTORS:
-                try:
-                    with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                        investor_users = json.load(f)
-                    
-                    investor_cfg = investor_users.get(user_brokerid)
-                    if investor_cfg:
-                        strategy_name = investor_cfg.get("invested_with", "")
-                except Exception as e:
-                    pass
-
-            if not strategy_name:
-                print(f"   SKIPPED - No strategy name found from invested_with for {user_brokerid}")
-                return {'success': False, 'error': 'No strategy name'}
-
-            # ONLY use strategy_name folder - NO FALLBACKS
-            limit_orders_path = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
-            valid_limit_files = [limit_orders_path] if limit_orders_path.exists() else []
-
-            if not valid_limit_files:
-                print(f"  ✗ No limit_orders.json found at {limit_orders_path}")
-                return {'success': False, 'error': 'No limit_orders.json found'}
-            
-            if not valid_limit_files:
-                print(f"  │ ✗ No limit_orders.json files found to verify against")
-                return {'success': False, 'error': 'No limit_orders.json files', 'deleted': 0}
-            
-            print(f"  │ Found {len(valid_limit_files)} limit_orders.json file(s)")
-            
-            def get_volume_from_order(order_dict):
-                for key, value in order_dict.items():
-                    if key.endswith('_volume') and isinstance(value, (int, float)):
-                        return value
-                if '_volume' in order_dict:
-                    return order_dict['_volume']
-                return None
-            
-            expected_volumes_by_ticket = {}
-            
-            for limit_file in valid_limit_files:
-                try:
-                    with open(limit_file, 'r', encoding='utf-8') as f:
-                        existing_orders = json.load(f)
-                    
-                    orders_to_process = []
-                    if isinstance(existing_orders, list):
-                        orders_to_process = existing_orders
-                    elif isinstance(existing_orders, dict):
-                        for category_name, category_data in existing_orders.get('categories', {}).items():
-                            symbols_in_category = category_data.get('symbols', {})
-                            for symbol, symbol_signals in symbols_in_category.items():
-                                def extract_orders(data):
-                                    if isinstance(data, dict):
-                                        if data.get("order_type") and ("entry" in data or "exit" in data):
-                                            orders_to_process.append(data)
-                                        for key, value in data.items():
-                                            if isinstance(value, (dict, list)):
-                                                extract_orders(value)
-                                    elif isinstance(data, list):
-                                        for item in data:
-                                            if isinstance(item, (dict, list)):
-                                                extract_orders(item)
-                                extract_orders(symbol_signals)
-                    
-                    for order in orders_to_process:
-                        if isinstance(order, dict) and 'ticket' in order:
-                            ticket = order['ticket']
-                            volume = get_volume_from_order(order)
-                            
-                            if volume:
-                                expected_volumes_by_ticket[ticket] = {
-                                    'expected_volume': volume,
-                                    'symbol': order.get('symbol', 'Unknown'),
-                                    'order_type': order.get('order_type', 'Unknown'),
-                                    'file': str(limit_file)
-                                }
-                except Exception as e:
-                    print(f"  │ ⚠️ Could not read {limit_file.name}: {e}")
-            
-            if not expected_volumes_by_ticket:
-                print(f"  │ ℹ️ No recorded orders with volume information found in JSON files")
-                return {'success': True, 'found': 0, 'deleted': 0, 'failed': 0}
-            
-            print(f"  │ Found {len(expected_volumes_by_ticket)} recorded orders with volume info")
-            
-            pending_orders = mt5.orders_get()
-            
-            if not pending_orders:
-                print(f"  │ ℹ️ No pending orders to check")
-                return {'success': True, 'found': 0, 'deleted': 0, 'failed': 0}
-            
-            print(f"  │ Found {len(pending_orders)} pending order(s) in MT5")
-            
-            deleted = 0
-            failed = 0
-            kept_matching = 0
-            kept_not_in_json = 0
-            
-            for order in pending_orders:
-                order_ticket = order.ticket
-                order_volume = order.volume_initial
-                order_symbol = order.symbol
-                
-                order_type_names = {
-                    mt5.ORDER_TYPE_BUY_LIMIT: "BUY_LIMIT",
-                    mt5.ORDER_TYPE_SELL_LIMIT: "SELL_LIMIT",
-                    mt5.ORDER_TYPE_BUY_STOP: "BUY_STOP",
-                    mt5.ORDER_TYPE_SELL_STOP: "SELL_STOP",
-                }
-                order_type_name = order_type_names.get(order.type, f"TYPE_{order.type}")
-                
-                if order_ticket in expected_volumes_by_ticket:
-                    expected_data = expected_volumes_by_ticket[order_ticket]
-                    expected_volume = expected_data['expected_volume']
-                    
-                    if abs(order_volume - expected_volume) < 0.001:
-                        kept_matching += 1
-                        print(f"  │ ✓ KEPT {order_type_name} #{order_ticket} | {order_symbol} | Volume: {order_volume:.3f} (matches JSON)")
-                    else:
-                        cancel_request = {
-                            "action": mt5.TRADE_ACTION_REMOVE,
-                            "order": order_ticket
-                        }
-                        result = mt5.order_send(cancel_request)
-                        
-                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                            deleted += 1
-                            print(f"  │ 🔥 CANCELLED {order_type_name} #{order_ticket} | {order_symbol} | Volume mismatch: MT5={order_volume:.3f} vs JSON={expected_volume:.3f}")
-                        else:
-                            failed += 1
-                            error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
-                            print(f"  │ ✗ Failed to cancel #{order_ticket}: {error_msg}")
-                else:
-                    kept_not_in_json += 1
-                    print(f"  │ ℹ️ KEPT {order_type_name} #{order_ticket} | {order_symbol} | Not found in recorded JSON")
-            
-            print(f"\n  │ 📊 Cancellation Summary:")
-            print(f"  │   • Total MT5 pending orders: {len(pending_orders)}")
-            print(f"  │   • Orders kept (matching volume): {kept_matching}")
-            print(f"  │   • Orders kept (not in JSON): {kept_not_in_json}")
-            print(f"  │   • Orders cancelled (volume mismatch): {deleted}")
-            print(f"  │   • Failed cancellations: {failed}")
-            
-            return {
-                'success': True, 
-                'found': len(pending_orders), 
-                'deleted': deleted, 
-                'failed': failed,
-                'kept_matching': kept_matching,
-                'kept_not_in_json': kept_not_in_json
-            }
-
         def get_all_symbols_from_limit_orders(data):
             symbols = set()
             if isinstance(data, list):
@@ -16443,6 +16041,7 @@ def martingale_system(inv_id=None):
             - Remaining profit after recovery becomes the target for scaling
             
             IMPORTANT: NEVER scales DOWN volumes. Only scales UP or keeps the same.
+            NEW: Checks MT5 pending orders and deletes those that don't match system analysis.
             """
             if not martingale_pre_scaling:
                 return False
@@ -16821,7 +16420,7 @@ def martingale_system(inv_id=None):
                 STEP 3: If TP profit < target_profit, scale UP to meet target
                 IMPORTANT: NEVER scales DOWN below default risk floor
                 
-                Returns: (new_volume, actual_profit, scaled, remaining_profit, steps_taken)
+                Returns: (new_volume, actual_profit, scaled, remaining_profit, steps_taken, volume_changed)
                 """
                 entry = order.get('entry')
                 tp = order.get('tp') or order.get('target')
@@ -16830,7 +16429,7 @@ def martingale_system(inv_id=None):
                 symbol = order.get('symbol', 'Unknown')
                 
                 if not entry or not tp or not current_volume or current_volume <= 0:
-                    return current_volume, 0, False, 0, "no_data"
+                    return current_volume, 0, False, 0, "no_data", False
                 
                 # Calculate price difference for TP
                 price_diff = abs(entry - tp)
@@ -16838,7 +16437,7 @@ def martingale_system(inv_id=None):
                 profit_per_lot = price_diff * contract_size
                 
                 if profit_per_lot <= 0:
-                    return current_volume, 0, False, 0, "invalid_price"
+                    return current_volume, 0, False, 0, "invalid_price", False
                 
                 # ========== STEP 1: Calculate risk at current volume ==========
                 # Get stop loss for risk calculation
@@ -16849,6 +16448,7 @@ def martingale_system(inv_id=None):
                     current_risk = risk_per_lot * current_volume
                 else:
                     current_risk = 0
+                    risk_per_lot = 0
                 
                 # Determine direction for display
                 order_type_lower = order_type.lower()
@@ -16862,6 +16462,7 @@ def martingale_system(inv_id=None):
                 # ========== STEP 2: Scale to default risk floor if current risk > default ==========
                 steps_taken = []
                 final_volume = current_volume
+                volume_changed = False
                 
                 if current_risk > default_risk_floor and default_risk_floor > 0:
                     # Scale down to default risk
@@ -16877,6 +16478,7 @@ def martingale_system(inv_id=None):
                     if target_volume_for_default < current_volume:
                         steps_taken.append(f"scaled_down_to_default_risk")
                         final_volume = target_volume_for_default
+                        volume_changed = True  # <-- CRITICAL FIX: Mark that volume changed
                         print(f"        [{direction}] Order #{order_index}: Scaling DOWN to default risk floor ${default_risk_floor:.2f}")
                         print(f"        └─ Volume: {current_volume:.2f} → {final_volume:.2f} lots (risk: ${current_risk:.2f} → ${default_risk_floor:.2f})")
                 
@@ -16888,9 +16490,11 @@ def martingale_system(inv_id=None):
                 
                 # If TP profit already covers the target, keep current volume
                 if remaining_profit >= 0:
-                    print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers the ${target_profit:.2f} target")
-                    print(f"        └─ Remaining profit: ${remaining_profit:.2f} - Keeping current volume {final_volume:.2f} lots (NO SCALING)")
-                    return final_volume, current_tp_profit, False, remaining_profit, steps_taken
+                    # Only print if we didn't already print the scaling message
+                    if not volume_changed:
+                        print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers the ${target_profit:.2f} target")
+                        print(f"        └─ Remaining profit: ${remaining_profit:.2f} - Keeping current volume {final_volume:.2f} lots (NO SCALING)")
+                    return final_volume, current_tp_profit, volume_changed, remaining_profit, steps_taken, volume_changed
                 
                 # ========== STEP 5: Need to scale UP to meet target ==========
                 deficit = target_profit - current_tp_profit
@@ -16907,7 +16511,7 @@ def martingale_system(inv_id=None):
                 max_volume = symbol_info.volume_max if symbol_info else 100
                 
                 # Ensure we don't go below the volume that achieves default risk
-                if default_risk_floor > 0:
+                if default_risk_floor > 0 and risk_per_lot > 0:
                     min_volume_for_risk = default_risk_floor / risk_per_lot
                     min_volume_for_risk = round(min_volume_for_risk, 2)
                     steps = round(min_volume_for_risk / volume_step) if volume_step > 0 else 0
@@ -16921,13 +16525,14 @@ def martingale_system(inv_id=None):
                 if required_volume < final_volume:
                     print(f"        Required volume {required_volume:.2f} is LESS than current {final_volume:.2f}")
                     print(f"        → Keeping current volume (NO DOWNSCALING)")
-                    return final_volume, current_tp_profit, False, current_tp_profit - target_profit, steps_taken
+                    return final_volume, current_tp_profit, volume_changed, current_tp_profit - target_profit, steps_taken, volume_changed
                 
                 # Calculate actual profit at required volume
                 actual_profit = profit_per_lot * required_volume
                 actual_remaining = actual_profit - target_profit
                 
                 steps_taken.append(f"scaled_up_to_target")
+                volume_changed = True  # <-- Mark that volume changed
                 
                 # Calculate new risk at required volume
                 new_risk = risk_per_lot * required_volume if stop else 0
@@ -16938,7 +16543,8 @@ def martingale_system(inv_id=None):
                 print(f"        └─ New TP profit: ${actual_profit:.2f}")
                 print(f"        └─ Remaining after target: ${actual_remaining:.2f}")
                 
-                return required_volume, actual_profit, True, actual_remaining, steps_taken
+                return required_volume, actual_profit, True, actual_remaining, steps_taken, volume_changed
+
 
             def group_orders_by_linear(orders_data):
                 stepup_linear = []
@@ -16979,12 +16585,14 @@ def martingale_system(inv_id=None):
                 return "UNKNOWN"
 
             def apply_linear_step_scaling(orders_linear, linear_name, symbol_info, 
-                                        total_extra_risk, calculation_details):
+                                        total_extra_risk, calculation_details, 
+                                        current_limit_volumes=None):
                 """
                 Apply linear scaling to a group of orders.
                 Uses the appropriate calculation based on martingale_factor.
                 
                 IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
+                Uses current_limit_volumes to get the ACTUAL current volume after recovery processing.
                 """
                 linear_updates = {}
                 
@@ -17011,6 +16619,12 @@ def martingale_system(inv_id=None):
                     entry = order.get('entry')
                     order_type = order.get('order_type', '')
                     direction = get_direction_from_order(order)
+                    
+                    # Get current volume from limit_orders.json (already scaled)
+                    if current_limit_volumes and symbol in current_limit_volumes:
+                        current_volume = current_limit_volumes[symbol]
+                    else:
+                        current_volume = get_volume_field_from_order(order)[1] or 0.01
                     
                     if martingale_factor == "takeprofit_factor":
                         # Use TP for profit calculation
@@ -17039,10 +16653,13 @@ def martingale_system(inv_id=None):
                         amount_per_lot = price_diff * symbol_info.trade_contract_size
                         amount_type = "risk"
                     
+                    # Use current_volume (already scaled) instead of reading from order
+                    current_amount = amount_per_lot * current_volume
+                    
                     if idx == 0:
-                        # LEADER order - keep original volume
-                        leader_volume = get_volume_field_from_order(order)[1] or 0.01
-                        leader_amount = amount_per_lot * leader_volume
+                        # LEADER order - use current volume (already scaled)
+                        leader_volume = current_volume
+                        leader_amount = current_amount
                         
                         print(f"\n        🔹 [{direction}] Order #1 (LEADER): {symbol} @ {entry:.5f} ({order_type})")
                         print(f"          ├─ LEADER {amount_type}: ${leader_amount:.2f}")
@@ -17061,9 +16678,6 @@ def martingale_system(inv_id=None):
                     else:
                         # Subsequent orders - progressive scaling
                         previous_amount = calculated_amounts[idx - 1]
-                        
-                        current_volume = get_volume_field_from_order(order)[1] or 0.01
-                        current_amount = amount_per_lot * current_volume
                         
                         # CRITICAL: NEVER SCALE DOWN
                         # If current amount already >= previous amount, keep current volume
@@ -17127,7 +16741,8 @@ def martingale_system(inv_id=None):
                         print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} risk")
                 
                 return linear_updates
-                
+
+
             # ========== LOSS_STREAK SPECIFIC FUNCTIONS ==========
             def fetch_and_analyze_trades_with_sequential_loss():
                 """
@@ -17405,6 +17020,178 @@ def martingale_system(inv_id=None):
                     traceback.print_exc()
                     return [], {}, 0, {}
 
+            # ========== NEW: MT5 PENDING ORDERS CHECK ==========
+            def check_and_delete_mt5_pending_orders(system_analysis_results, target_risk, martingale_factor_type):
+                """
+                Check MT5 pending orders against system analysis results.
+                Deletes MT5 pending orders that don't match the system analysis.
+                
+                Args:
+                    system_analysis_results: Dict with symbol -> {'volume': volume, 'risk': risk, 'profit': profit}
+                    target_risk: The target risk/profit amount per order
+                    martingale_factor_type: 'stoploss_factor' or 'takeprofit_factor'
+                
+                Returns:
+                    (deleted_count, preserved_count, deleted_details)
+                """
+                deleted_count = 0
+                preserved_count = 0
+                deleted_details = []
+                
+                print(f"\n  🔍 STEP: Checking MT5 Pending Orders...")
+                print(f"{'─'*60}")
+                print(f"  Target risk per order: ${target_risk:.2f}")
+                print(f"{'─'*60}\n")
+                
+                # Get all MT5 pending orders
+                pending_orders = mt5.orders_get()
+                if pending_orders is None or len(pending_orders) == 0:
+                    print(f"  │ No MT5 pending orders found")
+                    return 0, 0, []
+                
+                print(f"  │ Found {len(pending_orders)} MT5 pending order(s)")
+                print(f"{'─'*60}\n")
+                
+                for order in pending_orders:
+                    symbol = order.symbol
+                    order_type = order.type
+                    order_ticket = order.ticket
+                    # FIX: Use volume_initial or volume_current instead of volume
+                    volume = order.volume_initial if hasattr(order, 'volume_initial') else order.volume_current
+                    entry = order.price_open
+                    sl = order.sl
+                    tp = order.tp
+                    
+                    # Map MT5 order type to display name
+                    if order_type == 2:  # ORDER_TYPE_BUY_STOP
+                        order_type_display = "BUY_STOP"
+                        direction = "STEPUP"
+                    elif order_type == 3:  # ORDER_TYPE_SELL_STOP
+                        order_type_display = "SELL_STOP"
+                        direction = "STEPDOWN"
+                    elif order_type == 4:  # ORDER_TYPE_BUY_LIMIT
+                        order_type_display = "BUY_LIMIT"
+                        direction = "STEPDOWN"
+                    elif order_type == 5:  # ORDER_TYPE_SELL_LIMIT
+                        order_type_display = "SELL_LIMIT"
+                        direction = "STEPUP"
+                    else:
+                        order_type_display = f"TYPE_{order_type}"
+                        direction = "UNKNOWN"
+                    
+                    # Get symbol info
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        continue
+                    
+                    # Calculate actual risk or profit for this MT5 pending order
+                    if martingale_factor_type == "takeprofit_factor":
+                        # Use TP for profit calculation
+                        if not tp:
+                            continue
+                        price_diff = abs(entry - tp)
+                        contract_size = symbol_info.trade_contract_size
+                        actual_amount = price_diff * volume * contract_size
+                        amount_type = "TP profit"
+                    else:
+                        # Use stoploss for risk calculation (standard)
+                        if not sl:
+                            continue
+                        if order_type in [2, 4]:  # BUY orders (BUY_STOP, BUY_LIMIT)
+                            price_diff = entry - sl
+                        else:  # SELL orders (SELL_STOP, SELL_LIMIT)
+                            price_diff = sl - entry
+                        if price_diff <= 0:
+                            continue
+                        contract_size = symbol_info.trade_contract_size
+                        actual_amount = price_diff * volume * contract_size
+                        amount_type = "risk"
+                    
+                    # Check if this symbol is in system analysis
+                    if symbol in system_analysis_results:
+                        system_volume = system_analysis_results[symbol].get('volume', 0)
+                        system_amount = system_analysis_results[symbol].get('risk', 0) if martingale_factor_type == "stoploss_factor" else system_analysis_results[symbol].get('profit', 0)
+                        
+                        # Compare with tolerance (10%)
+                        tolerance = 0.10
+                        is_match = abs(actual_amount - system_amount) / system_amount <= tolerance if system_amount > 0 else False
+                        
+                        if is_match:
+                            preserved_count += 1
+                            print(f"  ✓ {symbol} {order_type_display} target ${actual_amount:.2f} = system analysis ${system_amount:.2f}")
+                            print(f"    └─ ✅ PRESERVED")
+                        else:
+                            deleted_count += 1
+                            print(f"  ❌ {symbol} {order_type_display} target ${actual_amount:.2f} != system analysis ${system_amount:.2f}")
+                            print(f"    └─ 🗑️ DELETED")
+                            deleted_details.append({
+                                'symbol': symbol,
+                                'order_type': order_type_display,
+                                'ticket': order_ticket,
+                                'entry': entry,
+                                'volume': volume,
+                                'actual_amount': actual_amount,
+                                'system_amount': system_amount,
+                                'diff': actual_amount - system_amount
+                            })
+                            
+                            # Delete the MT5 pending order using order_send with TRADE_ACTION_REMOVE
+                            try:
+                                cancel_request = {
+                                    "action": mt5.TRADE_ACTION_REMOVE,
+                                    "order": order_ticket
+                                }
+                                result = mt5.order_send(cancel_request)
+                                
+                                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                                    print(f"       └─ ✅ Order {order_ticket} deleted successfully")
+                                else:
+                                    error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
+                                    print(f"       └─ ❌ Failed to delete order {order_ticket}: {error_msg}")
+                            except Exception as e:
+                                print(f"       └─ ❌ Error deleting order {order_ticket}: {e}")
+                    else:
+                        # Symbol not in system analysis - delete it
+                        deleted_count += 1
+                        print(f"  ❌ {symbol} {order_type_display} target ${actual_amount:.2f} - Symbol not in system analysis")
+                        print(f"    └─ 🗑️ DELETED")
+                        deleted_details.append({
+                            'symbol': symbol,
+                            'order_type': order_type_display,
+                            'ticket': order_ticket,
+                            'entry': entry,
+                            'volume': volume,
+                            'actual_amount': actual_amount,
+                            'system_amount': 0,
+                            'diff': actual_amount
+                        })
+                        
+                        # Delete the MT5 pending order using order_send with TRADE_ACTION_REMOVE
+                        try:
+                            cancel_request = {
+                                "action": mt5.TRADE_ACTION_REMOVE,
+                                "order": order_ticket
+                            }
+                            result = mt5.order_send(cancel_request)
+                            
+                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                                print(f"       └─ ✅ Order {order_ticket} deleted successfully")
+                            else:
+                                error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
+                                print(f"       └─ ❌ Failed to delete order {order_ticket}: {error_msg}")
+                        except Exception as e:
+                            print(f"       └─ ❌ Error deleting order {order_ticket}: {e}")
+                
+                print(f"\n{'─'*60}")
+                print(f"  📊 MT5 Pending Orders Check Summary:")
+                print(f"  │ Total checked: {len(pending_orders)}")
+                print(f"  │ Preserved: {preserved_count} (matched system analysis)")
+                print(f"  │ Deleted: {deleted_count} (did not match system analysis)")
+                print(f"{'─'*60}")
+                
+                return deleted_count, preserved_count, deleted_details
+
+
             # ========== MAIN EXECUTION ==========
             
             # STEP 1: Get BASE TARGET RISK based on martingale type
@@ -17549,6 +17336,9 @@ def martingale_system(inv_id=None):
             
             print(f"{'─'*60}")
             
+            # Store system analysis results for MT5 pending order comparison
+            system_analysis_results = {}
+            
             try:
                 # ========== STEP 6: REMOVE INVALID PRICE LEVELS ==========
                 print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
@@ -17571,10 +17361,10 @@ def martingale_system(inv_id=None):
                     save_limit_orders(limit_orders_path, limit_orders_data)
                     print(f"  ✓ Removed {total_removed} invalid order(s)")
                 
-                # Get current volumes after removal
-                current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
+                # Get current volumes after removal and STORE BEFORE SCALING
+                current_limit_volumes_before_scaling = get_current_volumes_from_limit_orders(limit_orders_data)
                 print(f"\n  📄 Current limit_orders.json volumes:")
-                for symbol, vol in current_limit_volumes.items():
+                for symbol, vol in current_limit_volumes_before_scaling.items():
                     print(f"     {symbol}: {vol:.2f} lots")
                 
                 # ========== STEP 7: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
@@ -17675,14 +17465,15 @@ def martingale_system(inv_id=None):
                                 risk_per_lot_order = 0
                             
                             # Apply the TP-based scaling function
-                            new_volume, actual_profit, scaled, remaining, steps = scale_order_volume_to_target_profit(
+                            new_volume, actual_profit, scaled, remaining, steps, volume_changed = scale_order_volume_to_target_profit(
                                 order, symbol_info, final_target_risk, default_risk_floor, order_index
                             )
                             
                             # Get direction for display
                             direction = get_direction_from_order(order)
                             
-                            if scaled:
+                            # Update the order if volume changed OR if scaled is True
+                            if scaled or volume_changed:
                                 # Update the order volume
                                 order[volume_key] = new_volume
                                 scaled_count += 1
@@ -17698,14 +17489,28 @@ def martingale_system(inv_id=None):
                                 print(f"        └─ TP Profit: ${profit_per_lot * current_volume:.2f} → ${actual_profit:.2f}")
                                 print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
                             else:
-                                # Calculate current risk and profit for display
-                                current_risk = risk_per_lot_order * current_volume if risk_per_lot_order > 0 else 0
-                                current_profit = profit_per_lot * current_volume
+                                # No volume change
+                                final_risk = risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0
+                                final_profit = profit_per_lot * new_volume
+                                
                                 print(f"\n        ℹ️ [{direction}] Order #{order_index} - NO SCALING NEEDED:")
-                                print(f"        └─ Volume: {current_volume:.2f} lots")
-                                print(f"        └─ Risk: ${current_risk:.2f}")
-                                print(f"        └─ TP Profit: ${current_profit:.2f}")
+                                print(f"        └─ Volume: {new_volume:.2f} lots")
+                                print(f"        └─ Risk: ${final_risk:.2f}")
+                                print(f"        └─ TP Profit: ${final_profit:.2f}")
                                 print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
+                            
+                            # Store system analysis result for this symbol
+                            if symbol not in system_analysis_results:
+                                system_analysis_results[symbol] = {
+                                    'volume': new_volume,
+                                    'risk': risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0,
+                                    'profit': actual_profit if martingale_factor == "takeprofit_factor" else 0
+                                }
+                            else:
+                                # Update with latest values (should be same for all orders in symbol)
+                                system_analysis_results[symbol]['volume'] = new_volume
+                                system_analysis_results[symbol]['risk'] = risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0
+                                system_analysis_results[symbol]['profit'] = actual_profit if martingale_factor == "takeprofit_factor" else 0
                         
                         if scaled_count > 0:
                             scaling_results_by_symbol[symbol] = {
@@ -17769,6 +17574,17 @@ def martingale_system(inv_id=None):
                                 print(f"\n        ℹ️ [{direction}] Order #{order_index} - NO SCALING NEEDED:")
                                 print(f"        └─ Volume: {current_volume:.2f} lots")
                                 print(f"        └─ Risk: ${current_risk:.2f} (target: ${final_target_risk:.2f})")
+                            
+                            # Store system analysis result for this symbol
+                            if symbol not in system_analysis_results:
+                                system_analysis_results[symbol] = {
+                                    'volume': new_volume if scaled else current_volume,
+                                    'risk': actual_risk if scaled else current_risk,
+                                    'profit': 0
+                                }
+                            else:
+                                system_analysis_results[symbol]['volume'] = new_volume if scaled else current_volume
+                                system_analysis_results[symbol]['risk'] = actual_risk if scaled else current_risk
                         
                         if scaled_count > 0:
                             scaling_results_by_symbol[symbol] = {
@@ -17781,11 +17597,20 @@ def martingale_system(inv_id=None):
                         else:
                             print(f"\n     ℹ️ No scaling needed for {symbol}")
                 
-                # Save if any orders were scaled
-                if total_scaled > 0:
-                    print(f"\n  📝 Saving scaled limit_orders.json...")
+                # ========== STEP 8: SAVE if any changes were made ==========
+                # Check if any volumes were actually changed
+                volumes_changed = False
+                current_volumes_after = get_current_volumes_from_limit_orders(limit_orders_data)
+                for symbol, vol in current_volumes_after.items():
+                    if symbol in current_limit_volumes_before_scaling:
+                        if abs(vol - current_limit_volumes_before_scaling[symbol]) > 0.001:
+                            volumes_changed = True
+                            break
+                
+                if total_scaled > 0 or volumes_changed:
+                    print(f"\n  📝 Saving limit_orders.json with updated volumes...")
                     save_limit_orders(limit_orders_path, limit_orders_data)
-                    print(f"  ✓ Scaled {total_scaled} order(s)")
+                    print(f"  ✓ Saved {total_scaled if total_scaled > 0 else 'volume adjustments'}")
                     
                     # Verify final totals
                     verify_symbols = set()
@@ -17822,7 +17647,7 @@ def martingale_system(inv_id=None):
                                         if entry and stop:
                                             amount = abs(entry - stop) * vol * symbol_info.trade_contract_size
                                             total_amount += amount
-                                            
+                                        
                             print(f"     📊 {symbol} final: {total_vol:.2f} lots")
                             if martingale_factor == "takeprofit_factor":
                                 total_orders = len([o for o in limit_orders_data if isinstance(o, dict) and o.get('symbol') == symbol])
@@ -17837,7 +17662,7 @@ def martingale_system(inv_id=None):
                 else:
                     print(f"\n  ℹ️ No scaling needed - all orders already at target")
                 
-                # ========== STEP 8: LINEAR SCALING ==========
+                # ========== STEP 9: LINEAR SCALING ==========
                 print(f"\n{'─'*60}")
                 print(f"  📈 STEP: Linear Scaling (Progressive)")
                 print(f"{'─'*60}")
@@ -17849,7 +17674,11 @@ def martingale_system(inv_id=None):
                 print(f"  IMPORTANT: NEVER scales DOWN, only UP or keep same")
                 print(f"{'─'*60}")
                 
+                # ========== FIX: RELOAD current volumes after Smart Scaling ==========
                 current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
+                print(f"\n  📄 Current limit_orders.json volumes (after Smart Scaling):")
+                for symbol, vol in current_limit_volumes.items():
+                    print(f"     {symbol}: {vol:.2f} lots")
                 
                 order_updates = {}
                 pre_scaling_details = {}
@@ -17887,7 +17716,8 @@ def martingale_system(inv_id=None):
                         if first_entry and first_tp:
                             price_diff = abs(first_entry - first_tp)
                             if price_diff > 0:
-                                first_volume = get_volume_field_from_order(first_order)[1] or 0.01
+                                # ========== FIX: Use current_limit_volumes instead of reading from JSON ==========
+                                first_volume = current_limit_volumes.get(symbol, 0.01)
                                 leader_amount = price_diff * first_volume * symbol_info.trade_contract_size
                                 print(f"     LEADER TP profit (before recovery): ${leader_amount:.2f}")
                                 print(f"     Drawdown recovery target: ${final_target_risk:.2f}")
@@ -17908,7 +17738,8 @@ def martingale_system(inv_id=None):
                                 price_diff = first_stop - first_entry
                             
                             if price_diff > 0:
-                                first_volume = get_volume_field_from_order(first_order)[1] or 0.01
+                                # ========== FIX: Use current_limit_volumes instead of reading from JSON ==========
+                                first_volume = current_limit_volumes.get(symbol, 0.01)
                                 leader_amount = price_diff * first_volume * symbol_info.trade_contract_size
                                 print(f"     LEADER risk: ${leader_amount:.2f}")
                     
@@ -17952,14 +17783,16 @@ def martingale_system(inv_id=None):
                         if stepup_linear:
                             stepup_updates = apply_linear_step_scaling(
                                 stepup_linear, "STEPUP", symbol_info,
-                                leader_amount, calculation_details
+                                leader_amount, calculation_details,
+                                current_limit_volumes  # PASS THE CURRENT VOLUMES
                             )
                             order_updates.update(stepup_updates)
-                        
+
                         if stepdown_linear:
                             stepdown_updates = apply_linear_step_scaling(
                                 stepdown_linear, "STEPDOWN", symbol_info,
-                                leader_amount, calculation_details
+                                leader_amount, calculation_details,
+                                current_limit_volumes  # PASS THE CURRENT VOLUMES
                             )
                             order_updates.update(stepdown_updates)
                         
@@ -17974,7 +17807,7 @@ def martingale_system(inv_id=None):
                     
                     pre_scaling_details[f"{symbol}_limit"] = calculation_details
                 
-                # ========== STEP 9: APPLY UPDATES ==========
+                # ========== STEP 10: APPLY UPDATES ==========
                 print(f"\n{'─'*60}")
                 print(f"  💾 APPLYING FINAL UPDATES")
                 print(f"{'─'*60}")
@@ -18017,6 +17850,26 @@ def martingale_system(inv_id=None):
                 
                 stats["pre_scaling_details"] = pre_scaling_details
                 
+                # ========== STEP 11: CHECK MT5 PENDING ORDERS AGAINST SYSTEM ANALYSIS ==========
+                print(f"\n{'='*60}")
+                print(f"  🗑️ CHECKING MT5 PENDING ORDERS")
+                print(f"{'='*60}")
+                
+                # Print system analysis results summary
+                print(f"\n  📊 System Analysis Results:")
+                for symbol, result in system_analysis_results.items():
+                    if martingale_factor == "takeprofit_factor":
+                        print(f"     {symbol}: Volume {result['volume']:.2f} lots, TP Profit ${result['profit']:.2f}")
+                    else:
+                        print(f"     {symbol}: Volume {result['volume']:.2f} lots, Risk ${result['risk']:.2f}")
+                
+                # Check and delete MT5 pending orders that don't match system analysis
+                mt5_deleted_count, mt5_preserved_count, mt5_deleted_details = check_and_delete_mt5_pending_orders(
+                    system_analysis_results,
+                    final_target_risk,
+                    martingale_factor
+                )
+                
                 print(f"\n{'='*60}")
                 print(f"  ✅ PRE-SCALING COMPLETE")
                 print(f"{'='*60}")
@@ -18032,189 +17885,23 @@ def martingale_system(inv_id=None):
                     print(f"  │ Orders scaled to match target risk")
                 print(f"  │ Orders scaled: {total_scaled}")
                 print(f"  │ Linear scaling updated: {updated_count if 'updated_count' in locals() else 0}")
+                print(f"  │ MT5 Pending Orders:")
+                print(f"  │   - Preserved: {mt5_preserved_count}")
+                print(f"  │   - Deleted: {mt5_deleted_count}")
                 print(f"{'='*60}")
                 
-                return updated
+                return updated or mt5_deleted_count > 0
                 
             except Exception as e:
                 print(f"  ✗ Pre-scaling error: {e}")
                 import traceback
                 traceback.print_exc()
-                return False    
+                return False
 
-        def safety_check_pending_orders():
-            """
-            Safety check that ONLY cancels orders when:
-            1. limit_orders.json exists
-            2. The order is found in limit_orders.json
-            3. The order's volume needs to be updated (mismatch)
-            4. The order will be re-written to the JSON file with updated volume
-            
-            PRESERVES ALL ORDERS NOT EXPLICITLY MARKED FOR UPDATE.
-            """
-            print(f"\n  🛡️ STEP 5: Safety Check")
-            print(f"  {'─'*40}")
-            
-            nonlocal safety_cancellations, safety_cancellations_count
-            
-            try:
-                pending_orders = mt5.orders_get()
-                if pending_orders is None:
-                    pending_orders = []
-                
-                print(f"  │ Found {len(pending_orders)} pending orders")
-                
-                if not pending_orders:
-                    print(f"  │ ℹ️ No pending orders to check")
-                    return
-                
-                # ========== CRITICAL FIX: Only proceed if limit_orders.json exists ==========
-                limit_orders_path, limit_orders_data = load_limit_orders()
-                
-                # If no limit_orders.json exists, PRESERVE ALL ORDERS
-                if limit_orders_path is None or limit_orders_data is None:
-                    print(f"  │ ℹ️ No limit_orders.json found - PRESERVING ALL {len(pending_orders)} orders")
-                    print(f"  │   └─ No volume updates needed - skipping safety check")
-                    return  # <-- EXIT: Don't cancel anything!
-                
-                # ========== Build expected volumes from limit_orders.json ==========
-                expected_volumes = {}
-                
-                def get_volume_from_order(order_dict):
-                    for key, value in order_dict.items():
-                        if key.endswith('_volume') and isinstance(value, (int, float)):
-                            return value
-                    if '_volume' in order_dict:
-                        return order_dict['_volume']
-                    return None
-                
-                # Build a map of (symbol, direction) -> expected volume
-                for order in limit_orders_data:
-                    if isinstance(order, dict):
-                        symbol = order.get('symbol')
-                        order_type = order.get('order_type', '').lower()
-                        expected_volume = get_volume_from_order(order)
-                        
-                        if symbol and expected_volume and expected_volume > 0:
-                            if symbol not in expected_volumes:
-                                expected_volumes[symbol] = {}
-                            
-                            # Determine direction
-                            if "buy" in order_type:
-                                expected_volumes[symbol]['buy'] = expected_volume
-                            elif "sell" in order_type:
-                                expected_volumes[symbol]['sell'] = expected_volume
-                
-                print(f"  │ Loaded expected volumes for {len(expected_volumes)} symbols from limit_orders.json")
-                
-                # ========== Scan pending orders and identify those needing update ==========
-                orders_to_cancel = []
-                orders_to_preserve = []
-                
-                for order in pending_orders:
-                    symbol = order.symbol
-                    order_type = order.type
-                    order_volume = order.volume_initial
-                    
-                    # Determine order direction
-                    is_buy = order_type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP]
-                    is_sell = order_type in [mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP]
-                    
-                    if not is_buy and not is_sell:
-                        # Not a limit/stop order - PRESERVE
-                        orders_to_preserve.append(order)
-                        continue
-                    
-                    order_direction = 'buy' if is_buy else 'sell'
-                    
-                    # ========== CRITICAL: Check if this order is in the JSON file ==========
-                    expected_volume = expected_volumes.get(symbol, {}).get(order_direction, None)
-                    
-                    if expected_volume is None:
-                        # Order NOT in JSON - PRESERVE IT (no update needed)
-                        orders_to_preserve.append(order)
-                        print(f"  │ ℹ️ PRESERVING #{order.ticket} {symbol} {order_direction.upper()} - Not in limit_orders.json")
-                        continue
-                    
-                    # ========== Order IS in JSON - Check if volume needs update ==========
-                    if abs(order_volume - expected_volume) > 0.001:
-                        # Volume mismatch - needs update
-                        orders_to_cancel.append(order)
-                        print(f"  │ 🔄 MARK FOR UPDATE #{order.ticket} {symbol} {order_direction.upper()} - Volume {order_volume:.2f} → {expected_volume:.2f}")
-                    else:
-                        # Volume matches - PRESERVE
-                        orders_to_preserve.append(order)
-                        print(f"  │ ✅ PRESERVING #{order.ticket} {symbol} {order_direction.upper()} - Volume matches JSON ({order_volume:.2f})")
-                
-                # ========== Cancel ONLY orders that need volume updates ==========
-                if orders_to_cancel:
-                    print(f"\n  │ 📊 Summary:")
-                    print(f"  │   • Orders to cancel (need volume update): {len(orders_to_cancel)}")
-                    print(f"  │   • Orders to preserve: {len(orders_to_preserve)}")
-                    print(f"  │   • Total pending orders: {len(pending_orders)}")
-                    print(f"\n  │ 🔄 Cancelling {len(orders_to_cancel)} orders for volume update...")
-                    
-                    for order in orders_to_cancel:
-                        try:
-                            # ========== CRITICAL: Verify order still exists ==========
-                            verify_order = mt5.orders_get(ticket=order.ticket)
-                            if not verify_order or len(verify_order) == 0:
-                                print(f"  │   └─ Order #{order.ticket} no longer exists - skipping")
-                                continue
-                            
-                            cancel_request = {
-                                "action": mt5.TRADE_ACTION_REMOVE,
-                                "order": order.ticket,
-                            }
-                            
-                            cancel_result = mt5.order_send(cancel_request)
-                            
-                            if cancel_result and cancel_result.retcode == mt5.TRADE_RETCODE_DONE:
-                                safety_cancellations[order.ticket] = {
-                                    "success": True,
-                                    "reason": f"Volume update needed: {order.volume_initial:.2f} → {expected_volumes.get(order.symbol, {}).get('buy' if order.type in [mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP] else 'sell', 0):.2f}"
-                                }
-                                safety_cancellations_count += 1
-                                print(f"  │   ✅ CANCELLED #{order.ticket} (will be re-written with updated volume)")
-                            else:
-                                error_msg = cancel_result.comment if cancel_result else f"Error code: {mt5.last_error()}"
-                                safety_cancellations[order.ticket] = {"success": False, "error": error_msg}
-                                stats["errors"] += 1
-                                print(f"  │   ❌ Failed to cancel #{order.ticket}: {error_msg}")
-                                
-                        except Exception as e:
-                            safety_cancellations[order.ticket] = {"success": False, "error": str(e)}
-                            stats["errors"] += 1
-                            print(f"  │   ❌ Exception cancelling #{order.ticket}: {e}")
-                    
-                    # ========== IMPORTANT: The order will be re-written when limit_orders.json is saved ==========
-                    print(f"\n  │ ℹ️ Cancelled orders will be re-written to limit_orders.json")
-                    print(f"  │   └─ New volume will be applied when limit_orders.json is saved")
-                else:
-                    print(f"\n  │ ✅ No volume updates needed - all orders preserved")
-                
-                # ========== Final verification: Show what happened ==========
-                if safety_cancellations_count > 0:
-                    stats["pending_orders_modified"] = True
-                    print(f"\n  │ 📊 Safety Check Complete:")
-                    print(f"  │   • Orders cancelled for update: {safety_cancellations_count}")
-                    print(f"  │   • Orders preserved: {len(orders_to_preserve)}")
-                    print(f"  │   • Total pending orders: {len(pending_orders)}")
-                else:
-                    print(f"\n  │ ✅ Safety Check Complete - All orders preserved")
-                
-                stats["safety_cancellations"] = safety_cancellations
-                stats["safety_cancellations_count"] = safety_cancellations_count
-                
-            except Exception as e:
-                print(f"  ✗ Safety check error: {e}")
-                import traceback
-                traceback.print_exc()
 
         # ========== MAIN EXECUTION ==========
         def main():
             """Main execution - staged drawdown recovery with independent pre-scaling"""
-            nonlocal safety_cancellations, safety_cancellations_count
             
             print(f"\n{'='*50}")
             print(f"  STAGE {current_stage} RECOVERY - ${current_stage_drawdown:.2f}")
@@ -18249,16 +17936,6 @@ def martingale_system(inv_id=None):
             print(f"\n  📊 Default Risk Floor:")
             print(f"  │ Default risk floor enforced: ${default_risk_floor:.2f}")
             
-            # ========== STEP 0: RECORD EXISTING AUTHORIZED ORDERS ==========
-            print(f"\n  📋 STEP 0: Pre-Recovery Operations")
-            print(f"  {'─'*40}")
-            
-            record_result = record_authorized_pending_orders_local()
-            if not record_result['success']:
-                print(f"  ⚠️ Warning: Could not record authorized orders: {record_result.get('error', 'Unknown error')}")
-            else:
-                print(f"  ✓ Recorded {record_result.get('recorded', 0)} new authorized orders")
-            
             # Process limit_orders.json based on drawdown status
             limit_orders_updated = False
             if current_stage_drawdown > 0:
@@ -18269,23 +17946,8 @@ def martingale_system(inv_id=None):
                 limit_orders_updated = reset_limit_orders_to_default()
             
             # ⭐ PRE-SCALING - RUNS FOR BOTH MODES ⭐
-            # For loss_streak: Base target from sequential loss analysis
-            # For balance_based: Base target from drawdown amount
-            # For takeprofit_factor: Uses TP profit with drawdown deduction
             pre_scaling_updated = process_pre_scaling()
             stats["pre_scaling_applied"] = pre_scaling_updated
-            
-            # Safety check (always run)
-            safety_check_pending_orders()
-            
-            # ========== STEP: FINAL CANCELLATION OF MISMATCHED ORDERS ==========
-            print(f"  {'─'*40}")
-            cancel_result = cancel_all_pending_orders_local()
-            if not cancel_result['success']:
-                print(f"  ⚠️ Warning during cancellation: {cancel_result.get('error', 'Unknown error')}")
-            else:
-                print(f"  ✓ Selective cancellation complete: {cancel_result.get('deleted', 0)} orders cancelled")
-                safety_cancellations_count = cancel_result.get('deleted', 0)
             
             stats["limit_orders_modified"] = limit_orders_updated
             
@@ -18294,12 +17956,8 @@ def martingale_system(inv_id=None):
             print(f"  │ Mode: {martingale_type.upper()}")
             print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Default risk floor: ${default_risk_floor:.2f}")
-            print(f"  │ Pre-recorded orders: {record_result.get('recorded', 0)}")
             print(f"  │ Limit orders: {'✓' if limit_orders_updated else '−'}")
             print(f"  │ Pre-scaling: {'✓' if pre_scaling_updated else '−'}")
-            print(f"  │ Orders cancelled (mismatched): {cancel_result.get('deleted', 0)}")
-            print(f"  │ Orders kept (matching): {cancel_result.get('kept_matching', 0)}")
-            print(f"  │ Orders kept (not in JSON): {cancel_result.get('kept_not_in_json', 0)}")
             if martingale_factor == "takeprofit_factor":
                 print(f"  │ └─ TP factor: Drawdown deducted from each order's TP profit")
             print(f"{'='*50}")
@@ -18339,7 +17997,6 @@ def martingale_system(inv_id=None):
         print(f"\n  📝 Modifications:")
         print(f"  │ limit_orders.json: {'✓' if stats.get('limit_orders_modified') else '−'}")
         print(f"  │ Pre-scaling: {'✓' if stats.get('pre_scaling_applied') else '−'}")
-        print(f"  │ Orders cancelled: {stats.get('safety_cancellations_count', 0)}")
         
         if stats.get('order_risk_validation'):
             for symbol, details in stats['order_risk_validation'].items():
