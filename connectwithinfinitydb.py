@@ -4,8 +4,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 import requests
+import urllib3
+import zipfile
+import io
 import time
 import signal
 import sys
@@ -20,13 +22,15 @@ import traceback
 import threading
 import subprocess
 import tempfile
+import glob
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==============================================================================
-#  CRITICAL CONFIGURATION
+#  CONFIG
 # ==============================================================================
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 
-# Server Configuration
 primary_servers = {
     'query_page': 'https://harvhub.42web.io/phpmyadmintemplate.php',
     'fetch': 'https://harvhub.42web.io/phpmyadmin_tablesfetch.php'
@@ -45,686 +49,885 @@ admin_password = '@ciphercircleadminauthenticator#'
 temp_download_dir = r'C:\xampp\htdocs\CIPHER\temp_downloads'
 json_log_path = r'C:\xampp\htdocs\CIPHER\cipher trader\market\dbserver\connectwithdb.json'
 
-# Global driver and session - SINGLE PERSISTENT INSTANCE
 driver = None
 session = None
 current_servers = primary_servers
-_browser_lock = threading.Lock()  # Thread safety for concurrent calls
-_is_shutdown = False  # Track if shutdown was explicitly called
+_browser_lock = threading.Lock()
+_is_shutdown = False
+
+DEFAULT_WAIT_TIMEOUT = 10.0
+
+CHROMEDRIVER_CACHE_DIR = os.path.expanduser(r"~\.chromedriver_cache")
+CHROMEDRIVER_EXE = os.path.join(CHROMEDRIVER_CACHE_DIR, "chromedriver.exe")
+CHROMEDRIVER_VERSION_FILE = os.path.join(CHROMEDRIVER_CACHE_DIR, "driver.version")
+
+CFT_JSON_URLS = [
+    "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json",
+    "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
+    "https://raw.githubusercontent.com/GoogleChromeLabs/chrome-for-testing/main/data/known-good-versions-with-downloads.json",
+    "https://raw.githubusercontent.com/GoogleChromeLabs/chrome-for-testing/main/data/last-known-good-versions-with-downloads.json",
+    "https://cdn.npmmirror.com/binaries/chrome-for-testing/known-good-versions-with-downloads.json",
+    "https://registry.npmmirror.com/-/binary/chrome-for-testing/known-good-versions-with-downloads.json",
+]
+
+def _cft_zip_candidates(version):
+    return [
+        f"https://storage.googleapis.com/chrome-for-testing-public/{version}/win64/chromedriver-win64.zip",
+        f"https://cdn.npmmirror.com/binaries/chrome-for-testing/{version}/win64/chromedriver-win64.zip",
+        f"https://registry.npmmirror.com/-/binary/chrome-for-testing/{version}/win64/chromedriver-win64.zip",
+        f"https://chromedriver.storage.googleapis.com/{version}/chromedriver_win32.zip",
+        f"https://cdn.npmmirror.com/binaries/chromedriver/{version}/chromedriver_win32.zip",
+    ]
 # ==============================================================================
 
 
-def print_header(title, width=70):
-    """Print a formatted header."""
-    print(f"\n{'='*width}")
-    print(f"  {title}")
-    print(f"{'='*width}")
+def print_header(t, w=70):
+    print(f"\n{'='*w}\n  {t}\n{'='*w}")
 
-def print_step(step_num, total_steps, description):
-    """Print a formatted step indicator."""
-    print(f"\n   [{step_num}/{total_steps}] {description}")
+def print_step(n, total, d):
+    print(f"\n   [{n}/{total}] {d}")
 
-def print_success(message):
-    """Print a success message."""
-    print(f"   ✅ {message}")
+def print_success(m): print(f"   ✅ {m}")
+def print_error(m, d=None):
+    print(f"   ❌ {m}")
+    if d: print(f"     └─ Details: {d}")
+def print_warning(m): print(f"   ⚠️  {m}")
+def print_info(m): print(f"   ℹ️  {m}")
+def print_divider(c="─", w=70): print(f"  {c*w}")
 
-def print_error(message, details=None):
-    """Print an error message with optional details."""
-    print(f"   ❌ {message}")
-    if details:
-        print(f"     └─ Details: {details}")
 
-def print_warning(message):
-    """Print a warning message."""
-    print(f"   ⚠️  {message}")
+# ==============================================================================
+#  CHROME VERSION
+# ==============================================================================
+def _get_installed_chrome_version():
+    if not os.path.exists(CHROME_PATH):
+        return None
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-Item '{CHROME_PATH}').VersionInfo.ProductVersion"],
+            capture_output=True, text=True, timeout=10)
+        v = (r.stdout or "").strip()
+        if v and re.match(r'^\d+\.\d+\.\d+\.\d+$', v):
+            return v
+    except Exception as e:
+        print_warning(f"Could not detect Chrome version: {e}")
+    try:
+        parent = os.path.dirname(CHROME_PATH)
+        for entry in os.listdir(parent):
+            if re.match(r'^\d+\.\d+\.\d+\.\d+$', entry):
+                return entry
+    except Exception:
+        pass
+    return None
 
-def print_info(message):
-    """Print an info message."""
-    print(f"   ℹ️  {message}")
 
-def print_divider(char="─", width=70):
-    """Print a divider line."""
-    print(f"  {char*width}")
+# ==============================================================================
+#  HTTP HELPERS
+# ==============================================================================
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+}
 
+
+def _http_get_json(url, timeout=15):
+    r = requests.get(url, headers=_HEADERS, timeout=timeout, verify=False)
+    r.raise_for_status()
+    return r.json()
+
+
+def _http_get_bytes(url, timeout=90):
+    r = requests.get(url, headers=_HEADERS, timeout=timeout, verify=False, stream=True)
+    r.raise_for_status()
+    buf = io.BytesIO()
+    for chunk in r.iter_content(chunk_size=64 * 1024):
+        if chunk:
+            buf.write(chunk)
+    return buf.getvalue()
+
+
+# ==============================================================================
+#  VERSION PICKING
+# ==============================================================================
+def _pick_best_cft_version(versions, target):
+    if not versions:
+        return None
+    target = target or ""
+    target_major = target.split('.')[0] if target else None
+
+    def _key(v):
+        try:
+            return tuple(int(x) for x in v.split('.'))
+        except Exception:
+            return (0,)
+
+    versions = sorted(set(versions), key=_key, reverse=True)
+
+    if target in versions:
+        return target
+    if target_major:
+        same = [v for v in versions if v.split('.')[0] == target_major]
+        if same:
+            return same[0]
+        try:
+            prev = str(int(target_major) - 1)
+            prev_list = [v for v in versions if v.split('.')[0] == prev]
+            if prev_list:
+                return prev_list[0]
+        except Exception:
+            pass
+    return versions[0]
+
+
+# ==============================================================================
+#  ZIP EXTRACTION
+# ==============================================================================
+def _extract_chromedriver_from_zip(zip_bytes):
+    zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    target = None
+    for name in zf.namelist():
+        if os.path.basename(name).lower() == "chromedriver.exe":
+            target = name
+            break
+    if not target:
+        for name in zf.namelist():
+            if name.lower().endswith(".exe"):
+                target = name
+                break
+    if not target:
+        raise RuntimeError("chromedriver.exe not found in ZIP")
+
+    os.makedirs(CHROMEDRIVER_CACHE_DIR, exist_ok=True)
+    with zf.open(target) as src:
+        data = src.read()
+    with open(CHROMEDRIVER_EXE, "wb") as dst:
+        dst.write(data)
+    return CHROMEDRIVER_EXE
+
+
+# ==============================================================================
+#  MIRROR-BASED DOWNLOAD
+# ==============================================================================
+def _fetch_catalog():
+    for url in CFT_JSON_URLS:
+        try:
+            print_info(f"  Trying catalog: {url}")
+            data = _http_get_json(url)
+            versions = data.get("versions")
+            if versions:
+                print_success(f"  ✅ Catalog from: {url}  ({len(versions)} versions)")
+                return versions
+        except Exception as e:
+            print_warning(f"  ❌ Failed: {str(e)[:140]}")
+    return None
+
+
+def _try_download_zip_for_version(version):
+    for url in _cft_zip_candidates(version):
+        try:
+            print_info(f"  Trying ZIP: {url}")
+            blob = _http_get_bytes(url)
+            print_success(f"  ✅ Downloaded {len(blob):,} bytes")
+            return blob
+        except Exception as e:
+            print_warning(f"  ❌ Failed: {str(e)[:140]}")
+    return None
+
+
+def _download_via_mirrors(target_version):
+    catalog = _fetch_catalog()
+    if not catalog:
+        print_warning("No catalog mirror reachable")
+        return None
+
+    versions = [v.get("version") for v in catalog if v.get("version")]
+    picked = _pick_best_cft_version(versions, target_version)
+    if not picked:
+        print_warning("Could not pick a version")
+        return None
+    print_info(f"Picked version: {picked}")
+
+    blob = _try_download_zip_for_version(picked)
+    if not blob:
+        print_warning(f"No mirror served the ZIP for {picked}")
+        return None
+
+    try:
+        return _extract_chromedriver_from_zip(blob)
+    except Exception as e:
+        print_warning(f"ZIP extract failed: {e}")
+        return None
+
+
+def _download_via_pip_binary(target_version):
+    if not target_version:
+        print_warning("No target version — cannot use pip fallback")
+        return None
+
+    major = target_version.split('.')[0]
+    candidates = [target_version, f"{major}.0.0.0"]
+
+    for pkg_version in candidates:
+        try:
+            print_info(f"Trying pip install chromedriver-binary=={pkg_version} ...")
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet",
+                 "--disable-pip-version-check",
+                 f"chromedriver-binary=={pkg_version}"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0:
+                print_warning(f"  pip failed: {(r.stderr or '')[:160]}")
+                continue
+
+            import importlib.util
+            spec = importlib.util.find_spec("chromedriver_binary")
+            if spec and spec.submodule_search_locations:
+                for base in spec.submodule_search_locations:
+                    found = glob.glob(os.path.join(base, "chromedriver*.exe"))
+                    if found:
+                        os.makedirs(CHROMEDRIVER_CACHE_DIR, exist_ok=True)
+                        shutil.copy2(found[0], CHROMEDRIVER_EXE)
+                        print_success(f"Installed via pip: {CHROMEDRIVER_EXE}")
+                        return CHROMEDRIVER_EXE
+        except Exception as e:
+            print_warning(f"  pip attempt failed: {str(e)[:160]}")
+
+    return None
+
+
+# ==============================================================================
+#  DRIVER CACHE
+# ==============================================================================
+def _read_cached_driver_version():
+    if not os.path.exists(CHROMEDRIVER_VERSION_FILE):
+        return None
+    try:
+        with open(CHROMEDRIVER_VERSION_FILE, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def _record_driver_version(driver_path, fallback):
+    try:
+        os.makedirs(CHROMEDRIVER_CACHE_DIR, exist_ok=True)
+        version = fallback
+        try:
+            r = subprocess.run([driver_path, "--version"],
+                               capture_output=True, text=True, timeout=5)
+            out = (r.stdout or r.stderr or "").strip()
+            m = re.search(r'ChromeDriver\s+(\d+\.\d+\.\d+\.\d+)', out)
+            if m:
+                version = m.group(1)
+        except Exception:
+            pass
+        with open(CHROMEDRIVER_VERSION_FILE, 'w', encoding='utf-8') as f:
+            f.write(version)
+        print_info(f"Recorded driver version: {version}")
+    except Exception as e:
+        print_warning(f"Could not record version: {e}")
+
+
+def _resolve_chromedriver():
+    chrome_version = _get_installed_chrome_version()
+    chrome_major = chrome_version.split('.')[0] if chrome_version else None
+    if chrome_version:
+        print_info(f"Detected Chrome: {chrome_version}")
+
+    cached = _read_cached_driver_version()
+    if cached:
+        print_info(f"Cached driver: {cached}")
+
+    if chrome_major and cached and cached.split('.')[0] == chrome_major:
+        print_success("Cached driver matches Chrome — using it")
+        return CHROMEDRIVER_EXE
+
+    print_info("Attempting mirror-based ChromeDriver download...")
+    try:
+        path = _download_via_mirrors(chrome_version)
+        if path:
+            _record_driver_version(path, chrome_version)
+            return path
+    except Exception as e:
+        print_warning(f"Mirror download error: {str(e)[:200]}")
+
+    print_info("Attempting pip-based ChromeDriver install...")
+    try:
+        path = _download_via_pip_binary(chrome_version)
+        if path:
+            _record_driver_version(path, chrome_version)
+            return path
+    except Exception as e:
+        print_warning(f"pip fallback error: {str(e)[:200]}")
+
+    try:
+        print_info("Trying webdriver-manager as last network fallback...")
+        from webdriver_manager.chrome import ChromeDriverManager
+        path = ChromeDriverManager().install()
+        try:
+            os.makedirs(CHROMEDRIVER_CACHE_DIR, exist_ok=True)
+            shutil.copy2(path, CHROMEDRIVER_EXE)
+            _record_driver_version(CHROMEDRIVER_EXE, chrome_version)
+            return CHROMEDRIVER_EXE
+        except Exception:
+            return path
+    except Exception as e:
+        print_warning(f"webdriver-manager failed: {str(e)[:160]}")
+
+    if os.path.exists(CHROMEDRIVER_EXE):
+        print_warning("Using STALE cached ChromeDriver")
+        return CHROMEDRIVER_EXE
+
+    raise RuntimeError("ChromeDriver resolution failed — all sources exhausted")
+
+
+# ==============================================================================
+#  BROWSER / PROCESS MANAGEMENT
+# ==============================================================================
 def is_browser_alive():
-    """Check if the browser instance is still alive and responsive."""
     global driver
-    
     if driver is None:
         return False
-    
     try:
-        # Try to get current URL as a heartbeat check
-        current_url = driver.current_url
-        if current_url and "data:" not in current_url:
-            return True
-        return False
+        u = driver.current_url
+        return bool(u and "data:" not in u)
     except Exception:
         return False
 
+
 def kill_chrome_processes_and_clean_locks():
-    """Force kill all Chrome processes and remove webdriver locks"""
-    
     print_info("Cleaning Chrome processes and locks...")
-    
-    # 1. Kill all Chrome processes using taskkill (more aggressive)
-    killed_count = 0
+    killed = 0
     try:
-        # Kill all Chrome processes
-        result = subprocess.run(["taskkill", "/f", "/im", "chrome.exe", "/t"], 
-                               capture_output=True, text=True)
-        if "SUCCESS" in result.stdout or result.returncode == 0:
-            killed_count += 1
-            print_success("Killed Chrome processes via taskkill")
-        
-        # Kill all ChromeDriver processes
-        result = subprocess.run(["taskkill", "/f", "/im", "chromedriver.exe", "/t"], 
-                               capture_output=True, text=True)
-        if "SUCCESS" in result.stdout or result.returncode == 0:
-            killed_count += 1
-            print_success("Killed ChromeDriver processes via taskkill")
-        
-        if killed_count > 0:
-            print_success(f"Killed {killed_count} process group(s)")
-            time.sleep(2)  # Wait for processes to fully terminate
+        r = subprocess.run(["taskkill", "/f", "/im", "chrome.exe", "/t"],
+                           capture_output=True, text=True)
+        if "SUCCESS" in r.stdout or r.returncode == 0:
+            killed += 1; print_success("Killed Chrome")
+        r = subprocess.run(["taskkill", "/f", "/im", "chromedriver.exe", "/t"],
+                           capture_output=True, text=True)
+        if "SUCCESS" in r.stdout or r.returncode == 0:
+            killed += 1; print_success("Killed ChromeDriver")
+        if killed:
+            time.sleep(2)
     except Exception as e:
-        print_warning(f"Error killing processes: {e}")
-    
-    # 2. Remove the entire .wdm directory
-    wdm_dir = os.path.expanduser(r"~\.wdm")
-    removed_count = 0
-    
-    if os.path.exists(wdm_dir):
+        print_warning(f"Error killing: {e}")
+
+    wdm = os.path.expanduser(r"~\.wdm")
+    if os.path.exists(wdm):
         try:
-            # Try to remove the entire directory
-            shutil.rmtree(wdm_dir, ignore_errors=True)
-            print_success("Removed entire .wdm directory")
-            removed_count += 1
+            shutil.rmtree(wdm, ignore_errors=True)
+            killed += 1; print_success("Removed .wdm")
         except Exception as e:
-            print_warning(f"Could not remove entire .wdm directory: {e}")
-            # Fallback: remove individual lock files
-            for root, dirs, files in os.walk(wdm_dir):
-                for file in files:
-                    if ".wdm-lock" in file and file.endswith(".lock"):
-                        lock_path = os.path.join(root, file)
-                        try:
-                            os.remove(lock_path)
-                            removed_count += 1
-                            print_success(f"Removed lock: {file}")
-                        except Exception as e:
-                            print_warning(f"Could not remove {file}: {e}")
-    
-    if removed_count > 0:
-        print_success(f"Removed {removed_count} lock file(s)")
-    
-    return killed_count > 0 or removed_count > 0
+            print_warning(f"Could not remove .wdm: {e}")
+    return killed > 0
+
 
 def initialize_browser(force_new=False):
-    """
-    Initialize Chrome browser in HEADLESS mode - ALWAYS HEADLESS.
-    
-    Args:
-        force_new (bool): If True, creates a new instance even if one exists
-    
-    Returns:
-        bool: True if browser is ready, False otherwise
-    """
     global driver, session, current_servers, _is_shutdown
-    
+
     with _browser_lock:
-        # If shutdown was explicitly called, don't reuse
         if _is_shutdown and not force_new:
-            print_warning("Browser was explicitly shut down. Create new instance by calling with force_new=True")
+            print_warning("Browser was shut down. Use force_new=True")
             return False
-        
-        # Check if we can reuse existing browser
+
         if not force_new and is_browser_alive():
             print_info("Reusing existing browser session...")
             try:
-                # Verify session is still valid
                 driver.get(current_servers['query_page'])
-                # Re-sync session cookies
                 if session:
                     session.close()
                 session = requests.Session()
-                for cookie in driver.get_cookies():
-                    session.cookies.set(cookie['name'], cookie['value'])
-                print_success("Existing browser session reused successfully")
+                for c in driver.get_cookies():
+                    session.cookies.set(c['name'], c['value'])
+                print_success("Existing browser reused")
                 return True
             except Exception as e:
-                print_warning(f"Existing session invalid, restarting...: {str(e)[:100]}")
-                try: 
-                    driver.quit()
-                except: 
-                    pass
+                print_warning(f"Existing session invalid: {str(e)[:100]}")
+                try: driver.quit()
+                except Exception: pass
                 driver = None
                 session = None
-        
-        # Clean up any existing Chrome processes before starting new one
-        print_info("Cleaning up existing Chrome processes...")
+
+        print_info("Cleaning up Chrome processes...")
         kill_chrome_processes_and_clean_locks()
-        
+
         print_header("BROWSER INITIALIZATION (HEADLESS MODE)")
-        
-        # Step 1: Setup Chrome Options - ALWAYS HEADLESS
+
         print_step(1, 3, "Setting Up Chrome Environment (Headless)")
-        
-        # Create a temporary directory for this session
         temp_dir = tempfile.mkdtemp(prefix='chrome_selenium_')
-        
-        chrome_options = Options()
+
+        opts = Options()
         if os.path.exists(CHROME_PATH):
-            chrome_options.binary_location = CHROME_PATH
+            opts.binary_location = CHROME_PATH
             print_info(f"Using manual Chrome path: {CHROME_PATH}")
-        
-        # ALWAYS HEADLESS - THIS IS THE KEY
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--log-level=3")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
-        chrome_options.add_experimental_option("useAutomationExtension", False)
-        chrome_options.add_argument(f"--user-data-dir={temp_dir}")
-        
+
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--log-level=3")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+        opts.add_experimental_option("useAutomationExtension", False)
+        opts.add_argument(f"--user-data-dir={temp_dir}")
         print_info("🔧 Headless mode enabled")
 
-        # Step 2: Initialize ChromeDriver with retry
         print_step(2, 3, "Initializing ChromeDriver")
-        
-        # Try multiple times with increasing delays
-        max_attempts = 3
-        driver_initialized = False
-        
-        for attempt in range(1, max_attempts + 1):
+
+        for attempt in range(1, 4):
             try:
                 if attempt > 1:
-                    print_info(f"Retry attempt {attempt}/{max_attempts}...")
-                    # Clean up again before retry
+                    print_info(f"Retry attempt {attempt}/3...")
                     kill_chrome_processes_and_clean_locks()
                     time.sleep(2)
-                
-                # Try to use cached ChromeDriver first
-                chromedriver_cache = os.path.expanduser(r"~\.chromedriver_cache")
-                chromedriver_exe = os.path.join(chromedriver_cache, "chromedriver.exe")
-                
-                if os.path.exists(chromedriver_exe):
-                    print_info("Using cached ChromeDriver...")
-                    service = Service(chromedriver_exe)
-                else:
-                    print_info("Downloading ChromeDriver (this may take a moment)...")
-                    # Install ChromeDriver
-                    driver_path = ChromeDriverManager().install()
-                    
-                    # Cache it for future use
-                    try:
-                        os.makedirs(chromedriver_cache, exist_ok=True)
-                        shutil.copy2(driver_path, chromedriver_exe)
-                        print_info(f"Cached ChromeDriver at: {chromedriver_exe}")
-                    except:
-                        pass
-                    
-                    service = Service(driver_path)
-                
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-                print_success("ChromeDriver initialized successfully in HEADLESS mode")
-                driver_initialized = True
-                break  # Success, exit retry loop
-                
+
+                path = _resolve_chromedriver()
+                service = Service(path)
+                driver = webdriver.Chrome(service=service, options=opts)
+                print_success("ChromeDriver initialized in HEADLESS mode")
+                break
+
             except Exception as e:
-                error_msg = str(e)
-                if attempt < max_attempts:
-                    print_warning(f"Attempt {attempt} failed: {error_msg[:100]}")
+                msg = str(e)
+                if "only supports Chrome version" in msg:
+                    print_warning("Version mismatch detected")
+                    try:
+                        if os.path.exists(CHROMEDRIVER_VERSION_FILE):
+                            os.remove(CHROMEDRIVER_VERSION_FILE)
+                    except Exception:
+                        pass
+                if attempt < 3:
+                    print_warning(f"Attempt {attempt} failed: {msg[:180]}")
                     time.sleep(3)
                 else:
-                    print_error("Failed to initialize ChromeDriver after multiple attempts", error_msg)
+                    print_error("Failed to initialize ChromeDriver", msg)
                     return False
 
-        if not driver_initialized:
+        if not driver:
             return False
 
-        # Step 3: Authenticate
         print_step(3, 3, "Authenticating and Accessing Query Page")
-        
-        server_attempts = [
-            (primary_servers, "Primary"),
-            (backup_servers, "Backup"),
-            (server3, "Server 3")
-        ]
-        
-        for servers, server_type in server_attempts:
+
+        for servers, label in [(primary_servers, "Primary"),
+                               (backup_servers, "Backup"),
+                               (server3, "Server 3")]:
             current_servers = servers
-            print_info(f"Trying {server_type} server: {servers['query_page']}")
-            
+            print_info(f"Trying {label} server: {servers['query_page']}")
             try:
                 driver.get(servers['query_page'])
-                
-                # Inject credentials via LocalStorage
                 driver.execute_script(f"localStorage.setItem('admin_email', '{admin_email}');")
                 driver.execute_script(f"localStorage.setItem('admin_password', '{admin_password}');")
-                
-                # Reload to apply credentials
                 driver.get(servers['query_page'])
-                
                 WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.ID, "sql-query"))
-                )
-                
-                print_success(f"Authenticated on {server_type} server")
-                
-                # Sync requests session
+                    EC.presence_of_element_located((By.ID, "sql-query")))
+                print_success(f"Authenticated on {label} server")
+
                 if session:
                     session.close()
                 session = requests.Session()
-                for cookie in driver.get_cookies():
-                    session.cookies.set(cookie['name'], cookie['value'])
-                
-                append_to_json_log(server_type, servers['query_page'])
-                _is_shutdown = False  # Reset shutdown flag on successful init
+                for c in driver.get_cookies():
+                    session.cookies.set(c['name'], c['value'])
+                append_to_json_log(label, servers['query_page'])
+                _is_shutdown = False
                 return True
-                
             except Exception as e:
-                print_warning(f"{server_type} server failed: {str(e)[:100]}")
-                continue
+                print_warning(f"{label} failed: {str(e)[:100]}")
 
         print_error("All servers failed authentication")
         return False
-        
-def append_to_json_log(server_type, server_url):
-    """Append the server used to the JSON log file."""
-    log_entry = {
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'server_type': server_type,
-        'server_url': server_url,
-        'status': 'success'
-    }
-    log_data = []
 
+
+def append_to_json_log(server_type, server_url):
+    entry = {'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+             'server_type': server_type, 'server_url': server_url, 'status': 'success'}
+    data = []
     try:
         if os.path.exists(json_log_path):
             with open(json_log_path, 'r', encoding='utf-8') as f:
-                log_data = json.load(f)
-                if not isinstance(log_data, list):
-                    log_data = []
+                data = json.load(f)
+                if not isinstance(data, list):
+                    data = []
     except Exception:
-        log_data = []
-
-    if log_data and log_data[-1].get('server_url') == server_url:
-        return  # Skip duplicate
-
-    log_data.append(log_entry)
-
+        data = []
+    if data and data[-1].get('server_url') == server_url:
+        return
+    data.append(entry)
     try:
         os.makedirs(os.path.dirname(json_log_path), exist_ok=True)
         with open(json_log_path, 'w', encoding='utf-8') as f:
-            json.dump(log_data, f, indent=2)
+            json.dump(data, f, indent=2)
     except Exception as e:
         print_warning(f"Failed to write JSON log: {str(e)[:100]}")
 
+
 def signal_handler(sig, frame):
-    """Handle script interruption (Ctrl+C)."""
-    print_warning("\nScript interrupted by user. Cleaning up...")
+    print_warning("\nScript interrupted. Cleaning up...")
     cleanup()
     sys.exit(0)
 
+
 def cleanup():
-    """Clean up resources before exiting - ONLY closes browser if not already shut down."""
     global driver, session, _is_shutdown
-    
     if _is_shutdown:
         print_info("Browser already shut down")
         return
-    
     print_header("CLEANUP")
-    
     if driver:
-        print_info("Clearing browser localStorage...")
         try:
-            if driver and "data:" not in driver.current_url:
+            if "data:" not in driver.current_url:
                 driver.execute_script("localStorage.clear();")
                 print_success("LocalStorage cleared")
         except Exception as e:
             print_warning(f"Failed to clear localStorage: {e}")
-        
-        print_info("Closing browser...")
-        try:
-            driver.quit()
-        except:
-            pass
+        try: driver.quit()
+        except Exception: pass
         driver = None
         print_success("Browser closed")
-
     if session:
-        try:
-            session.close()
-        except:
-            pass
+        try: session.close()
+        except Exception: pass
         session = None
         print_success("HTTP session closed")
-
-    # Cleanup temp directory
     if os.path.exists(temp_download_dir):
-        print_info(f"Cleaning temp directory: {temp_download_dir}")
         try:
-            for temp_file in os.listdir(temp_download_dir):
-                file_path = os.path.join(temp_download_dir, temp_file)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
+            for f in os.listdir(temp_download_dir):
+                p = os.path.join(temp_download_dir, f)
+                if os.path.isfile(p):
+                    os.remove(p)
             os.rmdir(temp_download_dir)
             print_success("Temp directory removed")
         except Exception as e:
-            print_warning(f"Failed to clean temp directory: {e}")
-    
+            print_warning(f"Failed to clean temp: {e}")
     _is_shutdown = True
 
+
 def shutdown():
-    """Explicitly shut down the browser and cleanup - call this when you want to close Chrome."""
     global _is_shutdown
     print_info("Explicit shutdown requested...")
     cleanup()
 
+
 def check_server_availability(url):
-    """Check if a server is available."""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive'
-        }
-        response = requests.head(url, headers=headers, timeout=10, verify=True)
-        return response.status_code == 200
-    except requests.RequestException:
+        r = requests.head(url, headers=_HEADERS, timeout=10, verify=False)
+        return r.status_code == 200
+    except Exception:
         return False
 
-def execute_query(sql_query, params=None, reuse_browser=True):
-    """Execute SQL query via Selenium browser automation with proper parameter handling.
-    
-    Args:
-        sql_query (str): SQL query string (can contain %s placeholders)
-        params (tuple/list, optional): Parameters to substitute for placeholders
-        reuse_browser (bool): If True, reuse existing browser instance
-    
-    Returns:
-        dict: Query results with status, message, results, and affected_rows
+
+# ==============================================================================
+#  FAST COMPLETION DETECTION
+# ==============================================================================
+def _js_display_ready(d):
+    try: return d.find_element(By.ID, "sql-query-display").is_displayed()
+    except Exception: return False
+
+
+def _btn_re_enabled(d):
+    try: return d.find_element(By.ID, "execute-btn").is_enabled()
+    except Exception: return False
+
+
+# ▼▼▼ NEW DETECTOR ▼▼▼
+def _result_table_ready(d):
     """
+    True when the result area contains either:
+      - a <table> element (query returned rows), OR
+      - a <p> saying "no results" / "no records" / "0 rows" (empty result), OR
+      - an error message (#message.error)
+    This is the correct completion signal for read queries.
+    """
+    try:
+        # Error path
+        if d.find_elements(By.CSS_SELECTOR, "#message.error"):
+            return True
+
+        # Look inside #query-result first, then #column-data
+        for container_id in ("query-result", "column-data"):
+            try:
+                containers = d.find_elements(By.ID, container_id)
+                for c in containers:
+                    # A real result table
+                    if c.find_elements(By.CSS_SELECTOR, "table"):
+                        return True
+                    # A "no results" paragraph
+                    for p in c.find_elements(By.CSS_SELECTOR, "p"):
+                        txt = (p.text or "").lower()
+                        if ("no results" in txt
+                                or "no records" in txt
+                                or "0 rows" in txt
+                                or "query executed successfully" in txt):
+                            return True
+            except Exception:
+                continue
+
+        # Fallback: any <table> anywhere on the page
+        if d.find_elements(By.CSS_SELECTOR, "#query-result table"):
+            return True
+    except Exception:
+        pass
+    return False
+# ▲▲▲ END NEW DETECTOR ▲▲▲
+
+
+def _any_terminal_state(d):
+    if _js_display_ready(d) or _btn_re_enabled(d):
+        return True
+    if _result_table_ready(d):
+        return True
+    return False
+
+
+def _wait_for_completion(wait_hint, sql_query):
+    if wait_hint is None:
+        wait_hint = {}
+    sig = wait_hint.get('signal', 'any-of')
+    timeout = float(wait_hint.get('timeout', DEFAULT_WAIT_TIMEOUT))
+    if bool(wait_hint.get('expect_empty', False)) and timeout > 6.0:
+        timeout = 6.0
+    t0 = time.perf_counter()
+
+    det = {
+        'js-display':     _js_display_ready,
+        'button-enabled': _btn_re_enabled,
+        'table':          _result_table_ready,      # ▼ NEW SIGNAL
+    }.get(sig, _any_terminal_state)
+
+    try:
+        WebDriverWait(driver, timeout, poll_frequency=0.15).until(det)
+        return True, time.perf_counter() - t0, f"signal '{sig}'"
+    except Exception:
+        return False, time.perf_counter() - t0, f"timed out after {timeout:.1f}s"
+
+
+# ==============================================================================
+#  QUERY CLASSIFICATION
+# ==============================================================================
+_READ_KEYWORDS = ('SELECT', 'SHOW', 'DESCRIBE', 'DESC', 'EXPLAIN', 'WITH')
+
+
+def _is_read_query(sql):
+    s = sql.strip()
+    while True:
+        prev = s
+        s = s.lstrip()
+        if s.startswith('--'):
+            nl = s.find('\n')
+            s = s[nl+1:] if nl != -1 else ''
+        elif s.startswith('/*'):
+            end = s.find('*/')
+            s = s[end+2:] if end != -1 else ''
+        if s == prev:
+            break
+    if not s:
+        return False
+    upper = s.upper()
+    return any(upper.startswith(kw) for kw in _READ_KEYWORDS)
+
+
+# ==============================================================================
+#  MAIN QUERY EXECUTOR
+# ==============================================================================
+def execute_query(sql_query, params=None, reuse_browser=True, wait_hint=None):
     global driver, session
-    
-    # Handle parameters properly
+
     if params:
-        # Convert single param to tuple for consistent handling
         if not isinstance(params, (tuple, list)):
             params = (params,)
-        
-        # Build final query with proper escaping
         final_sql = sql_query
-        for param in params:
-            # Find first %s placeholder
-            if '%s' not in final_sql:
-                break
-                
-            if param is None:
-                final_sql = final_sql.replace('%s', 'NULL', 1)
-            elif isinstance(param, bool):
-                final_sql = final_sql.replace('%s', '1' if param else '0', 1)
-            elif isinstance(param, (int, float)):
-                final_sql = final_sql.replace('%s', str(param), 1)
-            elif isinstance(param, (dict, list)):
-                # Convert dict/list to JSON string
-                json_str = json.dumps(param, ensure_ascii=False)
-                # Escape for SQL
-                escaped = json_str.replace("'", "''").replace("\\", "\\\\")
-                final_sql = final_sql.replace('%s', f"'{escaped}'", 1)
+        for p in params:
+            if '%s' not in final_sql: break
+            if p is None: final_sql = final_sql.replace('%s', 'NULL', 1)
+            elif isinstance(p, bool): final_sql = final_sql.replace('%s', '1' if p else '0', 1)
+            elif isinstance(p, (int, float)): final_sql = final_sql.replace('%s', str(p), 1)
+            elif isinstance(p, (dict, list)):
+                js = json.dumps(p, ensure_ascii=False)
+                esc = js.replace("'", "''").replace("\\", "\\\\")
+                final_sql = final_sql.replace('%s', f"'{esc}'", 1)
             else:
-                # String parameter - escape properly
-                escaped = str(param).replace("'", "''").replace("\\", "\\\\")
-                final_sql = final_sql.replace('%s', f"'{escaped}'", 1)
+                esc = str(p).replace("'", "''").replace("\\", "\\\\")
+                final_sql = final_sql.replace('%s', f"'{esc}'", 1)
     else:
         final_sql = sql_query
-    
-    print_divider()
-    
-    try:
-        # Initialize browser with retry logic
-        max_retries = 3
-        for attempt in range(max_retries):
-            if attempt > 0:
-                print_info(f"Retry attempt {attempt + 1}/{max_retries} for browser initialization...")
-                time.sleep(3)
-                # Clean up before retry
-                kill_chrome_processes_and_clean_locks()
-            
-            if initialize_browser(force_new=True):
-                break
-            elif attempt == max_retries - 1:
-                return {
-                    'status': 'error', 
-                    'message': 'Browser initialization failed after multiple attempts', 
-                    'results': [],
-                    'affected_rows': 0
-                }
 
-        # Step 4: Inject SQL Query with robust element finding
+    print_divider()
+
+    try:
+        # Reuse browser if alive — only rebuild when it's really gone
+        for attempt in range(3):
+            if attempt > 0:
+                print_info(f"Retry {attempt + 1}/3 for browser init...")
+                time.sleep(3)
+                kill_chrome_processes_and_clean_locks()
+            if initialize_browser(force_new=False):
+                break
+            elif attempt == 2:
+                return {'status': 'error',
+                        'message': 'Browser initialization failed',
+                        'results': [], 'affected_rows': 0}
+
+        # Clear the JS display state so the completion detector is fresh
+        try:
+            driver.execute_script("""
+                var el = document.getElementById('sql-query-display');
+                if (el) el.style.display = 'none';
+            """)
+        except Exception:
+            pass
+
         print_step(4, 6, "Injecting SQL Query")
         try:
-            # Wait for page to be ready with multiple selector attempts
-            query_textarea = None
-            for selector in ["#sql-query", "textarea#sql-query", "textarea[name='sql-query']"]:
+            ta = None
+            for sel in ["#sql-query", "textarea#sql-query", "textarea[name='sql-query']"]:
                 try:
-                    query_textarea = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
+                    ta = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
                     break
-                except:
+                except Exception:
                     continue
-            
-            if not query_textarea:
-                # Try to find any textarea on the page
-                try:
-                    query_textarea = driver.find_element(By.TAG_NAME, "textarea")
-                except:
-                    pass
-            
-            if not query_textarea:
+            if not ta:
+                try: ta = driver.find_element(By.TAG_NAME, "textarea")
+                except Exception: pass
+            if not ta:
                 raise Exception("Could not find query textarea")
-            
-            # Clear and set value using JavaScript (more reliable)
-            driver.execute_script("arguments[0].value = '';", query_textarea)
-            driver.execute_script("arguments[0].value = arguments[1];", query_textarea, final_sql)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", query_textarea)
-            driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", query_textarea)
-            
-            # Small delay to ensure UI updates
-            time.sleep(0.5)
-            
-            # Find execute button with multiple strategies
-            execute_button = None
-            button_selectors = [
-                "//button[text()='Execute Query']",
-                "//button[contains(text(), 'Execute')]",
-                "//button[@id='execute-query']",
-                "//button[@class='execute-query']",
-                "//button[@type='submit']",
-                "//input[@type='submit' and contains(@value, 'Execute')]"
-            ]
-            
-            for selector in button_selectors:
+
+            # Clear textarea first so no stale query remains
+            driver.execute_script("arguments[0].value = '';", ta)
+            driver.execute_script("arguments[0].value = arguments[1];", ta, final_sql)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", ta)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", ta)
+            time.sleep(0.3)
+
+            btn = None
+            for sel in ["#execute-btn",
+                        "//button[text()='Execute Query']",
+                        "//button[contains(text(), 'Execute')]",
+                        "//button[@type='submit']"]:
                 try:
-                    if selector.startswith("//"):
-                        execute_button = driver.find_element(By.XPATH, selector)
-                    else:
-                        execute_button = driver.find_element(By.CSS_SELECTOR, selector)
-                    if execute_button:
-                        break
-                except:
+                    btn = driver.find_element(By.XPATH, sel) if sel.startswith("//") \
+                          else driver.find_element(By.CSS_SELECTOR, sel)
+                    if btn: break
+                except Exception:
                     continue
-            
-            if execute_button:
-                # Try JavaScript click first
-                driver.execute_script("arguments[0].click();", execute_button)
+
+            if btn:
+                driver.execute_script("arguments[0].click();", btn)
                 print_success("Query injected and executed")
             else:
-                print_warning("Execute button not found, attempting form submission...")
-                # Try to submit the form directly
+                print_warning("Execute button not found, submitting form...")
                 try:
                     driver.execute_script("document.querySelector('form').submit();")
                     print_success("Form submitted")
-                except:
+                except Exception:
                     raise Exception("Could not find execute button or form")
-                
+
         except Exception as e:
             print_error("Failed to inject query", str(e))
-            return {
-                'status': 'error', 
-                'message': f"Query input failed: {str(e)}", 
-                'results': [],
-                'affected_rows': 0
-            }
+            return {'status': 'error',
+                    'message': f"Query input failed: {str(e)}",
+                    'results': [], 'affected_rows': 0}
 
-        # Step 5: Wait for Results
         print_step(5, 6, "Waiting for Server Response")
         results = []
         affected_rows = 0
-        
-        try:
-            is_select = final_sql.strip().upper().startswith("SELECT")
-            
-            if is_select:
-                # Wait for table with multiple possible selectors
-                table_found = False
-                for selector in ["#query-result table", "#column-data table", ".result-table", ".data-table", "table"]:
-                    try:
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                        )
-                        table_found = True
-                        break
-                    except:
-                        continue
-                
-                if table_found:
-                    print_success("Result table detected")
-                else:
-                    # Check if there's an error message
-                    try:
-                        error_element = driver.find_element(By.CSS_SELECTOR, ".error, #error, .alert-danger, .alert-error")
-                        error_text = error_element.text
-                        if error_text:
-                            return {
-                                'status': 'error',
-                                'message': error_text,
-                                'results': [],
-                                'affected_rows': 0
-                            }
-                    except:
-                        pass
-                    print_warning("Result table not found, but proceeding...")
-            else:
-                # For UPDATE, INSERT, DELETE - wait for message
-                try:
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.ID, "message"))
-                    )
-                    print_success("Server response received")
-                except:
-                    print_info("No explicit response message (may be normal for this query)")
-                    
-        except Exception as e:
-            print_warning(f"Timeout waiting for results: {str(e)[:100]}")
-            # Check for errors in page source
-            try:
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
-                error_msg = soup.find('div', class_='error') or soup.find('div', id='error')
-                if error_msg:
-                    return {
-                        'status': 'error',
-                        'message': error_msg.text.strip(),
-                        'results': [],
-                        'affected_rows': 0
-                    }
-            except:
-                pass
-            
-            return {
-                'status': 'success', 
-                'results': [{'message': 'Query executed (no visible results)'}],
-                'affected_rows': 0
-            }
 
-        # Step 6: Parse Results
+        is_read = _is_read_query(final_sql)
+
+        # ▼ Default read queries to the "table ready" signal
+        if wait_hint and 'signal' in wait_hint:
+            sig = wait_hint['signal']
+        else:
+            sig = 'table' if is_read else 'button-enabled'
+
+        hint = {'signal': sig,
+                'timeout': (wait_hint or {}).get('timeout', DEFAULT_WAIT_TIMEOUT),
+                'expect_empty': (wait_hint or {}).get('expect_empty', is_read)}
+
+        ready, el, reason = _wait_for_completion(hint, final_sql)
+        if ready:
+            print_success(f"Server response ready ({reason}, {el:.2f}s)")
+        else:
+            print_warning(f"Result table not found ({reason})")
+
+        try:
+            err_els = driver.find_elements(By.CSS_SELECTOR, "#message.error")
+            if err_els:
+                txt = (err_els[0].text or "").strip()
+                if txt:
+                    return {'status': 'error', 'message': txt,
+                            'results': [], 'affected_rows': 0}
+        except Exception:
+            pass
+
         print_step(6, 6, "Parsing Query Results")
-        
         try:
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            
-            # Check for affected rows message first
-            msg_element = soup.find('div', id='message')
-            if msg_element:
-                msg_text = msg_element.get_text().strip()
-                # Extract affected rows count
-                import re
-                match = re.search(r'(\d+)\s+row\(s\) affected', msg_text)
-                if match:
-                    affected_rows = int(match.group(1))
+            msg = soup.find('div', id='message')
+            if msg:
+                m = re.search(r'(\d+)\s+row\(s\)\s+affected',
+                              msg.get_text().strip(), re.IGNORECASE)
+                if m:
+                    affected_rows = int(m.group(1))
                     print_success(f"Query affected {affected_rows} row(s)")
-            
+
             container = soup.find('div', id='query-result') or soup.find('div', id='column-data')
-            table = container.find('table') if container else soup.find('table')
+            table = container.find('table') if container else None
+            if not table:
+                table = soup.find('table')
 
             if table:
-                headers = [th.text.strip() for th in table.find_all('th')]
-                
+                headers = [th.get_text(strip=True) for th in table.find_all('th')]
                 for row in table.find_all('tr')[1:]:
                     cols = row.find_all('td')
-                    if len(cols) > 0:
-                        row_dict = {}
+                    if cols:
+                        rd = {}
                         for i in range(len(cols)):
                             if i < len(headers):
-                                row_dict[headers[i]] = cols[i].text.strip()
-                        results.append(row_dict)
-                
-                print_success(f"Parsed {len(results)} rows with {len(headers)} columns")
-                
-                if headers:
-                    print_info(f"Columns: {', '.join(headers[:5])}{'...' if len(headers) > 5 else ''}")
-                
-            elif not msg_element:
-                print_warning("No result table or message found in response")
-                results = [{'status': 'executed', 'message': 'Query completed'}]
+                                rd[headers[i]] = cols[i].get_text(strip=True)
+                        results.append(rd)
+                print_success(f"Parsed {len(results)} rows with {len(headers)} cols")
+            else:
+                nr = False
+                if container:
+                    for p in container.find_all('p'):
+                        t = p.get_text(strip=True).lower()
+                        if "no results" in t or "no records" in t or "0 rows" in t:
+                            nr = True; break
+                if nr:
+                    print_info("Query returned 0 rows")
+                elif is_read:
+                    print_warning("No result table found")
+                    results = [{'status': 'executed', 'message': 'Query completed'}]
+                elif affected_rows > 0 or not is_read:
+                    print_info("Non-read query executed")
+                else:
+                    print_warning("No result table found")
+                    results = [{'status': 'executed', 'message': 'Query completed'}]
 
         except Exception as e:
             print_error("Failed to parse results", str(e))
-            return {
-                'status': 'error', 
-                'message': f"Parse error: {str(e)}", 
-                'results': [],
-                'affected_rows': 0
-            }
+            return {'status': 'error', 'message': f"Parse error: {str(e)}",
+                    'results': [], 'affected_rows': 0}
 
-        # Summary
         print_divider()
-        print_success(f"Query execution complete - {len(results)} results returned")
+        print_success(f"Query execution complete - {len(results)} results")
         print_divider("═")
-        
-        return {
-            'status': 'success', 
-            'results': results,
-            'affected_rows': affected_rows,
-            'message': 'Query executed successfully'
-        }
+        return {'status': 'success', 'results': results,
+                'affected_rows': affected_rows,
+                'message': 'Query executed successfully'}
 
     except Exception as e:
-        print_error("Critical error during query execution", str(e))
-        print_divider()
+        print_error("Critical error", str(e))
         traceback.print_exc()
-        return {
-            'status': 'error', 
-            'message': str(e), 
-            'results': [],
-            'affected_rows': 0
-        }
-    
-# Register signal handler
+        return {'status': 'error', 'message': str(e),
+                'results': [], 'affected_rows': 0}
+
+
 signal.signal(signal.SIGINT, signal_handler)

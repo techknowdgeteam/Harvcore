@@ -1789,7 +1789,7 @@ def manage_accountmanagement_and_activities_jsons():
             
             # Also extract from accountmanagement if available
             if accountmanagement_data:
-                for key in ['login', 'password', 'server', 'activate_autotrading', 'bypass_restriction']:
+                for key in ['login', 'broker_password', 'server', 'activate_autotrading', 'bypass_restriction']:
                     if key in accountmanagement_data:
                         update_fields[key] = accountmanagement_data[key]
             
@@ -3499,7 +3499,7 @@ def move_fetched_investors():
             execution_start = normalize_date(execution_start_raw)
         Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
-        password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
+        broker_password = investor_data.get('broker_password', investor_data.get('broker_password', '')).strip()
         server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
         
         # Check required fields
@@ -3510,7 +3510,7 @@ def move_fetched_investors():
         
         missing_investor_fields = []
         if not login: missing_investor_fields.append('login')
-        if not password: missing_investor_fields.append('password')
+        if not broker_password: missing_investor_fields.append('broker_password')
         if not server: missing_investor_fields.append('server')
         
         is_complete = len(missing_required) == 0 and len(missing_investor_fields) == 0
@@ -3598,7 +3598,7 @@ def move_fetched_investors():
             execution_start = normalize_date(execution_start_raw)
         Terminal_path = investor_data.get('Terminal_path', investor_data.get('Terminal_path', '')).strip()
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
-        password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
+        broker_password = investor_data.get('broker_password', investor_data.get('broker_password', '')).strip()
         server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
         
         # Extract account mode and demo account fields
@@ -3614,7 +3614,7 @@ def move_fetched_investors():
         
         missing_investor_fields = []
         if not login: missing_investor_fields.append('login')
-        if not password: missing_investor_fields.append('password')
+        if not broker_password: missing_investor_fields.append('broker_password')
         if not server: missing_investor_fields.append('server')
         
         is_complete = len(missing_required) == 0 and len(missing_investor_fields) == 0
@@ -3714,9 +3714,9 @@ def move_fetched_investors():
             accountmanagement_path = inv_root / "accountmanagement.json"
             if not accountmanagement_path.exists():
                 accountmanagement_data = {}
-                if login and password and server:
+                if login and broker_password and server:
                     if login: accountmanagement_data['login'] = str(login).strip()
-                    if password: accountmanagement_data['password'] = password
+                    if broker_password: accountmanagement_data['broker_password'] = broker_password
                     if server: accountmanagement_data['server'] = server
                 # Set minimum contract duration
                 if 'requirements' not in accountmanagement_data:
@@ -3727,14 +3727,14 @@ def move_fetched_investors():
             # Update investors.json if credentials are present
             investor_entry = {
                 "LOGIN_ID": str(login).strip() if login else "",
-                "PASSWORD": password if password else "",
+                "broker_password": broker_password if broker_password else "",
                 "SERVER": server if server else "",
                 "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
                 "invested_with": invested_with if invested_with else "",
                 "Terminal_path": Terminal_path if Terminal_path else ""
             }
             
-            if login and password and server:
+            if login and broker_password and server:
                 investors_data[inv_id] = investor_entry
                 investors_updated.append(inv_id)
             else:
@@ -3751,7 +3751,7 @@ def move_fetched_investors():
         
         investor_entry = {
             "LOGIN_ID": str(login).strip(),
-            "PASSWORD": password,
+            "broker_password": broker_password,
             "SERVER": server,
             "DEMO_ACCOUNT": str(demo_account_raw) if demo_account_raw is not None else "0",
             "invested_with": invested_with,
@@ -3775,10 +3775,10 @@ def move_fetched_investors():
         
         investor_data = verified_data.get(inv_id, {})
         login = investor_data.get('login', investor_data.get('LOGIN', investor_data.get('LOGIN_ID', '')))
-        password = investor_data.get('password', investor_data.get('PASSWORD', '')).strip()
+        broker_password = investor_data.get('broker_password', investor_data.get('broker_password', '')).strip()
         server = investor_data.get('server', investor_data.get('SERVER', '')).strip()
         
-        if not login or not password or not server:
+        if not login or not broker_password or not server:
             investors_to_remove.append(inv_id)
             continue
         
@@ -14911,36 +14911,15 @@ def martingale_system(inv_id=None):
         # ========== SECTION 2: GET EFFECTIVE CURRENT BALANCE ==========
         def get_effective_current_balance():
             """
-            ALWAYS use recent_highest_balance as current balance.
-            Only fall back to MT5 if no recent_highest_balance exists.
+            ALWAYS use MT5 balance directly.
+            No longer uses recent_highest_balance.
             """
-            # ALWAYS try to get recent_highest_balance from activities.json
-            try:
-                inv_root = Path(INV_PATH) / user_brokerid
-                activities_path = inv_root / "activities.json"
-                
-                if activities_path.exists():
-                    with open(activities_path, 'r', encoding='utf-8') as f:
-                        activities = json.load(f)
-                    
-                    recent_balance = activities.get('recent_highest_balance')
-                    if recent_balance is not None:
-                        try:
-                            balance = float(recent_balance)
-                            print(f"  🔄 Using recent_highest_balance (${balance:.2f}) as current balance")
-                            return balance
-                        except (ValueError, TypeError):
-                            print(f"  ⚠️ recent_highest_balance has invalid value, falling back to MT5 balance")
-            except Exception as e:
-                print(f"  ⚠️ Error reading recent_highest_balance: {e}")
-            
-            # Fall back to MT5 balance ONLY if no recent_highest_balance exists
             account_info = mt5.account_info()
             if account_info:
-                print(f"  🔄 Falling back to MT5 balance (${account_info.balance:.2f})")
+                print(f"  📊 Using MT5 balance (${account_info.balance:.2f})")
                 return account_info.balance
             return None
-        
+
         def get_open_positions_total_risk():
             """
             Calculate total risk of all open positions.
@@ -14989,6 +14968,105 @@ def martingale_system(inv_id=None):
             return total_risk, position_risks
 
 
+
+        def get_starting_balance_and_drawdown():
+            """
+            Uses MT5 balance as current balance.
+            Starting balance comes from broker_balance in FETCHED_INVESTORS.
+            Adds daily_target_owed from activities.json to drawdown.
+            """
+            activities_path = inv_root / "activities.json"
+            
+            # Get current balance from MT5 (direct)
+            current_balance_for_drawdown = get_effective_current_balance()
+            if current_balance_for_drawdown is None:
+                print(f"  ✗ Failed to get MT5 balance")
+                return None, None
+            
+            # Get starting balance from broker_balance in FETCHED_INVESTORS
+            starting_balance = None
+            if FETCHED_INVESTORS:
+                try:
+                    with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                        fetched_data = json.load(f)
+                    investor_data = fetched_data.get(user_brokerid)
+                    if investor_data:
+                        broker_balance = investor_data.get('broker_balance')
+                        if broker_balance is not None:
+                            starting_balance = float(broker_balance)
+                            print(f"  │ Starting balance from broker_balance: ${starting_balance:.2f}")
+                except Exception as e:
+                    print(f"  │ Could not load FETCHED_INVESTORS: {e}")
+            
+            # If broker_balance not found, fall back to activities.json
+            if starting_balance is None and activities_path.exists():
+                try:
+                    with open(activities_path, 'r', encoding='utf-8') as f:
+                        activities = json.load(f)
+                    start_balance = activities.get('execution_start_balance')
+                    if start_balance is not None:
+                        starting_balance = float(start_balance)
+                        print(f"  │ Starting balance from activities.json: ${starting_balance:.2f}")
+                except Exception as e:
+                    print(f"  │ Could not load activities.json: {e}")
+            
+            # Final fallback: use current balance as starting balance
+            if starting_balance is None:
+                starting_balance = current_balance_for_drawdown
+                print(f"  │ No starting balance found, using current balance: ${starting_balance:.2f}")
+            
+            # ========== GET DAILY TARGET OWED ==========
+            daily_target_owed = 0.0
+            if activities_path.exists():
+                try:
+                    with open(activities_path, 'r', encoding='utf-8') as f:
+                        activities = json.load(f)
+                    daily_target_data = activities.get('daily_target_met', {})
+                    daily_target_owed = daily_target_data.get('daily_target_owed', 0.0)
+                    if daily_target_owed > 0:
+                        print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+                    else:
+                        print(f"  │ Daily target owed: $0.00 (no outstanding target)")
+                except Exception as e:
+                    print(f"  │ Could not read daily_target_owed: {e}")
+            
+            # Calculate drawdown
+            base_drawdown = max(0, starting_balance - current_balance_for_drawdown)
+            total_drawdown_with_target = base_drawdown + daily_target_owed
+            
+            print(f"  │ Starting balance: ${starting_balance:.2f}")
+            print(f"  │ Current MT5 balance: ${current_balance_for_drawdown:.2f}")
+            print(f"  │ Base drawdown: ${base_drawdown:.2f}")
+            print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
+            print(f"  │ Total Target recovery: Drawdown + Daily target owed = ${total_drawdown_with_target:.2f}")
+            
+            # ========== Pre-drawdown assumption ==========
+            if pre_drawdown_assumption:
+                print(f"\n  🔄 PRE-DRAWDOWN ASSUMPTION ENABLED:")
+                print(f"  │ Calculating risk from open positions...")
+                
+                positions_risk, positions_details = get_open_positions_total_risk()
+                
+                if positions_risk > 0:
+                    print(f"  │ Found {len(positions_details)} open position(s) with stop losses:")
+                    for pos in positions_details:
+                        print(f"  │   ├─ {pos['symbol']} {pos['type']}: ${pos['risk']:.2f} risk")
+                    print(f"  │ Total open positions risk: ${positions_risk:.2f}")
+                    
+                    original_drawdown = total_drawdown_with_target
+                    total_drawdown_with_target = total_drawdown_with_target + positions_risk
+                    print(f"  │ Pre-drawdown = total drawdown + positions risk")
+                    print(f"  │ ${original_drawdown:.2f} + ${positions_risk:.2f} = ${total_drawdown_with_target:.2f}")
+                else:
+                    print(f"  │ No open positions with stop losses found")
+                    print(f"  │ Pre-drawdown = existing total drawdown (${total_drawdown_with_target:.2f})")
+            else:
+                print(f"  │ Pre-drawdown assumption DISABLED")
+                print(f"  │ Using total drawdown: ${total_drawdown_with_target:.2f}")
+            
+            return starting_balance, total_drawdown_with_target
+
+            
         # ========== SECTION 1: LOAD CONFIGURATION ==========
         def load_configuration():
             """Load and parse martingale configuration from accountmanagement.json"""
@@ -15161,53 +15239,26 @@ def martingale_system(inv_id=None):
 
         effective_balance = get_effective_current_balance()
         if effective_balance is None:
-            print(f"  ✗ Failed to get effective balance - MT5 not initialized?")
+            print(f"  ✗ Failed to get MT5 balance - MT5 not initialized?")
             stats["errors"] += 1
             continue
 
         current_balance = effective_balance
         stats["current_balance"] = current_balance
-        print(f"  │ Current effective balance: ${current_balance:.2f}")
+        print(f"  │ Current MT5 balance: ${current_balance:.2f}")
+        print(f"  │ Using MT5 balance directly for drawdown calculation")
 
-        # Check if we're using recent_highest_balance as current balance
-        use_recent_flag = False
-        if os.path.exists(ALL_FETCHED_INVESTORS):
-            try:
-                with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                    all_fetched_data_temp = json.load(f)
-                investor_data_temp = all_fetched_data_temp.get(user_brokerid)
-                if investor_data_temp:
-                    root_flag = investor_data_temp.get('use_recent_highest_balance_as_current_balance', False)
-                    if root_flag:
-                        use_recent_flag = True
-                    else:
-                        settings_temp = investor_data_temp.get('settings', {})
-                        settings_flag = settings_temp.get('use_recent_highest_balance_as_current_balance', False)
-                        if settings_flag:
-                            use_recent_flag = True
-            except Exception as e:
-                pass
-
-        if use_recent_flag:
-            print(f"  │ Using recent_highest_balance as current balance (flag enabled)")
-        else:
-            print(f"  │ Using MT5 balance as current balance")
         # ========== SECTION 3: GET EXECUTION START BALANCE & DRAWDOWN ==========
-        def get_starting_balance_and_drawdown():
-            """
-            Uses recent_highest_balance from activities.json as current balance.
-            Starting balance comes from broker_balance in FETCHED_INVESTORS.
-            Adds daily_target_owed from activities.json to drawdown.
-            """
+        def get_execution_start_balance_and_stats():
+            """Original loss_streak function with pre-drawdown support using MT5 balance"""
             activities_path = inv_root / "activities.json"
             
-            # Get current balance (always from recent_highest_balance first)
-            current_balance_for_drawdown = get_effective_current_balance()
-            if current_balance_for_drawdown is None:
-                print(f"  ✗ Failed to get effective balance")
-                return None, None
+            # Get current balance from MT5 (direct)
+            effective_balance_for_stats = get_effective_current_balance()
+            if effective_balance_for_stats is None:
+                effective_balance_for_stats = current_balance
             
-            # Get starting balance from broker_balance in FETCHED_INVESTORS
+            # Get starting balance from broker_balance
             starting_balance = None
             if FETCHED_INVESTORS:
                 try:
@@ -15234,9 +15285,9 @@ def martingale_system(inv_id=None):
                 except Exception as e:
                     print(f"  │ Could not load activities.json: {e}")
             
-            # Final fallback: use current balance as starting balance
+            # Final fallback: use current balance
             if starting_balance is None:
-                starting_balance = current_balance_for_drawdown
+                starting_balance = effective_balance_for_stats
                 print(f"  │ No starting balance found, using current balance: ${starting_balance:.2f}")
             
             # ========== GET DAILY TARGET OWED ==========
@@ -15254,42 +15305,30 @@ def martingale_system(inv_id=None):
                 except Exception as e:
                     print(f"  │ Could not read daily_target_owed: {e}")
             
-            # Calculate drawdown
-            base_drawdown = max(0, starting_balance - current_balance_for_drawdown)
-            total_drawdown_with_target = base_drawdown + daily_target_owed
+            # Calculate total profit/loss
+            total_profit = effective_balance_for_stats - starting_balance
+            
+            total_profits = max(0, total_profit)
+            total_losses = max(0, -total_profit)
+            
+            winrate = 0
+            lossrate = 0
+            total_wins_value = 0
+            total_losses_value = 0
+            winning_trades_count = 0
+            losing_trades_count = 0
+            
+            later_balance = starting_balance + total_profits
             
             print(f"  │ Starting balance: ${starting_balance:.2f}")
-            print(f"  │ Current effective balance: ${current_balance_for_drawdown:.2f}")
-            print(f"  │ Base drawdown: ${base_drawdown:.2f}")
+            print(f"  │ Current MT5 balance: ${effective_balance_for_stats:.2f}")
+            print(f"  │ Total P&L: ${total_profit:.2f}")
+            print(f"  │ Later-balance (start + profits): ${later_balance:.2f}")
             print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
-            print(f"  │ Total Target recovery: Drawdown + Daily target owed = ${total_drawdown_with_target:.2f}")
             
-            # ========== Pre-drawdown assumption ==========
-            if pre_drawdown_assumption:
-                print(f"\n  🔄 PRE-DRAWDOWN ASSUMPTION ENABLED:")
-                print(f"  │ Calculating risk from open positions...")
-                
-                positions_risk, positions_details = get_open_positions_total_risk()
-                
-                if positions_risk > 0:
-                    print(f"  │ Found {len(positions_details)} open position(s) with stop losses:")
-                    for pos in positions_details:
-                        print(f"  │   ├─ {pos['symbol']} {pos['type']}: ${pos['risk']:.2f} risk")
-                    print(f"  │ Total open positions risk: ${positions_risk:.2f}")
-                    
-                    original_drawdown = total_drawdown_with_target
-                    total_drawdown_with_target = total_drawdown_with_target + positions_risk
-                    print(f"  │ Pre-drawdown = total drawdown + positions risk")
-                    print(f"  │ ${original_drawdown:.2f} + ${positions_risk:.2f} = ${total_drawdown_with_target:.2f}")
-                else:
-                    print(f"  │ No open positions with stop losses found")
-                    print(f"  │ Pre-drawdown = existing total drawdown (${total_drawdown_with_target:.2f})")
-            else:
-                print(f"  │ Pre-drawdown assumption DISABLED")
-                print(f"  │ Using total drawdown: ${total_drawdown_with_target:.2f}")
-            
-            return starting_balance, total_drawdown_with_target
-
+            return (starting_balance, total_profits, total_losses, 0, later_balance, 
+                    winrate, lossrate, total_wins_value, total_losses_value, 
+                    winning_trades_count, losing_trades_count, daily_target_owed)
 
 
         # Execute based on martingale type
@@ -15325,16 +15364,16 @@ def martingale_system(inv_id=None):
             stats["losing_trades_count"] = 0
             
             print(f"\n  📉 Drawdown Analysis (Balance-Based):")
-            print(f"  │ Starting balance (recent_highest_balance): ${execution_start_balance:.2f}")
-            print(f"  │ Current balance: ${current_balance:.2f}")
+            print(f"  │ Starting balance: ${execution_start_balance:.2f}")
+            print(f"  │ Current MT5 balance: ${current_balance:.2f}")
             print(f"  │ Daily target owed: ${daily_target_owed:.2f}")
             print(f"  │ Total drawdown (including daily target): ${total_drawdown:.2f}")
             
             if total_drawdown == 0:
                 print(f"  │ ✓ No drawdown - account is at or above starting balance")
             else:
-                print(f"  │ Drawdown detected: ${total_drawdown:.2f} ({(total_drawdown/execution_start_balance*100):.2f}% from start)")
-            
+                print(f"  │ Drawdown detected: ${total_drawdown:.2f} ({(total_drawdown/execution_start_balance*100):.2f}% from start)") 
+
         else:
             # Original loss_streak behavior with pre-drawdown support
             # ========== SECTION 3: GET EXECUTION START BALANCE FOR LOSS_STREAK ==========
@@ -28022,498 +28061,751 @@ def apply_dynamic_breakeven(inv_id=None):
 
 def trades_analytics(inv_id=None):
     """
-    Fetch and record all individual trades grouped by risk configurations,
-    using a single chronological window from execution start date to contract expiry.
-    
-    Reconciles missing profiles and fields between ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS.
-    Also tracks unauthorized actions and updates the unauthorized_actions flag.
-    
-    NEW: Daily trades record now includes all_trades with detailed trade information.
-    NEW: Risk reward is extracted from trade comments (highest RR found).
-    FIXED: all_trades field is ALWAYS included in daily records, even if empty.
-    FIXED: take_profit is now properly included in trade details.
+    Fetch and record trade-level analytics at ROOT LEVEL.
+
+    Produces, per investor, at the ROOT of the JSON record:
+      - analytics                    (flat scalar metrics)
+      - authorized_trades            (list of {symbol, volume, ticket, entry, stoploss,
+                                      target, pnl, closed_time, comment, risk_reward})
+      - unauthorized_trades          (same schema)
+      - daily_trades_record          ({ "YYYY-MM-DD": {trades_count, trade_summary, all_trades, profit_and_loss} })
+      - symbols_traded               (list of {symbol, total_trades, total_profit, total_loss})
+      - risk_reward_distribution     (dict { "1.0": count, "2.0": count, ... })
+      - drawdown_series              (list of {timestamp, peak_equity, equity, drawdown, drawdown_pct})
+      - highest_drawdown             (float — deepest peak-to-trough equity dip)
+
+    Also updates `unauthorized_action_detected` and `unauthorized_actions`.
+
+    Explicitly does NOT touch: daily_target_met, daily_balance_log, accountmanagement,
+    analytics_history, revenue_history, reset_contract.
     """
-    
+
     print("\n" + "="*80)
     print(" 📊 TRADES ANALYTICS SYSTEM DIAGNOSTIC INITIALIZED".ljust(79) + "=")
     print("="*80)
-    
+
     # ========================================================================
-    # DISPLAY ALL FILE PATHS BEING USED
+    # DISPLAY FILE PATHS
     # ========================================================================
     print("\n" + "─"*80)
     print(" 📁 FILE PATHS CONFIGURATION")
     print("─"*80)
-    
-    try:
-        print(f" │ INV_PATH: {INV_PATH}")
-    except NameError:
-        print(" │ ⚠️ INV_PATH not defined, using default")
-    
-    try:
-        print(f" │ FETCHED_INVESTORS: {FETCHED_INVESTORS}")
-    except NameError:
-        print(" │ ⚠️ FETCHED_INVESTORS not defined")
-    
-    try:
-        print(f" │ UPDATED_INVESTORS: {UPDATED_INVESTORS}")
-    except NameError:
-        print(" │ ⚠️ UPDATED_INVESTORS not defined")
-    
-    try:
-        print(f" │ ALL_FETCHED_INVESTORS: {ALL_FETCHED_INVESTORS}")
-    except NameError:
-        print(" │ ⚠️ ALL_FETCHED_INVESTORS not defined")
-    
-    try:
-        print(f" │ ALL_UPDATED_INVESTORS: {ALL_UPDATED_INVESTORS}")
-    except NameError:
-        print(" │ ⚠️ ALL_UPDATED_INVESTORS not defined")
-    
+    for name in ("INV_PATH", "FETCHED_INVESTORS", "UPDATED_INVESTORS",
+                 "ALL_FETCHED_INVESTORS", "ALL_UPDATED_INVESTORS"):
+        try:
+            print(f" │ {name}: {globals()[name]}")
+        except NameError:
+            print(f" │ ⚠️ {name} not defined")
     print("─"*80)
-    
+
     stats = {
         "investor_id": inv_id if inv_id else "all",
         "investors_processed": 0,
         "total_trades_recorded": 0,
         "processing_success": False
     }
-    
-    # Check usersdictionary presence (assumed defined globally in your script context)
+
     try:
         active_users_dict = usersdictionary
     except NameError:
         active_users_dict = {}
-        print(" ⚠️ Warning: 'usersdictionary' not found globally. Initializing blank fallback context.")
+        print(" ⚠️ 'usersdictionary' not found globally. Using empty fallback.")
 
     investor_ids = [inv_id] if inv_id else list(active_users_dict.keys())
     if not investor_ids:
-        print(" No active investors discovered inside runtime context properties.")
+        print(" No active investors found.")
         print("="*80)
         return stats
-    
-    # Load ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS for updating
-    fetched_data = {}
-    updated_data = {}
-    all_fetched_data = {}
-    all_updated_data = {}
-    
-    # Load FETCHED_INVESTORS (legacy)
-    if os.path.exists(FETCHED_INVESTORS):
+
+    # Load all four JSON files (read-only here; writes happen at end)
+    def _load(path):
+        if not os.path.exists(path):
+            print(f" │ ⚠️ Not found: {path}")
+            return {}
         try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                fetched_data = json.load(f)
-            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
         except Exception as e:
-            print(f" │ Error loading FETCHED_INVESTORS: {e}")
-    else:
-        print(f" │ ⚠️ FETCHED_INVESTORS not found at: {FETCHED_INVESTORS}")
-    
-    # Load UPDATED_INVESTORS (legacy)
-    if os.path.exists(UPDATED_INVESTORS):
-        try:
-            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                updated_data = json.load(f)
-            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading UPDATED_INVESTORS: {e}")
-    else:
-        print(f" │ ⚠️ UPDATED_INVESTORS not found at: {UPDATED_INVESTORS}")
-    
-    # Load ALL_FETCHED_INVESTORS
-    if os.path.exists(ALL_FETCHED_INVESTORS):
-        try:
-            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_fetched_data = json.load(f)
-            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
-    else:
-        print(f" │ ⚠️ ALL_FETCHED_INVESTORS not found at: {ALL_FETCHED_INVESTORS}")
-    
-    # Load ALL_UPDATED_INVESTORS
-    if os.path.exists(ALL_UPDATED_INVESTORS):
-        try:
-            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_updated_data = json.load(f)
-            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading ALL_UPDATED_INVESTORS: {e}")
-    else:
-        print(f" │ ⚠️ ALL_UPDATED_INVESTORS not found at: {ALL_UPDATED_INVESTORS}")
-    
-    # Dictionary to keep track of generated analytics structures for synchronization later
-    generated_analytics_registry = {}
-    
+            print(f" │ Error loading {path}: {e}")
+            return {}
+
+    fetched_data = _load(FETCHED_INVESTORS)
+    updated_data = _load(UPDATED_INVESTORS)
+    all_fetched_data = _load(ALL_FETCHED_INVESTORS)
+    all_updated_data = _load(ALL_UPDATED_INVESTORS)
+    print(f" │ Loaded: fetched={len(fetched_data)}  updated={len(updated_data)}  "
+          f"all_fetched={len(all_fetched_data)}  all_updated={len(all_updated_data)}")
+
+    # Registry of root-level payloads per investor (for the sync step later)
+    generated_payload_registry = {}
+
     # ========================================================================
-    # HELPER FUNCTION: Extract risk reward from trade comment
+    # HELPERS
     # ========================================================================
+    import re
+
     def extract_risk_reward_from_comment(comment):
-        """
-        Extract risk reward value from trade comment.
-        Comment format examples:
-        - "strategy|H0G0|R2" -> returns 2
-        - "strategy|H0G0|R1.5" -> returns 1.5
-        - "strategy|H0G0|Sbu|L2|R3" -> returns 3
-        
-        Returns 0 if no R value found.
-        """
+        """Extract highest R<number> from a trade comment. Returns float or 0."""
         if not comment or not isinstance(comment, str):
             return 0
-        
-        # Look for pattern R followed by number (with optional decimal)
-        import re
-        match = re.search(r'R([0-9]+(?:\.[0-9]+)?)', comment)
-        if match:
+        m = re.search(r'R([0-9]+(?:\.[0-9]+)?)', comment)
+        if m:
             try:
-                return float(match.group(1))
+                return float(m.group(1))
             except (ValueError, TypeError):
                 return 0
         return 0
-    
+
+    def coerce_dt(ts):
+        """Epoch seconds -> ISO string 'YYYY-MM-DD HH:MM:SS'."""
+        return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+
+    def day_key(ts):
+        return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+
+    def week_key(ts):
+        """Returns 'YYYY-Www' (ISO week)."""
+        d = datetime.fromtimestamp(ts).isocalendar()
+        return f"{d[0]}-W{d[1]:02d}"
+
     # ========================================================================
-    # HELPER FUNCTION: Calculate daily trades record with detailed trades
+    # DAILY TRADES RECORD
     # ========================================================================
     def calculate_daily_trades_record(trades_pool):
-        """
-        Calculate daily trades record with:
-        - trades_count per day
-        - trade_summary per symbol (PNL per symbol)
-        - all_trades with detailed trade info per symbol (ALWAYS INCLUDED)
-        - profit_and_loss for the day
-        
-        CRITICAL FIX: all_trades field is ALWAYS included, even if empty.
-        FIXED: take_profit is now included in trade details.
-        """
+        """Group trades by day. Includes detailed all_trades per symbol per day."""
         if not trades_pool:
             return {}
-        
+
         daily_records = {}
-        
-        # Group trades by date
-        trades_by_date = {}
+        by_day = {}
         for t in trades_pool:
-            trade_date = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
-            if trade_date not in trades_by_date:
-                trades_by_date[trade_date] = []
-            trades_by_date[trade_date].append(t)
-        
-        # Process each day
-        for date, trades in trades_by_date.items():
-            # Count trades for the day
+            d = day_key(t["raw_close_time"])
+            by_day.setdefault(d, []).append(t)
+
+        for date, trades in by_day.items():
             trades_count = len(trades)
-            
-            # Calculate P&L per symbol and collect detailed trades
             symbol_pnl = {}
             symbol_trades = {}
             total_daily_pnl = 0.0
-            
+
             for t in trades:
-                symbol = t["symbol"]
+                sym = t["symbol"]
                 pnl = t["total_pnl"]
-                
-                # Accumulate P&L per symbol
-                symbol_pnl[symbol] = symbol_pnl.get(symbol, 0.0) + pnl
+                symbol_pnl[sym] = symbol_pnl.get(sym, 0.0) + pnl
                 total_daily_pnl += pnl
-                
-                # Initialize symbol trade list if not exists
-                if symbol not in symbol_trades:
-                    symbol_trades[symbol] = []
-                
-                # Add detailed trade info with ALL fields
-                trade_detail = {
+
+                symbol_trades.setdefault(sym, []).append({
                     "order_type": t.get("type", "UNKNOWN"),
                     "volume": t.get("volume", 0),
                     "pnl": round(pnl, 2),
                     "entry_price": t.get("entry_price", 0),
-                    "exit_price": t.get("exit_price", 0) if "exit_price" in t else 0,
+                    "exit_price": t.get("exit_price", 0),
                     "ticket": t.get("ticket", 0),
                     "risk_reward": t.get("risk_reward", 0),
                     "time_open": t.get("time_open", ""),
                     "time_close": t.get("time_close", ""),
-                    "take_profit": t.get("take_profit", 0),  # FIXED: Include take_profit
-                    "tp": t.get("take_profit", 0),  # Also include as 'tp' for compatibility
-                    "stoploss": t.get("stoploss", 0)  # Also include stoploss
-                }
-                symbol_trades[symbol].append(trade_detail)
-            
-            # Round symbol P&L values
-            for symbol in symbol_pnl:
-                symbol_pnl[symbol] = round(symbol_pnl[symbol], 2)
-            
-            # CRITICAL FIX: ALWAYS include all_trades field, even if empty
+                    "take_profit": t.get("take_profit", 0),
+                    "tp": t.get("take_profit", 0),
+                    "stoploss": t.get("stoploss", 0),
+                })
+
+            for s in symbol_pnl:
+                symbol_pnl[s] = round(symbol_pnl[s], 2)
+
             daily_records[date] = {
                 "trades_count": trades_count,
                 "trade_summary": symbol_pnl,
-                "all_trades": symbol_trades,  # ALWAYS included
+                "all_trades": symbol_trades,
                 "profit_and_loss": round(total_daily_pnl, 2)
             }
-        
+
         return daily_records
-    
+
     # ========================================================================
-    # HELPER FUNCTION: Calculate recent risk reward from trade comments
+    # TRADES-PER-DAY (lowest/highest/average)
     # ========================================================================
-    def calculate_recent_risk_reward(trades_pool):
+    def calculate_trade_metrics(trades_pool):
+        if not trades_pool:
+            return {
+                "lowest_trades_per_day": 0,
+                "highest_trades_per_day": 0,
+                "average_trades_per_day": 0,
+                "lowest_trade_dates": [],
+                "highest_trade_dates": [],
+                "average_trade_dates": []
+            }
+
+        per_day = {}
+        for t in trades_pool:
+            d = day_key(t["raw_close_time"])
+            per_day[d] = per_day.get(d, 0) + 1
+
+        if not per_day:
+            return {
+                "lowest_trades_per_day": 0,
+                "highest_trades_per_day": 0,
+                "average_trades_per_day": 0,
+                "lowest_trade_dates": [],
+                "highest_trade_dates": [],
+                "average_trade_dates": []
+            }
+
+        values = list(per_day.values())
+        lowest = min(values)
+        highest = max(values)
+        average = round(sum(values) / len(values))
+
+        # Keep average distinct where possible
+        if len(set(values)) > 1:
+            if average == lowest:
+                average = lowest + 1
+            if average == highest:
+                average = highest - 1
+            if average < lowest:
+                average = lowest
+            if average > highest:
+                average = highest
+
+        lowest_dates = [d for d, v in per_day.items() if v == lowest]
+        highest_dates = [d for d, v in per_day.items() if v == highest]
+        average_dates = [d for d, v in per_day.items() if v == average]
+        if not average_dates:
+            # pick the day closest to average
+            closest = sorted(per_day.items(), key=lambda kv: abs(kv[1] - average))[:1]
+            average_dates = [d for d, _ in closest]
+
+        return {
+            "lowest_trades_per_day": lowest,
+            "highest_trades_per_day": highest,
+            "average_trades_per_day": average,
+            "lowest_trade_dates": lowest_dates,
+            "highest_trade_dates": highest_dates,
+            "average_trade_dates": average_dates
+        }
+
+    # ========================================================================
+    # TRADES-PER-WEEK (lowest/highest/average)
+    # ========================================================================
+    def calculate_week_metrics(trades_pool):
+        if not trades_pool:
+            return {
+                "lowest_trades_per_week": 0,
+                "highest_trades_per_week": 0,
+                "average_trades_per_week": 0,
+                "lowest_trade_weeks": [],
+                "highest_trade_weeks": [],
+                "average_trade_weeks": []
+            }
+
+        per_week = {}
+        for t in trades_pool:
+            w = week_key(t["raw_close_time"])
+            per_week[w] = per_week.get(w, 0) + 1
+
+        if not per_week:
+            return {
+                "lowest_trades_per_week": 0,
+                "highest_trades_per_week": 0,
+                "average_trades_per_week": 0,
+                "lowest_trade_weeks": [],
+                "highest_trade_weeks": [],
+                "average_trade_weeks": []
+            }
+
+        values = list(per_week.values())
+        lowest = min(values)
+        highest = max(values)
+        average = round(sum(values) / len(values))
+
+        if len(set(values)) > 1:
+            if average == lowest:
+                average = lowest + 1
+            if average == highest:
+                average = highest - 1
+            if average < lowest:
+                average = lowest
+            if average > highest:
+                average = highest
+
+        lowest_weeks = [w for w, v in per_week.items() if v == lowest]
+        highest_weeks = [w for w, v in per_week.items() if v == highest]
+        average_weeks = [w for w, v in per_week.items() if v == average]
+        if not average_weeks:
+            closest = sorted(per_week.items(), key=lambda kv: abs(kv[1] - average))[:1]
+            average_weeks = [w for w, _ in closest]
+
+        return {
+            "lowest_trades_per_week": lowest,
+            "highest_trades_per_week": highest,
+            "average_trades_per_week": average,
+            "lowest_trade_weeks": lowest_weeks,
+            "highest_trade_weeks": highest_weeks,
+            "average_trade_weeks": average_weeks
+        }
+
+    # ========================================================================
+    # DRAWDOWN (peak-to-trough on chronological trade PnL)
+    # ========================================================================
+    def calculate_drawdown_metrics(trades_pool, starting_balance=0.0):
         """
-        Calculate recent risk-reward ratio by extracting R values from trade comments.
-        Returns the highest risk reward value found across all trades.
-        
-        If no R value found, returns 0.
+        Walk trades in chronological order, tracking equity = starting_balance + cumulative PnL.
+        A peak is the highest equity so far. Drawdown at each step = peak - equity.
+        highest_drawdown = max over all steps (deepest point, regardless of recovery).
+        Returns (highest_drawdown_abs, highest_drawdown_pct, series)
         """
         if not trades_pool:
-            return 0
-        
+            return 0.0, 0.0, []
+
+        ordered = sorted(trades_pool, key=lambda x: x["raw_close_time"])
+        equity = float(starting_balance or 0.0)
+        peak = equity
+        max_dd_abs = 0.0
+        max_dd_pct = 0.0
+        series = []
+
+        for t in ordered:
+            equity += t["total_pnl"]
+            if equity > peak:
+                peak = equity
+            dd_abs = peak - equity
+            dd_pct = (dd_abs / peak * 100.0) if peak > 0 else 0.0
+
+            if dd_abs > max_dd_abs:
+                max_dd_abs = dd_abs
+                max_dd_pct = dd_pct
+
+            series.append({
+                "timestamp": coerce_dt(t["raw_close_time"]),
+                "ticket": t.get("ticket"),
+                "symbol": t.get("symbol"),
+                "pnl": round(t["total_pnl"], 2),
+                "equity": round(equity, 2),
+                "peak_equity": round(peak, 2),
+                "drawdown": round(dd_abs, 2),
+                "drawdown_pct": round(dd_pct, 2)
+            })
+
+        return round(max_dd_abs, 2), round(max_dd_pct, 2), series
+
+    # ========================================================================
+    # SYMBOL AGGREGATES
+    # ========================================================================
+    def calculate_symbols_traded(trades_pool):
+        sym_map = {}
+        for t in trades_pool:
+            s = t["symbol"]
+            m = sym_map.setdefault(s, {
+                "total_trades": 0,
+                "total_profit": 0.0,
+                "total_loss": 0.0,
+            })
+            m["total_trades"] += 1
+            if t["total_pnl"] > 0:
+                m["total_profit"] += t["total_pnl"]
+            elif t["total_pnl"] < 0:
+                m["total_loss"] += abs(t["total_pnl"])
+        result = []
+        for s, m in sym_map.items():
+            result.append({
+                "symbol": s,
+                "total_trades": m["total_trades"],
+                "total_profit": round(m["total_profit"], 2),
+                "total_loss": round(m["total_loss"], 2),
+            })
+        return result
+
+    # ========================================================================
+    # RISK-REWARD DISTRIBUTION
+    # ========================================================================
+    def calculate_rr_distribution(trades_pool):
+        dist = {}
+        for t in trades_pool:
+            rr = t.get("risk_reward", 0) or 0
+            key = f"{float(rr):.2f}"
+            dist[key] = dist.get(key, 0) + 1
+        return dist
+
+    # ========================================================================
+    # CONSECUTIVE LOSSES (flat only, no nested trades)
+    # ========================================================================
+    def calculate_consecutive_losses(trades_pool):
+        ordered = sorted(trades_pool, key=lambda x: x["raw_close_time"])
+        max_count = 0
+        max_amount = 0.0
+        cur_count = 0
+        cur_amount = 0.0
+        for t in ordered:
+            if t["total_pnl"] < 0:
+                cur_count += 1
+                cur_amount += abs(t["total_pnl"])
+                if cur_count > max_count:
+                    max_count = cur_count
+                    max_amount = cur_amount
+                elif cur_count == max_count and cur_amount > max_amount:
+                    max_amount = cur_amount
+            else:
+                cur_count = 0
+                cur_amount = 0.0
+        return max_count, round(max_amount, 2)
+
+    # ========================================================================
+    # CONSECUTIVE DAYS IN LOSS (flat only)
+    # ========================================================================
+    def calculate_consecutive_loss_days(trades_pool):
+        if not trades_pool:
+            return 0, 0.0
+        per_day_pnl = {}
+        for t in trades_pool:
+            d = day_key(t["raw_close_time"])
+            per_day_pnl[d] = per_day_pnl.get(d, 0.0) + t["total_pnl"]
+        ordered_days = sorted(per_day_pnl.keys())
+        max_days = 0
+        max_loss = 0.0
+        cur_days = 0
+        cur_loss = 0.0
+        for d in ordered_days:
+            if per_day_pnl[d] < 0:
+                cur_days += 1
+                cur_loss += abs(per_day_pnl[d])
+                if cur_days > max_days:
+                    max_days = cur_days
+                    max_loss = cur_loss
+                elif cur_days == max_days and cur_loss > max_loss:
+                    max_loss = cur_loss
+            else:
+                cur_days = 0
+                cur_loss = 0.0
+        return max_days, round(max_loss, 2)
+
+    # ========================================================================
+    # ANALYTICS BUILDER — flat root-level object
+    # ========================================================================
+    def build_analytics(trades_pool, starting_balance):
+        if not trades_pool:
+            return {
+                "start_date": None,
+                "end_date": None,
+                "last_updated": datetime.now().isoformat(),
+                "total_trades": 0,
+                "total_pnl": 0.0,
+                "profit_trades": 0,
+                "loss_trades": 0,
+                "profit_amount": 0.0,
+                "loss_amount": 0.0,
+                "lowest_trades_per_day": 0,
+                "highest_trades_per_day": 0,
+                "average_trades_per_day": 0,
+                "lowest_trade_dates": [],
+                "highest_trade_dates": [],
+                "average_trade_dates": [],
+                "lowest_trades_per_week": 0,
+                "highest_trades_per_week": 0,
+                "average_trades_per_week": 0,
+                "lowest_trade_weeks": [],
+                "highest_trade_weeks": [],
+                "average_trade_weeks": [],
+                "highest_loss_per_trade": 0.0,
+                "highest_drawdown": 0.0,
+                "highest_drawdown_pct": 0.0,
+                "symbols_traded": 0,
+                "closed_deals_with_sl_tp": 0,
+                "closed_deals_without_sl_tp": 0,
+                "consecutive_losses_count": 0,
+                "total_loss_pnl": 0.0,
+                "consecutive_days_in_loss_count": 0,
+                "consecutive_days_in_loss_count_total_loss_pnl": 0.0,
+                "revenue_percentage": 0.0,
+                "revenue_profit_percentage": 0.0,
+                "revenue_loss_percentage": 0.0,
+                "recent_risk_reward": 0,
+            }
+
+        ordered = sorted(trades_pool, key=lambda x: x["raw_close_time"])
+        p_list = [t for t in ordered if t["total_pnl"] > 0]
+        l_list = [t for t in ordered if t["total_pnl"] < 0]
+
+        total_pnl = sum(t["total_pnl"] for t in ordered)
+        p_rev = sum(t["total_pnl"] for t in p_list)
+        l_rev = sum(t["total_pnl"] for t in l_list)
+
+        highest_loss_per_trade = 0.0
+        for t in ordered:
+            if t["total_pnl"] < 0:
+                v = abs(t["total_pnl"])
+                if v > highest_loss_per_trade:
+                    highest_loss_per_trade = v
+
+        sl_tp = sum(1 for t in ordered if t["stoploss"] > 0 and t["take_profit"] > 0)
+        no_sl_tp = sum(1 for t in ordered if not (t["stoploss"] > 0 and t["take_profit"] > 0))
+
+        day_metrics = calculate_trade_metrics(ordered)
+        week_metrics = calculate_week_metrics(ordered)
+
+        max_losses_count, max_losses_amount = calculate_consecutive_losses(ordered)
+        max_loss_days, max_loss_days_amount = calculate_consecutive_loss_days(ordered)
+
+        max_dd_abs, max_dd_pct, _ = calculate_drawdown_metrics(ordered, starting_balance)
+
+        sym_map = {}
+        for t in ordered:
+            sym_map.setdefault(t["symbol"], 0)
+            sym_map[t["symbol"]] += 1
+
         highest_rr = 0
-        
-        for trade in trades_pool:
-            # Get comment from trade data
-            comment = trade.get("comment", "")
-            if not comment:
-                continue
-            
-            # Extract risk reward from comment
-            rr = extract_risk_reward_from_comment(comment)
-            
-            # Track the highest RR found
+        for t in ordered:
+            rr = t.get("risk_reward", 0) or 0
             if rr > highest_rr:
                 highest_rr = rr
-        
-        # If no RR found, return 0
-        return highest_rr
-    
-    # Iterate System Investors
+
+        # Revenue split
+        total_rev = abs(p_rev) + abs(l_rev)
+        if total_rev > 0:
+            p_pct = round((abs(p_rev) / total_rev) * 100.0, 2)
+            l_pct = round((abs(l_rev) / total_rev) * 100.0, 2)
+            rev_pct = round(p_pct - l_pct, 2)
+            if rev_pct < 0:
+                rev_pct = 0.0
+        else:
+            p_pct = l_pct = rev_pct = 0.0
+
+        return {
+            "start_date": day_key(ordered[0]["raw_close_time"]),
+            "end_date": day_key(ordered[-1]["raw_close_time"]),
+            "last_updated": datetime.now().isoformat(),
+
+            "total_trades": len(ordered),
+            "total_pnl": round(total_pnl, 2),
+            "profit_trades": len(p_list),
+            "loss_trades": len(l_list),
+            "profit_amount": round(p_rev, 2),
+            "loss_amount": round(abs(l_rev), 2),
+
+            "lowest_trades_per_day": day_metrics["lowest_trades_per_day"],
+            "highest_trades_per_day": day_metrics["highest_trades_per_day"],
+            "average_trades_per_day": day_metrics["average_trades_per_day"],
+            "lowest_trade_dates": day_metrics["lowest_trade_dates"],
+            "highest_trade_dates": day_metrics["highest_trade_dates"],
+            "average_trade_dates": day_metrics["average_trade_dates"],
+
+            "lowest_trades_per_week": week_metrics["lowest_trades_per_week"],
+            "highest_trades_per_week": week_metrics["highest_trades_per_week"],
+            "average_trades_per_week": week_metrics["average_trades_per_week"],
+            "lowest_trade_weeks": week_metrics["lowest_trade_weeks"],
+            "highest_trade_weeks": week_metrics["highest_trade_weeks"],
+            "average_trade_weeks": week_metrics["average_trade_weeks"],
+
+            "highest_loss_per_trade": round(highest_loss_per_trade, 2),
+            "highest_drawdown": max_dd_abs,
+            "highest_drawdown_pct": max_dd_pct,
+
+            "symbols_traded": len(sym_map),
+            "closed_deals_with_sl_tp": sl_tp,
+            "closed_deals_without_sl_tp": no_sl_tp,
+
+            "consecutive_losses_count": max_losses_count,
+            "total_loss_pnl": round(-max_losses_amount, 2),
+            "consecutive_days_in_loss_count": max_loss_days,
+            "consecutive_days_in_loss_count_total_loss_pnl": round(-max_loss_days_amount, 2),
+
+            "revenue_percentage": rev_pct,
+            "revenue_profit_percentage": p_pct,
+            "revenue_loss_percentage": l_pct,
+            "recent_risk_reward": highest_rr,
+        }
+
+    # ========================================================================
+    # MAIN LOOP
+    # ========================================================================
     for user_brokerid in investor_ids:
         print(f"\n" + "═"*80)
         print(f" PROFILE ANALYSIS: INVESTOR ID -> {user_brokerid}".ljust(79) + "═")
         print("═"*80)
-        
-        # Note: INV_PATH assumed defined globally in your environment
+
         try:
             root_dir_base = INV_PATH
         except NameError:
             root_dir_base = r"C:\xampp\htdocs\harvcore\users"
-            
+
         inv_root = Path(root_dir_base) / str(user_brokerid)
         if not inv_root.exists():
-            print(f" │ Operational folder structure missing: {inv_root}")
+            print(f" │ Folder missing: {inv_root}")
             continue
-        
+
         activities_path = inv_root / "activities.json"
         acct_mgmt_path = inv_root / "accountmanagement.json"
-        
-        print(f" │ Activities file path: {activities_path}")
-        
+
         if not activities_path.exists():
-            print(f" │ Profile tracking state file missing: {activities_path}")
+            print(f" │ Missing: {activities_path}")
             continue
-        
+
         try:
             with open(activities_path, 'r', encoding='utf-8') as f:
                 activities_data = json.load(f)
         except Exception as e:
-            print(f" │ Error parsing profile tracking state: {e}")
-            continue
-        
-        execution_start_date = activities_data.get('execution_start_date')
-        if not execution_start_date:
-            print(f" │ No operational start boundary 'execution_start_date' flagged inside tracking state.")
+            print(f" │ Error reading activities: {e}")
             continue
 
-        # Get contract duration and expiry date for proper end date calculation
+        execution_start_date = activities_data.get('execution_start_date')
+        if not execution_start_date:
+            print(" │ No execution_start_date — skipping.")
+            continue
+
         contract_duration = activities_data.get('contract_duration')
         contract_expiry_date = activities_data.get('contract_expiry_date')
-        
+
         broker_cfg = active_users_dict.get(user_brokerid)
         if not broker_cfg:
-            print(f" │ Critical authorization mapping criteria missing inside system dictionary.")
+            print(" │ No broker_cfg in usersdictionary — skipping.")
             continue
 
         login_id = broker_cfg.get('LOGIN_ID', '')
         if not login_id:
-            print(f" │ System environment mapping requires an active 'LOGIN_ID'.")
+            print(" │ Missing LOGIN_ID — skipping.")
             continue
 
         try:
             unique_magic_number = int(str(login_id) + str(user_brokerid))
         except (ValueError, TypeError) as e:
-            print(f" │ Failed to construct transaction cryptographic signature: {e}")
+            print(f" │ Bad magic number: {e}")
             continue
 
         activities_data['authorized_magic_number'] = unique_magic_number
         activities_data['unique_magicnumber'] = unique_magic_number
 
-        # LOAD CONFIGURATION TARGETS
-        max_allowable_risk_threshold = 0.0
+        # Parse execution_start_date
+        start_datetime = None
+        for fmt in ("%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d"):
+            try:
+                start_datetime = datetime.strptime(str(execution_start_date), fmt)
+                break
+            except Exception:
+                continue
+        if not start_datetime:
+            print(f" │ Unparseable start date: {execution_start_date}")
+            continue
 
+        # Compute end
+        end_datetime = None
+        if contract_expiry_date:
+            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%b %d, %Y"):
+                try:
+                    end_datetime = datetime.strptime(str(contract_expiry_date), fmt)
+                    break
+                except Exception:
+                    continue
+        if not end_datetime and contract_duration:
+            try:
+                end_datetime = start_datetime + timedelta(days=int(contract_duration))
+            except Exception:
+                pass
+        if not end_datetime:
+            end_datetime = datetime.now()
+        if end_datetime < start_datetime:
+            end_datetime = datetime.now()
+
+        # Fetch MT5 history
+        history_deals = mt5.history_deals_get(start_datetime, end_datetime)
+        if not history_deals:
+            print(" │ No closed deals in window.")
+            continue
+        history_orders = mt5.history_orders_get(start_datetime, end_datetime)
+
+        deals_by_position = {}
+        for deal in history_deals:
+            if deal.type in (0, 1):
+                deals_by_position.setdefault(deal.position_id, []).append(deal)
+
+        order_comments = {}
+        if history_orders:
+            for order in history_orders:
+                order_comments.setdefault(order.position_id, order.comment)
+
+        master_trades = []
+        unauthorized_detected = False
+        total_profit_loss = 0.0
+
+        # Account info for starting balance + current balance
+        try:
+            account_info = mt5.account_info()
+            current_balance = account_info.balance if account_info else 0.0
+        except Exception:
+            current_balance = 0.0
+
+        # Risk threshold from accountmanagement.json
+        max_allowable_risk_threshold = 0.0
         if acct_mgmt_path.exists():
             try:
                 with open(acct_mgmt_path, 'r', encoding='utf-8') as f:
                     acct_config = json.load(f)
-                    default_risks = acct_config.get("account_balance_default_risk_management", {})
-                    max_risks = acct_config.get("account_balance_maximum_risk_management", {})
-                    
-                    extracted_values = []
-                    for risk_dict in [default_risks, max_risks]:
-                        for k, target_val in risk_dict.items():
-                            try:
-                                extracted_values.append(float(target_val))
-                            except (ValueError, TypeError):
-                                continue
-                    
-                    if extracted_values:
-                        max_allowable_risk_threshold = max(extracted_values)
-            except Exception as e:
-                print(f" │ └── Error parsing accountmanagement.json: {e}")
-
-        start_datetime = None
-        for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d"]:
-            try:
-                start_datetime = datetime.strptime(str(execution_start_date), fmt)
-                break
-            except:
-                continue
-        
-        if not start_datetime:
-            print(f" │ Failed to parse operational start boundary string format: {execution_start_date}")
-            continue
-        
-        # Calculate the end date for from_execution_start_date window
-        # Priority: contract_expiry_date > contract_duration calculation > current date
-        end_datetime = None
-        
-        if contract_expiry_date:
-            # Try to parse contract expiry date
-            for fmt in ["%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d", "%b %d, %Y"]:
-                try:
-                    end_datetime = datetime.strptime(str(contract_expiry_date), fmt)
-                    print(f" │ Using contract expiry date as end boundary: {end_datetime.strftime('%B %d, %Y')}")
-                    break
-                except:
-                    continue
-        
-        if not end_datetime and contract_duration:
-            # Calculate end date based on duration days from start date
-            try:
-                duration_days = int(contract_duration)
-                end_datetime = start_datetime + timedelta(days=duration_days)
-                print(f" │ Using contract duration ({duration_days} days) to calculate end boundary: {end_datetime.strftime('%B %d, %Y')}")
-            except (ValueError, TypeError):
+                for key in ("account_balance_default_risk_management",
+                            "account_balance_maximum_risk_management"):
+                    for _, v in acct_config.get(key, {}).items():
+                        try:
+                            max_allowable_risk_threshold = max(
+                                max_allowable_risk_threshold, float(v)
+                            )
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
                 pass
-        
-        if not end_datetime:
-            # Fallback to current date
-            end_datetime = datetime.now()
-            print(f" │ No contract expiry or duration found. Using current date as end boundary: {end_datetime.strftime('%B %d, %Y')}")
-        
-        # Ensure end_datetime is not before start_datetime
-        if end_datetime < start_datetime:
-            print(f" │ Warning: Calculated end date ({end_datetime}) is before start date ({start_datetime}). Using current date instead.")
-            end_datetime = datetime.now()
-        
-        # Fetch trades from execution start to end date
-        history_deals = mt5.history_deals_get(start_datetime, end_datetime)
-        if not history_deals:
-            print(f" │ ℹ️ Zero closed trade records detected on account terminal layer history.")
-            continue
-        
-        # NEW: Also fetch history orders to get comments
-        history_orders = mt5.history_orders_get(start_datetime, end_datetime)
-        
-        deals_by_position = {}
-        for deal in history_deals:
-            if deal.type in [0, 1]:
-                position_key = deal.position_id
-                if position_key not in deals_by_position:
-                    deals_by_position[position_key] = []
-                deals_by_position[position_key].append(deal)
-        
-        master_flat_processed_trades = []
-        unauthorized_trades_detected = False  # Track if any unauthorized trades are found
-        total_profit_loss = 0.0  # Track total P&L for profitandloss field
-        
-        # Create a map of position_id to order comment
-        order_comments = {}
-        if history_orders:
-            for order in history_orders:
-                if order.position_id not in order_comments:
-                    order_comments[order.position_id] = order.comment
-        
-        # EVALUATE INDIVIDUAL POSITION RECORDS
+
+        # Build trades
         for position_id, deals in deals_by_position.items():
             deals.sort(key=lambda x: x.time)
-            
-            total_profit = sum(deal.profit for deal in deals)
-            total_commission = sum(deal.commission for deal in deals)
-            total_swap = sum(deal.swap for deal in deals)
-            total_pnl = total_profit + total_commission + total_swap
-            
-            entry_deal = deals[0]
-            exit_deal = deals[-1] if len(deals) > 1 else None
-            is_closed = len(deals) > 1 
-            
-            if not is_closed:
+            if len(deals) < 2:
                 continue
-                
+
+            total_profit = sum(d.profit for d in deals)
+            total_commission = sum(d.commission for d in deals)
+            total_swap = sum(d.swap for d in deals)
+            total_pnl = total_profit + total_commission + total_swap
+
+            entry_deal = deals[0]
+            exit_deal = deals[-1]
+
             is_authorized = (entry_deal.magic == unique_magic_number)
             auth_group = "authorized" if is_authorized else "unauthorized"
-            
-            # Track unauthorized trades
             if not is_authorized:
-                unauthorized_trades_detected = True
-            
-            # Track total P&L for profitandloss
+                unauthorized_detected = True
             total_profit_loss += total_pnl
-            
+
             trade_type = "BUY" if entry_deal.type == 0 else "SELL"
             mt5_action = mt5.ORDER_TYPE_BUY if entry_deal.type == 0 else mt5.ORDER_TYPE_SELL
             total_volume = entry_deal.volume
             entry_price = entry_deal.price
-            exit_price = exit_deal.price if exit_deal else 0
-            
+            exit_price = exit_deal.price
+
             stoploss = getattr(entry_deal, 'sl', 0.0)
             takeprofit = getattr(entry_deal, 'tp', 0.0)
-            
             if stoploss == 0.0 or takeprofit == 0.0:
-                related_orders = mt5.history_orders_get(position=position_id)
-                if related_orders:
-                    for order in related_orders:
-                        if order.sl > 0.0 and stoploss == 0.0:
-                            stoploss = order.sl
-                        if order.tp > 0.0 and takeprofit == 0.0:
-                            takeprofit = order.tp
-            
+                for order in (mt5.history_orders_get(position=position_id) or []):
+                    if order.sl > 0.0 and stoploss == 0.0:
+                        stoploss = order.sl
+                    if order.tp > 0.0 and takeprofit == 0.0:
+                        takeprofit = order.tp
+
             trade_risk = 0.0
-            risk_reward = 0  # Changed to numeric value
-            
+            risk_reward = 0
             if stoploss > 0.0:
-                calculated_risk_pnl = mt5.order_calc_profit(mt5_action, entry_deal.symbol, total_volume, entry_price, stoploss)
-                if calculated_risk_pnl is not None:
-                    trade_risk = abs(calculated_risk_pnl)
-            
+                calc = mt5.order_calc_profit(mt5_action, entry_deal.symbol,
+                                             total_volume, entry_price, stoploss)
+                if calc is not None:
+                    trade_risk = abs(calc)
             if stoploss > 0.0 and stoploss != entry_price:
-                price_risk_distance = abs(entry_price - stoploss)
-                if price_risk_distance > 0:
-                    if takeprofit > 0.0:
-                        price_reward_distance = abs(takeprofit - entry_price)
-                        risk_reward = round(price_reward_distance / price_risk_distance, 2)
-                    elif total_pnl < 0:
-                        risk_reward = 1.0
+                risk_dist = abs(entry_price - stoploss)
+                if risk_dist > 0 and takeprofit > 0.0:
+                    risk_reward = round(abs(takeprofit - entry_price) / risk_dist, 2)
 
-            resolved_risk = trade_risk if trade_risk > 0 else abs(total_pnl) if total_pnl < 0 else 0.0
-
+            resolved_risk = trade_risk if trade_risk > 0 else (abs(total_pnl) if total_pnl < 0 else 0.0)
             is_within_risk = (0.0 < resolved_risk <= max_allowable_risk_threshold)
-            
-            # Get comment from order if available
+
             comment = order_comments.get(position_id, "")
-            
-            # If risk_reward is still 0, try to extract from comment
             if risk_reward == 0 and comment:
-                extracted_rr = extract_risk_reward_from_comment(comment)
-                if extracted_rr > 0:
-                    risk_reward = extracted_rr
-            
-            trade_record = {
+                rr = extract_risk_reward_from_comment(comment)
+                if rr > 0:
+                    risk_reward = rr
+
+            master_trades.append({
                 "ticket": position_id,
                 "symbol": entry_deal.symbol,
                 "type": trade_type,
@@ -28526,933 +28818,158 @@ def trades_analytics(inv_id=None):
                 "volume": round(total_volume, 2),
                 "time_open": datetime.fromtimestamp(entry_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
                 "time_close": datetime.fromtimestamp(exit_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
+                "closed_time": datetime.fromtimestamp(exit_deal.time).strftime('%Y-%m-%d %H:%M:%S'),
                 "magic": entry_deal.magic,
                 "total_pnl": round(total_pnl, 2),
                 "state": "CLOSED",
                 "raw_close_time": exit_deal.time,
                 "is_within_risk": is_within_risk,
                 "auth_group": auth_group,
-                "comment": comment  # ADDED: Store comment for RR extraction
-            }
-            master_flat_processed_trades.append(trade_record)
+                "comment": comment,
+            })
 
-        # Get current broker balance
-        try:
-            account_info = mt5.account_info()
-            if account_info:
-                current_balance = account_info.balance
-                print(f" │ Current broker balance: ${current_balance:.2f}")
-            else:
-                current_balance = 0.0
-                print(f" │ Warning: Could not fetch account info")
-        except Exception as e:
-            current_balance = 0.0
-            print(f" │ Error fetching account balance: {e}")
+        if not master_trades:
+            print(" │ No closed trades after filtering.")
+            continue
 
-        # Helper function to calculate trade metrics
-        def calculate_trade_metrics(trades_pool):
-            """
-            Calculate trades per day metrics ensuring:
-            - lowest < average < highest (all distinct values when possible)
-            - If only one unique value exists, assign it to average and remove from lowest/highest
-            - lowest must be lower than highest
-            - average must be between lowest and highest (not equal to either)
-            """
-            if not trades_pool:
-                return {
-                    "lowest_trades_per_day": 0,
-                    "highest_trades_per_day": 0,
-                    "average_trades_per_day": 0,
-                    "lowest_trade_dates": [],
-                    "highest_trade_dates": [],
-                    "average_trade_dates": []
-                }
-            
-            # Count trades per day
-            trades_per_day = {}
-            for t in trades_pool:
-                trade_date = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
-                trades_per_day[trade_date] = trades_per_day.get(trade_date, 0) + 1
-            
-            if not trades_per_day:
-                return {
-                    "lowest_trades_per_day": 0,
-                    "highest_trades_per_day": 0,
-                    "average_trades_per_day": 0,
-                    "lowest_trade_dates": [],
-                    "highest_trade_dates": [],
-                    "average_trade_dates": []
-                }
-            
-            # Get all unique trade counts
-            unique_counts = sorted(set(trades_per_day.values()))
-            
-            # Case 1: Only one unique value exists (all days have same trade count)
-            if len(unique_counts) == 1:
-                single_value = unique_counts[0]
-                dates_with_value = [date for date, count in trades_per_day.items() if count == single_value]
-                
-                # Assign the value only to average, leave lowest and highest as 0 or distinct
-                return {
-                    "lowest_trades_per_day": 0,  # No distinct lower value exists
-                    "highest_trades_per_day": 0,  # No distinct higher value exists
-                    "average_trades_per_day": single_value,
-                    "lowest_trade_dates": [],  # No dates for lowest since value is 0
-                    "highest_trade_dates": [],  # No dates for highest since value is 0
-                    "average_trade_dates": dates_with_value
-                }
-            
-            # Case 2: Two unique values exist
-            if len(unique_counts) == 2:
-                lowest = unique_counts[0]
-                highest = unique_counts[1]
-                
-                # Find dates
-                lowest_dates = [date for date, count in trades_per_day.items() if count == lowest]
-                highest_dates = [date for date, count in trades_per_day.items() if count == highest]
-                
-                # Calculate average as the median between lowest and highest
-                average = round((lowest + highest) / 2)
-                
-                # Ensure average is distinct from both lowest and highest
-                if average == lowest:
-                    average = lowest + 1
-                elif average == highest:
-                    average = highest - 1
-                
-                # If adjustment made average equal to the other value, adjust further
-                if average == lowest and lowest < highest:
-                    average = lowest + 1
-                if average == highest and highest > lowest:
-                    average = highest - 1
-                
-                # Find or create dates for average (use combination of both or find existing)
-                average_dates = []
-                if average in trades_per_day.values():
-                    average_dates = [date for date, count in trades_per_day.items() if count == average]
-                else:
-                    # No days have this exact count, use dates that are closest to average
-                    closest_dates = sorted(trades_per_day.items(), key=lambda x: abs(x[1] - average))
-                    average_dates = [closest_dates[0][0]] if closest_dates else []
-                
-                return {
-                    "lowest_trades_per_day": lowest,
-                    "highest_trades_per_day": highest,
-                    "average_trades_per_day": average,
-                    "lowest_trade_dates": lowest_dates,
-                    "highest_trade_dates": highest_dates,
-                    "average_trade_dates": average_dates
-                }
-            
-            # Case 3: Three or more unique values exist
-            lowest = unique_counts[0]
-            highest = unique_counts[-1]
-            
-            # For average, pick a value that is NOT equal to lowest or highest
-            # Prioritize values that naturally exist in the data
-            candidate_averages = [count for count in unique_counts if count != lowest and count != highest]
-            
-            if candidate_averages:
-                # Choose the middle value (closest to median)
-                middle_index = len(candidate_averages) // 2
-                average = candidate_averages[middle_index]
-            else:
-                # Fallback: calculate weighted average and round
-                total_trades = sum(trades_per_day.values())
-                total_days = len(trades_per_day)
-                raw_avg = total_trades / total_days
-                average = round(raw_avg)
-                
-                # Ensure average is not equal to lowest or highest
-                if average == lowest:
-                    average = lowest + 1 if lowest + 1 < highest else lowest - 1
-                elif average == highest:
-                    average = highest - 1 if highest - 1 > lowest else highest + 1
-            
-            # Final validation: ensure lowest < average < highest
-            if average <= lowest:
-                average = lowest + 1
-                if average >= highest and highest > lowest + 1:
-                    average = highest - 1
-                elif average >= highest:
-                    # Force a valid average by taking midpoint
-                    average = round((lowest + highest) / 2)
-            
-            if average >= highest:
-                average = highest - 1
-                if average <= lowest and lowest < highest - 1:
-                    average = lowest + 1
-                elif average <= lowest:
-                    average = round((lowest + highest) / 2)
-            
-            # Find dates for each value
-            lowest_dates = [date for date, count in trades_per_day.items() if count == lowest]
-            highest_dates = [date for date, count in trades_per_day.items() if count == highest]
-            
-            # For average, find existing dates or use closest
-            if average in trades_per_day.values():
-                average_dates = [date for date, count in trades_per_day.items() if count == average]
-            else:
-                # No days have this exact count, find dates with counts closest to average
-                closest_dates = sorted(trades_per_day.items(), key=lambda x: abs(x[1] - average))
-                average_dates = [date for date, _ in closest_dates[:2]]  # Take up to 2 closest dates
-            
+        # ---------------------------------------------------------------
+        # Build the flat root-level payloads
+        # ---------------------------------------------------------------
+        starting_balance = current_balance - total_profit_loss
+
+        analytics_obj = build_analytics(master_trades, starting_balance)
+        daily_record = calculate_daily_trades_record(master_trades)
+        symbols_list = calculate_symbols_traded(master_trades)
+        rr_distribution = calculate_rr_distribution(master_trades)
+        _, _, dd_series = calculate_drawdown_metrics(master_trades, starting_balance)
+
+        # Split trades by group. Keep the JSON-relevant fields only.
+        def shape_trade(t):
             return {
-                "lowest_trades_per_day": lowest,
-                "highest_trades_per_day": highest,
-                "average_trades_per_day": average,
-                "lowest_trade_dates": lowest_dates,
-                "highest_trade_dates": highest_dates,
-                "average_trade_dates": average_dates
-            }
-        
-        # Helper function to calculate revenue metrics
-        def calculate_revenue_metrics(daily_trades_record, recent_risk_reward=0):
-            """
-            Calculate revenue metrics:
-            - revenue_percentage: Net revenue percentage (adjusted by recent risk reward)
-            - revenue_profit_percentage: Percentage of total revenue from profits (adjusted by recent risk reward)
-            - revenue_loss_percentage: Percentage of total revenue from losses (unchanged)
-            
-            The revenue_profit_percentage is divided by the recent_risk_reward value.
-            The revenue_percentage is then recalculated based on the adjusted values.
-            """
-            if not daily_trades_record:
-                return {
-                    "revenue_percentage": 0.0,
-                    "revenue_profit_percentage": 0.0,
-                    "revenue_loss_percentage": 0.0
-                }
-            
-            total_profit_revenue = 0.0
-            total_loss_revenue = 0.0
-            
-            for date, day_data in daily_trades_record.items():
-                pnl = day_data.get("profit_and_loss", 0.0)
-                if pnl > 0:
-                    total_profit_revenue += pnl
-                elif pnl < 0:
-                    total_loss_revenue += abs(pnl)
-            
-            total_revenue = total_profit_revenue + total_loss_revenue
-            
-            if total_revenue == 0:
-                return {
-                    "revenue_percentage": 0.0,
-                    "revenue_profit_percentage": 0.0,
-                    "revenue_loss_percentage": 0.0
-                }
-            
-            # Calculate initial revenue percentages
-            initial_revenue_profit_percentage = round((total_profit_revenue / total_revenue) * 100, 2)
-            revenue_loss_percentage = round((total_loss_revenue / total_revenue) * 100, 2)
-            
-            # Adjust revenue_profit_percentage by dividing by recent_risk_reward
-            # If recent_risk_reward is 0 or 1, keep the original value
-            if recent_risk_reward > 1:
-                adjusted_revenue_profit_percentage = round(initial_revenue_profit_percentage / recent_risk_reward, 2)
-            else:
-                adjusted_revenue_profit_percentage = initial_revenue_profit_percentage
-            
-            # Ensure the adjusted value doesn't exceed 100%
-            if adjusted_revenue_profit_percentage > 100.0:
-                adjusted_revenue_profit_percentage = 100.0
-            
-            # Recalculate revenue_percentage based on adjusted values
-            # revenue_percentage = revenue_profit_percentage - revenue_loss_percentage
-            # But if the result is negative, set it to 0
-            revenue_percentage = adjusted_revenue_profit_percentage - revenue_loss_percentage
-            if revenue_percentage < 0:
-                revenue_percentage = 0.0
-            else:
-                revenue_percentage = round(revenue_percentage, 2)
-            
-            return {
-                "revenue_percentage": revenue_percentage,
-                "revenue_profit_percentage": adjusted_revenue_profit_percentage,
-                "revenue_loss_percentage": revenue_loss_percentage
-            }
-        
-        # SEPARATE PIPELINE STATISTICS BUILDER UTILITY
-        def run_segment_analytics(trades_pool, window_start_dt):
-            trades_pool.sort(key=lambda x: x["raw_close_time"])
-            t_count = len(trades_pool)
-            
-            p_list = [t for t in trades_pool if t["total_pnl"] > 0]
-            l_list = [t for t in trades_pool if t["total_pnl"] < 0]
-            
-            p_count, l_count = len(p_list), len(l_list)
-            t_pnl = sum(t["total_pnl"] for t in trades_pool)
-            
-            # Calculate trade metrics using the helper function
-            trade_metrics = calculate_trade_metrics(trades_pool)
-            
-            # Calculate daily trades record with detailed trades
-            daily_trades_record = calculate_daily_trades_record(trades_pool)
-            
-            # Calculate recent risk reward from trade comments (highest RR found)
-            recent_risk_reward = calculate_recent_risk_reward(trades_pool)
-            
-            # Calculate revenue metrics with recent risk reward adjustment
-            revenue_metrics = calculate_revenue_metrics(daily_trades_record, recent_risk_reward)
-            
-            # Calculate highest loss per trade (single highest loss amount)
-            highest_loss_per_trade = 0.0
-            for t in trades_pool:
-                if t["total_pnl"] < 0:
-                    loss_amount = abs(t["total_pnl"])
-                    if loss_amount > highest_loss_per_trade:
-                        highest_loss_per_trade = loss_amount
-            
-            # Build symbol performance data
-            sym_map = {}
-            sl_tp_count, no_sl_tp_count = 0, 0
-            for t in trades_pool:
-                s = t["symbol"]
-                if t["stoploss"] > 0 and t["take_profit"] > 0:
-                    sl_tp_count += 1
-                else:
-                    no_sl_tp_count += 1
-                    
-                if s not in sym_map:
-                    sym_map[s] = {
-                        "total_trades": 0, 
-                        "wins_count": 0, 
-                        "losses_count": 0,
-                        "gross_profit_revenue": 0.0, 
-                        "gross_loss_revenue": 0.0, 
-                        "total_pnl": 0.0
-                    }
-                m = sym_map[s]
-                m["total_trades"] += 1
-                m["total_pnl"] += t["total_pnl"]
-                if t["total_pnl"] > 0:
-                    m["wins_count"] += 1
-                    m["gross_profit_revenue"] += t["total_pnl"]
-                elif t["total_pnl"] < 0:
-                    m["losses_count"] += 1
-                    m["gross_loss_revenue"] += abs(t["total_pnl"])
-
-            # Build all_traded_symbols data structure
-            all_traded_symbols = {}
-            for s_name, sm in sym_map.items():
-                all_traded_symbols[s_name] = {
-                    "symbol": s_name,
-                    "total_trades": sm["total_trades"],
-                    "total_profit": round(sm["gross_profit_revenue"], 2),
-                    "total_loss": round(sm["gross_loss_revenue"], 2)
-                }
-
-            # Calculate highest sequential losses (keeping trade details)
-            hi_losses = {}
-            curr_streak = []
-            max_loss_streak = 0.0
-            for t in trades_pool:
-                if t["total_pnl"] >= 0.01:
-                    if len(curr_streak) >= 3:
-                        s_loss = abs(sum(x["total_pnl"] for x in curr_streak))
-                        if s_loss > max_loss_streak:
-                            max_loss_streak = s_loss
-                            # Create clean copy of trades for the streak
-                            streak_trades = []
-                            for x in curr_streak:
-                                clean_trade = {**x}
-                                clean_trade.pop("raw_close_time", None)
-                                clean_trade.pop("is_within_risk", None)
-                                clean_trade.pop("auth_group", None)
-                                clean_trade.pop("comment", None)
-                                streak_trades.append(clean_trade)
-                            hi_losses = {
-                                "consecutive_losses_count": len(curr_streak), 
-                                "total_loss_pnl": round(-s_loss, 2), 
-                                "trades": streak_trades
-                            }
-                    curr_streak = []
-                elif t["total_pnl"] < 0:
-                    curr_streak.append(t)
-            if len(curr_streak) >= 3:
-                s_loss = abs(sum(x["total_pnl"] for x in curr_streak))
-                if s_loss > max_loss_streak:
-                    streak_trades = []
-                    for x in curr_streak:
-                        clean_trade = {**x}
-                        clean_trade.pop("raw_close_time", None)
-                        clean_trade.pop("is_within_risk", None)
-                        clean_trade.pop("auth_group", None)
-                        clean_trade.pop("comment", None)
-                        streak_trades.append(clean_trade)
-                    hi_losses = {
-                        "consecutive_losses_count": len(curr_streak), 
-                        "total_loss_pnl": round(-s_loss, 2), 
-                        "trades": streak_trades
-                    }
-
-            # Calculate highest sequential days in loss (keeping trade details)
-            hi_days = {}
-            d_pnl_map, d_trades_map = {}, {}
-            for t in trades_pool:
-                td = datetime.fromtimestamp(t["raw_close_time"]).strftime('%Y-%m-%d')
-                d_pnl_map[td] = d_pnl_map.get(td, 0.0) + t["total_pnl"]
-                if td not in d_trades_map: 
-                    d_trades_map[td] = []
-                d_trades_map[td].append(t)
-
-            chron_days = sorted(d_pnl_map.keys())
-            curr_day_streak = []
-            max_day_streak_loss = 0.0
-            
-            def finish_day_streak(streak):
-                nonlocal max_day_streak_loss, hi_days
-                if len(streak) >= 2:
-                    s_loss = abs(sum(d_pnl_map[d] for d in streak))
-                    if s_loss > max_day_streak_loss:
-                        max_day_streak_loss = s_loss
-                        # Create clean copy of days with their trades
-                        days_data = {}
-                        for d in streak:
-                            clean_trades = []
-                            for w in d_trades_map[d]:
-                                clean_trade = {**w}
-                                clean_trade.pop("raw_close_time", None)
-                                clean_trade.pop("is_within_risk", None)
-                                clean_trade.pop("auth_group", None)
-                                clean_trade.pop("comment", None)
-                                clean_trades.append(clean_trade)
-                            days_data[d] = clean_trades
-                        hi_days = {
-                            "consecutive_days_count": len(streak), 
-                            "total_loss_pnl": round(-s_loss, 2), 
-                            "days": days_data
-                        }
-
-            for d in chron_days:
-                if d_pnl_map[d] >= 0.01:
-                    finish_day_streak(curr_day_streak)
-                    curr_day_streak = []
-                elif d_pnl_map[d] < 0:
-                    curr_day_streak.append(d)
-            finish_day_streak(curr_day_streak)
-
-            p_rev = sum(t["total_pnl"] for t in p_list)
-            l_rev = sum(t["total_pnl"] for t in l_list)
-            
-            return {
-                "total_trades": t_count, 
-                "total_pnl": round(t_pnl, 2),
-                "profit_trades": p_count, 
-                "loss_trades": l_count, 
-                "profit_amount": round(p_rev, 2), 
-                "loss_amount": round(abs(l_rev), 2),
-                "lowest_trades_per_day": trade_metrics["lowest_trades_per_day"],
-                "highest_trades_per_day": trade_metrics["highest_trades_per_day"],
-                "average_trades_per_day": trade_metrics["average_trades_per_day"],
-                "lowest_trade_dates": trade_metrics["lowest_trade_dates"],
-                "highest_trade_dates": trade_metrics["highest_trade_dates"],
-                "average_trade_dates": trade_metrics["average_trade_dates"],
-                "highest_loss_per_trade": round(highest_loss_per_trade, 2),
-                "all_traded_symbols": all_traded_symbols,
-                "symbols_traded": len(sym_map), 
-                "closed_deals_with_sl_tp": sl_tp_count, 
-                "closed_deals_without_sl_tp": no_sl_tp_count,
-                "highest_sequential_losses": hi_losses, 
-                "highest_sequential_days_in_loss": hi_days,
-                "daily_trades_record": daily_trades_record,
-                "revenue_percentage": revenue_metrics["revenue_percentage"],
-                "revenue_profit_percentage": revenue_metrics["revenue_profit_percentage"],
-                "revenue_loss_percentage": revenue_metrics["revenue_loss_percentage"],
-                "recent_risk_reward": recent_risk_reward
+                "symbol": t.get("symbol"),
+                "volume": t.get("volume"),
+                "ticket": t.get("ticket"),
+                "entry": t.get("entry_price"),
+                "stoploss": t.get("stoploss"),
+                "target": t.get("take_profit"),
+                "pnl": t.get("total_pnl"),
+                "closed_time": t.get("closed_time"),
+                "comment": t.get("comment", ""),
+                "risk_reward": t.get("risk_reward", 0),
             }
 
-        # ================================================================
-        # CRITICAL FIX: ALWAYS OVERWRITE ANALYTICS WITH FRESH DATA
-        # ================================================================
-        # Build fresh analytics from scratch - DO NOT preserve old data
-        final_analytics_payload = {
-            "from_execution_start_date": {
-                "start_date": execution_start_date,
-                "end_date": end_datetime.strftime('%Y-%m-%d'),
-                "last_updated": datetime.now().isoformat()
-            }
+        authorized_list = [shape_trade(t) for t in master_trades if t["auth_group"] == "authorized"]
+        unauthorized_list = [shape_trade(t) for t in master_trades if t["auth_group"] == "unauthorized"]
+
+        # Save to activities.json
+        activities_data['analytics'] = analytics_obj
+        activities_data['authorized_trades'] = authorized_list
+        activities_data['unauthorized_trades'] = unauthorized_list
+        activities_data['daily_trades_record'] = daily_record
+        activities_data['symbols_traded'] = symbols_list
+        activities_data['risk_reward_distribution'] = rr_distribution
+        activities_data['drawdown_series'] = dd_series
+        activities_data['unauthorized_action_detected'] = unauthorized_detected
+        activities_data['unauthorized_actions'] = "1" if unauthorized_detected else "0"
+
+        # Expose the same root-level payload for the cross-file sync step
+        generated_payload_registry[str(user_brokerid)] = {
+            "analytics": analytics_obj,
+            "authorized_trades": authorized_list,
+            "unauthorized_trades": unauthorized_list,
+            "daily_trades_record": daily_record,
+            "symbols_traded": symbols_list,
+            "risk_reward_distribution": rr_distribution,
+            "drawdown_series": dd_series,
+            "unauthorized_action_detected": unauthorized_detected,
+            "unauthorized_actions": "1" if unauthorized_detected else "0",
+            "profitandloss": round(total_profit_loss, 2),
         }
-        
-        total_combined_trades = 0
 
-        # PROCESS FROM_EXECUTION_START_DATE (full history from start_date to end_datetime)
-        window_floor_ts = start_datetime.timestamp()
-        window_end_ts = end_datetime.timestamp()
-        window_start_dt_obj = start_datetime
-        
-        # Filter trades within the start to end date range
-        timeframe_filtered_pool = [t for t in master_flat_processed_trades if window_floor_ts <= t["raw_close_time"] <= window_end_ts]
-        
-        # Initialize storage for all segment summaries
-        all_segment_summaries = {}
-        
-        for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
-            if "from_execution_start_date" not in final_analytics_payload:
-                final_analytics_payload["from_execution_start_date"] = {}
-            
-            final_analytics_payload["from_execution_start_date"][c_group] = {
-                "regular_data": {}
-            }
-            
-            is_within = (c_group == "trades_within_risks_config")
-            bracket_trades = [t for t in timeframe_filtered_pool if t["is_within_risk"] == is_within]
-
-            # Compile standard baseline regular datasets
-            for a_group in ["authorized", "unauthorized"]:
-                source_trades = [t for t in bracket_trades if t["auth_group"] == a_group]
-                if len(source_trades) > 0:
-                    total_combined_trades += len(source_trades)
-                
-                regular_summary = run_segment_analytics([{**t} for t in source_trades], window_start_dt_obj)
-                
-                final_analytics_payload["from_execution_start_date"][c_group]["regular_data"][a_group] = regular_summary
-                
-                # Store for summaries calculation
-                if c_group not in all_segment_summaries:
-                    all_segment_summaries[c_group] = {}
-                all_segment_summaries[c_group][a_group] = regular_summary
-
-        # =========================================================================
-        # BUILD SUMMARIES FOR EACH CONFIG GROUP
-        # =========================================================================
-        for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
-            if c_group in all_segment_summaries:
-                summaries = all_segment_summaries[c_group]
-                
-                # Get authorized and unauthorized summaries
-                auth_summary = summaries.get("authorized", {})
-                unauth_summary = summaries.get("unauthorized", {})
-                
-                # Calculate combined summaries
-                total_lost_trades = auth_summary.get("loss_trades", 0) + unauth_summary.get("loss_trades", 0)
-                total_won_trades = auth_summary.get("profit_trades", 0) + unauth_summary.get("profit_trades", 0)
-                total_lost_trades_amount = auth_summary.get("loss_amount", 0) + unauth_summary.get("loss_amount", 0)
-                total_won_trades_amount = auth_summary.get("profit_amount", 0) + unauth_summary.get("profit_amount", 0)
-                
-                # Get trade per day metrics from authorized (primary) or unauthorized
-                auth_lowest = auth_summary.get("lowest_trades_per_day", 0)
-                unauth_lowest = unauth_summary.get("lowest_trades_per_day", 0)
-                auth_highest = auth_summary.get("highest_trades_per_day", 0)
-                unauth_highest = unauth_summary.get("highest_trades_per_day", 0)
-                auth_avg = auth_summary.get("average_trades_per_day", 0)
-                unauth_avg = unauth_summary.get("average_trades_per_day", 0)
-                
-                # Get recent risk reward from authorized (primary) or unauthorized
-                auth_recent_rr = auth_summary.get("recent_risk_reward", 0)
-                unauth_recent_rr = unauth_summary.get("recent_risk_reward", 0)
-                
-                # Use the better recent risk reward (from authorized if available, else from unauthorized)
-                if auth_recent_rr > 0:
-                    recent_risk_reward = auth_recent_rr
-                elif unauth_recent_rr > 0:
-                    recent_risk_reward = unauth_recent_rr
-                else:
-                    recent_risk_reward = 0
-                
-                # Get revenue metrics from authorized (primary) or unauthorized
-                auth_revenue_percentage = auth_summary.get("revenue_percentage", 0.0)
-                unauth_revenue_percentage = unauth_summary.get("revenue_percentage", 0.0)
-                auth_revenue_profit_percentage = auth_summary.get("revenue_profit_percentage", 0.0)
-                unauth_revenue_profit_percentage = unauth_summary.get("revenue_profit_percentage", 0.0)
-                auth_revenue_loss_percentage = auth_summary.get("revenue_loss_percentage", 0.0)
-                unauth_revenue_loss_percentage = unauth_summary.get("revenue_loss_percentage", 0.0)
-                
-                # Use the better revenue metrics (from authorized if available, else from unauthorized)
-                if auth_revenue_percentage > 0 or auth_revenue_profit_percentage > 0:
-                    revenue_percentage = auth_revenue_percentage
-                    revenue_profit_percentage = auth_revenue_profit_percentage
-                    revenue_loss_percentage = auth_revenue_loss_percentage
-                elif unauth_revenue_percentage > 0 or unauth_revenue_profit_percentage > 0:
-                    revenue_percentage = unauth_revenue_percentage
-                    revenue_profit_percentage = unauth_revenue_profit_percentage
-                    revenue_loss_percentage = unauth_revenue_loss_percentage
-                else:
-                    revenue_percentage = 0.0
-                    revenue_profit_percentage = 0.0
-                    revenue_loss_percentage = 0.0
-                
-                # Use the max for lowest (since we want the lowest across both)
-                lowest_trades_per_day = min(auth_lowest, unauth_lowest) if (auth_lowest > 0 or unauth_lowest > 0) else 0
-                # Use the max for highest
-                highest_trades_per_day = max(auth_highest, unauth_highest)
-                # Average: use weighted average or primary
-                if auth_avg > 0 and unauth_avg > 0:
-                    average_trades_per_day = round((auth_avg + unauth_avg) / 2, 2)
-                elif auth_avg > 0:
-                    average_trades_per_day = auth_avg
-                elif unauth_avg > 0:
-                    average_trades_per_day = unauth_avg
-                else:
-                    average_trades_per_day = 0                
-                # Combine trade dates
-                lowest_trade_dates = auth_summary.get("lowest_trade_dates", []) + unauth_summary.get("lowest_trade_dates", [])
-                highest_trade_dates = auth_summary.get("highest_trade_dates", []) + unauth_summary.get("highest_trade_dates", [])
-                average_trade_dates = auth_summary.get("average_trade_dates", []) + unauth_summary.get("average_trade_dates", [])
-                
-                # Remove duplicates
-                lowest_trade_dates = list(set(lowest_trade_dates))
-                highest_trade_dates = list(set(highest_trade_dates))
-                average_trade_dates = list(set(average_trade_dates))
-                
-                # Build the summaries object
-                summaries_payload = {
-                    "summaries": {
-                        "summaries_of_profits_only": {
-                            "total_lost_trades": total_lost_trades,
-                            "total_won_trades": total_won_trades,
-                            "total_lost_trades_amount": round(total_lost_trades_amount, 2),
-                            "total_won_trades_amount": round(total_won_trades_amount, 2),
-                            "lowest_trades_per_day": lowest_trades_per_day,
-                            "highest_trades_per_day": highest_trades_per_day,
-                            "average_trades_per_day": average_trades_per_day,
-                            "lowest_trade_dates": lowest_trade_dates,
-                            "highest_trade_dates": highest_trade_dates,
-                            "average_trade_dates": average_trade_dates,
-                            "recent_risk_reward": recent_risk_reward,
-                            "revenue_percentage": revenue_percentage,
-                            "revenue_profit_percentage": revenue_profit_percentage,
-                            "revenue_loss_percentage": revenue_loss_percentage
-                        }
-                    }
-                }
-                
-                # Add summaries to the payload
-                if "from_execution_start_date" in final_analytics_payload:
-                    if c_group not in final_analytics_payload["from_execution_start_date"]:
-                        final_analytics_payload["from_execution_start_date"][c_group] = {}
-                    final_analytics_payload["from_execution_start_date"][c_group]["summaries"] = summaries_payload["summaries"]
-
-        # Update unauthorized action flags in activities data
-        activities_data['unauthorized_action_detected'] = unauthorized_trades_detected
-        activities_data['unauthorized_actions'] = "1" if unauthorized_trades_detected else "0"
-        
-        if unauthorized_trades_detected:
-            print(f" │ ⚠️ UNAUTHORIZED TRADES DETECTED! Setting unauthorized_actions=1")
-        else:
-            print(f" │ ✅ No unauthorized trades detected. Setting unauthorized_actions=0")
-        
-        # ================================================================
-        # CRITICAL FIX: OVERWRITE THE ENTIRE ANALYTICS FIELD
-        # ================================================================
-        # Replace the entire analytics field with fresh data
-        activities_data['analytics'] = final_analytics_payload
-        
-        # Cache payload internally for cross-file synchronization sequence below
-        generated_analytics_registry[str(user_brokerid)] = final_analytics_payload
-        
-        print(f" │ 📅 Contract period: {execution_start_date} to {end_datetime.strftime('%B %d, %Y')}")
-        print(f" │ 💰 Current balance: ${current_balance:.2f}")
-        print(f" │ 📊 Total P&L: ${total_profit_loss:.2f}")
-        print(f" │ 🔒 Unauthorized actions flag: {activities_data['unauthorized_actions']} (detected: {activities_data['unauthorized_action_detected']})")
-
-        # ================================================================
-        # SAVE TO ACTIVITIES.JSON (Individual investor file)
-        # ================================================================
         try:
             with open(activities_path, 'w', encoding='utf-8') as f:
                 json.dump(activities_data, f, indent=4)
-            print(f" │ ✅ Updated activities.json at: {activities_path}")
-            print(f" │    - unauthorized_actions: {activities_data['unauthorized_actions']}")
-            print(f" │    - analytics fields updated with fresh data")
+            print(f" │ ✅ Wrote activities.json for {user_brokerid}")
         except Exception as e:
-            print(f" │ ⚠️ Error saving activities.json: {e}")
+            print(f" │ ❌ Error writing activities.json: {e}")
 
         stats["investors_processed"] += 1
-        stats["total_trades_recorded"] += total_combined_trades
+        stats["total_trades_recorded"] += len(master_trades)
 
     # =========================================================================
-    # 🔄 CROSS-FILE DATABASE SYNCHRONIZATION BACKEND ENGINE
+    # CROSS-FILE SYNC — write the same flat payload to the four JSON files
     # =========================================================================
     print("\n" + "═"*80)
-    print(" 🔄 INITIATING CROSS-FILE INVESTOR MATRIX RECONCILIATION LAYER".ljust(79) + "═")
-    print("═"*80)
-    print(" │ Files to be updated:")
-    print(f" │   1. {FETCHED_INVESTORS}")
-    print(f" │   2. {UPDATED_INVESTORS}")
-    print(f" │   3. {ALL_FETCHED_INVESTORS}")
-    print(f" │   4. {ALL_UPDATED_INVESTORS}")
+    print(" 🔄 CROSS-FILE INVESTOR MATRIX RECONCILIATION")
     print("═"*80)
 
-    # 1. Load Primary Source (FETCHED_INVESTORS)
-    fetched_data = {}
-    if os.path.exists(FETCHED_INVESTORS):
-        try:
-            with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                fetched_data = json.load(f)
-            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading FETCHED_INVESTORS: {e}")
-    else:
-        print(f" │ ⚠️ Warning: FETCHED_INVESTORS not found at: {FETCHED_INVESTORS}")
+    # Re-load in case anything changed concurrently
+    fetched_data = _load(FETCHED_INVESTORS) or fetched_data
+    updated_data = _load(UPDATED_INVESTORS) or updated_data
+    all_fetched_data = _load(ALL_FETCHED_INVESTORS) or all_fetched_data
+    all_updated_data = _load(ALL_UPDATED_INVESTORS) or all_updated_data
 
-    # 2. Load Destination Storage Matrix (UPDATED_INVESTORS)
-    updated_data = {}
-    if os.path.exists(UPDATED_INVESTORS):
-        try:
-            with open(UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                updated_data = json.load(f)
-            print(f" │ Loaded {len(updated_data)} profiles from UPDATED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error parsing UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
-            updated_data = {}
+    has_mutated = False
 
-    # 3. Load ALL_FETCHED_INVESTORS
-    all_fetched_data = {}
-    if os.path.exists(ALL_FETCHED_INVESTORS):
-        try:
-            with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_fetched_data = json.load(f)
-            print(f" │ Loaded {len(all_fetched_data)} profiles from ALL_FETCHED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error loading ALL_FETCHED_INVESTORS: {e}")
-    else:
-        print(f" │ ⚠️ ALL_FETCHED_INVESTORS not found at: {ALL_FETCHED_INVESTORS}")
+    for current_id, payload in generated_payload_registry.items():
+        # Common set of fields to mirror into every file
+        patch = {
+            'analytics': payload["analytics"],
+            'authorized_trades': payload["authorized_trades"],
+            'unauthorized_trades': payload["unauthorized_trades"],
+            'daily_trades_record': payload["daily_trades_record"],
+            'symbols_traded': payload["symbols_traded"],
+            'risk_reward_distribution': payload["risk_reward_distribution"],
+            'drawdown_series': payload["drawdown_series"],
+            'unauthorized_action_detected': payload["unauthorized_action_detected"],
+            'unauthorized_actions': payload["unauthorized_actions"],
+            'profitandloss': str(payload["profitandloss"]),
+            'recent_risk_reward': payload["analytics"].get("recent_risk_reward", 0),
+            'revenue_percentage': payload["analytics"].get("revenue_percentage", 0.0),
+            'revenue_profit_percentage': payload["analytics"].get("revenue_profit_percentage", 0.0),
+            'revenue_loss_percentage': payload["analytics"].get("revenue_loss_percentage", 0.0),
+            'highest_drawdown': payload["analytics"].get("highest_drawdown", 0.0),
+        }
 
-    # 4. Load ALL_UPDATED_INVESTORS
-    all_updated_data = {}
-    if os.path.exists(ALL_UPDATED_INVESTORS):
-        try:
-            with open(ALL_UPDATED_INVESTORS, 'r', encoding='utf-8') as f:
-                all_updated_data = json.load(f)
-            print(f" │ Loaded {len(all_updated_data)} profiles from ALL_UPDATED_INVESTORS")
-        except Exception as e:
-            print(f" │ Error parsing ALL_UPDATED_INVESTORS: {e}. Resetting to an empty dictionary.")
-            all_updated_data = {}
+        for container, label in (
+            (fetched_data,     'FETCHED_INVESTORS'),
+            (updated_data,     'UPDATED_INVESTORS'),
+            (all_fetched_data, 'ALL_FETCHED_INVESTORS'),
+            (all_updated_data, 'ALL_UPDATED_INVESTORS'),
+        ):
+            if current_id in container and isinstance(container[current_id], dict):
+                container[current_id].update(patch)
+                has_mutated = True
 
-    # =========================================================================
-    # UPDATE ALL FILES WITH NEW DATA - ONLY UPDATE SPECIFIC FIELDS
-    # =========================================================================
-    has_mutated_database = False
+        print(f" │ Synced investor {current_id} to all files")
 
-    for current_id in generated_analytics_registry.keys():
-        # Get the analytics data for this investor
-        analytics_data = generated_analytics_registry.get(current_id)
-        if not analytics_data:
-            continue
-            
-        # Calculate total P&L from analytics
-        total_pnl = 0.0
-        recent_risk_reward = 0
-        revenue_percentage = 0.0
-        revenue_profit_percentage = 0.0
-        revenue_loss_percentage = 0.0
-        
-        if "from_execution_start_date" in analytics_data:
-            for c_group in ["trades_within_risks_config", "trades_outside_risks_config"]:
-                if c_group in analytics_data["from_execution_start_date"]:
-                    # Get metrics from summaries
-                    summaries = analytics_data["from_execution_start_date"][c_group].get("summaries", {})
-                    summary_profits = summaries.get("summaries_of_profits_only", {})
-                    
-                    if summary_profits.get("recent_risk_reward", 0) > recent_risk_reward:
-                        recent_risk_reward = summary_profits.get("recent_risk_reward", 0)
-                    
-                    if summary_profits.get("revenue_percentage", 0.0) > revenue_percentage:
-                        revenue_percentage = summary_profits.get("revenue_percentage", 0.0)
-                        revenue_profit_percentage = summary_profits.get("revenue_profit_percentage", 0.0)
-                        revenue_loss_percentage = summary_profits.get("revenue_loss_percentage", 0.0)
-                    
-                    regular_data = analytics_data["from_execution_start_date"][c_group].get("regular_data", {})
-                    for auth_group in ["authorized", "unauthorized"]:
-                        if auth_group in regular_data:
-                            total_pnl += regular_data[auth_group].get("total_pnl", 0.0)
-        
-        # Check if unauthorized trades were detected
-        unauthorized_detected = False
-        try:
-            inv_id_int = int(current_id) if current_id.isdigit() else None
-            if inv_id_int is not None:
-                inv_activities_path = Path(INV_PATH) / str(inv_id_int) / "activities.json"
-                if inv_activities_path.exists():
-                    with open(inv_activities_path, 'r', encoding='utf-8') as f:
-                        inv_activities_data = json.load(f)
-                        unauthorized_detected = inv_activities_data.get('unauthorized_action_detected', False)
-        except Exception as e:
-            print(f" │   ⚠️ Could not check unauthorized for {current_id}: {e}")
-        
-        print(f"\n │ Updating records for investor: {current_id}")
-        print(f" │   Total P&L: ${total_pnl:.2f}")
-        print(f" │   Recent Risk-Reward: {recent_risk_reward}:1")
-        print(f" │   Revenue Profit %: {revenue_profit_percentage}%")
-        print(f" │   Revenue Loss %: {revenue_loss_percentage}%")
-        print(f" │   Revenue %: {revenue_percentage}%")
-        print(f" │   Unauthorized detected: {unauthorized_detected}")
-        
-        # ============================================================
-        # UPDATE FETCHED_INVESTORS (Legacy) - ONLY TARGETED FIELDS
-        # ============================================================
-        if current_id in fetched_data:
-            # Only update specific fields, preserve everything else
-            if isinstance(fetched_data[current_id], dict):
-                # Preserve all existing fields, only update the ones we need
-                fetched_data[current_id]['analytics'] = analytics_data
-                fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-                fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
-                fetched_data[current_id]['revenue_percentage'] = revenue_percentage
-                fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-                fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-                fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-                has_mutated_database = True
-                print(f" │   ✅ Updated FETCHED_INVESTORS for {current_id}")
-        else:
-            # If record doesn't exist, create it with the required fields
-            fetched_data[current_id] = {
-                'id': str(current_id),
-                'analytics': analytics_data,
-                'profitandloss': str(round(total_pnl, 2)),
-                'recent_risk_reward': recent_risk_reward,
-                'revenue_percentage': revenue_percentage,
-                'revenue_profit_percentage': revenue_profit_percentage,
-                'revenue_loss_percentage': revenue_loss_percentage,
-                'unauthorized_action_detected': unauthorized_detected
-            }
-            has_mutated_database = True
-            print(f" │   ➕ Created entry in FETCHED_INVESTORS for {current_id}")
-        
-        # ============================================================
-        # UPDATE UPDATED_INVESTORS (Legacy) - ONLY TARGETED FIELDS
-        # ============================================================
-        if current_id in updated_data:
-            # Only update specific fields, preserve everything else
-            if isinstance(updated_data[current_id], dict):
-                updated_data[current_id]['analytics'] = analytics_data
-                updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-                updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
-                updated_data[current_id]['revenue_percentage'] = revenue_percentage
-                updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-                updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-                updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-                has_mutated_database = True
-                print(f" │   ✅ Updated UPDATED_INVESTORS for {current_id}")
-        else:
-            # If record doesn't exist, create it with the required fields
-            updated_data[current_id] = {
-                'id': str(current_id),
-                'analytics': analytics_data,
-                'profitandloss': str(round(total_pnl, 2)),
-                'recent_risk_reward': recent_risk_reward,
-                'revenue_percentage': revenue_percentage,
-                'revenue_profit_percentage': revenue_profit_percentage,
-                'revenue_loss_percentage': revenue_loss_percentage,
-                'unauthorized_action_detected': unauthorized_detected
-            }
-            has_mutated_database = True
-            print(f" │   ➕ Created entry in UPDATED_INVESTORS for {current_id}")
-        
-        # ============================================================
-        # UPDATE ALL_FETCHED_INVESTORS - ONLY TARGETED FIELDS
-        # ============================================================
-        if current_id in all_fetched_data:
-            # Only update specific fields, preserve everything else
-            if isinstance(all_fetched_data[current_id], dict):
-                all_fetched_data[current_id]['analytics'] = analytics_data
-                all_fetched_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-                all_fetched_data[current_id]['recent_risk_reward'] = recent_risk_reward
-                all_fetched_data[current_id]['revenue_percentage'] = revenue_percentage
-                all_fetched_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-                all_fetched_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-                all_fetched_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-                has_mutated_database = True
-                print(f" │   ✅ Updated ALL_FETCHED_INVESTORS for {current_id}")
-        else:
-            # If record doesn't exist, create it with the required fields
-            all_fetched_data[current_id] = {
-                'id': str(current_id),
-                'analytics': analytics_data,
-                'profitandloss': str(round(total_pnl, 2)),
-                'recent_risk_reward': recent_risk_reward,
-                'revenue_percentage': revenue_percentage,
-                'revenue_profit_percentage': revenue_profit_percentage,
-                'revenue_loss_percentage': revenue_loss_percentage,
-                'unauthorized_action_detected': unauthorized_detected
-            }
-            has_mutated_database = True
-            print(f" │   ➕ Created entry in ALL_FETCHED_INVESTORS for {current_id}")
-        
-        # ============================================================
-        # UPDATE ALL_UPDATED_INVESTORS - ONLY TARGETED FIELDS
-        # ============================================================
-        if current_id in all_updated_data:
-            # Only update specific fields, preserve everything else
-            if isinstance(all_updated_data[current_id], dict):
-                all_updated_data[current_id]['analytics'] = analytics_data
-                all_updated_data[current_id]['profitandloss'] = str(round(total_pnl, 2))
-                all_updated_data[current_id]['recent_risk_reward'] = recent_risk_reward
-                all_updated_data[current_id]['revenue_percentage'] = revenue_percentage
-                all_updated_data[current_id]['revenue_profit_percentage'] = revenue_profit_percentage
-                all_updated_data[current_id]['revenue_loss_percentage'] = revenue_loss_percentage
-                all_updated_data[current_id]['unauthorized_action_detected'] = unauthorized_detected
-                has_mutated_database = True
-                print(f" │   ✅ Updated ALL_UPDATED_INVESTORS for {current_id}")
-        else:
-            # If record doesn't exist, create it with the required fields
-            all_updated_data[current_id] = {
-                'id': str(current_id),
-                'analytics': analytics_data,
-                'profitandloss': str(round(total_pnl, 2)),
-                'recent_risk_reward': recent_risk_reward,
-                'revenue_percentage': revenue_percentage,
-                'revenue_profit_percentage': revenue_profit_percentage,
-                'revenue_loss_percentage': revenue_loss_percentage,
-                'unauthorized_action_detected': unauthorized_detected
-            }
-            has_mutated_database = True
-            print(f" │   ➕ Created entry in ALL_UPDATED_INVESTORS for {current_id}")
-
-    # =========================================================================
-    # SAVE ALL UPDATES BACK TO DISK
-    # =========================================================================
-    if has_mutated_database:
+    if has_mutated:
         print("\n" + "─"*80)
         print(" 💾 SAVING ALL UPDATED FILES")
         print("─"*80)
-        
-        try:
-            # Save FETCHED_INVESTORS (Legacy)
-            with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(fetched_data, f, indent=4)
-            print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving FETCHED_INVESTORS: {e}")
-        
-        try:
-            # Save UPDATED_INVESTORS (Legacy)
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(updated_data, f, indent=4)
-            print(f" │ ✅ Updated: {UPDATED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving UPDATED_INVESTORS: {e}")
-        
-        try:
-            # Save ALL_FETCHED_INVESTORS
-            with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(all_fetched_data, f, indent=4)
-            print(f" │ ✅ Updated: {ALL_FETCHED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving ALL_FETCHED_INVESTORS: {e}")
-        
-        try:
-            # Save ALL_UPDATED_INVESTORS
-            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
-                json.dump(all_updated_data, f, indent=4)
-            print(f" │ ✅ Updated: {ALL_UPDATED_INVESTORS}")
-        except Exception as e:
-            print(f" │ ❌ Error saving ALL_UPDATED_INVESTORS: {e}")
-        
-        print(f"\n │ ✅ Synchronization transaction committed to all files.")
+        for path, data in (
+            (FETCHED_INVESTORS, fetched_data),
+            (UPDATED_INVESTORS, updated_data),
+            (ALL_FETCHED_INVESTORS, all_fetched_data),
+            (ALL_UPDATED_INVESTORS, all_updated_data),
+        ):
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+                print(f" │ ✅ Wrote {path}")
+            except Exception as e:
+                print(f" │ ❌ Error writing {path}: {e}")
     else:
-        print(" │ ℹ️ No changes detected. All files are already synchronized.")
+        print(" │ ℹ️ No changes to persist.")
 
     stats["processing_success"] = True
     print("\n" + "="*80)
-    print(" ✅ ANALYTICS RUN PROCESSING TASK COMPLETED".ljust(79) + "=")
+    print(" ✅ TRADES ANALYTICS COMPLETED".ljust(79) + "=")
     print("="*80)
     return stats
 
 #  accounts 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -29558,7 +29075,7 @@ def process_single_investor_(inv_folder):
     time.sleep(delay) 
     
     login_id = int(broker_cfg['LOGIN_ID'])
-    password_str = broker_cfg["PASSWORD"]
+    broker_password_str = broker_cfg["broker_password"]
     server_str = broker_cfg["SERVER"]
     
     configured_path = broker_cfg.get("Terminal_path", "")
@@ -29737,7 +29254,8 @@ def process_single_investor_(inv_folder):
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
         #recent_highest_balance_target(inv_id=inv_id)
-        martingale_system(inv_id=inv_id)
+        #martingale_system(inv_id=inv_id)
+        trades_analytics(inv_id=inv_id)
         #duplicate_order_to_reach_default_risk(inv_id=inv_id)
         
         mt5.shutdown()
@@ -29753,7 +29271,7 @@ def process_single_investor_(inv_folder):
     
     return account_stats
 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -29860,7 +29378,7 @@ def process_single_investor(inv_folder):
     time.sleep(delay) 
     
     login_id = int(broker_cfg['LOGIN_ID'])
-    password_str = broker_cfg["PASSWORD"]
+    broker_password_str = broker_cfg["broker_password"]
     server_str = broker_cfg["SERVER"]
     
     configured_path = broker_cfg.get("Terminal_path", "")
@@ -30467,7 +29985,7 @@ def main_loop():
             time.sleep(loop_interval)
 
 if __name__ == "__main__":
-   main_loop()
+   main_once()
 
 
  
