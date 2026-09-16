@@ -3057,7 +3057,12 @@ def fetch_developers():
     - Developer broker details come from the `developers` table (NOT harvhub).
     - Reads `broker_symbols`:
         * `selected_symbols`       → union of symbols where symbol_selected = 1
-        * `selected_timeframes`    → union of timeframes where symbol_selected = 1
+        * `selected_timeframes`    → value from the FIRST selected symbol row
+    - Reads `candle_records`:
+        * Per (userid, symbol, timeframe) picks the row with MAX(candle_time)
+          and reads its `last_recorded_candle_time`.
+        * Emits `last_symbol_tf_time_candle_record` as a list of
+          {symbol, timeframe, latest_recorded_candle}. Empty list if none.
     - Saves to DEVELOPERS json file.
     """
 
@@ -3141,6 +3146,49 @@ def fetch_developers():
             print(f"    ❌ Error moving file: {str(e)}")
             return False
 
+    # ── Helper: parse a `selected_timeframes` column value into a list ──
+    def _parse_timeframes_value(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(x).strip() for x in value if str(x).strip()]
+        if not isinstance(value, str):
+            return []
+
+        s = value.strip()
+        if not s or s.upper() == 'NULL':
+            return []
+
+        if s.startswith('[') and s.endswith(']'):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(x).strip() for x in parsed if str(x).strip()]
+            except Exception:
+                pass
+            inner = s[1:-1].strip()
+            if not inner:
+                return []
+            parts = [p.strip().strip('"').strip("'") for p in inner.split(',')]
+            return [p for p in parts if p]
+
+        if ',' in s:
+            parts = [p.strip() for p in s.split(',')]
+            return [p for p in parts if p]
+
+        return [s]
+
+    def _normalize_dt_string(value):
+        """Convert datetime/date/string to a clean string for JSON output."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.strftime('%Y-%m-%d %H:%M:%S')
+        if isinstance(value, date):
+            return value.strftime('%Y-%m-%d')
+        s = str(value).strip()
+        return s if s else None
+
     # =========================================================================
     # STEP 1: Find developer IDs associated with this computer
     # =========================================================================
@@ -3153,7 +3201,6 @@ def fetch_developers():
             print("  ⚠️ No local IP available for VPS matching")
             return [], None, None
 
-        # --- Step 1a: Match VPS IP ---
         print(f"\n  🔍 Checking VPS table for IP: {local_ip}")
         vps_query = """
             SELECT id, user_id, vps_ip_address
@@ -3182,7 +3229,6 @@ def fetch_developers():
         else:
             print(f"  ⚠️ VPS query failed: {vps_result.get('message')}")
 
-        # --- Step 1b: Followers of the VPS owner ---
         if matched_vps_user_id is not None:
             print(f"\n  🔍 Fetching followers for owner_id = {matched_vps_user_id}")
             followers_query = """
@@ -3246,15 +3292,9 @@ def fetch_developers():
     # STEP 3: Fetch selected symbols + selected timeframes from broker_symbols
     # =========================================================================
     def fetch_selected_symbols_map(developer_ids):
-        """
-        Returns (symbols_map, timeframes_map)
-          symbols_map[dev_id]     = sorted list of symbol strings where
-                                    symbol_selected = 1
-          timeframes_map[dev_id]  = sorted list of timeframes where
-                                    symbol_selected = 1 (union across all rows)
-        """
         symbols_map = {}
         timeframes_map = {}
+
         if not developer_ids:
             print(f"    ℹ️ No developer IDs to look up — skipping broker_symbols query")
             return symbols_map, timeframes_map
@@ -3288,6 +3328,8 @@ def fetch_developers():
             print(f"    ✅ broker_symbols: 0 selected row(s) found (query took {elapsed:.2f}s)")
             return symbols_map, timeframes_map
 
+        tf_captured_for = set()
+
         for row in rows:
             uid = row.get('userid')
             sym = row.get('symbol')
@@ -3300,7 +3342,6 @@ def fetch_developers():
             except (ValueError, TypeError):
                 continue
 
-            # Symbol
             if sym is not None:
                 sym_str = str(sym).strip()
                 if sym_str:
@@ -3308,15 +3349,12 @@ def fetch_developers():
                     if sym_str not in symbols_map[uid]:
                         symbols_map[uid].append(sym_str)
 
-            # Timeframes for this row
-            tf_list = _parse_timeframes_value(tf_raw)
-            if tf_list:
-                bucket = timeframes_map.setdefault(uid, [])
-                for tf in tf_list:
-                    if tf not in bucket:
-                        bucket.append(tf)
+            if uid not in tf_captured_for:
+                tf_list = _parse_timeframes_value(tf_raw)
+                if tf_list:
+                    timeframes_map[uid] = tf_list
+                tf_captured_for.add(uid)
 
-        # Sort each developer's list for stable output
         for uid in symbols_map:
             symbols_map[uid].sort()
         for uid in timeframes_map:
@@ -3324,48 +3362,98 @@ def fetch_developers():
 
         return symbols_map, timeframes_map
 
-    # ── Helper: parse a `selected_timeframes` column value into a list ──
-    def _parse_timeframes_value(value):
+    # =========================================================================
+    # STEP 3b: Fetch latest recorded candle per (userid, symbol, timeframe)
+    # =========================================================================
+    def fetch_latest_recorded_candles(developer_ids):
         """
-        Accepts:
-          - None / '' / 'NULL'         → []
-          - JSON array string          → list of strings
-          - Comma-separated string     → list of strings
-          - Python list already        → coerced to list of strings
+        Returns: latest_candles_map[userid] = [
+            {"symbol": ..., "timeframe": ..., "latest_recorded_candle": ...},
+            ...
+        ]
+
+        Rule: per (userid, symbol, timeframe) we pick the row with the MAX
+        candle_time, and read that row's `last_recorded_candle_time`.
+        Older rows behind it are ignored (they won't carry the value per
+        your data model).
         """
-        if value is None:
-            return []
-        if isinstance(value, list):
-            return [str(x).strip() for x in value if str(x).strip()]
-        if not isinstance(value, str):
-            return []
+        latest_candles_map = {}
 
-        s = value.strip()
-        if not s or s.upper() == 'NULL':
-            return []
+        if not developer_ids:
+            print(f"    ℹ️ No developer IDs to look up — skipping candle_records query")
+            return latest_candles_map
 
-        # Try JSON first
-        if s.startswith('[') and s.endswith(']'):
+        placeholders = ','.join(['%s'] * len(developer_ids))
+        query = f"""
+            SELECT cr.userid, cr.symbol, cr.timeframe, cr.last_recorded_candle_time
+            FROM candle_records cr
+            INNER JOIN (
+                SELECT userid, symbol, timeframe, MAX(candle_time) AS max_ct
+                FROM candle_records
+                WHERE userid IN ({placeholders})
+                GROUP BY userid, symbol, timeframe
+            ) latest
+              ON  cr.userid    = latest.userid
+              AND cr.symbol    = latest.symbol
+              AND cr.timeframe = latest.timeframe
+              AND cr.candle_time = latest.max_ct
+            WHERE cr.last_recorded_candle_time IS NOT NULL
+            ORDER BY cr.userid, cr.symbol, cr.timeframe
+        """
+
+        print(f"    🔎 Querying candle_records for {len(developer_ids)} developer ID(s)...")
+
+        result, elapsed = _timed_db_call(
+            "candle_records lookup", query, developer_ids,
+            wait_hint={'signal': 'js-display', 'timeout': 12, 'expect_empty': True},
+        )
+
+        if not isinstance(result, dict):
+            print(f"    ⚠️ candle_records: unexpected result type ({type(result).__name__}) — treating as empty")
+            return latest_candles_map
+
+        if result.get('status') != 'success':
+            print(f"    ⚠️ candle_records query failed: {result.get('message')}")
+            return latest_candles_map
+
+        rows = result.get('results') or []
+        if not rows:
+            print(f"    ✅ candle_records: 0 row(s) with a recorded candle (query took {elapsed:.2f}s)")
+            return latest_candles_map
+
+        for row in rows:
+            uid = row.get('userid')
+            sym = row.get('symbol')
+            tf = row.get('timeframe')
+            lrct = row.get('last_recorded_candle_time')
+
+            if uid is None or sym is None or tf is None:
+                continue
             try:
-                parsed = json.loads(s)
-                if isinstance(parsed, list):
-                    return [str(x).strip() for x in parsed if str(x).strip()]
-            except Exception:
-                pass
-            # Fallback: strip brackets, split on comma
-            inner = s[1:-1].strip()
-            if not inner:
-                return []
-            parts = [p.strip().strip('"').strip("'") for p in inner.split(',')]
-            return [p for p in parts if p]
+                uid = int(uid)
+            except (ValueError, TypeError):
+                continue
 
-        # Comma-separated
-        if ',' in s:
-            parts = [p.strip() for p in s.split(',')]
-            return [p for p in parts if p]
+            sym_str = str(sym).strip()
+            tf_str = str(tf).strip()
+            if not sym_str or not tf_str:
+                continue
 
-        # Single timeframe
-        return [s]
+            lrct_str = _normalize_dt_string(lrct)
+            if not lrct_str:
+                continue
+
+            latest_candles_map.setdefault(uid, []).append({
+                "symbol": sym_str,
+                "timeframe": tf_str,
+                "latest_recorded_candle": lrct_str,
+            })
+
+        # Stable ordering
+        for uid in latest_candles_map:
+            latest_candles_map[uid].sort(key=lambda x: (x['symbol'], x['timeframe']))
+
+        return latest_candles_map
 
     # =========================================================================
     # MAIN EXECUTION
@@ -3379,7 +3467,7 @@ def fetch_developers():
 
     try:
         # --- STEP 0: Get local IP ---
-        print("\n🖥️ [0/5] Getting Computer Identifiers...")
+        print("\n🖥️ [0/6] Getting Computer Identifiers...")
         local_ip = get_local_ip()
 
         if not local_ip:
@@ -3401,7 +3489,7 @@ def fetch_developers():
         print(f"  📋 IDs: {developer_ids[:30]}{'...' if len(developer_ids) > 30 else ''}")
 
         # --- STEP 1: Fetch developer details ---
-        print(f"\n📝 [1/5] Fetching developer details from `developers` table...")
+        print(f"\n📝 [1/6] Fetching developer details from `developers` table...")
         dev_map = fetch_developers_from_table(developer_ids)
 
         if dev_map:
@@ -3410,7 +3498,7 @@ def fetch_developers():
             print(f"  ℹ️ No matching developer records found")
 
         # --- STEP 2: Fetch selected symbols + selected timeframes ---
-        print(f"\n📝 [2/5] Fetching selected broker symbols + timeframes...")
+        print(f"\n📝 [2/6] Fetching selected broker symbols + timeframes...")
         symbols_map, timeframes_map = fetch_selected_symbols_map(developer_ids)
 
         if symbols_map:
@@ -3425,16 +3513,26 @@ def fetch_developers():
         else:
             print(f"  ℹ️ No selected timeframes found (this is normal if none are selected)")
 
-        # --- STEP 3: Prepare output file ---
-        print(f"\n📁 [3/5] Preparing output file...")
+        # --- STEP 3: Fetch latest recorded candle per (userid, symbol, timeframe) ---
+        print(f"\n📝 [3/6] Fetching latest recorded candle times from `candle_records`...")
+        latest_candles_map = fetch_latest_recorded_candles(developer_ids)
+
+        if latest_candles_map:
+            total_entries = sum(len(v) for v in latest_candles_map.values())
+            print(f"  ✅ Latest candle data for {len(latest_candles_map)} developer(s) — {total_entries} entry(ies)")
+        else:
+            print(f"  ℹ️ No latest recorded candle data found (will write empty arrays)")
+
+        # --- STEP 4: Prepare output file ---
+        print(f"\n📁 [4/6] Preparing output file...")
         dir_path = os.path.dirname(DEVELOPERS)
         os.makedirs(dir_path, exist_ok=True)
         temp_path = os.path.join(dir_path, 'newdevelopersdata.temp')
         safe_write_file(temp_path, 'overwrite', None)
         print(f"   Initialized temp file: {os.path.basename(temp_path)}")
 
-        # --- STEP 4: Build final records ---
-        print(f"\n🔨 [4/5] Building developer records...")
+        # --- STEP 5: Build final records ---
+        print(f"\n🔨 [5/6] Building developer records...")
         all_records = []
 
         for dev_id in developer_ids:
@@ -3459,6 +3557,8 @@ def fetch_developers():
                 "terminal_path": row.get('terminal_path'),
                 "selected_symbols": symbols_map.get(dev_id, []),
                 "selected_timeframes": timeframes_map.get(dev_id, []),
+                # NEW: always present, [] when nothing found
+                "last_symbol_tf_time_candle_record": latest_candles_map.get(dev_id, []),
             }
 
             created_at = row.get('created_at')
@@ -3476,11 +3576,12 @@ def fetch_developers():
             print(
                 f"    ✅ Prepared developer {dev_id} ({email}) — "
                 f"{len(record['selected_symbols'])} symbol(s), "
-                f"{len(record['selected_timeframes'])} timeframe(s)"
+                f"{len(record['selected_timeframes'])} timeframe(s), "
+                f"{len(record['last_symbol_tf_time_candle_record'])} candle record(s)"
             )
 
-        # --- STEP 5: Write all records to file ---
-        print(f"\n✍️ [5/5] Writing {len(all_records)} record(s) to temp file...")
+        # --- STEP 6: Write all records to file ---
+        print(f"\n✍️ [6/6] Writing {len(all_records)} record(s) to temp file...")
 
         content_parts = []
         for idx, (dev_id, record) in enumerate(all_records):
@@ -3527,6 +3628,7 @@ def fetch_developers():
         final_size = os.path.getsize(DEVELOPERS) if os.path.exists(DEVELOPERS) else 0
         total_selected_symbols = sum(len(v) for v in symbols_map.values())
         total_selected_tfs = sum(len(v) for v in timeframes_map.values())
+        total_candle_records = sum(len(v) for v in latest_candles_map.values())
 
         print("-"*70)
         print(f"\n📋 DEVELOPERS EXPORT SUMMARY")
@@ -3540,6 +3642,7 @@ def fetch_developers():
         print(f"  📊 Records Written      : {len(all_records)}")
         print(f"  📈 Selected Symbols     : {total_selected_symbols} (across {len(symbols_map)} developer(s))")
         print(f"  ⏱️  Selected Timeframes  : {total_selected_tfs} (across {len(timeframes_map)} developer(s))")
+        print(f"  🕯️  Latest Candle Records: {total_candle_records} (across {len(latest_candles_map)} developer(s))")
         print(f"  💾 File Size            : {final_size/1024:,.1f} KB ({final_size} bytes)")
         print(f"  📁 File Path            : {DEVELOPERS}")
         print("="*70)
@@ -3560,7 +3663,7 @@ def fetch_developers():
         print(f"{'='*70}")
         import traceback
         traceback.print_exc()
-
+              
 def fetch_investors():
     """Stream all results directly to file - VPS-based identification with followers fallback"""
     
@@ -5146,12 +5249,17 @@ def updated_individual_records_to_all_files():
 
 def update_developers():
     """
-    Update `developers` and `broker_symbols` tables from developers.json.
+    Update `developers`, `broker_symbols`, and `candle_records` from
+    developers.json + each developer's candle_records.json.
 
     - Batched upserts (200 rows per statement) for speed.
-    - Never deletes rows.
-    - Never touches `symbol_selected` or `selected_timeframes`.
+    - Never deletes rows from any table.
+    - Never touches `symbol_selected` or `selected_timeframes` in broker_symbols.
     - Only updates `timeframes` on existing broker_symbols rows.
+    - For candle_records: unique on (userid, symbol, candle_time, timeframe).
+      Existing tuples are skipped; only new ones are inserted. After a batch
+      commits, the matching entries are removed from the source JSON so the
+      local file shrinks over time.
     """
 
     # =====================================================================
@@ -5181,6 +5289,30 @@ def update_developers():
                 return None
         return None
 
+    def safe_write_json(file_path, data):
+        """Atomic-ish write with retries."""
+        max_retries = 3
+        retry_delay = 1
+        tmp_path = file_path + ".tmp"
+        for attempt in range(max_retries):
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+                os.replace(tmp_path, file_path)
+                return True
+            except PermissionError:
+                print(f"    ⚠️ Permission denied writing {file_path} (attempt {attempt+1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    return False
+            except Exception as e:
+                print(f"    ❌ Error writing {file_path}: {str(e)}")
+                return False
+        return False
+
     # =====================================================================
     # Value helpers
     # =====================================================================
@@ -5203,6 +5335,14 @@ def update_developers():
             return default
         try:
             return int(float(value))
+        except (ValueError, TypeError):
+            return default
+
+    def to_float_safe(value, default=None):
+        if value is None:
+            return default
+        try:
+            return float(value)
         except (ValueError, TypeError):
             return default
 
@@ -5230,7 +5370,7 @@ def update_developers():
     # Header
     # =====================================================================
     print("\n" + "="*70)
-    print(f"  UPDATING DEVELOPERS TABLES (developers + broker_symbols)")
+    print(f"  UPDATING DEVELOPERS TABLES (developers + broker_symbols + candle_records)")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("-"*70)
@@ -5241,7 +5381,7 @@ def update_developers():
         # =====================================================================
         # STEP 1: Load developers.json
         # =====================================================================
-        print("\n📁 [1/6] Loading developers source...")
+        print("\n📁 [1/7] Loading developers source...")
 
         if not os.path.exists(DEVELOPERS):
             print(f"   ❌ Developers file not found: {DEVELOPERS}")
@@ -5262,7 +5402,7 @@ def update_developers():
         # =====================================================================
         # STEP 2: Discover schemas
         # =====================================================================
-        print("\n📡 [2/6] Discovering target table schemas...")
+        print("\n📡 [2/7] Discovering target table schemas...")
 
         def _schema(table, retries=2):
             queries = [
@@ -5304,11 +5444,15 @@ def update_developers():
         print(f"   ✅ developers          : {len(dev_columns)} cols")
         bs_columns = _schema('broker_symbols')
         print(f"   ✅ broker_symbols      : {len(bs_columns)} cols")
+        cr_columns = _schema('candle_records')
+        print(f"   ✅ candle_records      : {len(cr_columns)} cols")
+
+        has_candle_records_table = bool(cr_columns)
 
         # =====================================================================
         # STEP 3: Fetch existing developer IDs
         # =====================================================================
-        print("\n🔍 [3/6] Fetching existing developers IDs...")
+        print("\n🔍 [3/7] Fetching existing developers IDs...")
         existing_result = db.execute_query(
             "SELECT id FROM developers",
             wait_hint={'signal': 'table', 'timeout': 10},
@@ -5324,15 +5468,13 @@ def update_developers():
         # =====================================================================
         # STEP 4: Fetch existing broker_symbols rows -> (userid, symbol) -> id
         # =====================================================================
-        print("\n🔍 [4/6] Fetching existing broker_symbols rows...")
+        print("\n🔍 [4/7] Fetching existing broker_symbols rows...")
 
         existing_bs_result = db.execute_query(
             "SELECT id, userid, symbol FROM broker_symbols",
             wait_hint={'signal': 'table', 'timeout': 10},
         )
-        # Map: (userid, symbol) -> row_id  (for targeted UPDATE by PK)
         existing_bs_key_to_id = {}
-        # Map: userid -> set(symbols)
         existing_bs_by_user = {}
         if existing_bs_result.get('status') == 'success':
             for row in existing_bs_result.get('results', []):
@@ -5351,9 +5493,9 @@ def update_developers():
         print(f"   📊 Existing broker_symbols rows : {len(existing_bs_key_to_id):,}")
 
         # =====================================================================
-        # STEP 5: Build batched operations
+        # STEP 5: Build batched ops for developers + broker_symbols
         # =====================================================================
-        print(f"\n📤 [5/6] Processing {total_devs:,} developer(s) in batches of {BATCH_SIZE}...")
+        print(f"\n📤 [5/7] Processing {total_devs:,} developer(s) in batches of {BATCH_SIZE}...")
         print("-"*70)
 
         start_time = datetime.now()
@@ -5363,33 +5505,31 @@ def update_developers():
             'bs_rows_updated': 0,
             'bs_rows_inserted': 0,
             'bs_rows_failed': 0,
+            # candle_records counters (filled in STEP 6)
+            'cr_inserted': 0,
+            'cr_skipped_existing': 0,
+            'cr_failed': 0,
+            'cr_json_cleared': 0,
+            'cr_users_touched': 0,
         }
         dev_unmapped = set()
 
         DEV_FIELDS = ['email', 'broker', 'login', 'server', 'broker_password',
                       'terminal_path', 'application_status', 'advertisement']
 
-        # ── Accumulators ──
-        # developers INSERTs: list of (id, {col: sql_literal})
         dev_insert_rows = []
-        # developers UPDATEs: list of (id, {col: sql_literal})
         dev_update_rows = []
-        # broker_symbols UPDATEs by PK id: list of (row_id, tf_literal)
         bs_update_by_id = []
-        # broker_symbols INSERTs: list of (userid, symbol_literal, tf_literal_or_None)
         bs_insert_rows = []
 
         has_timeframes_col = ('timeframes' in bs_columns)
         has_selected_tf_col = ('selected_timeframes' in bs_columns)
 
         def flush_dev_batches():
-            """Flush developers INSERT and UPDATE batches."""
-            # --- INSERTs (one multi-row INSERT) ---
             while dev_insert_rows:
                 chunk = dev_insert_rows[:BATCH_SIZE]
                 del dev_insert_rows[:BATCH_SIZE]
 
-                # Build column list from union of keys (should be consistent)
                 all_cols = ['id']
                 for _, d in chunk:
                     for c in d.keys():
@@ -5417,12 +5557,10 @@ def update_developers():
                     counters['dev_failed'] += len(chunk)
                     print(f"\n      ❌ developers batch INSERT failed: {r.get('message')}")
 
-            # --- UPDATEs (batched CASE per column) ---
             while dev_update_rows:
                 chunk = dev_update_rows[:BATCH_SIZE]
                 del dev_update_rows[:BATCH_SIZE]
 
-                # Columns present across this chunk
                 col_set = set()
                 for _, d in chunk:
                     col_set.update(d.keys())
@@ -5450,8 +5588,6 @@ def update_developers():
                     print(f"\n      ❌ developers batch UPDATE failed: {r.get('message')}")
 
         def flush_bs_batches():
-            """Flush broker_symbols INSERT and UPDATE batches."""
-            # --- INSERTs (multi-row INSERT) ---
             while bs_insert_rows:
                 chunk = bs_insert_rows[:BATCH_SIZE]
                 del bs_insert_rows[:BATCH_SIZE]
@@ -5459,9 +5595,7 @@ def update_developers():
                 if has_timeframes_col:
                     value_groups = []
                     for uid, sym_lit, tf_lit in chunk:
-                        value_groups.append(
-                            f"({uid}, {sym_lit}, {tf_lit})"
-                        )
+                        value_groups.append(f"({uid}, {sym_lit}, {tf_lit})")
                     q = (f"INSERT INTO broker_symbols "
                          f"(`userid`, `symbol`, `timeframes`) "
                          f"VALUES {', '.join(value_groups)}")
@@ -5480,7 +5614,6 @@ def update_developers():
                     counters['bs_rows_failed'] += len(chunk)
                     print(f"\n      ❌ broker_symbols batch INSERT failed: {r.get('message')}")
 
-            # --- UPDATEs by PK: single CASE on timeframes ---
             while bs_update_by_id:
                 chunk = bs_update_by_id[:BATCH_SIZE]
                 del bs_update_by_id[:BATCH_SIZE]
@@ -5504,7 +5637,6 @@ def update_developers():
                     counters['bs_rows_failed'] += len(chunk)
                     print(f"\n      ❌ broker_symbols batch UPDATE failed: {r.get('message')}")
 
-        # ── Main loop: just accumulate, flush at thresholds ──
         touched_users = set()
 
         for index, (dev_id, developer) in enumerate(dev_data.items(), 1):
@@ -5521,7 +5653,6 @@ def update_developers():
             if not isinstance(developer, dict):
                 continue
 
-            # ── Build developers payload ──
             dev_fields = {}
             for field in DEV_FIELDS:
                 if field not in developer:
@@ -5540,7 +5671,6 @@ def update_developers():
             else:
                 dev_insert_rows.append((userid, dev_fields))
 
-            # ── Build broker_symbols payload ──
             symbols_list = developer.get('symbols')
             tf_lit = sql_literal(_serialize_timeframes(developer.get('timeframes')))
 
@@ -5555,18 +5685,15 @@ def update_developers():
                     key = (userid, s)
                     row_id = existing_bs_key_to_id.get(key)
                     if row_id is not None:
-                        # Existing row → UPDATE timeframes only
                         if has_timeframes_col:
                             bs_update_by_id.append((row_id, tf_lit))
                             touched_users.add(userid)
                     else:
-                        # New row → INSERT
                         bs_insert_rows.append((userid, sql_literal(s), tf_lit))
-                        existing_bs_key_to_id[key] = None  # mark as known-pending
+                        existing_bs_key_to_id[key] = None
                         existing_bs_by_user.setdefault(userid, set()).add(s)
                         touched_users.add(userid)
 
-            # ── Flush when any buffer hits threshold ──
             if (len(dev_insert_rows) >= BATCH_SIZE or
                 len(dev_update_rows) >= BATCH_SIZE or
                 len(bs_insert_rows) >= BATCH_SIZE or
@@ -5574,19 +5701,271 @@ def update_developers():
                 flush_dev_batches()
                 flush_bs_batches()
 
-        # ── Final flush ──
         flush_dev_batches()
         flush_bs_batches()
 
         counters['bs_users'] = len(touched_users)
 
         print()
+
+        # =====================================================================
+        # STEP 6: Push candle_records.json → candle_records table
+        # =====================================================================
+        print("\n🕯️  [6/7] Syncing candle records from disk to DB...")
+        print("-"*70)
+
+        if not has_candle_records_table:
+            print("   ⚠️ candle_records table not found — skipping candle sync")
+        else:
+            # Only columns we actually populate
+            CR_INSERT_COLS = [
+                'userid', 'symbol', 'timeframe', 'candle_time',
+                'last_recorded_candle_time',
+                'open', 'high', 'low', 'close',
+                'candle_center', 'body_center',
+                'high_wick_center', 'low_wick_center',
+                'candle_width_center', 'volume',
+                'timezone',
+            ]
+            # Keep only columns that exist in the actual table
+            CR_INSERT_COLS = [c for c in CR_INSERT_COLS if c in cr_columns]
+
+            has_timezone_col = ('timezone' in cr_columns)
+            if not has_timezone_col:
+                print("   ⚠️ `timezone` column not found in candle_records — "
+                      "timezone will be skipped")
+
+            def _query_existing_tuples(userid, symbol, timeframe, candle_times):
+                """
+                Returns set of candle_time strings already present in DB for
+                the given (userid, symbol, timeframe) and candidate candle_times.
+                """
+                existing = set()
+                if not candle_times:
+                    return existing
+                # Query in chunks to avoid giant IN lists
+                for chunk in _chunks(candle_times, 500):
+                    in_list = ", ".join(sql_literal(t) for t in chunk)
+                    q = (
+                        f"SELECT candle_time FROM candle_records "
+                        f"WHERE userid = {userid} "
+                        f"AND symbol = {sql_literal(symbol)} "
+                        f"AND timeframe = {sql_literal(timeframe)} "
+                        f"AND candle_time IN ({in_list})"
+                    )
+                    r = db.execute_query(
+                        q,
+                        wait_hint={'signal': 'table', 'timeout': 15,
+                                   'expect_empty': True},
+                    )
+                    if r.get('status') == 'success':
+                        for row in r.get('results', []):
+                            v = row.get('candle_time')
+                            if v is not None:
+                                existing.add(str(v).strip())
+                return existing
+
+            def _insert_candle_batch(rows):
+                """
+                rows: list of dicts with keys matching CR_INSERT_COLS.
+                Returns True on success.
+                """
+                if not rows:
+                    return True
+
+                cols_sql = ', '.join(f"`{c}`" for c in CR_INSERT_COLS)
+                value_groups = []
+                for r in rows:
+                    vals = []
+                    for c in CR_INSERT_COLS:
+                        vals.append(sql_literal(r.get(c)))
+                    value_groups.append("(" + ", ".join(vals) + ")")
+
+                q = (f"INSERT INTO candle_records ({cols_sql}) "
+                     f"VALUES {', '.join(value_groups)}")
+                res = db.execute_query(
+                    q,
+                    wait_hint={'signal': 'any-of', 'timeout': 25},
+                )
+                return res.get('status') == 'success'
+
+            cr_start = datetime.now()
+
+            for dev_id, developer in dev_data.items():
+                userid = to_int_safe(dev_id)
+                if userid is None or not isinstance(developer, dict):
+                    continue
+
+                # Path is convention-based: <OHLC_FOLDER>/<user_id>/candle_records.json
+                # Update OHLC_FOLDER below if your layout differs.
+                cr_path = os.path.join(
+                    os.path.dirname(DEVELOPERS),
+                    str(userid),
+                    "candle_records.json"
+                )
+                if not os.path.exists(cr_path):
+                    continue
+
+                cr_json = safe_read_file(cr_path)
+                if not isinstance(cr_json, dict) or not cr_json:
+                    continue
+
+                user_had_inserts = False
+                user_inserted_total = 0
+
+                # For each symbol in the JSON we rebuild the file with
+                # remaining (not-yet-inserted) candles.
+                remaining_by_symbol = {}
+
+                for symbol, candle_list in cr_json.items():
+                    if not isinstance(candle_list, list) or not candle_list:
+                        continue
+
+                    symbol_str = str(symbol).strip()
+                    if not symbol_str:
+                        continue
+
+                    # Group by timeframe within this symbol
+                    by_tf = {}
+                    for candle in candle_list:
+                        if not isinstance(candle, dict):
+                            continue
+                        tf = candle.get('timeframe')
+                        ts = candle.get('timestamp')
+                        if not tf or not ts:
+                            continue
+                        by_tf.setdefault(str(tf).strip(), []).append(candle)
+
+                    for tf_str, candles in by_tf.items():
+                        # Build candidate candle_time strings
+                        candle_times = []
+                        ts_to_candle = {}
+                        for c in candles:
+                            ts = str(c.get('timestamp')).strip()
+                            if ts and ts not in ts_to_candle:
+                                ts_to_candle[ts] = c
+                                candle_times.append(ts)
+
+                        if not candle_times:
+                            continue
+
+                        existing_times = _query_existing_tuples(
+                            userid, symbol_str, tf_str, candle_times
+                        )
+
+                        new_rows = []
+                        newest_candle_time = None
+                        for ts in candle_times:
+                            if ts in existing_times:
+                                counters['cr_skipped_existing'] += 1
+                                continue
+                            c = ts_to_candle[ts]
+                            row = {
+                                'userid': userid,
+                                'symbol': symbol_str,
+                                'timeframe': tf_str,
+                                'candle_time': ts,
+                                'last_recorded_candle_time': ts,  # see note below
+                                'open': to_float_safe(c.get('open')),
+                                'high': to_float_safe(c.get('high')),
+                                'low': to_float_safe(c.get('low')),
+                                'close': to_float_safe(c.get('close')),
+                                'candle_center': to_float_safe(c.get('candle_center')),
+                                'body_center': to_float_safe(c.get('body_center')),
+                                'high_wick_center': to_float_safe(c.get('high_wick_center')),
+                                'low_wick_center': to_float_safe(c.get('low_wick_center')),
+                                'candle_width_center': to_float_safe(c.get('candle_width_center')),
+                                'volume': to_float_safe(c.get('volume')),
+                                'timezone': c.get('timezone'),
+                            }
+                            new_rows.append(row)
+                            if newest_candle_time is None or ts > newest_candle_time:
+                                newest_candle_time = ts
+
+                        if not new_rows:
+                            # Nothing new for this (symbol, timeframe) — keep
+                            # whatever was in the JSON for the "existing skip"
+                            # case? Per requirement: if it already exists,
+                            # skip immediately. We still keep the existing
+                            # entries in remaining_by_symbol ONLY if they
+                            # were NOT inserted (i.e. they were skipped here
+                            # and we want to preserve them? No — they exist
+                            # in DB, so we can drop them too).
+                            #
+                            # Decision: entries that already exist in DB are
+                            # removed from the local file too, since the
+                            # source of truth is now the DB. This is the
+                            # "free up space" behaviour requested.
+                            #
+                            # Uncomment the next two lines if you want to
+                            # KEEP already-existing entries in the file:
+                            # remaining_by_symbol.setdefault(symbol, []).extend(candles)
+                            continue
+
+                        # Insert in batches
+                        inserted_this_tf = 0
+                        failed_this_tf = 0
+                        for batch in _chunks(new_rows, BATCH_SIZE):
+                            if _insert_candle_batch(batch):
+                                inserted_this_tf += len(batch)
+                            else:
+                                failed_this_tf += len(batch)
+                                print(f"      ❌ candle_records batch INSERT failed for "
+                                      f"user={userid} symbol={symbol_str} tf={tf_str}")
+
+                        counters['cr_inserted'] += inserted_this_tf
+                        counters['cr_failed'] += failed_this_tf
+                        if inserted_this_tf > 0:
+                            user_had_inserts = True
+                            user_inserted_total += inserted_this_tf
+
+                        # Keep in remaining JSON only the candles that FAILED
+                        # to insert (so a retry can pick them up next run).
+                        if failed_this_tf > 0:
+                            for row in new_rows[inserted_this_tf:]:
+                                remaining_entry = {
+                                    "symbol": symbol_str,
+                                    "timeframe": row['timeframe'],
+                                    "timestamp": row['candle_time'],
+                                    "open": row['open'],
+                                    "high": row['high'],
+                                    "low": row['low'],
+                                    "close": row['close'],
+                                    "volume": row['volume'],
+                                    "candle_center": row['candle_center'],
+                                    "body_center": row['body_center'],
+                                    "high_wick_center": row['high_wick_center'],
+                                    "low_wick_center": row['low_wick_center'],
+                                    "candle_width_center": row['candle_width_center'],
+                                }
+                                if has_timezone_col and row.get('timezone') is not None:
+                                    remaining_entry["timezone"] = row['timezone']
+                                remaining_by_symbol.setdefault(symbol_str, []).append(
+                                    remaining_entry
+                                )
+
+                # Write back the trimmed file for this user
+                if user_had_inserts:
+                    # Rebuild the file with only uninserted entries.
+                    # If nothing is left, write an empty dict.
+                    if safe_write_json(cr_path, remaining_by_symbol):
+                        counters['cr_users_touched'] += 1
+                        counters['cr_json_cleared'] += user_inserted_total
+                        print(f"   ✅ user {userid}: inserted {user_inserted_total} candle(s), "
+                              f"file trimmed")
+                    else:
+                        print(f"   ⚠️ user {userid}: inserts succeeded but could not "
+                              f"rewrite {cr_path}")
+
+            cr_elapsed = (datetime.now() - cr_start).total_seconds()
+            print(f"\n   🕯️  Candle sync done in {cr_elapsed:.1f}s")
+
         elapsed = (datetime.now() - start_time).total_seconds()
 
         # =====================================================================
-        # STEP 6: Summary
+        # STEP 7: Summary
         # =====================================================================
-        print(f"\n💾 [6/6] Source file preserved: {DEVELOPERS}")
+        print(f"\n💾 [7/7] Source file preserved: {DEVELOPERS}")
         print(f"\n📋 UPDATE SUMMARY")
         print("="*70)
         print(f"\n  📊 developers:")
@@ -5603,6 +5982,14 @@ def update_developers():
         print(f"     Written cols : userid, symbol, timeframes")
         print(f"     Read-only    : symbol_selected, selected_timeframes")
         print(f"     No DELETE — existing rows keep their selection state")
+        print(f"\n  📊 candle_records:")
+        print(f"     Inserted         : {counters['cr_inserted']:,}")
+        print(f"     Skipped existing : {counters['cr_skipped_existing']:,}")
+        print(f"     Failed           : {counters['cr_failed']:,}")
+        print(f"     JSONs trimmed    : {counters['cr_users_touched']:,} user(s)")
+        print(f"     JSON entries removed after successful insert: "
+              f"{counters['cr_json_cleared']:,}")
+        print(f"     No DELETE on table — only skip + insert")
         print(f"\n  ⏱️  Total Time : {elapsed:.1f}s")
         print(f"  🕐 Completion  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
@@ -5618,7 +6005,7 @@ def update_developers():
         print(f"\n{'='*70}\n   CRITICAL ERROR\n{'='*70}")
         print(f"  Error   : {type(e).__name__}\n  Message : {str(e)}\n{'='*70}")
         import traceback; traceback.print_exc()
-                            
+                                   
 def update_investors():
     """
     Update database from JSON files (batched, no delete-insert for multi-row tables).
