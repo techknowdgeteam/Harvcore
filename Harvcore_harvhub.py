@@ -2176,7 +2176,6 @@ def sync_and_distribute_investors():
     
     Uses ALL_FETCHED_INVESTORS and ALL_UPDATED_INVESTORS as the source of truth.
     """
-    update_fresh_data_from_fetched_to_all_files()
     restore_empty_investor_files()
     
     print(f"\n{'='*70}")
@@ -2371,11 +2370,24 @@ def sync_and_distribute_investors():
     
     def is_grid_trader(investor_data):
         """
-        Check if investor is a grid trader by looking for grid-related keywords
-        in various fields.
+        Check if investor belongs to HARVHUB.
+        
+        An investor goes to HARVHUB if it is a grid trader OR if it matches
+        any of the additional HARVHUB keywords:
+            - Boom and Crash
+            - Trailing spike
+            - Trailing price
+            - Stalking Price
+            - Stalking Spike
+        
+        Matching strategy:
+            1. Regex match against the full cleaned value using patterns that
+               tolerate any non-word separator (space, _, -, or nothing).
+            2. "Squashed" normalized substring match (strip all non-alphanumerics).
+            3. Token-based match for single-word keywords.
         
         Returns:
-            bool: True if investor is a grid trader, False otherwise
+            bool: True if investor belongs to HARVHUB, False otherwise
         """
         if not isinstance(investor_data, dict):
             return False
@@ -2393,7 +2405,7 @@ def sync_and_distribute_investors():
             'tags'
         ]
         
-        # Grid-related keywords with patterns
+        # Grid-related regex patterns (match anywhere in the cleaned value)
         grid_patterns = [
             r'grid',
             r'grid_trade',
@@ -2408,8 +2420,39 @@ def sync_and_distribute_investors():
             r'grid$',
         ]
         
+        # Additional HARVHUB keyword regex patterns
+        # Use \W* (any non-word chars) between words so " ", "_", "-", or
+        # no separator at all will all match.
+        harvhub_patterns = [
+            r'boom\W*and\W*crash',
+            r'trailing\W*spike',
+            r'trailing\W*price',
+            r'stalking\W*price',
+            r'stalking\W*spike',
+        ]
+        
         # Compile regex patterns for case-insensitive matching
-        compiled_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in grid_patterns]
+        compiled_grid_patterns = [re.compile(p, re.IGNORECASE) for p in grid_patterns]
+        compiled_harvhub_patterns = [re.compile(p, re.IGNORECASE) for p in harvhub_patterns]
+        
+        # Normalized (squashed) keyword lists — strip all non-alphanumerics
+        # e.g. "boom and crash", "boom_and_crash", "boomandcrash" all become
+        # "boomandcrash" and match.
+        harvhub_normalized = [
+            'boomandcrash',
+            'trailingspike',
+            'trailingprice',
+            'stalkingprice',
+            'stalkingspike',
+        ]
+        
+        grid_keywords = [
+            'grid', 'gridtrade', 'grid_trade', 'gridtrades', 'grid_trades',
+            'dynamic_grid', 'dynamicgrid', 'dynamic_grid_trade', 'dynamicgridtrade',
+            'gridding', 'gridder', 'gridbot', 'grid_bot', 'gridrobot'
+        ]
+        grid_normalized = [re.sub(r'[^a-z0-9]', '', kw.lower()) for kw in grid_keywords]
+        grid_normalized = [kw for kw in grid_normalized if kw]
         
         # Check all relevant fields
         for field in fields_to_check:
@@ -2422,30 +2465,38 @@ def sync_and_distribute_investors():
             # Clean and normalize the value
             clean_value = value.strip().lower()
             
-            # Check for grid-related patterns
-            for pattern in compiled_patterns:
+            # ---- 1) Regex match on FULL cleaned value (multi-word phrases) ----
+            for pattern in compiled_grid_patterns:
+                if pattern.search(clean_value):
+                    return True
+            for pattern in compiled_harvhub_patterns:
                 if pattern.search(clean_value):
                     return True
             
-            # Additional check: split by common delimiters
+            # ---- 2) Squashed normalized substring match ----
+            squashed = re.sub(r'[^a-z0-9]', '', clean_value)
+            for kw in harvhub_normalized:
+                if kw in squashed:
+                    return True
+            for kw in grid_normalized:
+                if kw in squashed:
+                    return True
+            
+            # ---- 3) Token-based match (single-word keywords) ----
             delimiters = [' ', '_', '-', '.', ',', ';', '|', '/', '\\', ':', ';']
             parts = [clean_value]
-            
             for delimiter in delimiters:
                 new_parts = []
                 for part in parts:
                     new_parts.extend(part.split(delimiter))
                 parts = new_parts
             
-            # Check each part for grid-related keywords
-            grid_keywords = [
-                'grid', 'gridtrade', 'grid_trade', 'gridtrades', 'grid_trades',
-                'dynamic_grid', 'dynamicgrid', 'dynamic_grid_trade', 'dynamicgridtrade',
-                'gridding', 'gridder', 'gridbot', 'grid_bot', 'gridrobot'
-            ]
-            
             for part in parts:
-                if part in grid_keywords or any(keyword in part for keyword in grid_keywords):
+                if not part:
+                    continue
+                if part in grid_keywords:
+                    return True
+                if part in harvhub_normalized:
                     return True
         
         return False
@@ -2478,7 +2529,7 @@ def sync_and_distribute_investors():
         print(f"         INVHARV: {len(invharv_ids):,} investors")
         print(f"         HARVHUB: {len(harvhub_ids):,} investors")
         
-        # STEP 1: Check INVHARV for grid traders
+        # STEP 1: Check INVHARV for grid traders (or HARVHUB keyword matches)
         invalid_in_invharv = []
         for inv_id in list(invharv_ids):
             investor_data = working_all.get(inv_id, {})
@@ -3046,20 +3097,108 @@ def sync_and_distribute_investors():
         
         stats["processing_success"] = False
         stats["errors"].append(f"Critical error: {str(e)}")
-        return stats
-
-def fetch_database():
-    """Stream all results directly to file without batch division - Hybrid mode: IP first, then VS Code ID fallback"""
+        return stats   
+ 
+def fetch_investors():
+    """Stream all results directly to file - VPS-based identification with followers fallback"""
+    
+    # ── Diagnostic helper: time every DB call + pass fast-completion hints ──
+    def _timed_db_call(label, query, params=None, wait_hint=None):
+        import time as _time
+        t0 = _time.perf_counter()
+        if wait_hint is not None:
+            try:
+                result = db.execute_query(query, params=params, wait_hint=wait_hint)
+            except TypeError:
+                print(f"    ℹ️  [{label}] wrapper does not accept wait_hint — using default wait")
+                result = db.execute_query(query, params=params)
+        else:
+            result = db.execute_query(query, params=params)
+        elapsed = _time.perf_counter() - t0
+        print(f"    ⏱️  [{label}] took {elapsed:.2f}s")
+        return result, elapsed
+    
+    def _diag_dump(label, result):
+        print(f"    🔎 [DIAG] {label} response dump:")
+        if not isinstance(result, dict):
+            print(f"        ⚠️ result is not a dict — type = {type(result).__name__}")
+            print(f"        ⚠️ repr(result) = {repr(result)[:400]}")
+            return
+        print(f"        status  : {result.get('status')!r}")
+        print(f"        message : {result.get('message')!r}")
+        results_val = result.get('results')
+        if results_val is None:
+            print(f"        results : None (key missing or null)")
+        elif not isinstance(results_val, list):
+            print(f"        results : not a list — type = {type(results_val).__name__}")
+            print(f"        results : repr = {repr(results_val)[:400]}")
+        else:
+            print(f"        results : list of {len(results_val)} item(s)")
+            if results_val:
+                first = results_val[0]
+                print(f"        first item type: {type(first).__name__}")
+                if isinstance(first, dict):
+                    keys = list(first.keys())
+                    print(f"        first item keys: {keys[:20]}{'...' if len(keys) > 20 else ''}")
+                    print(f"        first item sample: { {k: first.get(k) for k in keys[:5]} }")
+                else:
+                    print(f"        first item repr: {repr(first)[:300]}")
+        other_keys = [k for k in result.keys() if k not in ('status', 'message', 'results')]
+        if other_keys:
+            print(f"        other top-level keys: {other_keys}")
+    
+    FAST_HINT = {'signal': 'js-display', 'timeout': 8, 'expect_empty': True}
+    BULK_HINT = {'signal': 'js-display', 'timeout': 15, 'expect_empty': False}
+    
+    def _normalize_keys(row):
+        if not isinstance(row, dict):
+            return row
+        normalized = {}
+        for k, v in row.items():
+            if isinstance(k, str):
+                normalized[k.strip().lower()] = v
+            else:
+                normalized[k] = v
+        return normalized
+    
+    def _coerce_int(value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        try:
+            s = str(value).strip()
+            if not s or s.lower() in ('null', 'none', 'nan'):
+                return None
+            if '.' in s:
+                return int(float(s))
+            return int(s)
+        except (ValueError, TypeError):
+            return None
+    
+    def _pick_first_key(row, *candidate_keys):
+        if not isinstance(row, dict):
+            return None
+        lowered = { (k.strip().lower() if isinstance(k, str) else k): v
+                    for k, v in row.items() }
+        for key in candidate_keys:
+            if key is None:
+                continue
+            lk = key.strip().lower()
+            if lk in lowered and lowered[lk] is not None:
+                return lowered[lk]
+        return None
     
     def get_local_ip():
-        """Get the local IP address of the computer"""
         try:
-            # Create a socket connection to determine the local IP
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip_address = s.getsockname()[0]
             s.close()
-            
             print(f"  🌐 Local IP Address detected: {ip_address}")
             return ip_address
         except Exception as e:
@@ -3067,404 +3206,143 @@ def fetch_database():
             return None
     
     def get_vscode_machine_id():
-        """Extract VS Code machine ID from storage.json"""
         try:
             appdata = os.environ.get("APPDATA", "")
             if not appdata:
                 return None
-            
             global_storage = os.path.join(appdata, "Code", "User", "globalStorage")
             storage_json_path = os.path.join(global_storage, "storage.json")
-            
             if os.path.exists(storage_json_path):
                 with open(storage_json_path, 'r', encoding='utf-8') as f:
                     storage_data = json.load(f)
-                    
-                    # Look for machine ID in various possible keys
-                    possible_keys = [
-                        'telemetry.machineId',
-                        'machineId',
-                        'machine.id',
-                        'vscode.machineId'
-                    ]
-                    
-                    for key in possible_keys:
-                        if key in storage_data:
-                            machine_id = storage_data[key]
-                            if machine_id:
-                                print(f"  🖥️ VS Code Machine ID detected: {machine_id[:32]}...")
-                                return machine_id
-            
+                    for key in ['telemetry.machineId', 'machineId', 'machine.id', 'vscode.machineId']:
+                        if key in storage_data and storage_data[key]:
+                            print(f"  🖥️ VS Code Machine ID detected: {storage_data[key][:32]}...")
+                            return storage_data[key]
             return None
         except Exception as e:
             print(f"    Error getting VS Code ID: {e}")
             return None
     
-    def parse_server_config(config_value):
-        """Parse system_server_config from string to dictionary"""
-        if config_value is None:
-            return {}
-        
-        # If it's already a dict, use it
-        if isinstance(config_value, dict):
-            return config_value
-        
-        # If it's a string, try to parse it
-        if isinstance(config_value, str):
-            try:
-                # First attempt: direct JSON parse
-                return json.loads(config_value)
-            except json.JSONDecodeError:
-                pass
-            
-            # Second attempt: Use repair_json_field
-            try:
-                repaired = repair_json_field(config_value)
-                if isinstance(repaired, dict):
-                    return repaired
-            except:
-                pass
-            
-            # Third attempt: Try to evaluate as Python literal
-            try:
-                import ast
-                parsed = ast.literal_eval(config_value)
-                if isinstance(parsed, dict):
-                    return parsed
-            except:
-                pass
-            
-            # If all fails, return empty dict
-            print(f"    🛑 Could not parse system_server_config")
-            return {}
-        
-        return {}
-    
-    def extract_user_ids_from_config(config_dict, target_id, id_type="identifier"):
-        """Extract user IDs for a specific computer ID (IP or VS Code ID)"""
-        if not config_dict or target_id not in config_dict:
-            return []
-        
-        computer_data = config_dict[target_id]
-        
-        # If it's not a list, return empty
-        if not isinstance(computer_data, list):
-            print(f"    🛑 Data for {id_type} {target_id} is not a list: {type(computer_data)}")
-            return []
-        
-        user_ids = []
-        for item in computer_data:
-            # Only add if it's a valid ID (int or string that can be converted)
-            if isinstance(item, (int, float)):
-                # Convert to string for consistent handling
-                user_ids.append(str(int(item)))
-            elif isinstance(item, str):
-                # Try to convert to int if it's numeric
-                try:
-                    # Check if it's a numeric string
-                    if item.strip().isdigit():
-                        user_ids.append(str(int(item)))
-                    else:
-                        # Skip non-numeric strings (like URLs or other text)
-                        print(f"    ℹ️ Skipping non-numeric entry: '{item}' for {id_type} {target_id}")
-                        continue
-                except:
-                    print(f"    ℹ️ Skipping invalid entry: '{item}' for {id_type} {target_id}")
-                    continue
-            elif isinstance(item, dict):
-                # Skip dictionary objects (like {"URL": "..."})
-                print(f"    ℹ️ Skipping nested object for {id_type} {target_id}: {item}")
-                continue
-            else:
-                # Skip any other types
-                print(f"    ℹ️ Skipping unsupported type {type(item)} for {id_type} {target_id}: {item}")
-                continue
-        
-        return user_ids
-    
-    def denormalize_path_value(value, field_name):
-        """Convert underscore-normalized paths back to original path format with backslashes"""
+    def parse_json_safe(value):
         if value is None:
             return None
-        
-        # Check if field name contains 'path' (case insensitive)
-        if 'path' not in field_name.lower():
-            return value
-        
-        # Only process string values
-        if not isinstance(value, str):
-            return value
-        
-        # Convert underscores back to backslashes (ONLY underscores, preserve everything else)
-        denormalized = value.replace('_', '\\')
-        
-        # Handle drive letters: C:\ should remain C:\ (not C:\\)
-        import re
-        # Fix drive letters (e.g., "C:\" pattern)
-        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
-        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
-        
-        # Convert single backslashes to double backslashes for JSON string representation
-        denormalized = denormalized.replace('\\', '\\')
-        
-        # Fix drive letters again after double backslash conversion
-        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
-        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
-        
-        return denormalized
-    
-    def repair_json_field(value):
-        """Intelligently detect and repair JSON fields, even if they're escaped or malformed"""
-        if value is None:
-            return None
-        
-        # If it's already a dict or list, return as is
         if isinstance(value, (dict, list)):
             return value
-        
-        # If it's not a string, return original
         if not isinstance(value, str):
             return value
-        
-        # Trim whitespace
         value = value.strip()
-        
-        # Check if it looks like JSON (starts with { or [)
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        try:
+            return repair_json_field(value)
+        except Exception:
+            pass
+        try:
+            import ast
+            return ast.literal_eval(value)
+        except Exception:
+            pass
+        return value
+    
+    def repair_json_field(value):
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
         if not (value.startswith('{') or value.startswith('[')):
-            # Check if it might be a string representation of JSON
             if (value.startswith('"{') and value.endswith('}"')) or \
                (value.startswith("'{") and value.endswith("}'")) or \
                (value.startswith('"[') and value.endswith(']"')) or \
-               (value.startswith("'[") and value.endswith("]'")):
-                # Remove outer quotes
+               (value.startswith("'[") and value.endswith("]'")) :
                 value = value[1:-1]
-            
-            # Check again after removing quotes
             if not (value.strip().startswith('{') or value.strip().startswith('[')):
-                return value  # Not JSON-like, return as is
-        
-        # Try to parse JSON
+                return value
         try:
-            # First attempt: direct parsing
             return json.loads(value)
         except json.JSONDecodeError:
             pass
-        
-        # Second attempt: Fix common issues
         try:
-            # Replace escaped quotes
-            fixed_value = value.replace('\\"', '"').replace("\\'", "'")
-            # Fix unescaped newlines in strings
-            fixed_value = re.sub(r'(?<!")\n(?!")', '\\n', fixed_value)
-            # Fix missing quotes around keys
-            fixed_value = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed_value)
-            # Fix single quotes to double quotes
-            fixed_value = fixed_value.replace("'", '"')
-            # Fix trailing commas
-            fixed_value = re.sub(r',\s*}', '}', fixed_value)
-            fixed_value = re.sub(r',\s*\]', ']', fixed_value)
-            # Remove BOM if present
-            if fixed_value.startswith('\ufeff'):
-                fixed_value = fixed_value[1:]
-            
-            return json.loads(fixed_value)
+            fixed = value.replace('\\"', '"').replace("\\'", "'")
+            fixed = re.sub(r'(?<!")\n(?!")', '\\n', fixed)
+            fixed = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', fixed)
+            fixed = fixed.replace("'", '"')
+            fixed = re.sub(r',\s*}', '}', fixed)
+            fixed = re.sub(r',\s*\]', ']', fixed)
+            if fixed.startswith('\ufeff'):
+                fixed = fixed[1:]
+            return json.loads(fixed)
         except json.JSONDecodeError:
             pass
-        
-        # Third attempt: Use ast.literal_eval for Python literals
         try:
             import ast
             result = ast.literal_eval(value)
-            # If it parsed successfully, convert to JSON-serializable format
             if isinstance(result, (dict, list, tuple)):
                 return result
-        except (ValueError, SyntaxError, ImportError):
+        except (ValueError, SyntaxError):
             pass
-        
-        # Fourth attempt: Handle nested escaped JSON
         try:
-            # Try to unescape multiple times
             unescaped = value
-            for _ in range(5):  # Max 5 levels of escaping
+            for _ in range(5):
                 if '\\"' in unescaped:
                     unescaped = unescaped.replace('\\"', '"')
                 elif "\\'" in unescaped:
                     unescaped = unescaped.replace("\\'", "'")
                 else:
                     break
-            
             if unescaped != value:
                 return json.loads(unescaped)
         except json.JSONDecodeError:
             pass
-        
-        # Fifth attempt: String to dict conversion for specific patterns
         try:
-            # Check if it's a string representation of a dict/list
-            if value.startswith('{') and value.endswith('}') or value.startswith('[') and value.endswith(']'):
-                # Replace literal string 'NULL' with None
-                fixed_value = value.replace(': "NULL"', ': null').replace(': NULL', ': null')
-                fixed_value = fixed_value.replace('"NULL"', 'null')
-                # Replace 'true'/'false' strings
-                fixed_value = fixed_value.replace(': "true"', ': true').replace(': "false"', ': false')
-                fixed_value = fixed_value.replace('"true"', 'true').replace('"false"', 'false')
-                # Replace decimal strings
-                fixed_value = re.sub(r'"(\d+\.\d+)"', r'\1', fixed_value)
-                
-                return json.loads(fixed_value)
+            if (value.startswith('{') and value.endswith('}')) or (value.startswith('[') and value.endswith(']')):
+                fixed = value.replace(': "NULL"', ': null').replace(': NULL', ': null')
+                fixed = fixed.replace('"NULL"', 'null')
+                fixed = fixed.replace(': "true"', ': true').replace(': "false"', ': false')
+                fixed = fixed.replace('"true"', 'true').replace('"false"', 'false')
+                fixed = re.sub(r'"(\d+\.\d+)"', r'\1', fixed)
+                return json.loads(fixed)
         except json.JSONDecodeError:
             pass
-        
-        # If all attempts fail, return original string
         return value
     
-    def unwrap_and_extract_config_title(accountmanagement_data):
-        """
-        Remove wrapper key from accountmanagement data and extract config title.
-        
-        If data is like: {"config_key": {actual_data}} -> 
-            Return: {"configuration_title": "config_key", ...actual_data}
-        
-        If data already has configuration_title field:
-            Update it with the wrapper key value (overwrite)
-        
-        If data is like: {} or {"key": "value"} (no nested dict wrapper) -> 
-            Return as is (no extraction)
-        
-        If data is None or empty -> return {}
-        """
-        if accountmanagement_data is None:
-            return {}
-        
-        # If it's not a dict, return as is (but wrapped in dict if needed)
-        if not isinstance(accountmanagement_data, dict):
-            # If it's an empty string or null-like, return empty dict
-            if accountmanagement_data == '' or accountmanagement_data == 'null':
-                return {}
-            return accountmanagement_data
-        
-        # If dict is empty, return empty dict
-        if len(accountmanagement_data) == 0:
-            return {}
-        
-        # Check if the dict has exactly one key and that key's value is a dict
-        keys = list(accountmanagement_data.keys())
-        
-        if len(keys) == 1:
-            first_key = keys[0]
-            first_value = accountmanagement_data[first_key]
-            
-            # If the value is a dict (nested structure), unwrap it and extract config title
-            if isinstance(first_value, dict):
-                print(f"       Extracted config title from wrapper key: '{first_key}'")
-                
-                # Create new dict with configuration_title and all data from inner dict
-                result = dict(first_value)  # Copy all inner data
-                result['configuration_title'] = first_key  # Add/extract config title
-                
-                return result
-        
-        # Otherwise, return as is (no wrapper to remove)
-        return accountmanagement_data
-    
-    def normalize_gmail_path(value):
-        """
-        Normalize Gmail-related path segments from backslashes to underscores.
-        Specifically targets paths containing \at\gmail\dot\com patterns.
-        
-        Example:
-        Input:  "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 tolulopestandarddemo\\at\\gmail\\dot\\com 2 Deriv\\terminal64.exe"
-        Output: "C:\\xampp\\htdocs\\harvcore\\mt5\\MetaTrader 5 tolulopestandarddemo_at_gmail_dot_com 2 Deriv\\terminal64.exe"
-        """
+    def denormalize_path_value(value, field_name):
         if value is None:
             return None
-        
-        # Only process string values
+        if 'path' not in field_name.lower():
+            return value
         if not isinstance(value, str):
             return value
-        
-        # Only process if it contains Gmail-related path pattern
-        # Pattern: \at\gmail\dot\com or \\at\\gmail\\dot\\com
-        import re
-        
-        # Check if the path contains the Gmail pattern
+        denormalized = value.replace('_', '\\')
+        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
+        denormalized = re.sub(r'([A-Za-z]):\\', r'\1:\\', denormalized)
+        return denormalized
+    
+    def normalize_gmail_path(value):
+        if value is None or not isinstance(value, str):
+            return value
         if 'at\\gmail\\dot\\com' in value or 'at/gmail/dot/com' in value:
-            # Replace the segment \at\gmail\dot\com with _at_gmail_dot_com
-            # This preserves the rest of the path structure
-            
-            # Handle double backslash representation (JSON strings)
-            # Pattern: \\at\\gmail\\dot\\com (double backslashes in string)
-            if '\\\\at\\\\gmail\\\\dot\\\\com' in value:
-                # Replace the entire segment
-                value = value.replace('\\\\at\\\\gmail\\\\dot\\\\com', '_at_gmail_dot_com')
-            
-            # Handle single backslash representation (normal Windows paths)
-            elif '\\at\\gmail\\dot\\com' in value:
+            if '\\at\\gmail\\dot\\com' in value:
                 value = value.replace('\\at\\gmail\\dot\\com', '_at_gmail_dot_com')
-            
-            # Handle forward slash representation (Unix-style paths)
             elif '/at/gmail/dot/com' in value:
                 value = value.replace('/at/gmail/dot/com', '_at_gmail_dot_com')
-            
-            # Handle mixed slashes (backslashes in path, but check for any combination)
             else:
-                # More flexible pattern matching for various slash combinations
-                # Replace \at\gmail\dot\com (with any slash direction)
-                pattern = r'[\\/]at[\\/]gmail[\\/]dot[\\/]com'
-                value = re.sub(pattern, '_at_gmail_dot_com', value)
-        
+                value = re.sub(r'[\\/]at[\\/]gmail[\\/]dot[\\/]com', '_at_gmail_dot_com', value)
         return value
     
-    def clean_record(record):
-        """Clean a record by repairing all fields that might contain JSON and denormalizing paths"""
-        cleaned = {}
-        for key, value in record.items():
-            # First, denormalize path fields if they are strings
-            if isinstance(value, str) and len(value) > 0:
-                # Denormalize path fields before JSON repair
-                value = denormalize_path_value(value, key)
-                
-                # Attempt to repair JSON fields
-                repaired = repair_json_field(value)
-                cleaned[key] = repaired
-            else:
-                cleaned[key] = value
-        
-        # Process accountmanagement field - NO AUTO-FILLING, just unwrap and extract config title
-        if 'accountmanagement' in cleaned:
-            accountmanagement = cleaned.get('accountmanagement')
-            
-            # Unwrap the accountmanagement data and extract configuration title
-            cleaned['accountmanagement'] = unwrap_and_extract_config_title(accountmanagement)
-            
-            # Ensure it's at least an empty dict if None
-            if cleaned['accountmanagement'] is None:
-                cleaned['accountmanagement'] = {}
-        
-        # NEW: Normalize Gmail paths in all fields (last section)
-        for key, value in cleaned.items():
-            # Only process string values
-            if isinstance(value, str):
-                # Check if it's a path field or contains path-like structure
-                if 'path' in key.lower() or isinstance(value, str) and ('\\at\\gmail\\dot\\com' in value or '/at/gmail/dot/com' in value):
-                    cleaned[key] = normalize_gmail_path(value)
-        
-        return cleaned
-    
-    def safe_write_file(file_path, mode, content, is_first_record=False):
-        """
-        Safely write to a file with permission handling.
-        If permission denied, delete the file and retry.
-        """
+    def safe_write_file(file_path, mode, content):
         max_retries = 3
         retry_delay = 1
-        
         for attempt in range(max_retries):
             try:
-                # Ensure directory exists
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                
-                # Try to write the file
                 if mode == 'w':
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
@@ -3472,614 +3350,822 @@ def fetch_database():
                     with open(file_path, 'a', encoding='utf-8') as f:
                         f.write(content)
                 elif mode == 'overwrite':
-                    # Special mode for writing the opening brace
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write('{\n')
-                
-                return True  # Success
-                
-            except PermissionError as e:
+                return True
+            except PermissionError:
                 print(f"    ⚠️ Permission denied (attempt {attempt+1}/{max_retries})")
-                
                 if attempt < max_retries - 1:
                     try:
-                        # Try to delete the file
                         if os.path.exists(file_path):
-                            print(f"       🔄 Deleting file: {file_path}")
                             os.remove(file_path)
                             print(f"       ✅ File deleted, retrying...")
                         time.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
+                        retry_delay *= 2
                     except Exception as delete_error:
                         print(f"       ❌ Could not delete file: {delete_error}")
                         time.sleep(retry_delay)
                         retry_delay *= 2
                 else:
-                    # Last attempt failed, raise the error
                     raise
-        
-        return False  # Should not reach here
+        return False
     
     def move_temp_to_final(temp_file_path, final_file_path):
-        """
-        Move a temporary file to its final destination.
-        Handles cases where the final file may not exist.
-        """
-        # REMOVED: delete_investor_files() - This was deleting files after they were moved!
         try:
-            # Ensure the final directory exists
             os.makedirs(os.path.dirname(final_file_path), exist_ok=True)
-            
-            # If the final file already exists, remove it first (Windows requires this)
             if os.path.exists(final_file_path):
                 os.remove(final_file_path)
-                print(f"    🗑️ Removed existing file: {os.path.basename(final_file_path)}")
-            
-            # Move the temp file to the final location
             shutil.move(temp_file_path, final_file_path)
             print(f"    ✅ Moved: {os.path.basename(temp_file_path)} → {os.path.basename(final_file_path)}")
             return True
-            
         except Exception as e:
             print(f"    ❌ Error moving file: {str(e)}")
             return False
     
+    # =========================================================================
+    # STEP 1: Find the investor IDs associated with this computer
+    # =========================================================================
+    def find_investor_ids_for_this_computer(local_ip):
+        investor_ids = set()
+        matched_vps_user_id = None
+        identification_method = None
+        vps_row_existed = False
+        vps_row_dump = None
+        
+        if not local_ip:
+            print("  ⚠️ No local IP available for VPS matching")
+            return [], None, None, False
+        
+        print(f"\n  🔍 Checking VPS table for IP: {local_ip}")
+        vps_query = """
+            SELECT id, user_id, vps_ip_address
+            FROM vps
+            WHERE vps_ip_address = %s
+            LIMIT 1
+        """
+        vps_result, _ = _timed_db_call(
+            "vps lookup", vps_query, [local_ip], wait_hint=FAST_HINT
+        )
+        
+        if vps_result.get('status') == 'success':
+            vps_rows = vps_result.get('results', [])
+            if vps_rows and len(vps_rows) > 0:
+                vps_row_existed = True
+                raw_row = vps_rows[0]
+                if isinstance(raw_row, dict):
+                    print(f"    🔎 VPS row keys: {list(raw_row.keys())}")
+                    print(f"    🔎 VPS row data: {raw_row}")
+                else:
+                    print(f"    🔎 VPS row (non-dict, {type(raw_row).__name__}): {repr(raw_row)[:300]}")
+                normalized_row = _normalize_keys(raw_row) if isinstance(raw_row, dict) else {}
+                vps_row_dump = normalized_row
+                raw_user_id = _pick_first_key(
+                    raw_row,
+                    'user_id', 'userid', 'user-id', 'user id',
+                    'uid', 'user', 'USER_ID', 'UserId',
+                )
+                print(f"    🔎 Resolved raw user_id value: {raw_user_id!r} "
+                      f"(type={type(raw_user_id).__name__})")
+                matched_vps_user_id = _coerce_int(raw_user_id)
+                if matched_vps_user_id is not None:
+                    investor_ids.add(matched_vps_user_id)
+                    identification_method = 'vps_ip'
+                    print(f"  ✅ VPS match found! user_id = {matched_vps_user_id}")
+                else:
+                    print(f"  ⚠️ VPS row found (id={normalized_row.get('id')}) "
+                          f"but user_id is NULL/unparseable — nothing to fetch")
+            else:
+                print(f"  ℹ️ No VPS row with vps_ip_address = {local_ip}")
+        else:
+            print(f"  ⚠️ VPS query failed: {vps_result.get('message')}")
+        
+        if matched_vps_user_id is not None:
+            print(f"\n  🔍 Fetching followers for owner_id = {matched_vps_user_id}")
+            followers_query = """
+                SELECT follower_id
+                FROM vps_hosts_followers
+                WHERE owner_id = %s
+                  AND host_status = 'active'
+            """
+            followers_result, _ = _timed_db_call(
+                "followers lookup", followers_query, [matched_vps_user_id],
+                wait_hint=FAST_HINT,
+            )
+            if followers_result.get('status') == 'success':
+                follower_rows = followers_result.get('results', [])
+                for row in follower_rows:
+                    fid = _pick_first_key(row, 'follower_id', 'followerid', 'follower id')
+                    fid_int = _coerce_int(fid)
+                    if fid_int is not None:
+                        investor_ids.add(fid_int)
+                print(f"  ✅ Found {len(follower_rows)} active follower(s)")
+            else:
+                print(f"  ⚠️ Followers query failed: {followers_result.get('message')}")
+        
+        return sorted(investor_ids), identification_method, matched_vps_user_id, vps_row_existed
+    
+    # =========================================================================
+    # STEP 1b: Fetch DEFAULT_ACCOUNTMANAGEMENT from server_account
+    #          and WRITE IT DIRECTLY TO THE FILE (global, not per-investor)
+    # =========================================================================
+    def fetch_and_save_default_accountmanagement(output_path):
+        """
+        Fetch accountmanagement_configs from server_account (single global row,
+        NOT user/VPS-specific) and write it directly to `output_path` as a
+        standalone JSON file.
+
+        This is COMPLETELY SEPARATE from the `accountmanagement` table.
+          * server_account.accountmanagement_configs → DEFAULT_ACCOUNTMANAGEMENT file
+          * accountmanagement table                  → per-investor records
+        They must never be mixed.
+        """
+        print(f"\n📝 [0b/6] Fetching server_account accountmanagement_configs → {output_path}")
+        try:
+            query = "SELECT accountmanagement_configs FROM server_account LIMIT 1"
+            result, _ = _timed_db_call(
+                "server_account accountmanagement_configs", query, None,
+                wait_hint=FAST_HINT,
+            )
+            if result.get('status') != 'success' or not result.get('results'):
+                print(f"  ⚠️ Could not fetch server_account accountmanagement_configs: "
+                      f"{result.get('message')}")
+                return False
+
+            raw = _pick_first_key(
+                result['results'][0],
+                'accountmanagement_configs', 'accountmanagementconfigs',
+                'accountmanagement configs', 'accountmanagement_config',
+            )
+            parsed = parse_json_safe(raw)
+            if not isinstance(parsed, dict):
+                print(f"  ⚠️ accountmanagement_configs parsed to non-dict "
+                      f"({type(parsed).__name__}) — writing raw value anyway")
+            else:
+                print(f"  ✅ Loaded DEFAULT_ACCOUNTMANAGEMENT with {len(parsed)} top-level key(s): "
+                      f"{', '.join(list(parsed.keys())[:8])}")
+
+            # ── Write the parsed dict straight to the target file ──
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(parsed, f, indent=2, default=str)
+            size = os.path.getsize(output_path)
+            print(f"  💾 Wrote DEFAULT_ACCOUNTMANAGEMENT → {output_path} ({size:,} bytes)")
+            return True
+
+        except Exception as e:
+            print(f"  ❌ Error fetching/writing DEFAULT_ACCOUNTMANAGEMENT: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    # =========================================================================
+    # STEP 2: Build invested_with mapping for the given investor IDs
+    # =========================================================================
+    def fetch_invested_with_map(investor_ids):
+        invested_map = {}
+        pi_rows_map = {}
+        if not investor_ids:
+            return invested_map, pi_rows_map
+        placeholders = ','.join(['%s'] * len(investor_ids))
+        query = f"""
+            SELECT pi.id, pi.investorid, pi.developerid, pi.programme_id,
+                   pi.contract_duration, pi.developer_percentage, pi.investor_percentage,
+                   pi.minimum_investment_amount, pi.maximum_investment_amount,
+                   pi.invested_at, pi.status,
+                   p.program_name
+            FROM programme_investors pi
+            LEFT JOIN programme p ON p.id = pi.programme_id
+            WHERE pi.investorid IN ({placeholders})
+        """
+        result, _ = _timed_db_call(
+            "programme_investors lookup", query, investor_ids,
+            wait_hint=FAST_HINT,
+        )
+        if result.get('status') == 'success':
+            for row in result.get('results', []):
+                inv_id = _pick_first_key(row, 'investorid', 'investor_id', 'investor id')
+                dev_id = _pick_first_key(row, 'developerid', 'developer_id', 'developer id')
+                prog_name = _pick_first_key(row, 'program_name', 'programname', 'program name') or ''
+                prog_id = _pick_first_key(row, 'programme_id', 'programmeid', 'programme id')
+                if inv_id is None or dev_id is None:
+                    continue
+                inv_id = _coerce_int(inv_id)
+                dev_id = _coerce_int(dev_id)
+                if inv_id is None or dev_id is None:
+                    continue
+                key = f"{dev_id}_{prog_name}"
+                invested_map.setdefault(inv_id, [])
+                if key not in invested_map[inv_id]:
+                    invested_map[inv_id].append(key)
+                pi_rows_map[(inv_id, dev_id, prog_id)] = row
+        return invested_map, pi_rows_map
+    
+    # =========================================================================
+    # STEP 3: Fetch accountmanagement rows for investor+developer pairs
+    #         (THIS IS THE `accountmanagement` TABLE — NOT server_account!)
+    # =========================================================================
+    def fetch_accountmanagement_map(investor_developer_pairs):
+        am_map = {}
+        if not investor_developer_pairs:
+            return am_map
+        conditions = []
+        params = []
+        for inv_id, dev_id in investor_developer_pairs:
+            conditions.append("(investorid = %s AND developerid = %s)")
+            params.extend([inv_id, dev_id])
+        where_clause = " OR ".join(conditions)
+        query = f"""
+            SELECT *
+            FROM accountmanagement
+            WHERE {where_clause}
+        """
+        result, _ = _timed_db_call(
+            "accountmanagement lookup", query, params,
+            wait_hint=FAST_HINT,
+        )
+        if result.get('status') == 'success':
+            for row in result.get('results', []):
+                inv_id = _pick_first_key(row, 'investorid', 'investor_id', 'investor id')
+                dev_id = _pick_first_key(row, 'developerid', 'developer_id', 'developer id')
+                inv_int = _coerce_int(inv_id)
+                dev_int = _coerce_int(dev_id)
+                if inv_int is not None and dev_int is not None:
+                    am_map[(inv_int, dev_int)] = row
+        else:
+            print(f"    ⚠️ accountmanagement query failed: {result.get('message')}")
+        return am_map
+    
+    # =========================================================================
+    # STEP 3b: Fetch server_account tier_limit
+    # =========================================================================
+    def fetch_server_tier_limit():
+        print(f"\n📝 [2b/6] Fetching server_account tier_limit...")
+        try:
+            query = "SELECT tier_limit FROM server_account LIMIT 1"
+            result, _ = _timed_db_call(
+                "server_account tier_limit", query, None,
+                wait_hint=FAST_HINT,
+            )
+            if result.get('status') == 'success' and result.get('results'):
+                raw = _pick_first_key(
+                    result['results'][0],
+                    'tier_limit', 'tierlimit', 'tier limit',
+                )
+                parsed = parse_json_safe(raw)
+                if isinstance(parsed, dict):
+                    print(f"  ✅ Loaded {len(parsed)} tier(s): {', '.join(list(parsed.keys())[:5])}")
+                    return parsed
+                elif parsed is not None:
+                    print(f"  ⚠️ tier_limit parsed to non-dict type: {type(parsed).__name__}")
+                    return parsed
+                else:
+                    print(f"  ℹ️ tier_limit is empty/null")
+                    return {}
+            else:
+                print(f"  ⚠️ Could not fetch server_account tier_limit: {result.get('message')}")
+                return {}
+        except Exception as e:
+            print(f"  ❌ Error fetching server_account tier_limit: {e}")
+            return {}
+    
+    # =========================================================================
+    # STEP 4: Build the accountmanagement object (per-investor, from `accountmanagement` table)
+    # =========================================================================
+    SETTINGS_FIELDS = [
+        'use_recent_highest_balance_as_current_balance',
+        'additional_configurations',
+        'skip_orders_close_to_position',
+        'cancel_orders_close_to_position',
+        'also_restrict_opposite_order_too_close_to_position',
+        'switch_invalid_to_instant_order',
+        'enable_order_type_conversion',
+        'restrictions_duration',
+        'enable_breakeven',
+        'breakeven_dictionary',
+        'restrict_order_from_timeframe',
+    ]
+    JSON_LIKE_FIELDS = [
+        'breakeven_dictionary',
+        'restrictions_duration',
+        'minimum_balance_risk_distance',
+        'maximum_balance_risk_distance',
+        'account_balance_default_risk_management',
+        'account_balance_maximum_risk_management',
+        'daily_target_config',
+        'additional_configurations',
+    ]
+    AM_EXCLUDED_COLUMNS = {'id', 'investorid', 'developerid'}
+    RISK_REWARD_ARRAY_FIELDS = {
+        'minimum_risk_reward',
+        'fixed_risk_reward',
+    }
+    FLATTEN_INTO_SETTINGS_COLUMN = 'additional_configurations'
+    
+    def _coerce_json_scalar(val):
+        if isinstance(val, Decimal):
+            return float(val)
+        if isinstance(val, datetime):
+            return val.isoformat()
+        if isinstance(val, date):
+            return val.isoformat()
+        return val
+    
+    def build_accountmanagement_object(am_row):
+        if not am_row:
+            return {}
+        am_obj = {}
+        settings_obj = {}
+        for col, val in am_row.items():
+            if col in AM_EXCLUDED_COLUMNS:
+                continue
+            if col in JSON_LIKE_FIELDS:
+                parsed = parse_json_safe(val)
+                val = parsed if parsed is not None else val
+            if col in RISK_REWARD_ARRAY_FIELDS:
+                if isinstance(val, str):
+                    val = val.strip()
+                    if val:
+                        try:
+                            val = [float(val)]
+                        except (ValueError, TypeError):
+                            val = [val]
+                    else:
+                        val = None
+                elif isinstance(val, (int, float)):
+                    val = [float(val)]
+                elif isinstance(val, list):
+                    converted = []
+                    for item in val:
+                        try:
+                            converted.append(float(item))
+                        except (ValueError, TypeError):
+                            converted.append(item)
+                    val = converted
+                elif isinstance(val, Decimal):
+                    val = [float(val)]
+            if isinstance(val, Decimal):
+                val = float(val)
+            elif isinstance(val, datetime):
+                val = val.isoformat()
+            elif isinstance(val, date):
+                val = val.isoformat()
+            if col == FLATTEN_INTO_SETTINGS_COLUMN:
+                if isinstance(val, dict):
+                    for sub_key, sub_val in val.items():
+                        if sub_key == 'settings' and isinstance(sub_val, dict):
+                            for inner_key, inner_val in sub_val.items():
+                                settings_obj[inner_key] = _coerce_json_scalar(inner_val)
+                        else:
+                            settings_obj[sub_key] = _coerce_json_scalar(sub_val)
+                elif val is not None:
+                    settings_obj[col] = _coerce_json_scalar(val)
+                continue
+            if col in SETTINGS_FIELDS:
+                settings_obj[col] = val
+            else:
+                am_obj[col] = val
+        am_obj['settings'] = settings_obj
+        return am_obj
+    
+    # =========================================================================
+    # STEP 5: Build the requirements object
+    # =========================================================================
+    def build_requirements_object(pi_row):
+        if not pi_row:
+            return {
+                'contract_duration': None,
+                'minimum_investment_amount': None,
+                'maximum_investment_amount': None,
+                'investor_percentage': None,
+                'developer_percentage': None,
+                'invested_at': None,
+                'status': None,
+            }
+        def _dec(v):
+            if isinstance(v, Decimal):
+                return float(v)
+            if isinstance(v, datetime):
+                return v.isoformat()
+            if isinstance(v, date):
+                return v.isoformat()
+            return v
+        return {
+            'contract_duration': _dec(_pick_first_key(pi_row, 'contract_duration', 'contractduration')),
+            'minimum_investment_amount': _dec(_pick_first_key(pi_row, 'minimum_investment_amount', 'minimuminvestmentamount')),
+            'maximum_investment_amount': _dec(_pick_first_key(pi_row, 'maximum_investment_amount', 'maximuminvestmentamount')),
+            'investor_percentage': _dec(_pick_first_key(pi_row, 'investor_percentage', 'investorpercentage')),
+            'developer_percentage': _dec(_pick_first_key(pi_row, 'developer_percentage', 'developerpercentage')),
+            'invested_at': _dec(_pick_first_key(pi_row, 'invested_at', 'investedat')),
+            'status': _pick_first_key(pi_row, 'status'),
+        }
+    
+    # =========================================================================
+    # STEP 5b: Build the tier_limit object
+    # =========================================================================
+    def build_tier_limit_object(user_tier_limit_value, server_tier_limit):
+        if server_tier_limit is None or not isinstance(server_tier_limit, dict):
+            return user_tier_limit_value
+        if user_tier_limit_value is None:
+            return None
+        if isinstance(user_tier_limit_value, (dict, list)):
+            return user_tier_limit_value
+        user_tier_str = str(user_tier_limit_value).strip()
+        if not user_tier_str:
+            return user_tier_limit_value
+        for key, val in server_tier_limit.items():
+            if str(key).strip().lower() == user_tier_str.lower():
+                print(f"       🎫 Matched tier '{key}' → enriched tier_limit")
+                return {key: val}
+        for key, val in server_tier_limit.items():
+            if user_tier_str.lower() in str(key).lower() or str(key).lower() in user_tier_str.lower():
+                print(f"       🎫 Matched tier '{key}' (fuzzy) → enriched tier_limit")
+                return {key: val}
+        return user_tier_limit_value
+    
+    # =========================================================================
+    # STEP 6: Clean a record
+    # =========================================================================
+    def clean_record(record, investor_id, invested_map, pi_rows_map, am_map, server_tier_limit):
+        cleaned = {}
+        for key, value in record.items():
+            if isinstance(value, str) and len(value) > 0:
+                value = denormalize_path_value(value, key)
+                repaired = repair_json_field(value)
+                cleaned[key] = repaired
+            else:
+                cleaned[key] = value
+        inv_list = invested_map.get(investor_id, [])
+        cleaned['invested_with'] = '_AND_'.join(inv_list) if inv_list else None
+        am_obj = {}
+        req_obj = None
+        matching_pi = []
+        for (inv_id, dev_id, prog_id), pi_row in pi_rows_map.items():
+            if inv_id == investor_id:
+                matching_pi.append((dev_id, prog_id, pi_row))
+        if matching_pi:
+            for dev_id, prog_id, pi_row in matching_pi:
+                am_row = am_map.get((investor_id, dev_id))
+                if am_row:
+                    am_obj = build_accountmanagement_object(am_row)
+                    req_obj = build_requirements_object(pi_row)
+                    break
+            if req_obj is None:
+                req_obj = build_requirements_object(matching_pi[0][2])
+        if req_obj is not None:
+            am_obj['requirements'] = req_obj
+        cleaned['accountmanagement'] = am_obj if am_obj else {}
+        if 'tier_limit' in cleaned:
+            cleaned['tier_limit'] = build_tier_limit_object(
+                cleaned.get('tier_limit'), server_tier_limit
+            )
+        for key, value in cleaned.items():
+            if isinstance(value, str):
+                if 'path' in key.lower() or '\\at\\gmail\\dot\\com' in value or '/at/gmail/dot/com' in value:
+                    cleaned[key] = normalize_gmail_path(value)
+        return cleaned
+    
+    # =========================================================================
+    # STEP 7: Write records to file
+    # =========================================================================
     def write_all_to_file(temp_file_path, data, first_record_status):
-        """Write all records to a temporary file"""
         if not data:
             return first_record_status, 0
-        
         bytes_written = 0
-        
-        # Build the content first
         content_parts = []
         for record in data:
             record_id = str(record.get('id') or record.get('ID') or f"record_{hash(str(record))}")
-            
             if not first_record_status:
                 content_parts.append(',\n')
-            
-            cleaned_row = clean_record(record)
-            
-            # Convert special types to JSON-serializable format
-            for key, value in cleaned_row.items():
-                if value is None:
-                    cleaned_row[key] = None
-                elif isinstance(value, (datetime, date)):
-                    cleaned_row[key] = value.isoformat()
-                elif isinstance(value, Decimal):
-                    cleaned_row[key] = float(value)
-            
-            json_str = json.dumps(cleaned_row, default=str, indent=2)
+            json_str = json.dumps(record, default=str, indent=2)
             lines = json_str.split('\n')
             indented_lines = ['    ' + line for line in lines]
             formatted_json = '\n'.join(indented_lines)
-            
             line = f'  "{record_id}": {formatted_json}'
             content_parts.append(line)
-            
             bytes_written += len(line.encode('utf-8'))
             first_record_status = False
-        
-        # Write everything at once to temp file
         content = ''.join(content_parts)
         safe_write_file(temp_file_path, 'a', content)
-        
         return first_record_status, bytes_written
     
+    # =========================================================================
+    # MAIN EXECUTION
+    # =========================================================================
     print("\n" + "="*70)
-    print(f"  FETCHING TABLES (HYBRID MODE: IP → VS Code ID)")
+    print(f"  FETCHING TABLES (VPS-BASED IDENTIFICATION)")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Output Files: 2 files (ALL_FETCHED_INVESTORS & ALL_UPDATED_INVESTORS)")
     print("-"*70)
     
     try:
-        # STEP 0: Get identifiers (IP first, then VS Code ID as fallback)
+        # ---------------------------------------------------------------------
+        # STEP 0: Get local IP and find investor IDs
+        # ---------------------------------------------------------------------
         print("\n🖥️ [0/6] Getting Computer Identifiers...")
-        
-        # First, try to get local IP
-        computer_id = get_local_ip()
-        identification_method = None
-        user_ids_to_fetch = []
-        
-        # Fetch system_server_config first to check both identifiers
-        print(f"\n🔍 Fetching System Server Configuration...")
-        query = "SELECT system_server_config FROM server_account LIMIT 1"
-        result = db.execute_query(query)
-        
-        config_data = {}
-        if result.get('status') == 'success':
-            rows = result.get('results', [])
-            if rows and len(rows) > 0:
-                config_value = rows[0].get('system_server_config')
-                config_data = parse_server_config(config_value)
-                print(f"  ✅ Successfully parsed server configuration")
-            else:
-                print(f"  No server_account records found")
-                return
-        else:
-            print(f"  Failed to fetch server_account: {result.get('message')}")
+        local_ip = get_local_ip()
+        if not local_ip:
+            print("\n  🛑 Could not determine local IP address. Aborting.")
             return
         
-        # Show current config for debugging
-        if config_data:
-            print(f"\n  📋 Current Computer Configuration:")
-            for comp_id, data in config_data.items():
-                if isinstance(data, list):
-                    numeric_ids = [item for item in data if isinstance(item, (int, str)) and str(item).isdigit()]
-                    # Truncate long IDs for display
-                    display_id = comp_id[:30] + "..." if len(comp_id) > 33 else comp_id
-                    print(f"     - {display_id}: {len(numeric_ids)} user(s)")
-                else:
-                    display_id = comp_id[:30] + "..." if len(comp_id) > 33 else comp_id
-                    print(f"     - {display_id}: {type(data).__name__} (invalid format)")
+        investor_ids_to_fetch, identification_method, matched_vps_user_id, vps_row_existed = \
+            find_investor_ids_for_this_computer(local_ip)
         
-        # Try IP first
-        if computer_id:
-            print(f"\n  🔍 Trying IP Address: {computer_id}")
-            if computer_id in config_data:
-                user_ids_to_fetch = extract_user_ids_from_config(config_data, computer_id, "IP")
-                if user_ids_to_fetch:
-                    identification_method = 'ip_address'
-                    print(f"  ✅ SUCCESS: Found {len(user_ids_to_fetch)} user(s) linked to IP address")
-                else:
-                    print(f"  🛑 IP address found in config but has no valid user IDs assigned")
-            else:
-                print(f"   IP address NOT FOUND in system_server_config")
-        else:
-            print(f"   Could not retrieve local IP address")
-        
-        # If IP didn't work, try VS Code ID as fallback
-        if not user_ids_to_fetch:
-            print(f"\n  🔄 Falling back to VS Code Machine ID...")
-            vscode_id = get_vscode_machine_id()
-            
-            if vscode_id:
-                print(f"  🔍 Trying VS Code ID: {vscode_id[:32]}...")
-                if vscode_id in config_data:
-                    user_ids_to_fetch = extract_user_ids_from_config(config_data, vscode_id, "VS Code ID")
-                    if user_ids_to_fetch:
-                        identification_method = 'vscode_machine_id'
-                        computer_id = vscode_id
-                        print(f"  ✅ SUCCESS: Found {len(user_ids_to_fetch)} user(s) linked to VS Code ID")
-                    else:
-                        print(f"  🛑 VS Code ID found in config but has no valid user IDs assigned")
-                else:
-                    print(f"   VS Code ID NOT FOUND in system_server_config")
-            else:
-                print(f"   Could not retrieve VS Code Machine ID")
-        
-        # Check if we found any valid identifier with users
-        if not user_ids_to_fetch:
+        if not investor_ids_to_fetch:
             print(f"\n{'='*70}")
-            print(f"  EXPORT SKIPPED - NO VALID IDENTIFIER WITH USERS")
+            print(f"  EXPORT SKIPPED - NO INVESTOR IDS FOUND")
             print(f"{'='*70}")
-            print(f"  Reason: Neither IP address nor VS Code ID is linked to any users")
-            print(f"  ℹ️ Please add either your IP address or VS Code ID to")
-            print(f"     server_account.system_server_config with associated user IDs")
+            if vps_row_existed:
+                print(f"  Reason: A VPS row EXISTS for IP {local_ip}, but its user_id is")
+                print(f"          NULL or could not be parsed. Set a valid user_id:")
+                print(f"          UPDATE vps SET user_id = <ID> WHERE vps_ip_address = '{local_ip}';")
+            else:
+                print(f"  Reason: No VPS row matches IP {local_ip}")
+                print(f"  ℹ️ Please add your IP to the vps table with an associated user_id:")
+                print(f"          INSERT INTO vps (user_id, vps_ip_address) VALUES (<ID>, '{local_ip}');")
             print(f"{'='*70}")
             return
         
-        print(f"\n  ✅ Using identifier: {identification_method}")
-        print(f"  📋 User IDs to fetch: {user_ids_to_fetch[:20]}{'...' if len(user_ids_to_fetch) > 20 else ''}")
+        print(f"\n  ✅ Total investor IDs to fetch: {len(investor_ids_to_fetch)}")
+        print(f"  📋 IDs: {investor_ids_to_fetch[:30]}{'...' if len(investor_ids_to_fetch) > 30 else ''}")
         
-        # ===== DELETE OLD FILES BEFORE WRITING NEW DATA =====
-        print(f"\n🗑️ Cleaning up old files before writing new data...")
-        try:
-            delete_investor_files()
-            print(f"   ✅ Old files deleted successfully")
-        except Exception as e:
-            print(f"   ⚠️ Error deleting old files: {str(e)}")
-            print(f"   Continuing anyway...")
+        # ---------------------------------------------------------------------
+        # STEP 0b: Fetch DEFAULT_ACCOUNTMANAGEMENT from server_account
+        #          and WRITE IT DIRECTLY TO THE GLOBAL FILE.
+        #          NOT per-investor. NOT merged. Just a standalone file.
+        # ---------------------------------------------------------------------
+        fetch_and_save_default_accountmanagement(
+            r"C:\xampp\htdocs\harvcore\harvox\harvcore_accountmanagement.json"
+        )
         
-        # ===== NEW: Fetch and write accountmanagement to DEFAULT_ACCOUNTMANAGEMENT =====
-        print(f"\n📝 [NEW] Fetching Account Management from server_account...")
-        try:
-            # Fetch just the accountmanagement column
-            accountmanagement_query = "SELECT accountmanagement FROM server_account LIMIT 1"
-            am_result = db.execute_query(accountmanagement_query)
-            
-            if am_result.get('status') == 'success':
-                am_rows = am_result.get('results', [])
-                if am_rows and len(am_rows) > 0:
-                    accountmanagement_data = am_rows[0].get('accountmanagement')
-                    
-                    # Parse/repair the JSON
-                    if accountmanagement_data:
-                        if isinstance(accountmanagement_data, str):
-                            parsed_am = repair_json_field(accountmanagement_data)
-                        else:
-                            parsed_am = accountmanagement_data
-                    else:
-                        parsed_am = {}
-                    
-                    # Write to DEFAULT_ACCOUNTMANAGEMENT with permission handling
-                    os.makedirs(os.path.dirname(DEFAULT_ACCOUNTMANAGEMENT), exist_ok=True)
-                    content = json.dumps(parsed_am, default=str, indent=2)
-                    safe_write_file(DEFAULT_ACCOUNTMANAGEMENT, 'w', content)
-                    
-                    print(f"   ✅ Account Management written to: {DEFAULT_ACCOUNTMANAGEMENT}")
-                    print(f"   📊 Data size: {len(content)} bytes")
-                else:
-                    print(f"   🛑 No server_account records found, writing empty dict")
-                    os.makedirs(os.path.dirname(DEFAULT_ACCOUNTMANAGEMENT), exist_ok=True)
-                    safe_write_file(DEFAULT_ACCOUNTMANAGEMENT, 'w', json.dumps({}, indent=2))
-                    print(f"   ✅ Empty account management written to: {DEFAULT_ACCOUNTMANAGEMENT}")
-            else:
-                print(f"   ❌ Failed to fetch accountmanagement: {am_result.get('message')}")
-                
-        except Exception as e:
-            print(f"   ❌ Error writing accountmanagement: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        # ===== END NEW SECTION =====
+        # ---------------------------------------------------------------------
+        # STEP 1: Build invested_with map and programme_investors rows
+        # ---------------------------------------------------------------------
+        print(f"\n📝 [1/6] Fetching programme_investors for invested_with...")
+        invested_map, pi_rows_map = fetch_invested_with_map(investor_ids_to_fetch)
+        if invested_map:
+            print(f"  ✅ invested_with data found for {len(invested_map)} investor(s)")
+        else:
+            print(f"  ℹ️ No programme_investors records found")
         
-        # Step 2: Test Connection and Get Actual Data Columns (excluding analytics column)
-        print("\n📡 [2/6] Testing Database Connection & Fetching Schema...")
+        # ---------------------------------------------------------------------
+        # STEP 2: Build accountmanagement map (from `accountmanagement` TABLE)
+        # ---------------------------------------------------------------------
+        print(f"\n📝 [2/6] Fetching accountmanagement records...")
+        investor_developer_pairs = set()
+        for (inv_id, dev_id, prog_id) in pi_rows_map.keys():
+            investor_developer_pairs.add((inv_id, dev_id))
+        if investor_developer_pairs:
+            print(f"  🔍 Looking up {len(investor_developer_pairs)} (investor, developer) pair(s)")
+            am_map = fetch_accountmanagement_map(list(investor_developer_pairs))
+            print(f"  ✅ Found {len(am_map)} accountmanagement record(s)")
+        else:
+            am_map = {}
+            print(f"  ℹ️ No investor-developer pairs to look up")
         
-        # Get all columns from insiders table except 'analytics'
-        get_columns_query = """
-        SELECT COLUMN_NAME 
-        FROM information_schema.COLUMNS 
-        WHERE TABLE_SCHEMA = DATABASE() 
-        AND TABLE_NAME = 'insiders'
-        AND COLUMN_NAME != 'analytics'
-        ORDER BY ORDINAL_POSITION
-        """
+        # ---------------------------------------------------------------------
+        # STEP 2b: Fetch server_account tier_limit
+        # ---------------------------------------------------------------------
+        server_tier_limit = fetch_server_tier_limit()
         
-        columns_result = db.execute_query(get_columns_query)
+        # ---------------------------------------------------------------------
+        # STEP 3: Get harvhub columns
+        # ---------------------------------------------------------------------
+        print("\n📡 [3/6] Fetching harvhub Schema...")
+        EXCLUDED_COLUMNS = {
+            'analytics_history', 'analytics', 'invested_with',
+            'reset_contract', 'revenue_history',
+            'password', 'paymentdetails', 'balance_display', 'message',
+        }
+        show_columns_query = "SHOW COLUMNS FROM harvhub"
+        columns_result, _ = _timed_db_call(
+            "harvhub schema (SHOW COLUMNS)", show_columns_query, None,
+            wait_hint=FAST_HINT,
+        )
         columns = []
-        
         if columns_result.get('status') == 'success' and columns_result.get('results'):
             for row in columns_result['results']:
-                column_name = row.get('COLUMN_NAME', '')
-                if column_name and column_name.lower() != 'analytics':
-                    columns.append(column_name)
-            
-            print(f"  📋 Found {len(columns)} columns from schema (excluding 'analytics'): {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
-            
-            # Test connection with a simple query
-            test_query = f"SELECT {', '.join([f'`{col}`' for col in columns[:1]])} FROM insiders LIMIT 1"
-            test_result = db.execute_query(test_query)
-            
-            if test_result.get('status') != 'success':
-                print(f"   Connection FAILED: {test_result.get('message')}")
-                return
+                col = _pick_first_key(row, 'field', 'column_name', 'columnname', 'column')
+                if col and col.lower() not in EXCLUDED_COLUMNS:
+                    columns.append(col)
+            print(f"  📋 Found {len(columns)} columns via SHOW COLUMNS "
+                  f"(excluding: {', '.join(sorted(EXCLUDED_COLUMNS))})")
         else:
-            # Fallback: try to get columns from data
-            print(f"    Could not fetch schema from information_schema, trying SELECT *...")
-            test_query = "SELECT * FROM insiders LIMIT 1"
-            test_result = db.execute_query(test_query)
-            
-            if test_result.get('status') != 'success':
-                print(f"   Connection FAILED: {test_result.get('message')}")
-                return
-            
-            results = test_result.get('results', [])
-            if results and len(results) > 0:
-                # Get column names from the first row's keys, excluding 'analytics'
-                all_columns = list(results[0].keys())
-                columns = [col for col in all_columns if col.lower() != 'analytics']
-                print(f"  📋 Found {len(columns)} columns from data (excluding 'analytics'): {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
+            print(f"  ⚠️ SHOW COLUMNS returned no usable results.")
+            _diag_dump("harvhub schema (SHOW COLUMNS)", columns_result)
+            print(f"  ⚠️ Trying fallback: information_schema.COLUMNS with DATABASE()...")
+            info_schema_query = """
+                SELECT COLUMN_NAME
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'harvhub'
+                ORDER BY ORDINAL_POSITION
+            """
+            info_result, _ = _timed_db_call(
+                "harvhub schema (information_schema)", info_schema_query, None,
+                wait_hint=FAST_HINT,
+            )
+            if info_result.get('status') == 'success' and info_result.get('results'):
+                for row in info_result['results']:
+                    col = _pick_first_key(row, 'column_name', 'columnname', 'column')
+                    if col and col.lower() not in EXCLUDED_COLUMNS:
+                        columns.append(col)
+                print(f"  📋 Found {len(columns)} columns via information_schema")
             else:
-                print(f"    No data rows to determine schema")
-                columns = []
-        
-        print(f"   Connection SUCCESSFUL")
-        
-        # Step 3: Get Total Count (only for the specific user IDs)
-        print("\n📊 [3/6] Counting Total Records (filtered by user IDs)...")
-        
-        # Build IN clause for user IDs
-        id_placeholders = ','.join(['%s'] * len(user_ids_to_fetch))
-        count_query = f"""
-            SELECT COUNT(*) as total 
-            FROM insiders 
-            WHERE id IN ({id_placeholders})
-        """
-        
-        count_result = db.execute_query(count_query, params=user_ids_to_fetch)
-        
-        total_rows = 0
-        if isinstance(count_result, dict) and count_result.get('status') == 'success':
-            results = count_result.get('results', [])
-            if results and len(results) > 0:
-                total_rows = int(results[0].get('total') or 
-                               results[0].get('COUNT(*)') or 
-                               results[0].get('count') or 0)
-        
-        print(f"  📈 Total Records Found (filtered): {total_rows:,}")
-        
-        if total_rows == 0:
-            print(f"    No records found for the specified user IDs. Export skipped.")
-            print(f"    User IDs queried: {user_ids_to_fetch[:20]}{'...' if len(user_ids_to_fetch) > 20 else ''}")
+                print(f"  ⚠️ information_schema also returned nothing.")
+                _diag_dump("harvhub schema (information_schema)", info_result)
+                print(f"  ⚠️ Trying final fallback: SELECT * FROM harvhub LIMIT 1...")
+                sample_result, _ = _timed_db_call(
+                    "harvhub sample row", "SELECT * FROM harvhub LIMIT 1", None,
+                    wait_hint=FAST_HINT,
+                )
+                if sample_result.get('status') == 'success' and sample_result.get('results'):
+                    sample_row = sample_result['results'][0]
+                    if isinstance(sample_row, dict):
+                        all_cols = list(sample_row.keys())
+                        columns = [c for c in all_cols if c.lower() not in EXCLUDED_COLUMNS]
+                        print(f"  📋 Found {len(columns)} columns from sample row keys")
+                        print(f"       (raw sample keys: {all_cols})")
+                    else:
+                        print(f"  ❌ Sample row is not a dict — type={type(sample_row).__name__}")
+                        _diag_dump("harvhub sample row", sample_result)
+                else:
+                    print(f"  ❌ Sample row query also returned nothing.")
+                    _diag_dump("harvhub sample row", sample_result)
+        if not columns:
+            print(f"\n{'='*70}")
+            print(f"  🛑 ABORTING — could not determine harvhub columns")
+            print(f"{'='*70}")
             return
         
-        # Step 4: Fetch Server Account Management and Requirements (READ ONLY - NO WRITING)
-        print(f"\n⚙️ [4/6] Fetching Server Account Management & Requirements (Read Only)...")
-        
-        server_acct_query = """
-            SELECT 
-                accountmanagement,
-                min_broker_balance,
-                contract_duration
-            FROM server_account 
-            LIMIT 1
-        """
-        server_result = db.execute_query(server_acct_query)
-        
-        default_accountmanagement = None
-        
-        if server_result.get('status') == 'success':
-            server_rows = server_result.get('results', [])
-            if server_rows and len(server_rows) > 0:
-                server_row = server_rows[0]
-                server_acct_management = server_row.get('accountmanagement')
-                min_broker_balance = server_row.get('min_broker_balance')
-                contract_duration = server_row.get('contract_duration')
-                
-                # Parse the accountmanagement JSON
-                parsed_management = None
-                if server_acct_management:
-                    try:
-                        if isinstance(server_acct_management, str):
-                            parsed_management = repair_json_field(server_acct_management)
-                        else:
-                            parsed_management = server_acct_management
-                        
-                        if not isinstance(parsed_management, dict):
-                            if isinstance(parsed_management, list):
-                                parsed_management = {'data': parsed_management}
-                            else:
-                                parsed_management = {'value': parsed_management}
-                    except Exception as e:
-                        print(f"    Failed to parse accountmanagement: {str(e)}")
-                        parsed_management = {}
-                else:
-                    parsed_management = {}
-                
-                if not isinstance(parsed_management, dict):
-                    parsed_management = {}
-                
-                # Add requirements section with fetched values
-                requirements = {}
-                
-                if contract_duration is not None:
-                    requirements['contract_duration'] = contract_duration
-                else:
-                    requirements['contract_duration'] = None
-                
-                if min_broker_balance is not None:
-                    if isinstance(min_broker_balance, Decimal):
-                        requirements['min_broker_balance'] = float(min_broker_balance)
-                    else:
-                        requirements['min_broker_balance'] = min_broker_balance
-                else:
-                    requirements['min_broker_balance'] = None
-                
-                parsed_management['requirements'] = requirements
-                default_accountmanagement = parsed_management
-                
-                print(f"   ✅ Server Account Management Loaded (READ ONLY - Not Modified)")
-                print(f"  🔍 Server Requirements:")
-                print(f"     - contract_duration: {requirements.get('contract_duration')} days")
-                print(f"     - min_broker_balance: ${requirements.get('min_broker_balance')}")
-                
-                # Display existing accountmanagement structure (for reference)
-                print(f"  📋 Accountmanagement structure:")
-                if parsed_management:
-                    # Show first few keys
-                    keys = list(parsed_management.keys())
-                    if keys:
-                        print(f"     Keys: {', '.join(keys[:5])}{'...' if len(keys) > 5 else ''}")
-                    if 'configuration_title' in parsed_management:
-                        print(f"     Configuration Title: {parsed_management.get('configuration_title')}")
-                    if 'export_history' in parsed_management:
-                        print(f"     Export History: {len(parsed_management.get('export_history', []))} exports")
-                else:
-                    print(f"     No existing accountmanagement data")
-            else:
-                print(f"    No server_account records found")
+        # ---------------------------------------------------------------------
+        # STEP 4: Count records
+        # ---------------------------------------------------------------------
+        print("\n📊 [4/6] Counting Records...")
+        id_placeholders = ','.join(['%s'] * len(investor_ids_to_fetch))
+        count_query = f"SELECT COUNT(*) as total FROM harvhub WHERE id IN ({id_placeholders})"
+        count_result, _ = _timed_db_call(
+            "harvhub count", count_query, investor_ids_to_fetch,
+            wait_hint=FAST_HINT,
+        )
+        total_rows = 0
+        if count_result.get('status') == 'success' and count_result.get('results'):
+            raw_total = _pick_first_key(count_result['results'][0], 'total', 'count', 'COUNT(*)')
+            total_rows = _coerce_int(raw_total) or 0
         else:
-            print(f"    Failed to fetch server account management: {server_result.get('message')}")
+            print(f"  ⚠️ COUNT query returned no usable results.")
+            _diag_dump("harvhub count", count_result)
+        print(f"  📈 Total harvhub records: {total_rows:,}")
         
-        # Step 5: Prepare Output Directories and Files
-        print(f"\n📁 [5/6] Preparing Output Directories for Insiders Data...")
-        
-        # Define both output files
-        output_files = [
-            ALL_FETCHED_INVESTORS,
-            ALL_UPDATED_INVESTORS
-        ]
-        
-        # Create temporary file paths (same directory, .temp extension)
+        # ---------------------------------------------------------------------
+        # STEP 5: Prepare output files
+        # ---------------------------------------------------------------------
+        print(f"\n📁 [5/6] Preparing Output Directories...")
+        output_files = [ALL_FETCHED_INVESTORS, ALL_UPDATED_INVESTORS]
         temp_files = []
-        for file_path in output_files:
-            temp_path = file_path + '.temp'
+        for i, file_path in enumerate(output_files):
+            dir_path = os.path.dirname(file_path)
+            temp_name = 'newfetcheddata_fetched.temp' if i == 0 else 'newfetcheddata_updated.temp'
+            temp_path = os.path.join(dir_path, temp_name)
             temp_files.append(temp_path)
-            
-            # Create directories for temp files
-            os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-            
-            # Initialize temp file with opening brace
+            os.makedirs(dir_path, exist_ok=True)
             safe_write_file(temp_path, 'overwrite', None)
             print(f"   Initialized temp file: {os.path.basename(temp_path)}")
         
-        print(f"   Both output directories ready")
-        print(f"   📝 Using temporary files before moving to final location")
-        
-        # Step 6: Fetch ALL Insiders Data in One Query
-        print(f"\n📥 [6/6] Fetching ALL Insiders Records in One Query...")
-        print(f"  📌 Note: 'analytics' column is EXCLUDED from export")
-        print(f"  🖥️ Using: {identification_method.upper()}: {computer_id if identification_method == 'ip_address' else computer_id[:32] + '...'}")
-        print(f"  🎯 Filter: Only user IDs associated with this identifier")
-        print(f"  🔧 AccountManagement: Existing data preserved as-is (no modification)")
-        print(f"  🔧 AccountManagement: Wrapper keys extracted to 'configuration_title' field (view only)")
-        print(f"  🔧 Gmail Path Normalization: Converting \\at\\gmail\\dot\\com to _at_gmail_dot_com")
-        print(f"  🛑  IMPORTANT: server_account.accountmanagement is NOT modified")
-        print(f"  📁 Writing to temp files first, then moving to final destinations")
+        # ---------------------------------------------------------------------
+        # STEP 6: Fetch all harvhub records
+        # ---------------------------------------------------------------------
+        print(f"\n📥 [6/6] Fetching ALL harvhub Records...")
+        print(f"  🖥️ Method: {identification_method}")
+        print(f"  🎯 Filter: {len(investor_ids_to_fetch)} investor ID(s)")
+        print(f"  📋 Columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
         print("-"*70)
-        
         start_time = datetime.now()
-        total_bytes_written = 0
-        json_repaired_count = 0
-        accountmanagement_unwrapped_count = 0
-        path_denormalized_count = 0
-        gmail_normalized_count = 0
-        
-        if not columns:
-            print(f"    No columns available for query. Cannot proceed.")
-            return
-        
-        columns = [col for col in columns if col.lower() != 'analytics']
         select_clause = ", ".join([f"`{col}`" for col in columns])
-        
-        print(f"  📋 Exporting columns: {', '.join(columns[:5])}{'...' if len(columns) > 5 else ''}")
-        print(f"  👥 Filtering for {len(user_ids_to_fetch)} specific user IDs")
-        print(f"  🚀 Fetching ALL records in a single query (no batch division)...")
-        
-        # Track first record status for each temp file
-        first_record_status = {}
-        for temp_path in temp_files:
-            first_record_status[temp_path] = True
-        
-        # Fetch ALL records in one query (no LIMIT/OFFSET)
         query = f"""
-            SELECT {select_clause} 
-            FROM insiders 
+            SELECT {select_clause}
+            FROM harvhub
             WHERE id IN ({id_placeholders})
             ORDER BY id
         """
-        
-        print(f"  ⏳ Executing query to fetch all {total_rows:,} records...")
-        result = db.execute_query(query, params=user_ids_to_fetch)
-        
+        print(f"  ⏳ Executing query...")
+        result, _ = _timed_db_call(
+            "harvhub fetch", query, investor_ids_to_fetch,
+            wait_hint=BULK_HINT,
+        )
         if result.get('status') != 'success':
-            print(f"   QUERY ERROR: {result.get('message')}")
+            print(f"   ❌ QUERY ERROR: {result.get('message')}")
+            _diag_dump("harvhub fetch", result)
+            for temp_path in temp_files:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
             return
-            
         rows = result.get('results', [])
-        if not rows:
-            print(f"    No rows returned. Stopping.")
-            return
-        
-        print(f"  ✅ Retrieved {len(rows):,} records. Processing and writing to temp files...")
-        
-        # Process all rows
+        print(f"  ✅ Retrieved {len(rows):,} records")
         all_records = []
+        tier_enriched_count = 0
         for row in rows:
-            cleaned_row = clean_record(row)
-            
-            # Track statistics
-            original_accountmanagement = row.get('accountmanagement')
-            if original_accountmanagement is not None:
-                if isinstance(original_accountmanagement, dict) and len(original_accountmanagement) == 1:
-                    first_key = list(original_accountmanagement.keys())[0]
-                    if isinstance(original_accountmanagement[first_key], dict):
-                        accountmanagement_unwrapped_count += 1
-            
-            for key, value in cleaned_row.items():
-                if 'path' in key.lower() and isinstance(value, str) and '\\' in value:
-                    path_denormalized_count += 1
-                if isinstance(value, str) and '_at_gmail_dot_com' in value:
-                    gmail_normalized_count += 1
-                if isinstance(value, (dict, list)) and key in row and isinstance(row[key], str):
-                    json_repaired_count += 1
-            
-            # Convert special types
-            for key, value in cleaned_row.items():
-                if value is None:
-                    cleaned_row[key] = None
-                elif isinstance(value, (datetime, date)):
-                    cleaned_row[key] = value.isoformat()
+            investor_id = _pick_first_key(row, 'id', 'ID')
+            investor_id = _coerce_int(investor_id)
+            cleaned = clean_record(
+                row, investor_id, invested_map, pi_rows_map, am_map, server_tier_limit
+            )
+            if isinstance(cleaned.get('tier_limit'), dict):
+                tier_enriched_count += 1
+            for key, value in cleaned.items():
+                if isinstance(value, (datetime, date)):
+                    cleaned[key] = value.isoformat()
                 elif isinstance(value, Decimal):
-                    cleaned_row[key] = float(value)
-            
-            all_records.append(cleaned_row)
-        
-        # Write ALL records to both temp files
+                    cleaned[key] = float(value)
+            all_records.append(cleaned)
         print(f"  ✍️ Writing {len(all_records):,} records to temp files...")
-        
-        # Write to BOTH temp files
+        first_record_status = {tp: True for tp in temp_files}
+        total_bytes_written = 0
         for i, temp_path in enumerate(temp_files):
-            print(f"    Writing to temp file: {os.path.basename(temp_path)}")
-            first_record_status[temp_path], bytes_written = write_all_to_file(
+            print(f"    Writing to: {os.path.basename(temp_path)}")
+            first_record_status[temp_path], bw = write_all_to_file(
                 temp_path, all_records, first_record_status[temp_path]
             )
-            total_bytes_written += bytes_written
-        
-        # Close JSON objects in both temp files
+            total_bytes_written += bw
         for temp_path in temp_files:
             safe_write_file(temp_path, 'a', '\n}')
-            print(f"  ✅ Closed temp file: {os.path.basename(temp_path)}")
-        
-        # ===== NEW: Move temp files to final destinations =====
-        print(f"\n📦 Moving temp files to final destinations...")
-        move_success = True
-        
-        for i, temp_path in enumerate(temp_files):
-            final_path = output_files[i]
-            print(f"  🔄 Moving: {os.path.basename(temp_path)} → {os.path.basename(final_path)}")
-            
-            if move_temp_to_final(temp_path, final_path):
-                print(f"    ✅ Successfully moved {os.path.basename(temp_path)} to {os.path.basename(final_path)}")
+            print(f"  ✅ Closed: {os.path.basename(temp_path)}")
+        temp_files_valid = True
+        for temp_path in temp_files:
+            if os.path.exists(temp_path):
+                file_size = os.path.getsize(temp_path)
+                if file_size >= 4:
+                    print(f"  ✅ Valid: {os.path.basename(temp_path)} ({file_size} bytes)")
+                else:
+                    print(f"  ❌ Too small: {os.path.basename(temp_path)} ({file_size} bytes)")
+                    temp_files_valid = False
             else:
-                move_success = False
-                print(f"    ❌ Failed to move {os.path.basename(temp_path)} to {os.path.basename(final_path)}")
-        
-        if not move_success:
-            print(f"  ⚠️ Some files failed to move. Temp files may remain.")
+                print(f"  ❌ Missing: {os.path.basename(temp_path)}")
+                temp_files_valid = False
+        if temp_files_valid:
+            print(f"\n🗑️ [SUCCESS] Deleting old files and moving to final destinations...")
+            try:
+                delete_investor_files()
+                print(f"   ✅ Old files deleted")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting old files: {e}")
+            for i, temp_path in enumerate(temp_files):
+                final_path = output_files[i]
+                print(f"  🔄 Moving: {os.path.basename(temp_path)} → {os.path.basename(final_path)}")
+                move_temp_to_final(temp_path, final_path)
         else:
-            print(f"  ✅ All temp files moved successfully!")
+            print(f"\n⚠️ [SKIPPED] Temp files invalid. Keeping existing files intact.")
+            for temp_path in temp_files:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+            return
         
-        # NO METADATA SAVING - READ ONLY APPROACH
-        
-        # Final Summary
+        # ---------------------------------------------------------------------
+        # SUMMARY
+        # ---------------------------------------------------------------------
         elapsed_time = (datetime.now() - start_time).total_seconds()
-        avg_speed = len(rows) / elapsed_time if elapsed_time > 0 else 0
-        
-        # Get final file sizes
         final_sizes = {}
-        for file_path in output_files:
-            if os.path.exists(file_path):
-                size_bytes = os.path.getsize(file_path)
-                final_sizes[file_path] = size_bytes
-            else:
-                final_sizes[file_path] = 0
-        
+        for fp in output_files:
+            final_sizes[fp] = os.path.getsize(fp) if os.path.exists(fp) else 0
         print("-"*70)
         print(f"\n📋 EXPORT SUMMARY")
         print("="*70)
         print(f"   Status           : SUCCESS")
-        print(f"  🖥️  Identifier      : {identification_method.upper()}")
-        print(f"  🔑 Value           : {computer_id if identification_method == 'ip_address' else computer_id[:32] + '...'}")
-        print(f"  👥 Valid User IDs   : {len(user_ids_to_fetch)} users")
-        print(f"  📊 Records Exported : {len(rows):,} / {total_rows:,}")
-        print(f"  🚀 Query Type       : Single query (no batch division)")
-        print(f"  📋 Schema Columns   : {len(columns)} (excluded 'analytics')")
-        print(f"  🔧 JSON Repairs     : {json_repaired_count} fields repaired")
-        print(f"  🔄 Path Denormalized: {path_denormalized_count} path fields restored")
-        print(f"  🧹 Config Title Extracted: {accountmanagement_unwrapped_count} records")
-        print(f"  📧 Gmail Normalized : {gmail_normalized_count} path fields normalized")
-        print(f"  💾 File 1 Size      : {final_sizes[ALL_FETCHED_INVESTORS]/1024:,.1f} KB ({final_sizes[ALL_FETCHED_INVESTORS]/1048576:.2f} MB)")
-        print(f"  📁 File 1 Path      : {ALL_FETCHED_INVESTORS}")
-        print(f"  💾 File 2 Size      : {final_sizes[ALL_UPDATED_INVESTORS]/1024:,.1f} KB ({final_sizes[ALL_UPDATED_INVESTORS]/1048576:.2f} MB)")
-        print(f"  📁 File 2 Path      : {ALL_UPDATED_INVESTORS}")
-        print(f"  📁 Account Mgmt File: {DEFAULT_ACCOUNTMANAGEMENT}")
-        print(f"  🛑  Database         : server_account.accountmanagement NOT modified (read-only)")
-        print(f"  ⏱️  Total Time       : {elapsed_time:.1f} seconds")
-        print(f"  ⚡ Average Speed    : {avg_speed:,.0f} records/second")
+        print(f"  🖥️  Method          : {identification_method}")
+        print(f"  🌐 Local IP        : {local_ip}")
+        if matched_vps_user_id:
+            print(f"  🔑 VPS user_id     : {matched_vps_user_id}")
+        print(f"  👥 Investor IDs    : {len(investor_ids_to_fetch)}")
+        print(f"  📊 Records Exported: {len(rows):,} / {total_rows:,}")
+        print(f"  🔗 invested_with   : {len(invested_map)} investor(s) with programme data")
+        print(f"  📋 accountmanagement: {len(am_map)} record(s) found")
+        print(f"  🎫 tier_limit tiers : {len(server_tier_limit) if isinstance(server_tier_limit, dict) else 0} available")
+        print(f"  🎫 tier_limit enrich: {tier_enriched_count} user(s) enriched")
+        print(f"  💾 File 1 Size     : {final_sizes[ALL_FETCHED_INVESTORS]/1024:,.1f} KB")
+        print(f"  📁 File 1 Path     : {ALL_FETCHED_INVESTORS}")
+        print(f"  💾 File 2 Size     : {final_sizes[ALL_UPDATED_INVESTORS]/1024:,.1f} KB")
+        print(f"  📁 File 2 Path     : {ALL_UPDATED_INVESTORS}")
+        print(f"  ⏱️  Total Time      : {elapsed_time:.1f} seconds")
         print("="*70)
-        print(f"  🕐 Completion Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  🕐 Completion Time : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
         
-        # Now call the update function - the files should exist
-        if os.path.exists(ALL_FETCHED_INVESTORS) and os.path.getsize(ALL_FETCHED_INVESTORS) > 0:
-            update_fresh_data_from_fetched_to_all_files()
-        else:
-            print(f"  ⚠️ Skipping update_fresh_data: {ALL_FETCHED_INVESTORS} not available or empty")
-        
+        if os.path.exists(ALL_FETCHED_INVESTORS):
+            try:
+                with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content.startswith('{') and content.endswith('}'):
+                        update_fresh_data_from_fetched_to_all_files()
+                    else:
+                        print(f"  ⚠️ Skipping update: invalid JSON structure")
+            except:
+                print(f"  ⚠️ Skipping update: unable to read file")
         
     except PermissionError as e:
         print(f"\n{'='*70}")
@@ -4089,18 +4175,8 @@ def fetch_database():
         print(f"  Message    : {str(e)}")
         print(f"  File Path  : {e.filename if hasattr(e, 'filename') else 'Unknown'}")
         print(f"{'='*70}")
-        print(f"\n  💡 TROUBLESHOOTING TIPS:")
-        print(f"  1. Close any program that might have the file open (editor, Excel, etc.)")
-        print(f"  2. Run your script as Administrator")
-        print(f"  3. Check file permissions (right-click → Properties → uncheck Read-only)")
-        print(f"  4. Try deleting the file manually: del {e.filename if hasattr(e, 'filename') else 'file'}")
-        print(f"{'='*70}")
-        
-        
         import traceback
-        print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-        
     except Exception as e:
         print(f"\n{'='*70}")
         print(f"   CRITICAL ERROR")
@@ -4108,12 +4184,10 @@ def fetch_database():
         print(f"  Error Type : {type(e).__name__}")
         print(f"  Message    : {str(e)}")
         print(f"{'='*70}")
-        
         import traceback
-        print(f"\n  📜 Full Traceback:")
         traceback.print_exc()
-
-def Harvhub_algo():
+                            
+def hello():
     try:
         Harvhub.main_once()
         print("technical analysis completed.")
@@ -4662,29 +4736,48 @@ def updated_individual_records_to_all_files():
         stats["errors"].append(f"Critical error: {str(e)}")
         return stats
                  
-def update_database():
-    """Update database from JSON files without batch processing
-    - Reads from BOTH ALL_UPDATED_INVESTORS and ALL_FETCHED_INVESTORS
-    - Merges data from both files
-    - Does NOT delete files after updating
-    - Processes ALL records in one go
+def update_investors():
     """
+    Update database from JSON files (batched, no delete-insert for multi-row tables).
+
+    Reads from BOTH ALL_UPDATED_INVESTORS and ALL_FETCHED_INVESTORS, merges
+    them, then splits each merged investor record back into the underlying
+    source tables:
+
+      - harvhub                 ← flat fields
+      - investors_analytics     ← analytics.*  (UNIQUE per userid)
+      - daily_target_revenue    ← daily_target_met.week_*.<Day>
+      - balance_log             ← daily_balance_log.<dd-mm-yyyy>
+      - unauthorized_trades     ← unauthorized_trades[]  (root)
+      - authorized_trades       ← authorized_trades[]    (root)
+
+    ⚠️  accountmanagement is deliberately EXCLUDED from this updater.
+        Its data is owned exclusively by fetch_investors(); any changes to
+        accountmanagement made in the JSON files are NOT pushed back to the
+        DB.  This prevents the fetch-side snapshot from clobbering the
+        authoritative accountmanagement rows (which may be edited directly
+        in the database or by another service).
+
+    All writes are batched (200 rows per statement).  Multi-row tables are
+    updated in place — NO DELETE. Rows absent from JSON are left untouched.
+    """
+
     updated_individual_records_to_all_files()
     restore_missing_fields()
-    
+
+    # =====================================================================
+    # IO / value helpers
+    # =====================================================================
     def safe_read_file(file_path):
-        """Safely read a JSON file with permission handling"""
         if not os.path.exists(file_path):
             return None
-        
         max_retries = 3
         retry_delay = 1
-        
         for attempt in range(max_retries):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except PermissionError as e:
+            except PermissionError:
                 print(f"    ⚠️ Permission denied reading {file_path} (attempt {attempt+1}/{max_retries})")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
@@ -4697,446 +4790,810 @@ def update_database():
             except Exception as e:
                 print(f"    ❌ Error reading {file_path}: {str(e)}")
                 return None
-        
         return None
-    
-    def safe_write_file(file_path, content):
-        """Safely write to a file with permission handling"""
-        max_retries = 3
-        retry_delay = 1
-        
-        for attempt in range(max_retries):
-            try:
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(content)
-                return True
-                
-            except PermissionError as e:
-                print(f"    ⚠️ Permission denied writing {file_path} (attempt {attempt+1}/{max_retries})")
-                
-                if attempt < max_retries - 1:
-                    try:
-                        if os.path.exists(file_path):
-                            print(f"       🔄 Deleting file: {file_path}")
-                            os.remove(file_path)
-                            print(f"       ✅ File deleted, retrying...")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                    except Exception as delete_error:
-                        print(f"       ❌ Could not delete file: {delete_error}")
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                else:
-                    raise
-        
+
+    def is_json_like(value):
+        if value is None: return False
+        if isinstance(value, (dict, list)): return True
+        if isinstance(value, str):
+            s = value.strip()
+            return (s.startswith('{') and s.endswith('}')) or \
+                   (s.startswith('[') and s.endswith(']'))
         return False
-    
+
+    def normalize_path_value(value, field_name):
+        if value is None or 'path' not in field_name.lower(): return value
+        if not isinstance(value, str): return value
+        return value.replace('\\', '_')
+
+    def normalize_execution_start_date(value):
+        if value is None or not isinstance(value, str): return value
+        fmts = ["%B %d, %Y", "%b %d, %Y", "%d-%b-%Y", "%Y-%m-%d",
+                "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"]
+        v = value.strip()
+        for fmt in fmts:
+            try: return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+            except ValueError: continue
+        return value
+
+    def normalize_json_value(value):
+        if value is None: return None
+        if isinstance(value, (dict, list)): return json.dumps(value, ensure_ascii=False)
+        if isinstance(value, str):
+            s = value.strip()
+            if s.upper() == 'NULL': return None
+            if s == '' or s == '{}': return '{}'
+            return s
+        return value
+
+    def sql_literal(value):
+        if value is None: return 'NULL'
+        if isinstance(value, bool): return '1' if value else '0'
+        if isinstance(value, (int, float)): return str(value)
+        if isinstance(value, str):
+            if value.strip().upper() == 'NULL': return 'NULL'
+            return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        s = str(value)
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    def sql_kv(field_name, value, field_lower=None):
+        if field_lower is None: field_lower = field_name.lower()
+        if field_lower == 'execution_start_date':
+            value = normalize_execution_start_date(value)
+        if 'path' in field_lower:
+            value = normalize_path_value(value, field_name)
+        if is_json_like(value):
+            jv = normalize_json_value(value)
+            if jv is None: return f"`{field_name}` = NULL"
+            esc = jv.replace("\\", "\\\\").replace("'", "\\'")
+            return f"`{field_name}` = '{esc}'"
+        return f"`{field_name}` = {sql_literal(value)}"
+
+    def to_int_safe(value, default=None):
+        if value is None: return default
+        try: return int(float(value))
+        except (ValueError, TypeError): return default
+
+    def coerce_date(value):
+        if value is None: return None
+        if isinstance(value, str):
+            v = value.strip()
+            if not v or v.upper() == 'NULL': return None
+            fmts = ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%Y",
+                    "%Y/%m/%d", "%B %d, %Y", "%b %d, %Y", "%d-%b-%Y"]
+            for fmt in fmts:
+                try: return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+                except ValueError: continue
+            try: return datetime.fromisoformat(v).strftime("%Y-%m-%d")
+            except Exception: return None
+        return None
+
+    def coerce_datetime(value):
+        if value is None: return None
+        if isinstance(value, str):
+            v = value.strip()
+            if not v or v.upper() == 'NULL': return None
+            try: return datetime.fromisoformat(v).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                    try: return datetime.strptime(v, fmt).strftime("%Y-%m-%d %H:%M:%S")
+                    except ValueError: continue
+        return None
+
+    def chunked(seq, size):
+        for i in range(0, len(seq), size):
+            yield seq[i:i + size]
+
+    # =====================================================================
+    # Batched upsert for single-row-per-user tables
+    # =====================================================================
+    def batch_upsert_single_row(table, rows, key_cols, cols):
+        """
+        rows: list of dict {key_col: value, col: literal, ...}
+        key_cols: list of key column names (e.g. ['id'] or ['investorid','developerid'])
+        cols: list of all writable column names (excluding keys)
+        Uses: INSERT INTO t (k..., c...) VALUES (...),(...)
+              ON DUPLICATE KEY UPDATE c = VALUES(c), ...
+        """
+        if not rows:
+            return 0
+        all_cols = list(dict.fromkeys(list(key_cols) + list(cols)))
+        value_groups = []
+        for r in rows:
+            vals = []
+            for c in all_cols:
+                vals.append(r.get(c, 'NULL'))
+            value_groups.append("(" + ", ".join(vals) + ")")
+
+        update_cols = [c for c in cols if c not in key_cols]
+        if update_cols:
+            upd = ", ".join(f"`{c}` = VALUES(`{c}`)" for c in update_cols)
+            tail = f"ON DUPLICATE KEY UPDATE {upd}"
+        else:
+            # Nothing to update — skip conflicting rows entirely
+            tail = "ON DUPLICATE KEY UPDATE " + f"`{key_cols[0]}` = `{key_cols[0]}`"
+
+        total = 0
+        for grp in chunked(value_groups, BATCH_SIZE):
+            q = (f"INSERT INTO {table} "
+                 f"({', '.join(f'`{c}`' for c in all_cols)}) "
+                 f"VALUES {', '.join(grp)} {tail}")
+            r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+            if r.get('status') == 'success':
+                total += len(grp)
+        return total
+
+    # =====================================================================
+    # Multi-row tables: no delete. Update existing, insert new.
+    # =====================================================================
+    def sync_multi_row_table(table, userid, rows, columns, pk_col='id',
+                             existing_cache=None, match_key_fn=None):
+        """
+        rows: list of dicts {col: value, ...} — all for one user.
+        columns: list of writable columns (excluding pk/userid which are added)
+        pk_col: primary key column of the table
+        existing_cache: {userid: {match_key: pk_id}}  — populated lazily
+        match_key_fn: given a row dict, return the tuple that identifies it
+                      (used to look up the PK in existing_cache)
+
+        Returns (updated_count, inserted_count).
+        """
+        if not rows:
+            return 0, 0
+        if existing_cache is None:
+            existing_cache = {}
+        if match_key_fn is None:
+            # default: use ('userid',) - meaning single row per user; but this
+            # shouldn't happen because multi-row tables always need a key.
+            match_key_fn = lambda r: (userid,)
+
+        # Lazily fetch existing PKs for this user
+        if userid not in existing_cache:
+            r = db.execute_query(
+                f"SELECT {pk_col} FROM {table} WHERE userid = {int(userid)}",
+                wait_hint={'signal': 'table', 'timeout': 10},
+            )
+            cache_map = {}
+            if r.get('status') == 'success':
+                for row in r.get('results', []):
+                    rid = to_int_safe(row.get(pk_col))
+                    if rid is None:
+                        continue
+                    # We don't know the match key from a bare PK fetch — so we
+                    # also need the other columns that form the key. Fall back
+                    # to fetching them.
+                    pass
+            existing_cache[userid] = cache_map  # will be re-fetched below
+
+        # We need the match columns too, so do a richer fetch.
+        if not existing_cache.get(userid):
+            # Determine match columns from the first row
+            sample = rows[0]
+            match_cols = [c for c in columns if c in sample]
+            select_cols = [pk_col] + [c for c in match_cols if c != pk_col]
+            r = db.execute_query(
+                f"SELECT {', '.join(f'`{c}`' for c in select_cols)} "
+                f"FROM {table} WHERE userid = {int(userid)}",
+                wait_hint={'signal': 'table', 'timeout': 10},
+            )
+            cmap = {}
+            if r.get('status') == 'success':
+                for row in r.get('results', []):
+                    rid = to_int_safe(row.get(pk_col))
+                    if rid is None:
+                        continue
+                    key = tuple(
+                        (row.get(c) if row.get(c) is not None else '')
+                        for c in match_cols if c != pk_col
+                    )
+                    cmap[key] = rid
+            existing_cache[userid] = cmap
+
+        cache = existing_cache[userid]
+
+        to_update = []  # list of (pk_id, {col: literal})
+        to_insert = []  # list of {col: literal, 'userid': literal}
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # Build per-row literals
+            row_lit = {}
+            for c in columns:
+                if c not in row or row[c] is None:
+                    continue
+                val = row[c]
+                if c == 'closed_time':
+                    val = coerce_datetime(val)
+                    if val is None:
+                        continue
+                elif c == 'date':
+                    coerced = coerce_date(val)
+                    if coerced is not None:
+                        val = coerced
+                row_lit[c] = sql_literal(val)
+
+            key = match_key_fn(row)
+            if key in cache:
+                pk_id = cache[key]
+                to_update.append((pk_id, row_lit))
+            else:
+                ins = dict(row_lit)
+                ins['userid'] = str(int(userid))
+                to_insert.append(ins)
+
+        updated = 0
+        inserted = 0
+
+        # --- batched UPDATE by PK using CASE ---
+        for grp in chunked(to_update, BATCH_SIZE):
+            col_set = set()
+            for _, d in grp:
+                col_set.update(d.keys())
+            if not col_set:
+                continue
+            cols = [c for c in columns if c in col_set]
+            ids = [str(rid) for rid, _ in grp]
+            case_parts = []
+            for c in cols:
+                whens = []
+                for rid, d in grp:
+                    lit = d.get(c, 'NULL')
+                    whens.append(f"WHEN {rid} THEN {lit}")
+                case_parts.append(f"`{c}` = CASE `{pk_col}` {' '.join(whens)} END")
+            q = (f"UPDATE {table} SET {', '.join(case_parts)} "
+                 f"WHERE `{pk_col}` IN ({', '.join(ids)})")
+            r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+            if r.get('status') == 'success':
+                updated += len(grp)
+                # Update cache with new literals (so subsequent rows in same
+                # user match correctly — unlikely here but safe)
+                for rid, d in grp:
+                    for k, v in cache.items():
+                        if v == rid:
+                            cache[k] = rid
+                            break
+
+        # --- batched INSERT ---
+        for grp in chunked(to_insert, BATCH_SIZE):
+            col_set = set()
+            for d in grp:
+                col_set.update(d.keys())
+            cols = [c for c in ['userid'] + columns if c in col_set]
+            value_groups = []
+            for d in grp:
+                vals = [d.get(c, 'NULL') for c in cols]
+                value_groups.append("(" + ", ".join(vals) + ")")
+            q = (f"INSERT INTO {table} "
+                 f"({', '.join(f'`{c}`' for c in cols)}) "
+                 f"VALUES {', '.join(value_groups)}")
+            r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+            if r.get('status') == 'success':
+                inserted += len(grp)
+
+        return updated, inserted
+
+    # =====================================================================
+    # Header
+    # =====================================================================
     print("\n" + "="*70)
-    print(f"  UPDATING TABLES (SINGLE BATCH - ALL RECORDS)")
+    print(f"  UPDATING TABLES (SPLIT-BACK MODE — batched, no delete)")
     print("="*70)
     print(f"  Start Time  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Mode        : ALL records in one operation")
+    print(f"  ℹ️  accountmanagement is FETCH-ONLY and will NOT be written by this updater")
     print("-"*70)
-    
+
+    BATCH_SIZE = 200
+
     try:
-        # Step 1: Read from BOTH source files and merge
-        print("\n📁 [1/6] Checking Source Files...")
-        
+        # =====================================================================
+        # [1/7] Load source files
+        # =====================================================================
+        print("\n📁 [1/7] Checking Source Files...")
         merged_data = {}
         files_loaded = []
-        
-        # Check and load ALL_UPDATED_INVESTORS
+
         if os.path.exists(ALL_UPDATED_INVESTORS):
             try:
                 updated_data = safe_read_file(ALL_UPDATED_INVESTORS)
                 if updated_data and isinstance(updated_data, dict):
                     merged_data.update(updated_data)
                     files_loaded.append('ALL_UPDATED_INVESTORS.json')
-                    print(f"   ✅ Loaded from update file: {ALL_UPDATED_INVESTORS}")
-                    print(f"      📊 Records: {len(updated_data):,}")
-                else:
-                    print(f"   🛑 Update file has invalid format (expected dict): {ALL_UPDATED_INVESTORS}")
+                    print(f"   ✅ Loaded: {ALL_UPDATED_INVESTORS} ({len(updated_data):,} records)")
             except Exception as e:
                 print(f"   🛑 Error reading update file: {str(e)}")
-        else:
-            print(f"   🛑 Update file not found: {ALL_UPDATED_INVESTORS}")
-        
-        # Check and load ALL_FETCHED_INVESTORS
+
         if os.path.exists(ALL_FETCHED_INVESTORS):
             try:
                 fetched_data = safe_read_file(ALL_FETCHED_INVESTORS)
                 if fetched_data and isinstance(fetched_data, dict):
-                    # Merge, but don't overwrite ALL_UPDATED_INVESTORS data if it exists
                     for key, value in fetched_data.items():
                         if key not in merged_data:
                             merged_data[key] = value
                     files_loaded.append('ALL_FETCHED_INVESTORS.json')
-                    print(f"   ✅ Loaded from fetched file: {ALL_FETCHED_INVESTORS}")
-                    print(f"      📊 Records: {len(fetched_data):,}")
-                else:
-                    print(f"   🛑 Fetched file has invalid format (expected dict): {ALL_FETCHED_INVESTORS}")
+                    print(f"   ✅ Loaded: {ALL_FETCHED_INVESTORS} ({len(fetched_data):,} records)")
             except Exception as e:
                 print(f"   🛑 Error reading fetched file: {str(e)}")
-        else:
-            print(f"   🛑 Fetched file not found: {ALL_FETCHED_INVESTORS}")
-        
+
         if not merged_data:
             print(f"\n   ❌ No data loaded from any source file")
-            print(f"   ℹ️ Please run fetch_database() first to create the fetched file")
             return
-        
+
         total_investors = len(merged_data)
         print(f"\n  📊 Total Records Merged: {total_investors:,}")
         print(f"  📁 Source Files: {', '.join(files_loaded)}")
-        
-        # Step 2: Test Database Connection and get table columns
-        print("\n📡 [2/6] Testing Database Connection...")
-        test_query = "SELECT id FROM insiders LIMIT 1"
-        test_result = db.execute_query(test_query)
-        
-        if test_result.get('status') != 'success':
-            print(f"   Connection FAILED: {test_result.get('message')}")
-            return
-        print(f"   Connection SUCCESSFUL")
-        
-        # Get all column names from insiders table
-        print("\n🔍 Fetching insiders table columns...")
-        get_columns_query = """
-        SELECT COLUMN_NAME 
-        FROM information_schema.COLUMNS 
-        WHERE TABLE_SCHEMA = DATABASE() 
-        AND TABLE_NAME = 'insiders'
-        """
-        
-        columns_result = db.execute_query(get_columns_query)
-        existing_columns = set()
-        
-        if columns_result.get('status') == 'success' and columns_result.get('results'):
-            for row in columns_result['results']:
-                column_name = row.get('COLUMN_NAME', '')
-                if column_name:
-                    existing_columns.add(column_name.lower())
-            print(f"   Found {len(existing_columns)} columns in insiders table")
-            print(f"  📋 Columns: {', '.join(sorted(existing_columns))}")
-        else:
-            print(f"    Could not fetch column information")
-            existing_columns = set()
-        
-        # Helper functions
-        def is_json_field(value):
-            """Determine if a value should be stored as JSON in database"""
-            if value is None:
-                return False
-            if isinstance(value, (dict, list)):
-                return True
-            if isinstance(value, str):
-                stripped = value.strip()
-                if stripped.startswith('{') and stripped.endswith('}'):
-                    return True
-                if stripped.startswith('[') and stripped.endswith(']'):
-                    return True
-            return False
-        
-        def normalize_path_value(value, field_name):
-            """Normalize path values: ONLY replace backslashes with underscores"""
-            if value is None:
-                return None
-            if 'path' not in field_name.lower():
-                return value
-            if not isinstance(value, str):
-                return value
-            
-            normalized = value.replace('\\', '_')
-            if normalized != value:
-                print(f"       Normalizing path field '{field_name}':")
-                print(f"         Original: {value[:100]}{'...' if len(value) > 100 else ''}")
-                print(f"         Normalized: {normalized[:100]}{'...' if len(normalized) > 100 else ''}")
-            return normalized
-        
-        def normalize_execution_start_date(value):
-            """Normalize execution_start_date to YYYY-MM-DD format"""
-            if value is None or not isinstance(value, str):
-                return value
-            
-            date_formats = [
-                "%B %d, %Y",
-                "%b %d, %Y",
-                "%d-%b-%Y",
-                "%Y-%m-%d",
-                "%m/%d/%Y",
-                "%d/%m/%Y",
-                "%Y/%m/%d",
+
+        # =====================================================================
+        # [2/7] Discover schemas  (accountmanagement intentionally NOT discovered)
+        # =====================================================================
+        print("\n📡 [2/7] Discovering target table schemas...")
+
+        def _schema(table, retries=2):
+            queries = [
+                (
+                    f"SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                    f"WHERE TABLE_SCHEMA = DATABASE() "
+                    f"AND TABLE_NAME = '{table}' "
+                    f"ORDER BY ORDINAL_POSITION"
+                ),
+                f"SHOW COLUMNS FROM {table}",
             ]
-            
-            original_value = value.strip()
-            for date_format in date_formats:
-                try:
-                    parsed_date = datetime.strptime(original_value, date_format)
-                    normalized = parsed_date.strftime("%Y-%m-%d")
-                    if normalized != original_value:
-                        print(f"       Normalizing execution_start_date:")
-                        print(f"         Original: {original_value}")
-                        print(f"         Normalized: {normalized}")
-                    return normalized
-                except ValueError:
-                    continue
-            return value
-        
-        def normalize_json_value(value):
-            """Convert value to proper JSON for database storage"""
-            if value is None:
-                return None
-            if isinstance(value, (dict, list)):
-                return json.dumps(value, ensure_ascii=False)
-            if isinstance(value, str):
-                stripped = value.strip()
-                if stripped.upper() == 'NULL':
-                    return None
-                if stripped == '' or stripped == '{}':
-                    return '{}'
-                if (stripped.startswith('{') and stripped.endswith('}')) or \
-                   (stripped.startswith('[') and stripped.endswith(']')):
-                    try:
-                        json.loads(stripped)
-                        return stripped
-                    except:
-                        return value
-            return value
-        
-        # Step 3: Get existing IDs for validation
-        print("\n🔍 [3/6] Fetching Existing Record IDs...")
-        existing_ids_query = "SELECT id FROM insiders"
-        existing_result = db.execute_query(existing_ids_query)
-        
+            for attempt in range(retries):
+                for q in queries:
+                    r = db.execute_query(
+                        q,
+                        wait_hint={'signal': 'table', 'timeout': 10,
+                                   'expect_empty': True},
+                    )
+                    if r.get('status') == 'success' and r.get('results'):
+                        cols = set()
+                        for row in r['results']:
+                            c = (
+                                row.get('Field')
+                                or row.get('FIELD')
+                                or row.get('COLUMN_NAME')
+                                or row.get('column_name')
+                                or ''
+                            )
+                            if c:
+                                cols.add(c.lower())
+                        if cols:
+                            return cols
+                if attempt < retries - 1:
+                    time.sleep(0.6)
+            print(f"   ⚠️ Could not read {table} schema")
+            return set()
+
+        harvhub_columns   = _schema('harvhub');               print(f"   ✅ harvhub                : {len(harvhub_columns)} cols")
+        ia_columns        = _schema('investors_analytics');    print(f"   ✅ investors_analytics    : {len(ia_columns)} cols")
+        dtr_columns       = _schema('daily_target_revenue');   print(f"   ✅ daily_target_revenue   : {len(dtr_columns)} cols")
+        bl_columns        = _schema('balance_log');            print(f"   ✅ balance_log            : {len(bl_columns)} cols")
+        ut_columns        = _schema('unauthorized_trades');    print(f"   ✅ unauthorized_trades    : {len(ut_columns)} cols")
+        at_columns        = _schema('authorized_trades');      print(f"   ✅ authorized_trades      : {len(at_columns)} cols")
+        print(f"   ⏭️  accountmanagement      : SKIPPED (fetch-only table)")
+
+        # =====================================================================
+        # [3/7] Fetch existing harvhub IDs
+        # =====================================================================
+        print("\n🔍 [3/7] Fetching Existing harvhub IDs...")
+        existing_result = db.execute_query(
+            "SELECT id FROM harvhub",
+            wait_hint={'signal': 'table', 'timeout': 10},
+        )
         existing_ids = set()
         if existing_result.get('status') == 'success':
             for row in existing_result.get('results', []):
-                existing_ids.add(str(row.get('id')))
-        
-        print(f"  📊 Existing Records in DB: {len(existing_ids):,}")
-        
-        # Step 4: Identify which records exist in DB vs not
-        print(f"\n📖 [4/6] Processing Records...")
-        
-        investors_to_update = {}
-        investors_to_skip = []
-        
-        for investor_id, investor_data in merged_data.items():
-            if investor_id in existing_ids:
-                investors_to_update[investor_id] = investor_data
-            else:
-                investors_to_skip.append(investor_id)
-        
-        print(f"  📊 Records to Update (exist in DB): {len(investors_to_update):,}")
-        print(f"  🛑  Records Skipped (not in DB): {len(investors_to_skip):,}")
-        
-        if investors_to_skip:
-            print(f"     ℹ️ These records will be skipped (not deleted from file)")
-            # Show first few skipped IDs
-            if len(investors_to_skip) <= 10:
-                print(f"     Skipped IDs: {', '.join(investors_to_skip)}")
-            else:
-                print(f"     Skipped IDs (first 10): {', '.join(investors_to_skip[:10])}...")
-        
-        # Step 5: Update Database - ALL RECORDS IN ONE OPERATION
-        if investors_to_update:
-            print(f"\n📤 [5/6] Updating ALL Database Records (Single Operation)...")
-            print("-"*70)
-            
-            start_time = datetime.now()
-            updated_count = 0
-            failed_count = 0
-            successfully_updated_ids = []
-            unmapped_fields = set()
-            
-            total_to_update = len(investors_to_update)
-            print(f"  🚀 Processing all {total_to_update:,} records in one operation...")
-            print(f"  ⏳ This may take some time for large datasets...")
-            print()
-            
-            # Process ALL records in one go
-            for index, (investor_id, investor) in enumerate(investors_to_update.items(), 1):
-                # Progress indicator (every 100 records)
-                if index % 100 == 0 or index == total_to_update:
-                    progress = (index / total_to_update) * 100
-                    bar_length = 30
-                    filled = int(bar_length * index // total_to_update)
-                    bar = '█' * filled + '░' * (bar_length - filled)
-                    print(f"  [{bar}] {progress:5.1f}% | {index:,}/{total_to_update:,} records processed", end='\r')
-                
-                # Build UPDATE query dynamically
-                update_parts = []
-                
-                for json_field, value in investor.items():
-                    if json_field == 'id':
-                        continue
-                    
-                    if json_field.lower() not in existing_columns:
-                        unmapped_fields.add(json_field)
-                        continue
-                    
-                    # Normalize values
-                    if json_field.lower() == 'execution_start_date':
-                        value = normalize_execution_start_date(value)
-                    
-                    if 'path' in json_field.lower():
-                        value = normalize_path_value(value, json_field)
-                    
-                    # Handle different value types
-                    if is_json_field(value):
-                        json_value = normalize_json_value(value)
-                        if json_value is None:
-                            update_parts.append(f"`{json_field}` = NULL")
-                        else:
-                            escaped_json = json_value.replace("'", "\\'")
-                            update_parts.append(f"`{json_field}` = '{escaped_json}'")
-                    elif value is None:
-                        update_parts.append(f"`{json_field}` = NULL")
-                    elif isinstance(value, bool):
-                        db_value = '1' if value else '0'
-                        update_parts.append(f"`{json_field}` = {db_value}")
-                    elif isinstance(value, (int, float)):
-                        update_parts.append(f"`{json_field}` = {value}")
-                    elif isinstance(value, str):
-                        if value.strip().upper() == 'NULL':
-                            update_parts.append(f"`{json_field}` = NULL")
-                        else:
-                            escaped_value = value.replace("'", "\\'")
-                            update_parts.append(f"`{json_field}` = '{escaped_value}'")
-                    else:
-                        str_value = str(value)
-                        escaped_value = str_value.replace("'", "\\'")
-                        update_parts.append(f"`{json_field}` = '{escaped_value}'")
-                
-                if not update_parts:
-                    continue
-                
-                set_clause = ", ".join(update_parts)
-                query = f"UPDATE insiders SET {set_clause} WHERE id = {int(investor_id)}"
-                
-                result = db.execute_query(query)
-                
-                if result.get('status') == 'success':
-                    updated_count += 1
-                    successfully_updated_ids.append(investor_id)
-                else:
-                    failed_count += 1
-                    print(f"\n      ❌ Failed to update investor {investor_id}: {result.get('message')}")
-            
-            # Final progress update
-            print()  # New line after progress bar
-            
-            elapsed_time = (datetime.now() - start_time).total_seconds()
-            avg_speed = updated_count / elapsed_time if elapsed_time > 0 else 0
-            
-            if unmapped_fields:
-                print(f"\n    Unmapped/Non-existent fields found (skipped):")
-                for field in sorted(unmapped_fields)[:10]:
-                    print(f"     - {field}")
-                if len(unmapped_fields) > 10:
-                    print(f"     ... and {len(unmapped_fields) - 10} more")
-        else:
-            print(f"\n📤 [5/6] No records to update - skipping insiders update")
-            elapsed_time = 0
-            avg_speed = 0
-            successfully_updated_ids = []
-            updated_count = 0
-            failed_count = 0
-            unmapped_fields = set()
-        
-        # Step 6: DO NOT DELETE OR MODIFY THE SOURCE FILES
-        print(f"\n💾 [6/6] Preserving Source Files (No Deletion)...")
-        print(f"   ℹ️ Source files preserved")
-        print(f"   📊 Total records in merged data: {total_investors:,}")
-        print(f"   ✅ Updated successfully: {len(successfully_updated_ids):,}")
-        print(f"   🛑 Skipped (not in DB): {len(investors_to_skip):,}")
-        print(f"   ℹ️ No data was deleted from any file")
-        
-        # Final Summary
+                v = row.get('id')
+                if v is not None:
+                    existing_ids.add(str(v))
+        print(f"  📊 Existing Records in harvhub: {len(existing_ids):,}")
+
+        HARVHUB_EXCLUDED = {
+            'analytics_history', 'revenue_history', 'reset_contract',
+            'invested_with', 'accountmanagement', 'tier_limit',
+            'mt5_folder_name', 'verified_at',
+            'daily_target_met', 'daily_balance_log',
+            'unauthorized_trades', 'authorized_trades',
+            'id',
+        }
+        ANALYTICS_FIELDS = [
+            'start_date', 'end_date', 'last_updated',
+            'total_trades', 'total_pnl', 'profit_trades', 'loss_trades',
+            'profit_amount', 'loss_amount',
+            'lowest_trades_per_day', 'highest_trades_per_day', 'average_trades_per_day',
+            'lowest_trades_per_week', 'highest_trades_per_week', 'average_trades_per_week',
+            'highest_loss_per_trade', 'highest_drawdown', 'symbols_traded',
+            'closed_deals_with_sl_tp', 'closed_deals_without_sl_tp',
+            'consecutive_losses_count', 'total_loss_pnl',
+            'consecutive_days_in_loss_count',
+            'consecutive_days_in_loss_count_total_loss_pnl',
+            'revenue_percentage', 'revenue_profit_percentage', 'revenue_loss_percentage',
+        ]
+        TRADE_FIELDS = ['symbol', 'entry', 'stoploss', 'target',
+                        'ticket', 'pnl', 'closed_time']
+
+        # =====================================================================
+        # [4/7] Accumulator buffers
+        # =====================================================================
+        print(f"\n📤 [4/7] Processing records into all target tables...")
         print("-"*70)
-        print(f"\n📋 UPDATE SUMMARY")
+
+        start_time = datetime.now()
+        counters = {
+            'harvhub_inserted': 0, 'harvhub_updated': 0, 'harvhub_failed': 0,
+            'ia_inserted': 0, 'ia_updated': 0, 'ia_failed': 0,
+            'dtr_users': 0, 'dtr_rows_updated': 0, 'dtr_rows_inserted': 0,
+            'bl_users': 0,  'bl_rows_updated': 0,  'bl_rows_inserted': 0,
+            'ut_users': 0,  'ut_rows_updated': 0,  'ut_rows_inserted': 0,
+            'at_users': 0,  'at_rows_updated': 0,  'at_rows_inserted': 0,
+        }
+        harvhub_unmapped = set()
+        ia_unmapped = set()
+
+        # Cache for existing PKs per multi-row table: {userid: {match_key: pk_id}}
+        existing_cache = {
+            'daily_target_revenue': {},
+            'balance_log': {},
+            'unauthorized_trades': {},
+            'authorized_trades': {},
+        }
+
+        # --- harvhub / investors_analytics buffers ---
+        harvhub_updates = []   # list of (id_int, {col: literal})
+        harvhub_inserts = []   # list of {col: literal, 'id': str}
+        ia_updates = []        # list of (userid, {col: literal})
+        ia_inserts = []        # list of {col: literal, 'userid': str}
+
+        def flush_harvhub():
+            nonlocal harvhub_updates, harvhub_inserts
+            if harvhub_inserts:
+                for grp in chunked(harvhub_inserts, BATCH_SIZE):
+                    col_set = set()
+                    for d in grp: col_set.update(d.keys())
+                    all_cols = [c for c in ['id'] + sorted(col_set - {'id'}) if c in col_set or c == 'id']
+                    # ensure id is first
+                    all_cols = ['id'] + [c for c in all_cols if c != 'id']
+                    vgroups = []
+                    for d in grp:
+                        vals = [d.get(c, 'NULL') for c in all_cols]
+                        vgroups.append("(" + ", ".join(vals) + ")")
+                    update_cols = [c for c in all_cols if c != 'id']
+                    if update_cols:
+                        tail = "ON DUPLICATE KEY UPDATE " + ", ".join(
+                            f"`{c}` = VALUES(`{c}`)" for c in update_cols)
+                    else:
+                        tail = "ON DUPLICATE KEY UPDATE `id` = `id`"
+                    q = (f"INSERT INTO harvhub "
+                         f"({', '.join(f'`{c}`' for c in all_cols)}) "
+                         f"VALUES {', '.join(vgroups)} {tail}")
+                    r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+                    if r.get('status') == 'success':
+                        counters['harvhub_inserted'] += len(grp)
+                        for d in grp: existing_ids.add(d.get('id', '').strip("'"))
+                    else:
+                        counters['harvhub_failed'] += len(grp)
+                harvhub_inserts = []
+
+            if harvhub_updates:
+                for grp in chunked(harvhub_updates, BATCH_SIZE):
+                    col_set = set()
+                    for _, d in grp: col_set.update(d.keys())
+                    cols = sorted(col_set)
+                    if not cols:
+                        continue
+                    ids = [str(rid) for rid, _ in grp]
+                    case_parts = []
+                    for c in cols:
+                        whens = []
+                        for rid, d in grp:
+                            lit = d.get(c, 'NULL')
+                            whens.append(f"WHEN {rid} THEN {lit}")
+                        case_parts.append(f"`{c}` = CASE `id` {' '.join(whens)} END")
+                    q = (f"UPDATE harvhub SET {', '.join(case_parts)} "
+                         f"WHERE `id` IN ({', '.join(ids)})")
+                    r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+                    if r.get('status') == 'success':
+                        counters['harvhub_updated'] += len(grp)
+                    else:
+                        counters['harvhub_failed'] += len(grp)
+                harvhub_updates = []
+
+        def flush_investors_analytics():
+            nonlocal ia_updates, ia_inserts
+            if ia_inserts:
+                for grp in chunked(ia_inserts, BATCH_SIZE):
+                    col_set = set()
+                    for d in grp: col_set.update(d.keys())
+                    all_cols = ['userid'] + [
+                        c for c in sorted(col_set) if c != 'userid'
+                    ]
+                    vgroups = []
+                    for d in grp:
+                        vals = [d.get(c, 'NULL') for c in all_cols]
+                        vgroups.append("(" + ", ".join(vals) + ")")
+                    update_cols = [c for c in all_cols if c != 'userid']
+                    if update_cols:
+                        tail = "ON DUPLICATE KEY UPDATE " + ", ".join(
+                            f"`{c}` = VALUES(`{c}`)" for c in update_cols)
+                    else:
+                        tail = "ON DUPLICATE KEY UPDATE `userid` = `userid`"
+                    q = (f"INSERT INTO investors_analytics "
+                         f"({', '.join(f'`{c}`' for c in all_cols)}) "
+                         f"VALUES {', '.join(vgroups)} {tail}")
+                    r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+                    if r.get('status') == 'success':
+                        counters['ia_inserted'] += len(grp)
+                    else:
+                        counters['ia_failed'] += len(grp)
+                ia_inserts = []
+
+            if ia_updates:
+                for grp in chunked(ia_updates, BATCH_SIZE):
+                    col_set = set()
+                    for _, d in grp: col_set.update(d.keys())
+                    cols = sorted(col_set)
+                    if not cols:
+                        continue
+                    ids = [str(uid) for uid, _ in grp]
+                    case_parts = []
+                    for c in cols:
+                        whens = []
+                        for uid, d in grp:
+                            lit = d.get(c, 'NULL')
+                            whens.append(f"WHEN {uid} THEN {lit}")
+                        case_parts.append(f"`{c}` = CASE `userid` {' '.join(whens)} END")
+                    q = (f"UPDATE investors_analytics SET {', '.join(case_parts)} "
+                         f"WHERE `userid` IN ({', '.join(ids)})")
+                    r = db.execute_query(q, wait_hint={'signal': 'any-of', 'timeout': 25})
+                    if r.get('status') == 'success':
+                        counters['ia_updated'] += len(grp)
+                    else:
+                        counters['ia_failed'] += len(grp)
+                ia_updates = []
+
+        # =====================================================================
+        # Main loop
+        # =====================================================================
+        total_to_update = len(merged_data)
+        print(f"  🚀 Processing {total_to_update:,} record(s) in batches of {BATCH_SIZE}...")
+        print()
+
+        for index, (investor_id, investor) in enumerate(merged_data.items(), 1):
+            if index % 50 == 0 or index == total_to_update:
+                pct = (index / total_to_update) * 100
+                bar_len = 30
+                filled = int(bar_len * index // total_to_update)
+                bar = '█' * filled + '░' * (bar_len - filled)
+                print(f"  [{bar}] {pct:5.1f}% | {index:,}/{total_to_update:,}", end='\r')
+
+            userid = to_int_safe(investor_id)
+            if userid is None:
+                continue
+            if not isinstance(investor, dict):
+                continue
+
+            # ── (A) harvhub ──
+            harvhub_payload = {}
+            for field, value in investor.items():
+                if field in HARVHUB_EXCLUDED:
+                    continue
+                if field.lower() not in harvhub_columns:
+                    harvhub_unmapped.add(field); continue
+                # get literal
+                lit_kv = sql_kv(field, value)
+                # extract RHS
+                _, _, rhs = lit_kv.partition('=')
+                harvhub_payload[field] = rhs.strip()
+
+            if harvhub_payload:
+                if str(investor_id) in existing_ids:
+                    harvhub_updates.append((userid, harvhub_payload))
+                else:
+                    ins = dict(harvhub_payload)
+                    ins['id'] = str(userid)
+                    harvhub_inserts.append(ins)
+
+            # ── (B) accountmanagement — INTENTIONALLY SKIPPED ──
+            # accountmanagement is owned exclusively by fetch_investors().
+            # We never write to it here so that any DB-side edits (or edits by
+            # another service) are never clobbered by a stale JSON snapshot.
+            # (No am_payload / am_inserts built; nothing flushed below.)
+
+            # ── (C) investors_analytics ──
+            analytics = investor.get('analytics')
+            if isinstance(analytics, dict) and ia_columns:
+                ia_payload = {}
+                for f in ANALYTICS_FIELDS:
+                    if f not in analytics: continue
+                    if f.lower() not in ia_columns:
+                        ia_unmapped.add(f); continue
+                    val = analytics[f]
+                    if f in ('start_date', 'end_date'):
+                        val = coerce_date(val)
+                    elif f == 'last_updated':
+                        val = coerce_datetime(val)
+                    lit_kv = sql_kv(f, val)
+                    _, _, rhs = lit_kv.partition('=')
+                    ia_payload[f] = rhs.strip()
+
+                if ia_payload:
+                    ins = dict(ia_payload)
+                    ins['userid'] = str(userid)
+                    ia_inserts.append(ins)
+
+            # ── (D) daily_target_revenue ──
+            dtm = investor.get('daily_target_met')
+            if isinstance(dtm, dict) and dtr_columns:
+                rows = []
+                for wk_key, wk_val in dtm.items():
+                    if not isinstance(wk_val, dict): continue
+                    if not wk_key.lower().startswith('week_'): continue
+                    for day_name, day_val in wk_val.items():
+                        if not isinstance(day_val, dict): continue
+                        rows.append({
+                            'week': wk_key, 'day': day_name,
+                            'date': day_val.get('date'),
+                            'daily_target': day_val.get('daily_target'),
+                            'status': day_val.get('status'),
+                            'profit_allocated': day_val.get('profit_allocated'),
+                            'remaining_needed': day_val.get('remaining_needed'),
+                        })
+                if rows:
+                    u, i = sync_multi_row_table(
+                        'daily_target_revenue', userid, rows,
+                        columns=['week', 'day', 'date', 'daily_target',
+                                 'status', 'profit_allocated', 'remaining_needed'],
+                        pk_col='id',
+                        existing_cache=existing_cache['daily_target_revenue'],
+                        match_key_fn=lambda r: (str(r.get('week', '')),
+                                                str(r.get('day', ''))),
+                    )
+                    counters['dtr_users'] += 1
+                    counters['dtr_rows_updated'] += u
+                    counters['dtr_rows_inserted'] += i
+
+            # ── (E) balance_log ──
+            dbl = investor.get('daily_balance_log')
+            if isinstance(dbl, dict) and bl_columns:
+                rows = []
+                for day_key, day_val in dbl.items():
+                    if not isinstance(day_val, dict): continue
+                    rows.append({
+                        'date': day_key,
+                        'day_starting_balance': day_val.get('day_starting_balance'),
+                        'day_authorized_trades_pnl': day_val.get('day_authorized_trades_pnl'),
+                        'day_unauthorized_trades_pnl': day_val.get('day_unauthorized_trades_pnl'),
+                        'day_unauthorized_withdrawals': day_val.get('day_unauthorized_withdrawals'),
+                        'day_closing_balance': day_val.get('day_closing_balance'),
+                        'unusual_activity': day_val.get('unusual_activity'),
+                        'authorized_trades_count': day_val.get('authorized_trades_count'),
+                        'unauthorized_trades_count': day_val.get('unauthorized_trades_count'),
+                    })
+                if rows:
+                    u, i = sync_multi_row_table(
+                        'balance_log', userid, rows,
+                        columns=['date', 'day_starting_balance',
+                                 'day_authorized_trades_pnl',
+                                 'day_unauthorized_trades_pnl',
+                                 'day_unauthorized_withdrawals',
+                                 'day_closing_balance', 'unusual_activity',
+                                 'authorized_trades_count', 'unauthorized_trades_count'],
+                        pk_col='id',
+                        existing_cache=existing_cache['balance_log'],
+                        match_key_fn=lambda r: (str(r.get('date', '')),),
+                    )
+                    counters['bl_users'] += 1
+                    counters['bl_rows_updated'] += u
+                    counters['bl_rows_inserted'] += i
+
+            # ── (F) unauthorized_trades ──
+            ut = investor.get('unauthorized_trades')
+            if isinstance(ut, list) and ut_columns:
+                rows = [{f: t.get(f) for f in TRADE_FIELDS}
+                        for t in ut if isinstance(t, dict)]
+                if rows:
+                    u, i = sync_multi_row_table(
+                        'unauthorized_trades', userid, rows,
+                        columns=TRADE_FIELDS, pk_col='id',
+                        existing_cache=existing_cache['unauthorized_trades'],
+                        match_key_fn=lambda r: (str(r.get('ticket', '')),),
+                    )
+                    counters['ut_users'] += 1
+                    counters['ut_rows_updated'] += u
+                    counters['ut_rows_inserted'] += i
+
+            # ── (G) authorized_trades ──
+            at = investor.get('authorized_trades')
+            if isinstance(at, list) and at_columns:
+                rows = [{f: t.get(f) for f in TRADE_FIELDS}
+                        for t in at if isinstance(t, dict)]
+                if rows:
+                    u, i = sync_multi_row_table(
+                        'authorized_trades', userid, rows,
+                        columns=TRADE_FIELDS, pk_col='id',
+                        existing_cache=existing_cache['authorized_trades'],
+                        match_key_fn=lambda r: (str(r.get('ticket', '')),),
+                    )
+                    counters['at_users'] += 1
+                    counters['at_rows_updated'] += u
+                    counters['at_rows_inserted'] += i
+
+            # ── Flush top-level single-row buffers ──
+            if (len(harvhub_inserts) >= BATCH_SIZE or
+                len(harvhub_updates) >= BATCH_SIZE or
+                len(ia_inserts) >= BATCH_SIZE):
+                flush_harvhub()
+                flush_investors_analytics()
+
+        # ── Final flush ──
+        flush_harvhub()
+        flush_investors_analytics()
+
+        print()
+        elapsed_time = (datetime.now() - start_time).total_seconds()
+
+        # =====================================================================
+        # Summary
+        # =====================================================================
+        print(f"\n💾 [5/7] Source files preserved (no deletion)")
+        print(f"\n📋 [6/7] SPLIT-BACK UPDATE SUMMARY")
         print("="*70)
-        
-        # Insiders Summary
-        print(f"\n  📊 INSIDERS UPDATE:")
-        if total_investors > 0:
-            print(f"     Status              : {'SUCCESS' if failed_count == 0 else 'COMPLETED WITH ERRORS'}")
-            print(f"     Source Files        : {', '.join(files_loaded)}")
-            print(f"     Total Records       : {total_investors:,}")
-            print(f"     Records Updated     : {updated_count:,}")
-            print(f"     Records Skipped     : {len(investors_to_skip):,} (not in DB)")
-            print(f"     Failed Updates      : {failed_count:,}")
-            print(f"     Time                : {elapsed_time:.1f} seconds")
-            print(f"     Speed               : {avg_speed:,.0f} records/second")
-            print(f"     Files Preserved     : YES (no deletion)")
-            print(f"     Update Mode         : SINGLE BATCH (all records at once)")
-            
-            if successfully_updated_ids:
-                print(f"     Sample Updated IDs  : {', '.join(successfully_updated_ids[:5])}{'...' if len(successfully_updated_ids) > 5 else ''}")
-            
-            if unmapped_fields:
-                print(f"\n       Skipped Fields (not in DB):")
-                for field in sorted(unmapped_fields)[:10]:
-                    print(f"        - {field}")
-                if len(unmapped_fields) > 10:
-                    print(f"        ... and {len(unmapped_fields) - 10} more")
-        else:
-            print(f"     Status              : SKIPPED (no data to process)")
-        
-        print(f"\n  🕐 Completion Time     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"\n  📊 harvhub:")
+        print(f"     Inserted/Upserted : {counters['harvhub_inserted']:,}")
+        print(f"     Updated           : {counters['harvhub_updated']:,}")
+        print(f"     Failed            : {counters['harvhub_failed']:,}")
+        print(f"     Skipped flds      : {len(harvhub_unmapped)}")
+        print(f"\n  📊 accountmanagement:")
+        print(f"     ⏭️  SKIPPED (fetch-only table — never written by updater)")
+        print(f"\n  📊 investors_analytics:")
+        print(f"     Inserted/Upserted : {counters['ia_inserted']:,}")
+        print(f"     Updated           : {counters['ia_updated']:,}")
+        print(f"     Failed            : {counters['ia_failed']:,}")
+        print(f"     Skipped flds      : {len(ia_unmapped)}")
+        print(f"\n  📊 daily_target_revenue:    Users: {counters['dtr_users']:,}  "
+              f"UPDATED: {counters['dtr_rows_updated']:,}  INSERTED: {counters['dtr_rows_inserted']:,}")
+        print(f"\n  📊 balance_log:             Users: {counters['bl_users']:,}  "
+              f"UPDATED: {counters['bl_rows_updated']:,}  INSERTED: {counters['bl_rows_inserted']:,}")
+        print(f"\n  📊 unauthorized_trades:     Users: {counters['ut_users']:,}  "
+              f"UPDATED: {counters['ut_rows_updated']:,}  INSERTED: {counters['ut_rows_inserted']:,}")
+        print(f"\n  📊 authorized_trades:       Users: {counters['at_users']:,}  "
+              f"UPDATED: {counters['at_rows_updated']:,}  INSERTED: {counters['at_rows_inserted']:,}")
+        print(f"\n  🚫 NO DELETE statements executed — rows kept and updated in place")
+        print(f"  🚫 accountmanagement left untouched (owned by fetch_investors)")
+        print(f"  ⏱️  Total Time : {elapsed_time:.1f}s")
+        print(f"  🕐 Completion  : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("="*70)
-        
+
     except json.JSONDecodeError as e:
-        print(f"\n{'='*70}")
-        print(f"   JSON PARSE ERROR")
-        print(f"{'='*70}")
-        print(f"  Error: {str(e)}")
-        print(f"{'='*70}")
-        
+        print(f"\n{'='*70}\n   JSON PARSE ERROR\n{'='*70}\n  Error: {str(e)}\n{'='*70}")
     except PermissionError as e:
-        print(f"\n{'='*70}")
-        print(f"   PERMISSION ERROR")
-        print(f"{'='*70}")
-        print(f"  Error Type : {type(e).__name__}")
-        print(f"  Message    : {str(e)}")
-        print(f"  File Path  : {e.filename if hasattr(e, 'filename') else 'Unknown'}")
-        print(f"{'='*70}")
-        print(f"\n  💡 TROUBLESHOOTING TIPS:")
-        print(f"  1. Close any program that might have the file open")
-        print(f"  2. Run your script as Administrator")
-        print(f"  3. Check file permissions")
-        print(f"{'='*70}")
-        
-        import traceback
-        print(f"\n  📜 Full Traceback:")
-        traceback.print_exc()
-        
+        print(f"\n{'='*70}\n   PERMISSION ERROR\n{'='*70}")
+        print(f"  Error   : {type(e).__name__}\n  Message : {str(e)}")
+        print(f"  File    : {e.filename if hasattr(e, 'filename') else 'Unknown'}\n{'='*70}")
+        import traceback; traceback.print_exc()
     except Exception as e:
-        print(f"\n{'='*70}")
-        print(f"   CRITICAL ERROR")
-        print(f"{'='*70}")
-        print(f"  Error Type : {type(e).__name__}")
-        print(f"  Message    : {str(e)}")
-        print(f"{'='*70}")
-        
-        import traceback
-        print(f"\n  📜 Full Traceback:")
-        traceback.print_exc()
-   
+        print(f"\n{'='*70}\n   CRITICAL ERROR\n{'='*70}")
+        print(f"  Error   : {type(e).__name__}\n  Message : {str(e)}\n{'='*70}")
+        import traceback; traceback.print_exc()       
+
 def close_db_browser():
     db.shutdown()
     print(f"\n🔒 Database connection closed.")
     
 def create_investor_mt5_files(inv_id=None):
     """
-    Creates MT5 terminal folders for investors by copying from DEFAULT_MT5_PATH
-    
+    Creates MT5 terminal folders for investors by copying from DEFAULT_MT5_PATH.
+
+    Guarantees:
+      - The folder name, `Terminal_path`, and `mt5_folder_name` in the JSON
+        always match what the current `broker` + `id` + `email` produce.
+      - If any of the three disagree with the expected value, they are all
+        rewritten (via updated_data → merge_create_results).
+      - This check runs on EVERY invocation, whether the folder exists or not.
+
     Args:
         inv_id: Required - specific investor ID to process (for multiprocessing)
-    
+
     Returns:
         dict: {
             'investor_id': str,
@@ -5147,13 +5604,13 @@ def create_investor_mt5_files(inv_id=None):
             'updated_data': dict  # The updated investor data to merge
         }
     """
-    
+
     import os
     import json
     import shutil
     import re
     import tempfile
-    
+
     # MUST have inv_id for multiprocessing
     if inv_id is None:
         return {
@@ -5164,7 +5621,7 @@ def create_investor_mt5_files(inv_id=None):
             'message': 'inv_id is required for multiprocessing',
             'updated_data': None
         }
-    
+
     result = {
         'investor_id': str(inv_id),
         'success': False,
@@ -5173,26 +5630,26 @@ def create_investor_mt5_files(inv_id=None):
         'message': '',
         'updated_data': None
     }
-    
+
     print(f"\n{'='*60}")
     print(f"📦 CREATE/MAINTAIN MT5 FILES - ID: {inv_id}")
     print(f"{'='*60}")
-    
+
     # Check if source MT5 folder exists
     if not os.path.exists(DEFAULT_MT5_PATH) or not os.path.isdir(DEFAULT_MT5_PATH):
         msg = f"Source MT5 folder not found: {DEFAULT_MT5_PATH}"
         print(f" {msg}")
         result['message'] = msg
         return result
-    
+
     # Check if fetched investors file exists
     if not os.path.exists(ALL_FETCHED_INVESTORS):
         msg = f"Fetched investors file not found: {ALL_FETCHED_INVESTORS}"
         print(f" {msg}")
         result['message'] = msg
         return result
-    
-    # Load suspended accounts (read-only, no lock needed)
+
+    # Load suspended accounts (read-only)
     suspended_ids = set()
     suspended_data = {}
     if os.path.exists(SUSPENDED_ACCOUNTS):
@@ -5211,7 +5668,7 @@ def create_investor_mt5_files(inv_id=None):
             print(f"🛑 Error loading suspended accounts: {e}")
     else:
         print(f"ℹ️ No suspended accounts file found - all users will be processed normally")
-    
+
     # Load fetched investors data (read-only)
     try:
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
@@ -5222,25 +5679,26 @@ def create_investor_mt5_files(inv_id=None):
         print(f" {msg}")
         result['message'] = msg
         return result
-    
+
     inv_id_str = str(inv_id)
     if inv_id_str not in investors_data:
         msg = f"Investor {inv_id} not found in data"
         print(f" {msg}")
         result['message'] = msg
         return result
-    
+
     # Work on a copy of the investor data
     investor_data = investors_data[inv_id_str].copy()
     investor_id_str = str(inv_id)
-    
-    # RULE 1: If user is suspended/blacklisted -> Skip immediately or clean up
+
+    # =========================================================================
+    # RULE 1: Suspended / blacklisted → delete folder, clear paths
+    # =========================================================================
     if investor_id_str in suspended_ids:
-        broker = investor_data.get('broker', '').strip()
-        investor_id_value = investor_data.get('id', '').strip()
-        email = investor_data.get('email', '').strip()
-        
-        # Create folder name with email format for suspended users
+        broker = (investor_data.get('broker') or '').strip()
+        investor_id_value = (investor_data.get('id') or '').strip()
+        email = (investor_data.get('email') or '').strip()
+
         if broker and investor_id_value and email:
             safe_email = email.replace('@', '_at_').replace('.', '_dot_')
             safe_email = re.sub(r'[<>:"/\\|?*]', '_', safe_email)
@@ -5249,21 +5707,16 @@ def create_investor_mt5_files(inv_id=None):
             folder_name = f"MetaTrader 5 {broker} {investor_id_value}"
         else:
             folder_name = ""
-        
+
         target_folder = os.path.join(MT5_DESTINATION_PATH, folder_name) if folder_name else None
-        
+
         if target_folder and os.path.exists(target_folder):
             try:
                 print(f"🗑️  SUSPENDED ID:{inv_id} - Deleting active folder for blacklisted user...")
                 shutil.rmtree(target_folder, ignore_errors=True)
                 result['deleted'] = True
                 result['message'] = "Suspended user - folder deleted"
-                
-                # Update the copy
-                if 'Terminal_path' in investor_data:
-                    investor_data['Terminal_path'] = ''
-                
-                # Only store the fields that changed
+
                 result['updated_data'] = {
                     inv_id_str: {
                         'Terminal_path': '',
@@ -5271,12 +5724,11 @@ def create_investor_mt5_files(inv_id=None):
                     }
                 }
                 result['success'] = True
-                
-                # Save individual result to temp file
+
                 temp_result_file = os.path.join(tempfile.gettempdir(), f"create_result_{inv_id}.json")
                 with open(temp_result_file, 'w', encoding='utf-8') as f:
                     json.dump(result, f, indent=2)
-                
+
                 return result
             except Exception as e:
                 msg = f"Failed to delete folder: {str(e)[:100]}"
@@ -5284,22 +5736,35 @@ def create_investor_mt5_files(inv_id=None):
                 result['message'] = msg
                 return result
         else:
-            msg = f"SUSPENDED ID:{inv_id} - Blacklisted, skipping (no folder to delete)"
+            # Suspended but no folder to delete → still enforce empty paths
+            msg = f"SUSPENDED ID:{inv_id} - Blacklisted, no folder to delete"
             print(f"🚫 {msg}")
             result['message'] = msg
+            result['success'] = True
+            result['updated_data'] = {
+                inv_id_str: {
+                    'Terminal_path': '',
+                    'mt5_folder_name': ''
+                }
+            }
+            temp_result_file = os.path.join(tempfile.gettempdir(), f"create_result_{inv_id}.json")
+            with open(temp_result_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, indent=2)
             return result
-    
-    # Extract broker, id, and email for valid accounts
-    broker = investor_data.get('broker', '').strip()
-    investor_id_value = investor_data.get('id', '').strip()
-    email = investor_data.get('email', '').strip()
-    
+
+    # =========================================================================
+    # Extract fields from investor data
+    # =========================================================================
+    broker = (investor_data.get('broker') or '').strip()
+    investor_id_value = (investor_data.get('id') or '').strip()
+    email = (investor_data.get('email') or '').strip()
+
     if not broker or not investor_id_value:
         msg = f"Investor {inv_id} missing broker or id, skipping"
         print(f"🛑 {msg}")
         result['message'] = msg
         return result
-    
+
     # Sanitize email for folder name
     if email:
         safe_email = email.replace('@', '_at_').replace('.', '_dot_')
@@ -5308,132 +5773,160 @@ def create_investor_mt5_files(inv_id=None):
     else:
         safe_email = "no_email"
         print(f"🛑 ID:{inv_id} has no email address - using 'no_email' in folder name")
-    
-    # Create target paths with email format
+
+    # =========================================================================
+    # Compute the EXPECTED folder name + path from current broker/id/email
+    # =========================================================================
     folder_name = f"MetaTrader 5 {safe_email} {investor_id_value} {broker}"
     target_folder = os.path.join(MT5_DESTINATION_PATH, folder_name)
     target_exe = os.path.join(target_folder, "terminal64.exe")
-    normalized_path = target_exe.replace('\\', '\\')
-    
+    # NOTE: json.dump handles backslash escaping — do NOT double them here.
+    normalized_path = target_exe
+
+    # Normalized comparisons (case-insensitive on Windows, slash-insensitive)
+    def _norm(p):
+        if p is None:
+            return ""
+        return os.path.normcase(os.path.normpath(str(p).strip()))
+
+    current_path = (investor_data.get('Terminal_path') or '').strip()
+    current_folder = (investor_data.get('mt5_folder_name') or '').strip()
+
+    path_matches = _norm(current_path) == _norm(normalized_path)
+    folder_matches = current_folder == folder_name
+
+    print(f"   Expected folder : {folder_name}")
+    print(f"   Expected path   : {normalized_path}")
+    print(f"   Current folder  : {current_folder or '(empty)'}")
+    print(f"   Current path    : {current_path or '(empty)'}")
+    print(f"   Path matches    : {path_matches}")
+    print(f"   Folder matches  : {folder_matches}")
+
     folder_exists = os.path.exists(target_folder)
     current_status = investor_data.get('application_status', '')
-    
-    # Prepare update data (only fields that might change)
-    update_data = {}
-    
-    # RULE 2: If folder exists and user is NOT suspended
+
+    # =========================================================================
+    # ALWAYS build the canonical update payload regardless of folder existence.
+    # This ensures the JSON is monitored and corrected on every run.
+    # =========================================================================
+    update_data = {
+        'Terminal_path': normalized_path,
+        'mt5_folder_name': folder_name
+    }
+
+    if not path_matches:
+        print(f"   🔧 Terminal_path corrected")
+    else:
+        print(f"   ✓ Terminal_path verified")
+
+    if not folder_matches:
+        print(f"   🔧 mt5_folder_name corrected")
+    else:
+        print(f"   ✓ mt5_folder_name verified")
+
+    # Status transition (pending → just-joined) applies in both branches
+    status_changed = False
+    if current_status == "pending":
+        update_data['application_status'] = 'just-joined'
+        status_changed = True
+        print(f"   🔄 Status: pending → just-joined")
+    else:
+        print(f"   ℹ️ Status: {current_status} (unchanged)")
+
+    # =========================================================================
+    # RULE 2: Folder exists → just emit the canonical + corrected values
+    # =========================================================================
     if folder_exists:
         print(f"✓ Folder exists: {folder_name}")
-        current_path = investor_data.get('Terminal_path', '')
-        
-        # Ensure Terminal_path is set correctly
-        if not current_path or current_path != normalized_path:
-            update_data['Terminal_path'] = normalized_path
-            result['message'] = "Terminal_path updated"
-            print(f"   🔧 Terminal_path updated")
-        else:
-            result['message'] = "Terminal_path verified"
-            print(f"   ✓ Terminal_path verified")
-        
-        # Check application_status: only change if it is exactly "pending"
-        if current_status == "pending":
-            update_data['application_status'] = 'just-joined'
-            result['message'] += " | Status: pending → just-joined"
-            print(f"   🔄 Status: pending → just-joined")
-        else:
-            print(f"   ℹ️ Status: {current_status} (unchanged)")
-        
-        # Always include mt5_folder_name
-        update_data['mt5_folder_name'] = folder_name
-        
+
         result['success'] = True
         result['created'] = False
+        result['message'] = (
+            "Folder exists | Terminal_path " +
+            ("corrected" if not path_matches else "verified") +
+            " | mt5_folder_name " +
+            ("corrected" if not folder_matches else "verified") +
+            (" | Status: pending → just-joined" if status_changed else "")
+        )
         result['updated_data'] = {inv_id_str: update_data}
-        
-        # Save individual result to temp file
+
         temp_result_file = os.path.join(tempfile.gettempdir(), f"create_result_{inv_id}.json")
         with open(temp_result_file, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2)
-        
+
         return result
-    
-    # RULE 3: If folder is missing -> Create it
+
+    # =========================================================================
+    # RULE 3: Folder missing → create it, then emit fresh canonical values
+    # =========================================================================
     print(f"🆕 Creating new folder: {folder_name}")
     print(f"   Email: {email}")
     print(f"   Broker: {broker}")
     print(f"   ID: {investor_id_value}")
-    
+
     try:
-        # Copy default files
         print(f"   📁 Copying from {DEFAULT_MT5_PATH}...")
-        shutil.copytree(DEFAULT_MT5_PATH, target_folder, 
-                        ignore_dangling_symlinks=True,
-                        ignore=shutil.ignore_patterns('*.lock', '*.log'))
-        
-        # Prepare update data
-        update_data = {
-            'Terminal_path': normalized_path,
-            'mt5_folder_name': folder_name
-        }
-        
-        # Handle application status condition
-        if current_status == "pending":
-            update_data['application_status'] = 'just-joined'
-            result['message'] = "Folder created | Status: pending → just-joined"
-            print(f"   🔄 Status: pending → just-joined")
-        else:
-            result['message'] = f"Folder created | Status kept: {current_status}"
-            print(f"   ℹ️ Status kept as: {current_status}")
-        
+        shutil.copytree(
+            DEFAULT_MT5_PATH,
+            target_folder,
+            ignore_dangling_symlinks=True,
+            ignore=shutil.ignore_patterns('*.lock', '*.log'),
+        )
+
+        result['message'] = (
+            "Folder created" +
+            (" | Status: pending → just-joined" if status_changed else f" | Status kept: {current_status}")
+        )
+
         result['success'] = True
         result['created'] = True
         result['updated_data'] = {inv_id_str: update_data}
-        
+
         print(f"   ✅ Folder created successfully!")
         print(f"   📍 Path: {normalized_path[:100]}...")
-        
-        # Save individual result to temp file
+
         temp_result_file = os.path.join(tempfile.gettempdir(), f"create_result_{inv_id}.json")
         with open(temp_result_file, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2)
-        
+
         return result
-        
+
     except Exception as e:
         msg = f"Failed to copy folder: {str(e)[:200]}"
         print(f"    {msg}")
         result['message'] = msg
-        
-        # Clean up partial folder if it exists
+
         if os.path.exists(target_folder):
             try:
                 shutil.rmtree(target_folder, ignore_errors=True)
                 print(f"   🧹 Cleaned up partial folder")
-            except:
+            except Exception:
                 pass
-        
-        return result
 
+        return result  
+   
 def merge_create_results():
     """
-    Merge all individual MT5 folder creation results from temp files back to the main JSON file.
-    Call this after all multiprocessing tasks are complete.
+    Merge all individual MT5 folder creation results from temp files back to
+    ALL_FETCHED_INVESTORS, then propagate the same updates to every other
+    investor file (ALL_INVESTORS, ALL_UPDATED_INVESTORS, INVHARV_FETCHED_INVESTORS,
+    HARVHUB_FETCHED_INVESTORS, INVHARV_UPDATED_INVESTORS, HARVHUB_UPDATED_INVESTORS,
+    ALL_INVESTORS_BACKUP). Each target file is updated only if the investor ID is found.
     """
     import os
     import json
     import tempfile
     import shutil
     import glob
-    
+
     print(f"\n{'='*60}")
     print(f"📦 MERGING MT5 FOLDER CREATION RESULTS")
     print(f"{'='*60}")
-    
-    # Load current investors data
+
     if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
         return {'total_processed': 0, 'created': 0, 'deleted': 0, 'updated': 0, 'errors': 0}
-    
+
     try:
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
@@ -5441,11 +5934,10 @@ def merge_create_results():
     except Exception as e:
         print(f" Error loading investors: {e}")
         return {'total_processed': 0, 'created': 0, 'deleted': 0, 'updated': 0, 'errors': 0}
-    
-    # Find all temp result files
+
     temp_dir = tempfile.gettempdir()
     result_files = glob.glob(os.path.join(temp_dir, "create_result_*.json"))
-    
+
     stats = {
         'total_processed': len(result_files),
         'created': 0,
@@ -5453,81 +5945,132 @@ def merge_create_results():
         'updated': 0,
         'errors': 0
     }
-    
+
+    # Collector of per-investor field updates to propagate to all other files
+    propagated_updates = {}   # {investor_id: {field: value}}
+
     print(f"\n📁 Found {len(result_files)} result files to merge")
-    
+
     for result_file in result_files:
         try:
             with open(result_file, 'r', encoding='utf-8') as f:
                 result = json.load(f)
-            
+
             if result.get('success') and result.get('updated_data'):
                 investor_id = result['investor_id']
                 updated_data = result['updated_data']
-                
-                # Check if investor exists in current data
+
                 if investor_id in investors_data:
-                    # Get the new data (only fields that changed)
                     new_data = updated_data.get(investor_id, {})
                     old_data = investors_data[investor_id]
-                    
-                    # Update only the fields that were changed
+
                     updated = False
                     for field, value in new_data.items():
                         if field in old_data and value != old_data.get(field):
                             investors_data[investor_id][field] = value
                             updated = True
+                            propagated_updates.setdefault(investor_id, {})[field] = value
                             print(f"   🔄 Updated {field} for investor {investor_id}")
                         elif field not in old_data:
                             investors_data[investor_id][field] = value
                             updated = True
+                            propagated_updates.setdefault(investor_id, {})[field] = value
                             print(f"   ➕ Added {field} for investor {investor_id}")
-                    
-                    # Track statistics
+
                     if result.get('created'):
                         stats['created'] += 1
                     elif result.get('deleted'):
                         stats['deleted'] += 1
                     elif updated:
                         stats['updated'] += 1
-                    
+
                     if updated or result.get('created') or result.get('deleted'):
                         print(f"✅ Merged update for investor {investor_id}: {result.get('message', '')[:60]}")
                 else:
-                    # If investor doesn't exist, add them
                     investors_data[investor_id] = updated_data.get(investor_id, {})
                     stats['created'] += 1
+                    propagated_updates[investor_id] = dict(updated_data.get(investor_id, {}))
                     print(f"➕ Added new investor {investor_id}")
             else:
                 stats['errors'] += 1
                 print(f"🛑 Failed result for investor {result.get('investor_id', 'unknown')}: {result.get('message', 'No message')}")
-            
-            # Delete temp file after processing
+
             try:
                 os.remove(result_file)
             except:
                 pass
-            
+
         except Exception as e:
             stats['errors'] += 1
             print(f"🛑 Error processing {result_file}: {e}")
-    
+
     # Save merged data if there were changes
     if stats['total_processed'] > 0 and stats['errors'] < stats['total_processed']:
-        # Create backup
         backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
             shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
             print(f"\n📦 Created backup: {backup_path}")
-        
+
         with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
-        
+
         print(f"\n💾 Saved merged data to {ALL_FETCHED_INVESTORS}")
+
+        # ------------------------------------------------------------
+        # PROPAGATE to every other investor file if the ID is found
+        # ------------------------------------------------------------
+        if propagated_updates:
+            other_targets = [
+                ("ALL_INVESTORS", ALL_INVESTORS),
+                ("ALL_UPDATED_INVESTORS", ALL_UPDATED_INVESTORS),
+                ("INVHARV_FETCHED_INVESTORS", INVHARV_FETCHED_INVESTORS),
+                ("HARVHUB_FETCHED_INVESTORS", HARVHUB_FETCHED_INVESTORS),
+                ("INVHARV_UPDATED_INVESTORS", INVHARV_UPDATED_INVESTORS),
+                ("HARVHUB_UPDATED_INVESTORS", HARVHUB_UPDATED_INVESTORS),
+                ("ALL_INVESTORS_BACKUP", ALL_INVESTORS_BACKUP),
+            ]
+
+            print(f"\n📤 Propagating folder-creation updates to other investor files...")
+
+            for target_name, target_path in other_targets:
+                if not os.path.exists(target_path):
+                    print(f"   ℹ️  {target_name}: not found, skipping")
+                    continue
+                try:
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        target_data = json.load(f)
+                    if not isinstance(target_data, dict):
+                        print(f"   ⚠️  {target_name}: invalid format, skipping")
+                        continue
+                except Exception as e:
+                    print(f"   ⚠️  {target_name}: could not load ({e}), skipping")
+                    continue
+
+                changed = 0
+                for inv_id, fields in propagated_updates.items():
+                    if inv_id not in target_data:
+                        continue
+                    if not isinstance(target_data[inv_id], dict):
+                        continue
+                    for field, value in fields.items():
+                        if target_data[inv_id].get(field) != value:
+                            target_data[inv_id][field] = value
+                            changed += 1
+
+                if changed > 0:
+                    try:
+                        with open(target_path, 'w', encoding='utf-8') as f:
+                            json.dump(target_data, f, indent=2, ensure_ascii=False)
+                        print(f"   ✅ {target_name}: {changed} field(s) updated")
+                    except Exception as e:
+                        print(f"   ❌ {target_name}: save failed ({e})")
+                else:
+                    print(f"   ℹ️  {target_name}: no matching IDs / no changes")
+        else:
+            print(f"\nℹ️ No propagated updates (nothing changed)")
     else:
         print(f"\n🛑 No valid updates to save")
-    
-    # Print summary
+
     print(f"\n{'='*60}")
     print(f"📊 MERGE SUMMARY - MT5 FOLDER CREATION")
     print(f"{'='*60}")
@@ -5537,7 +6080,7 @@ def merge_create_results():
     print(f"   🔧 Updated paths    : {stats['updated']}")
     print(f"    Errors           : {stats['errors']}")
     print(f"{'='*60}")
-    
+
     return stats
 
 def get_investors_balance(inv_id=None):
@@ -5672,17 +6215,17 @@ def get_investors_balance(inv_id=None):
     
     # Extract credentials (only needed for validation, not for login)
     login_id = investor_data.get('login', '') or investor_data.get('LOGIN_ID', '')
-    password = investor_data.get('password', '') or investor_data.get('PASSWORD', '')
+    broker_password = investor_data.get('broker_password', '') or investor_data.get('broker_password', '')
     server = investor_data.get('server', '') or investor_data.get('SERVER', '')
     Terminal_path = investor_data.get('Terminal_path', '')
     email = investor_data.get('email', 'No Email')
     
     print(f"📊 Credentials: Login={login_id}, Server={server}")
     
-    if not all([login_id, password, server, Terminal_path]):
+    if not all([login_id, broker_password, server, Terminal_path]):
         missing = []
         if not login_id: missing.append('login')
-        if not password: missing.append('password')
+        if not broker_password: missing.append('broker_password')
         if not server: missing.append('server')
         if not Terminal_path: missing.append('Terminal_path')
         msg = f"Missing credentials: {', '.join(missing)}"
@@ -5800,114 +6343,166 @@ def get_investors_balance(inv_id=None):
       
 def merge_balance_results():
     """
-    Merge all individual balance results from temp files back to the main JSON file.
-    Call this after all multiprocessing tasks are complete.
+    Merge all individual balance results from temp files back to
+    ALL_FETCHED_INVESTORS, then propagate the same updates to every other
+    investor file (ALL_INVESTORS, ALL_UPDATED_INVESTORS, INVHARV_FETCHED_INVESTORS,
+    HARVHUB_FETCHED_INVESTORS, INVHARV_UPDATED_INVESTORS, HARVHUB_UPDATED_INVESTORS,
+    ALL_INVESTORS_BACKUP). Each target file is updated only if the investor ID is found.
     """
     import os
     import json
     import tempfile
     import shutil
     import glob
-    
+
     print(f"\n{'='*60}")
     print(f"📦 MERGING BALANCE RESULTS")
     print(f"{'='*60}")
-    
-    # Load current investors data
+
     if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
         return {'total_processed': 0, 'updated': 0, 'errors': 0}
-    
+
     try:
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
     except Exception as e:
         print(f" Error loading investors: {e}")
         return {'total_processed': 0, 'updated': 0, 'errors': 0}
-    
-    # Find all temp result files
+
     temp_dir = tempfile.gettempdir()
     result_files = glob.glob(os.path.join(temp_dir, "balance_result_*.json"))
-    
+
     stats = {
         'total_processed': len(result_files),
         'updated': 0,
         'errors': 0
     }
-    
+
+    propagated_updates = {}   # {investor_id: {field: value}}
+
     print(f"\n📁 Found {len(result_files)} balance result files to merge")
-    
+
     for result_file in result_files:
         try:
             with open(result_file, 'r', encoding='utf-8') as f:
                 result = json.load(f)
-            
+
             if result.get('success') and result.get('updated_data'):
                 investor_id = result['investor_id']
                 updated_data = result['updated_data']
-                
-                # Check if investor exists in current data
+
                 if investor_id in investors_data:
-                    # Get the new data (only fields that changed)
                     new_data = updated_data.get(investor_id, {})
                     old_data = investors_data[investor_id]
-                    
-                    # Update only the fields that were changed
+
                     updated = False
                     for field, value in new_data.items():
                         if field in old_data and value != old_data.get(field):
                             investors_data[investor_id][field] = value
                             updated = True
+                            propagated_updates.setdefault(investor_id, {})[field] = value
                             print(f"   🔄 Updated {field} for investor {investor_id}")
                         elif field not in old_data:
                             investors_data[investor_id][field] = value
                             updated = True
+                            propagated_updates.setdefault(investor_id, {})[field] = value
                             print(f"   ➕ Added {field} for investor {investor_id}")
-                    
+
                     if updated:
                         stats['updated'] += 1
                         print(f"✅ Merged balance update for investor {investor_id}: {result.get('message', '')[:50]}")
                 else:
-                    # If investor doesn't exist, add them
                     investors_data[investor_id] = updated_data.get(investor_id, {})
                     stats['updated'] += 1
+                    propagated_updates[investor_id] = dict(updated_data.get(investor_id, {}))
                     print(f"➕ Added new investor {investor_id}")
-            
-            # Delete temp file after processing
+
             try:
                 os.remove(result_file)
             except:
                 pass
-            
+
         except Exception as e:
             stats['errors'] += 1
             print(f"🛑 Error processing {result_file}: {e}")
-    
-    # Save merged data
+
     if stats['updated'] > 0:
-        # Create backup
         backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
             shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
             print(f"📦 Created backup: {backup_path}")
-        
+
         with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
-        
+
         print(f"\n💾 Saved {stats['updated']} updates to {ALL_FETCHED_INVESTORS}")
-        
-        # Also update updated_investors.json with valid credentials
+
+        # Refresh ALL_UPDATED_INVESTORS subset (existing behavior kept)
         updated_investors_data = {}
         for investor_id, investor_data in investors_data.items():
             app_status = investor_data.get('application_status', '').strip().lower()
             if app_status == 'just-joined-and-valid_credentials':
                 updated_investors_data[investor_id] = investor_data
-        
+
         if updated_investors_data:
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(updated_investors_data, f, indent=2)
-            print(f"💾 Updated {len(updated_investors_data)} investors to {UPDATED_INVESTORS}")
-        
+            print(f"💾 Updated {len(updated_investors_data)} investors to {ALL_UPDATED_INVESTORS}")
+
+        # ------------------------------------------------------------
+        # PROPAGATE to every other investor file if the ID is found
+        # ------------------------------------------------------------
+        if propagated_updates:
+            other_targets = [
+                ("ALL_INVESTORS", ALL_INVESTORS),
+                ("ALL_UPDATED_INVESTORS", ALL_UPDATED_INVESTORS),
+                ("INVHARV_FETCHED_INVESTORS", INVHARV_FETCHED_INVESTORS),
+                ("HARVHUB_FETCHED_INVESTORS", HARVHUB_FETCHED_INVESTORS),
+                ("INVHARV_UPDATED_INVESTORS", INVHARV_UPDATED_INVESTORS),
+                ("HARVHUB_UPDATED_INVESTORS", HARVHUB_UPDATED_INVESTORS),
+                ("ALL_INVESTORS_BACKUP", ALL_INVESTORS_BACKUP),
+            ]
+
+            print(f"\n📤 Propagating balance updates to other investor files...")
+
+            for target_name, target_path in other_targets:
+                if not os.path.exists(target_path):
+                    print(f"   ℹ️  {target_name}: not found, skipping")
+                    continue
+                try:
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        target_data = json.load(f)
+                    if not isinstance(target_data, dict):
+                        print(f"   ⚠️  {target_name}: invalid format, skipping")
+                        continue
+                except Exception as e:
+                    print(f"   ⚠️  {target_name}: could not load ({e}), skipping")
+                    continue
+
+                changed = 0
+                for inv_id, fields in propagated_updates.items():
+                    if inv_id not in target_data:
+                        continue
+                    if not isinstance(target_data[inv_id], dict):
+                        continue
+                    for field, value in fields.items():
+                        if target_data[inv_id].get(field) != value:
+                            target_data[inv_id][field] = value
+                            changed += 1
+
+                if changed > 0:
+                    try:
+                        with open(target_path, 'w', encoding='utf-8') as f:
+                            json.dump(target_data, f, indent=2, ensure_ascii=False)
+                        print(f"   ✅ {target_name}: {changed} field(s) updated")
+                    except Exception as e:
+                        print(f"   ❌ {target_name}: save failed ({e})")
+                else:
+                    print(f"   ℹ️  {target_name}: no matching IDs / no changes")
+        else:
+            print(f"\nℹ️ No propagated updates (nothing changed)")
+
         print(f"\n📊 Merge Summary:")
         print(f"   ✅ Updated: {stats['updated']}")
         print(f"   🛑 Errors: {stats['errors']}")
@@ -5915,7 +6510,7 @@ def merge_balance_results():
     else:
         print(f"ℹ️ No updates to merge")
         return stats
-    
+       
 def verify_investors_balance(inv_id=None):
     """
     Verify balance for investors who have applied for verification.
@@ -6136,111 +6731,167 @@ def verify_investors_balance(inv_id=None):
       
 def merge_verify_results():
     """
-    Merge all individual verification results from temp files back to the main JSON file.
-    Call this after all multiprocessing tasks are complete.
+    Merge all individual verification results from temp files back to
+    ALL_FETCHED_INVESTORS, then propagate the same updates to every other
+    investor file (ALL_INVESTORS, ALL_UPDATED_INVESTORS, INVHARV_FETCHED_INVESTORS,
+    HARVHUB_FETCHED_INVESTORS, INVHARV_UPDATED_INVESTORS, HARVHUB_UPDATED_INVESTORS,
+    ALL_INVESTORS_BACKUP). Each target file is updated only if the investor ID is found.
     """
     import os
     import json
     import tempfile
     import shutil
     import glob
-    
+
     print(f"\n{'='*60}")
     print(f"📦 MERGING VERIFICATION RESULTS")
     print(f"{'='*60}")
-    
+
     if not os.path.exists(ALL_FETCHED_INVESTORS):
         print(f" Fetched investors file not found")
         return {'total_processed': 0, 'verified': 0, 'errors': 0}
-    
+
     try:
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             investors_data = json.load(f)
     except Exception as e:
         print(f" Error loading investors: {e}")
         return {'total_processed': 0, 'verified': 0, 'errors': 0}
-    
+
     temp_dir = tempfile.gettempdir()
     result_files = glob.glob(os.path.join(temp_dir, "verify_result_*.json"))
-    
+
     stats = {
         'total_processed': len(result_files),
         'verified': 0,
         'errors': 0
     }
-    
+
+    propagated_updates = {}   # {investor_id: {field: value}}
+
     print(f"\n📁 Found {len(result_files)} verification result files to merge")
-    
+
     for result_file in result_files:
         try:
             with open(result_file, 'r', encoding='utf-8') as f:
                 result = json.load(f)
-            
+
             # Only merge if verification was successful and status is 'verified'
             if result.get('success') and result.get('status') == 'verified' and result.get('updated_data'):
                 investor_id = result['investor_id']
                 updated_data = result['updated_data']
-                
-                # Check if investor exists in current data
+
                 if investor_id in investors_data:
-                    # Get the new data (only fields that changed)
                     new_data = updated_data.get(investor_id, {})
                     old_data = investors_data[investor_id]
-                    
-                    # Update only the fields that were changed
+
                     updated = False
                     for field, value in new_data.items():
                         if field in old_data and value != old_data.get(field):
                             investors_data[investor_id][field] = value
                             updated = True
+                            propagated_updates.setdefault(investor_id, {})[field] = value
                             print(f"   🔄 Updated {field} for investor {investor_id}")
                         elif field not in old_data:
                             investors_data[investor_id][field] = value
                             updated = True
+                            propagated_updates.setdefault(investor_id, {})[field] = value
                             print(f"   ➕ Added {field} for investor {investor_id}")
-                    
+
                     if updated:
                         stats['verified'] += 1
                         print(f"✅ Merged verification for investor {investor_id}: {result.get('message', '')[:50]}")
                 else:
-                    # If investor doesn't exist, add them
                     investors_data[investor_id] = updated_data.get(investor_id, {})
                     stats['verified'] += 1
+                    propagated_updates[investor_id] = dict(updated_data.get(investor_id, {}))
                     print(f"➕ Added new investor {investor_id}")
-            
-            # Delete temp file after processing
+
             try:
                 os.remove(result_file)
             except:
                 pass
-            
+
         except Exception as e:
             stats['errors'] += 1
             print(f"🛑 Error processing {result_file}: {e}")
-    
+
     if stats['verified'] > 0:
         backup_path = ALL_FETCHED_INVESTORS.replace('.json', '_backup.json')
         if not os.path.exists(backup_path):
             shutil.copy2(ALL_FETCHED_INVESTORS, backup_path)
             print(f"📦 Created backup: {backup_path}")
-        
+
         with open(ALL_FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
             json.dump(investors_data, f, indent=2)
-        
+
         print(f"\n💾 Saved {stats['verified']} verification updates to {ALL_FETCHED_INVESTORS}")
-        
-        # Update updated_investors.json with verified investors
+
+        # Refresh ALL_UPDATED_INVESTORS subset (existing behavior kept)
         updated_investors_data = {}
         for investor_id, investor_data in investors_data.items():
             verification_status = investor_data.get('balance_verification', '').strip().lower()
             if verification_status == 'verified':
                 updated_investors_data[investor_id] = investor_data
-        
+
         if updated_investors_data:
-            with open(UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
+            with open(ALL_UPDATED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(updated_investors_data, f, indent=2)
-            print(f"💾 Updated {len(updated_investors_data)} verified investors to {UPDATED_INVESTORS}")
-        
+            print(f"💾 Updated {len(updated_investors_data)} verified investors to {ALL_UPDATED_INVESTORS}")
+
+        # ------------------------------------------------------------
+        # PROPAGATE to every other investor file if the ID is found
+        # ------------------------------------------------------------
+        if propagated_updates:
+            other_targets = [
+                ("ALL_INVESTORS", ALL_INVESTORS),
+                ("ALL_UPDATED_INVESTORS", ALL_UPDATED_INVESTORS),
+                ("INVHARV_FETCHED_INVESTORS", INVHARV_FETCHED_INVESTORS),
+                ("HARVHUB_FETCHED_INVESTORS", HARVHUB_FETCHED_INVESTORS),
+                ("INVHARV_UPDATED_INVESTORS", INVHARV_UPDATED_INVESTORS),
+                ("HARVHUB_UPDATED_INVESTORS", HARVHUB_UPDATED_INVESTORS),
+                ("ALL_INVESTORS_BACKUP", ALL_INVESTORS_BACKUP),
+            ]
+
+            print(f"\n📤 Propagating verification updates to other investor files...")
+
+            for target_name, target_path in other_targets:
+                if not os.path.exists(target_path):
+                    print(f"   ℹ️  {target_name}: not found, skipping")
+                    continue
+                try:
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        target_data = json.load(f)
+                    if not isinstance(target_data, dict):
+                        print(f"   ⚠️  {target_name}: invalid format, skipping")
+                        continue
+                except Exception as e:
+                    print(f"   ⚠️  {target_name}: could not load ({e}), skipping")
+                    continue
+
+                changed = 0
+                for inv_id, fields in propagated_updates.items():
+                    if inv_id not in target_data:
+                        continue
+                    if not isinstance(target_data[inv_id], dict):
+                        continue
+                    for field, value in fields.items():
+                        if target_data[inv_id].get(field) != value:
+                            target_data[inv_id][field] = value
+                            changed += 1
+
+                if changed > 0:
+                    try:
+                        with open(target_path, 'w', encoding='utf-8') as f:
+                            json.dump(target_data, f, indent=2, ensure_ascii=False)
+                        print(f"   ✅ {target_name}: {changed} field(s) updated")
+                    except Exception as e:
+                        print(f"   ❌ {target_name}: save failed ({e})")
+                else:
+                    print(f"   ℹ️  {target_name}: no matching IDs / no changes")
+        else:
+            print(f"\nℹ️ No propagated updates (nothing changed)")
+
         print(f"\n📊 Merge Summary:")
         print(f"   ✅ Verified: {stats['verified']}")
         print(f"   🛑 Errors: {stats['errors']}")
@@ -6248,7 +6899,7 @@ def merge_verify_results():
     else:
         print(f"ℹ️ No verification updates to merge")
         return stats
-
+    
 def process_all_fetched_investors_(inv_id):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
@@ -6342,7 +6993,7 @@ def process_all_fetched_investors_(inv_id):
         # Build broker config from investor data
         broker_cfg = {
             'LOGIN_ID': investor_data.get('login'),
-            'PASSWORD': investor_data.get('password'),
+            'broker_password': investor_data.get('broker_password'),
             'SERVER': investor_data.get('server'),
             'Terminal_path': investor_data.get('Terminal_path', '')
         }
@@ -6513,23 +7164,31 @@ def process_all_fetched_investors(inv_id):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials from ALL_FETCHED_INVESTORS.
-    
+
+    ORDER OF OPERATIONS (critical):
+      1. Load investor data (needed to know broker/id/email)
+      2. RUN create_investor_mt5_files FIRST → corrects Terminal_path + mt5_folder_name
+         and creates the folder if missing.
+      3. RELOAD investor data from disk so we pick up the corrected Terminal_path.
+      4. MT5 initialize using the corrected path.
+      5. get_investors_balance / verify_investors_balance.
+
     Args:
         inv_id: String investor ID (e.g., "1", "5", etc.)
     """
     # =====================================================================
     # SECTION: WORK IN TIME RANGE CHECK
     # =====================================================================
-    
+
     # Initialize mode_label with default value at the start
     mode_label = "unknown"
     account_mode = "unknown"
-    
+
     print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
-    
+
     account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
+        "inv_id": inv_id,
+        "success": False,
         "price_collection_stats": {},
         "candle_fetch_stats": {},
         "crosser_analysis_stats": {},
@@ -6565,81 +7224,124 @@ def process_all_fetched_investors(inv_id):
         "execution_skipped": False,
         "skip_reason": None,
         "account_type": "UNKNOWN",
-        "account_mode": "UNKNOWN",  
+        "account_mode": "UNKNOWN",
         "is_real_account": False,
         "grid_strategy_enabled": False,
         "ohlc_strategy_enabled": False,
         "within_time_range": False,
         "outside_time_range": False
     }
-    
+
     # =====================================================================
     # SECTION: LOAD INVESTOR DATA FIRST (Always needed)
     # =====================================================================
     investor_data = None
     broker_cfg = None
     inv_str_id = str(inv_id)
-    
+
     try:
         if not os.path.exists(ALL_FETCHED_INVESTORS):
             print(f"[ERROR] ALL_FETCHED_INVESTORS file not found: {ALL_FETCHED_INVESTORS}")
             account_stats["skip_reason"] = "Fetched investors file not found"
             return account_stats
-        
+
         with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
             all_investors = json.load(f)
-        
+
         investor_data = all_investors.get(inv_str_id)
-        
+
         if not investor_data:
             print(f"[ERROR] Investor ID {inv_id} not found in ALL_FETCHED_INVESTORS")
             account_stats["skip_reason"] = "Investor not found in fetched data"
             return account_stats
-        
+
         print(f"✅ Found investor {inv_id} in ALL_FETCHED_INVESTORS")
-        
-        # Build broker config from investor data
-        broker_cfg = {
-            'LOGIN_ID': investor_data.get('login'),
-            'PASSWORD': investor_data.get('password'),
-            'SERVER': investor_data.get('server'),
-            'Terminal_path': investor_data.get('Terminal_path', '')
-        }
-        
-        print(f"   Login: {broker_cfg['LOGIN_ID']}")
-        print(f"   Server: {broker_cfg['SERVER']}")
-        print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
-        
+
     except Exception as e:
         print(f"[ERROR] Failed to load investor data: {str(e)}")
         account_stats["skip_reason"] = f"Data loading error: {str(e)}"
         return account_stats
-    
+
     # =====================================================================
-    # SECTION: MT5 INITIALIZATION (ALWAYS do this first, before any MT5 calls)
+    # SECTION: CREATE/MAINTAIN MT5 FILES  ← MOVED UP, RUNS BEFORE MT5 INIT
+    # ---------------------------------------------------------------------
+    # This MUST run first so that:
+    #   - A missing folder is created.
+    #   - A wrong/empty/"NULL" Terminal_path is corrected and persisted.
+    #   - mt5_folder_name is always kept in sync.
+    #   - The pending → just-joined status transition is applied.
+    # After this call, we RELOAD the investor record from disk to pick up
+    # the corrected Terminal_path before passing it to mt5.initialize().
+    # =====================================================================
+    print(f"\n{'='*10} 📦 MT5 FOLDER MAINTENANCE FOR {inv_id} {'='*10}")
+
+    try:
+        create_result = create_investor_mt5_files(inv_id=inv_id)
+        if create_result:
+            print(f"   create_investor_mt5_files → success={create_result.get('success')} "
+                  f"created={create_result.get('created')} deleted={create_result.get('deleted')}")
+            if create_result.get('message'):
+                print(f"   message: {create_result['message']}")
+    except Exception as e:
+        print(f"[WARN] create_investor_mt5_files raised for {inv_id}: {e}")
+        # Non-fatal: continue, but the Terminal_path may still be wrong.
+
+    # ---------------------------------------------------------------------
+    # RELOAD investor data from disk to pick up any corrected Terminal_path
+    # written by create_investor_mt5_files (its updated_data is merged by
+    # the merge step, but on a single-process run we also re-read here as a
+    # belt-and-braces measure in case the merge already ran).
+    # ---------------------------------------------------------------------
+    try:
+        with open(ALL_FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
+            all_investors = json.load(f)
+        refreshed = all_investors.get(inv_str_id)
+        if refreshed:
+            investor_data = refreshed
+            print(f"   🔄 Reloaded investor {inv_id} after folder maintenance")
+    except Exception as e:
+        print(f"[WARN] Could not reload investor data after folder maintenance: {e}")
+        # Keep the previously loaded investor_data
+
+    # Build broker config from (possibly refreshed) investor data
+    broker_cfg = {
+        'LOGIN_ID': investor_data.get('login'),
+        'broker_password': investor_data.get('broker_password'),
+        'SERVER': investor_data.get('server'),
+        'Terminal_path': investor_data.get('Terminal_path', '')
+    }
+
+    print(f"   Login: {broker_cfg['LOGIN_ID']}")
+    print(f"   Server: {broker_cfg['SERVER']}")
+    print(f"   Terminal Path: {broker_cfg['Terminal_path']}")
+
+    # =====================================================================
+    # SECTION: MT5 INITIALIZATION (uses the corrected Terminal_path)
     # =====================================================================
     print(f"\n{'='*10} 🔗 MT5 INITIALIZATION FOR {inv_id} {'='*10}")
-    
+
     if not broker_cfg:
         print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
         return account_stats
-    
-    # CRITICAL FIX: Shutdown any existing MT5 connection first
+
+    # CRITICAL: Shutdown any existing MT5 connection first
     try:
         mt5.shutdown()
     except:
         pass
-    
+
     configured_path = broker_cfg.get("Terminal_path", "")
-    
-    # =====================================================================
+
+    # Normalize the "NULL" string to empty for safety
+    if configured_path is None or str(configured_path).strip().upper() in ("", "NULL", "NONE"):
+        configured_path = ""
+
     # FIX: Initialize terminal_path with default value BEFORE the if block
-    # =====================================================================
     terminal_path = configured_path if configured_path else "No path configured"
-    
+
     # SINGLE INITIALIZATION ATTEMPT - NO LOGIN NEEDED
     init_successful = False
-    
+
     if configured_path and str(configured_path).strip():
         terminal_path = os.path.abspath(configured_path)
         if os.path.exists(terminal_path):
@@ -6659,38 +7361,38 @@ def process_all_fetched_investors(inv_id):
             print(f" Terminal path does not exist")
             print(f"Invalid Terminal Path:")
             print(f"{terminal_path}")
-    
+
     # Fallback to default initialization without path
     if not init_successful:
         print(f" Not initialized, Try Login into {inv_id} {terminal_path} manually")
-    
+
     if not init_successful:
         print(f"Unable to Process {inv_id} MT5")
         print(f"🛑 Issue:")
         print(f" Failed to initialize MT5 connection")
         account_stats["skip_reason"] = "MT5 Initialization Failure"
         return account_stats
-    
+
     # =====================================================================
     # GET ACCOUNT INFO (Verify connection works)
     # =====================================================================
     print(f"\n{'='*10} 📊 GETTING ACCOUNT INFO FOR {inv_id} {'='*10}")
-    
+
     # Verify account info directly - already connected via terminal path
     acc = mt5.account_info()
-    
+
     if acc is None:
         print(f"[FAIL] Could not retrieve account information after initialization")
         print(f"       Error: {mt5.last_error()}")
         return account_stats
-    
+
     # =================================================================
     # ACCOUNT TYPE IDENTIFICATION HIERARCHY
     # =================================================================
     is_real = False
     type_label = "UNKNOWN"
     mode_label = "demo"
-    
+
     if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
         is_real = True
         type_label = "REAL"
@@ -6717,19 +7419,19 @@ def process_all_fetched_investors(inv_id):
             is_real = True
             type_label = "REAL (FALLBACK)"
             mode_label = "real"
-    
+
     if is_real:
         mode_label = "real"
-    
+
     account_stats["account_type"] = type_label
     account_stats["account_mode"] = mode_label
     account_stats["is_real_account"] = is_real
-    
+
     print(f"[{inv_id}] Account ID: {acc.login}")
     print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
     print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
     print(f"[{inv_id}] Account Leverage: {acc.leverage}")
-    
+
     # Extract structural demo permission policies from investor data
     allow_demo_processing = True
     try:
@@ -6739,38 +7441,38 @@ def process_all_fetched_investors(inv_id):
             print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is DISABLED for this user.")
         else:
             print(f"[{inv_id}] Registry Flag Loaded: DEMO_ACCOUNT processing is ALLOWED for this user.")
-            
+
         account_mode = investor_data.get("account_mode", "demo")
         print(f"[{inv_id}] Account Mode from data: {account_mode}")
-        
+
     except Exception as json_err:
         print(f"[ERROR] Failed to parse investor configuration: {str(json_err)}")
-    
+
     # Safety policy gate check
     if not is_real and not allow_demo_processing:
         print(f"[ABORT] Account {inv_id} is a DEMO environment, but JSON permissions forbid execution. Skipping.")
         account_stats["execution_skipped"] = True
         account_stats["skip_reason"] = "Execution Blocked: DEMO_ACCOUNT rule is configured to 0"
         return account_stats
-  
+
     # =====================================================================
-    # SUCCESS - MT5 CONNECTED, NOW CALL FUNCTIONS
+    # SUCCESS - MT5 CONNECTED, NOW CALL REMAINING FUNCTIONS
+    # (create_investor_mt5_files already ran at the top)
     # =====================================================================
     print(f"\n{'='*10} ✅ MT5 CONNECTION SUCCESSFUL FOR {inv_id} {'='*10}")
     print(f"   Account ID: {acc.login}")
     print(f"   Balance: {acc.balance} {acc.currency}")
     print(f"   Leverage: {acc.leverage}")
-    
-    create_investor_mt5_files(inv_id=inv_id)
+
     get_investors_balance(inv_id=inv_id)
     verify_investors_balance(inv_id=inv_id)
-    
+
     # =====================================================================
     # CLEANUP
     # =====================================================================
     mt5.shutdown()
     print(f"✅ MT5 shutdown complete for investor {inv_id}")
-    
+
     account_stats["success"] = True
     print(f"[SUCCESS] Finished pipeline for Investor: {inv_id} ({mode_label})")
     return account_stats
@@ -6830,7 +7532,7 @@ def main_once():
         
         if within_time_range:
             print(f"✅ System is WITHIN allowed work time range - Fetching data")
-            fetch_database()
+            fetch_investors()
         else:
             print("No executions")
         
@@ -6916,13 +7618,13 @@ def main_once():
         merge_create_results()
         merge_balance_results()
         merge_verify_results()
-        Harvhub_algo()
+        
         if within_time_range:
             sync_and_distribute_investors() 
             restore_empty_investor_files()
             print(f"✅ System is WITHIN allowed work time range - Updating database")
             close_db_browser()
-            update_database()
+            update_investors()
         
         # Merge all results (these functions now handle the merging safely)
         
@@ -6999,7 +7701,7 @@ def main_loop():
         
         if within_time_range:
             print(f"✅ System is WITHIN allowed work time range - Fetching data")
-            fetch_database()
+            fetch_investors()
         else:
             print("No executions")
         
@@ -7085,13 +7787,13 @@ def main_loop():
         merge_create_results()
         merge_balance_results()
         merge_verify_results()
-        Harvhub_algo()
+        
         if within_time_range:
             sync_and_distribute_investors() 
             restore_empty_investor_files()
             print(f"✅ System is WITHIN allowed work time range - Updating database")
             close_db_browser()
-            update_database()
+            update_investors()
         
         # Merge all results (these functions now handle the merging safely)
         

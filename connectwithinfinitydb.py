@@ -23,6 +23,7 @@ import threading
 import subprocess
 import tempfile
 import glob
+import uuid as _uuid_module
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -61,6 +62,13 @@ CHROMEDRIVER_CACHE_DIR = os.path.expanduser(r"~\.chromedriver_cache")
 CHROMEDRIVER_EXE = os.path.join(CHROMEDRIVER_CACHE_DIR, "chromedriver.exe")
 CHROMEDRIVER_VERSION_FILE = os.path.join(CHROMEDRIVER_CACHE_DIR, "driver.version")
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  DNS / HOST OVERRIDE
+# ─────────────────────────────────────────────────────────────────────────────
+PIN_KNOWN_HOST = True
+KNOWN_HOST_IP = "185.27.134.138"
+KNOWN_HOST_NAME = "harvhub.42web.io"
+
 CFT_JSON_URLS = [
     "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json",
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
@@ -69,6 +77,7 @@ CFT_JSON_URLS = [
     "https://cdn.npmmirror.com/binaries/chrome-for-testing/known-good-versions-with-downloads.json",
     "https://registry.npmmirror.com/-/binary/chrome-for-testing/known-good-versions-with-downloads.json",
 ]
+
 
 def _cft_zip_candidates(version):
     return [
@@ -428,6 +437,45 @@ def kill_chrome_processes_and_clean_locks():
     return killed > 0
 
 
+def _build_chrome_options(temp_dir):
+    opts = Options()
+
+    if os.path.exists(CHROME_PATH):
+        opts.binary_location = CHROME_PATH
+        print_info(f"Using manual Chrome path: {CHROME_PATH}")
+
+    # ── Core headless hygiene ────────────────────────────────────────────
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--log-level=3")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument(f"--user-data-dir={temp_dir}")
+    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+    opts.add_experimental_option("useAutomationExtension", False)
+
+    # ── DNS / network overrides ──────────────────────────────────────────
+    opts.add_argument("--dns-over-https-mode=secure")
+    opts.add_argument(
+        "--dns-over-https-templates="
+        "https://cloudflare-dns.com/dns-query "
+        "https://dns.google/dns-query"
+    )
+    opts.add_argument("--disable-features=NetworkServiceInProcess")
+    opts.add_argument("--disable-background-networking")
+    opts.add_argument("--no-proxy-server")
+
+    if PIN_KNOWN_HOST and KNOWN_HOST_IP and KNOWN_HOST_NAME:
+        rule = f"MAP {KNOWN_HOST_NAME} {KNOWN_HOST_IP}"
+        opts.add_argument(f"--host-resolver-rules={rule}")
+        print_info(f"Pinned DNS: {KNOWN_HOST_NAME} → {KNOWN_HOST_IP}")
+
+    print_info("🔧 Headless mode enabled (DoH + no-proxy + host-pin)")
+    return opts
+
+
 def initialize_browser(force_new=False):
     global driver, session, current_servers, _is_shutdown
 
@@ -461,23 +509,7 @@ def initialize_browser(force_new=False):
 
         print_step(1, 3, "Setting Up Chrome Environment (Headless)")
         temp_dir = tempfile.mkdtemp(prefix='chrome_selenium_')
-
-        opts = Options()
-        if os.path.exists(CHROME_PATH):
-            opts.binary_location = CHROME_PATH
-            print_info(f"Using manual Chrome path: {CHROME_PATH}")
-
-        opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--window-size=1920,1080")
-        opts.add_argument("--log-level=3")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
-        opts.add_experimental_option("useAutomationExtension", False)
-        opts.add_argument(f"--user-data-dir={temp_dir}")
-        print_info("🔧 Headless mode enabled")
+        opts = _build_chrome_options(temp_dir)
 
         print_step(2, 3, "Initializing ChromeDriver")
 
@@ -623,7 +655,62 @@ def check_server_availability(url):
 
 
 # ==============================================================================
-#  FAST COMPLETION DETECTION
+#  EXEC STATUS BANNER READERS
+#  The page exposes #exec-status[data-state=idle|loading|success|empty|error]
+#  and data-rows / data-affected / data-query-id attributes.
+# ==============================================================================
+def _read_exec_status(d):
+    """
+    Read the machine-readable execution banner.
+    Returns dict {state, rows, affected, query_id, label} or None if the banner
+    is not present (i.e. running against the legacy page version).
+    """
+    try:
+        el = d.find_element(By.ID, "exec-status")
+    except Exception:
+        return None
+
+    try:
+        state = (el.get_attribute("data-state") or "").strip().lower()
+    except Exception:
+        state = ""
+
+    if not state:
+        return None
+
+    label = ""
+    try:
+        label = (el.find_element(By.CSS_SELECTOR, ".status-label").text or "").strip()
+    except Exception:
+        pass
+
+    return {
+        'state':    state,
+        'rows':     el.get_attribute("data-rows"),
+        'affected': el.get_attribute("data-affected"),
+        'query_id': el.get_attribute("data-query-id"),
+        'label':    label,
+    }
+
+
+def _status_terminal(d, query_id=None):
+    """
+    True when the banner is in a terminal state (success|empty|error).
+    If query_id is provided, also require the banner's query-id to match,
+    so we don't read the result of a *previous* run.
+    """
+    s = _read_exec_status(d)
+    if not s:
+        return False
+    if s['state'] not in ('success', 'empty', 'error'):
+        return False
+    if query_id is not None and str(s.get('query_id') or '') != str(query_id):
+        return False
+    return True
+
+
+# ==============================================================================
+#  LEGACY COMPLETION DETECTION (fallback when banner is absent)
 # ==============================================================================
 def _js_display_ready(d):
     try: return d.find_element(By.ID, "sql-query-display").is_displayed()
@@ -635,29 +722,17 @@ def _btn_re_enabled(d):
     except Exception: return False
 
 
-# ▼▼▼ NEW DETECTOR ▼▼▼
 def _result_table_ready(d):
-    """
-    True when the result area contains either:
-      - a <table> element (query returned rows), OR
-      - a <p> saying "no results" / "no records" / "0 rows" (empty result), OR
-      - an error message (#message.error)
-    This is the correct completion signal for read queries.
-    """
     try:
-        # Error path
         if d.find_elements(By.CSS_SELECTOR, "#message.error"):
             return True
 
-        # Look inside #query-result first, then #column-data
         for container_id in ("query-result", "column-data"):
             try:
                 containers = d.find_elements(By.ID, container_id)
                 for c in containers:
-                    # A real result table
                     if c.find_elements(By.CSS_SELECTOR, "table"):
                         return True
-                    # A "no results" paragraph
                     for p in c.find_elements(By.CSS_SELECTOR, "p"):
                         txt = (p.text or "").lower()
                         if ("no results" in txt
@@ -668,13 +743,11 @@ def _result_table_ready(d):
             except Exception:
                 continue
 
-        # Fallback: any <table> anywhere on the page
         if d.find_elements(By.CSS_SELECTOR, "#query-result table"):
             return True
     except Exception:
         pass
     return False
-# ▲▲▲ END NEW DETECTOR ▲▲▲
 
 
 def _any_terminal_state(d):
@@ -685,26 +758,58 @@ def _any_terminal_state(d):
     return False
 
 
-def _wait_for_completion(wait_hint, sql_query):
+def _wait_for_completion(wait_hint, sql_query, query_id=None):
+    """
+    Wait until the execution banner leaves 'loading'.
+
+    Primary path:  #exec-status[data-state] transitions loading → terminal.
+    Fallback path: legacy detection (js-display / button-enabled / table)
+                   if the banner is not present on the page at all.
+
+    Returns: (ready: bool, elapsed: float, reason: str)
+    """
     if wait_hint is None:
         wait_hint = {}
-    sig = wait_hint.get('signal', 'any-of')
     timeout = float(wait_hint.get('timeout', DEFAULT_WAIT_TIMEOUT))
-    if bool(wait_hint.get('expect_empty', False)) and timeout > 6.0:
-        timeout = 6.0
     t0 = time.perf_counter()
 
-    det = {
-        'js-display':     _js_display_ready,
-        'button-enabled': _btn_re_enabled,
-        'table':          _result_table_ready,      # ▼ NEW SIGNAL
-    }.get(sig, _any_terminal_state)
+    banner_present = False
+    try:
+        banner_present = bool(driver.find_elements(By.ID, "exec-status"))
+    except Exception:
+        banner_present = False
+
+    if not banner_present:
+        sig = wait_hint.get('signal', 'any-of')
+        det = {
+            'js-display':     _js_display_ready,
+            'button-enabled': _btn_re_enabled,
+            'table':          _result_table_ready,
+        }.get(sig, _any_terminal_state)
+        try:
+            WebDriverWait(driver, timeout, poll_frequency=0.15).until(det)
+            return True, time.perf_counter() - t0, f"legacy signal '{sig}'"
+        except Exception:
+            return False, time.perf_counter() - t0, f"legacy timeout after {timeout:.1f}s"
 
     try:
-        WebDriverWait(driver, timeout, poll_frequency=0.15).until(det)
-        return True, time.perf_counter() - t0, f"signal '{sig}'"
+        WebDriverWait(driver, min(3.0, timeout), poll_frequency=0.1).until(
+            lambda d: (_read_exec_status(d) or {}).get('state') == 'loading'
+        )
     except Exception:
-        return False, time.perf_counter() - t0, f"timed out after {timeout:.1f}s"
+        pass
+
+    try:
+        WebDriverWait(driver, timeout, poll_frequency=0.1).until(
+            lambda d: _status_terminal(d, query_id)
+        )
+        s = _read_exec_status(driver) or {}
+        return (True, time.perf_counter() - t0,
+                f"exec-status={s.get('state')} rows={s.get('rows')}")
+    except Exception:
+        s = _read_exec_status(driver) or {}
+        return (False, time.perf_counter() - t0,
+                f"timeout after {timeout:.1f}s (last state={s.get('state')!r})")
 
 
 # ==============================================================================
@@ -760,7 +865,6 @@ def execute_query(sql_query, params=None, reuse_browser=True, wait_hint=None):
     print_divider()
 
     try:
-        # Reuse browser if alive — only rebuild when it's really gone
         for attempt in range(3):
             if attempt > 0:
                 print_info(f"Retry {attempt + 1}/3 for browser init...")
@@ -773,12 +877,32 @@ def execute_query(sql_query, params=None, reuse_browser=True, wait_hint=None):
                         'message': 'Browser initialization failed',
                         'results': [], 'affected_rows': 0}
 
-        # Clear the JS display state so the completion detector is fresh
+        # ── Reset banner to idle so we can detect the next transition ────
         try:
             driver.execute_script("""
-                var el = document.getElementById('sql-query-display');
-                if (el) el.style.display = 'none';
+                (function(){
+                    var s = document.getElementById('exec-status');
+                    if (s) {
+                        s.dataset.state = 'idle';
+                        s.dataset.rows = '0';
+                        s.dataset.affected = '0';
+                        s.dataset.queryId = '';
+                        var l = s.querySelector('.status-label');
+                        var m = s.querySelector('.status-meta');
+                        if (l) l.textContent = 'Waiting…';
+                        if (m) m.textContent = '';
+                    }
+                    var d = document.getElementById('sql-query-display');
+                    if (d) d.style.display = 'none';
+                })();
             """)
+        except Exception:
+            pass
+
+        query_id = str(_uuid_module.uuid4().int)[:12]
+        try:
+            driver.execute_script(
+                "window.__harvhub_query_id = arguments[0];", query_id)
         except Exception:
             pass
 
@@ -798,7 +922,6 @@ def execute_query(sql_query, params=None, reuse_browser=True, wait_hint=None):
             if not ta:
                 raise Exception("Could not find query textarea")
 
-            # Clear textarea first so no stale query remains
             driver.execute_script("arguments[0].value = '';", ta)
             driver.execute_script("arguments[0].value = arguments[1];", ta, final_sql)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", ta)
@@ -835,49 +958,109 @@ def execute_query(sql_query, params=None, reuse_browser=True, wait_hint=None):
                     'results': [], 'affected_rows': 0}
 
         print_step(5, 6, "Waiting for Server Response")
+
         results = []
         affected_rows = 0
-
         is_read = _is_read_query(final_sql)
 
-        # ▼ Default read queries to the "table ready" signal
-        if wait_hint and 'signal' in wait_hint:
-            sig = wait_hint['signal']
-        else:
-            sig = 'table' if is_read else 'button-enabled'
+        hint = {
+            'timeout': (wait_hint or {}).get('timeout', DEFAULT_WAIT_TIMEOUT),
+            'signal':  (wait_hint or {}).get('signal', 'table' if is_read else 'button-enabled'),
+        }
 
-        hint = {'signal': sig,
-                'timeout': (wait_hint or {}).get('timeout', DEFAULT_WAIT_TIMEOUT),
-                'expect_empty': (wait_hint or {}).get('expect_empty', is_read)}
-
-        ready, el, reason = _wait_for_completion(hint, final_sql)
+        ready, el, reason = _wait_for_completion(hint, final_sql, query_id)
         if ready:
             print_success(f"Server response ready ({reason}, {el:.2f}s)")
         else:
-            print_warning(f"Result table not found ({reason})")
+            print_warning(f"Status banner did not reach terminal state ({reason})")
 
-        try:
-            err_els = driver.find_elements(By.CSS_SELECTOR, "#message.error")
-            if err_els:
-                txt = (err_els[0].text or "").strip()
-                if txt:
-                    return {'status': 'error', 'message': txt,
-                            'results': [], 'affected_rows': 0}
-        except Exception:
-            pass
+        # ── Read the authoritative status ─────────────────────────────────
+        status = _read_exec_status(driver) or {}
+        state = (status.get('state') or '').lower()
+        banner_rows = status.get('rows')
+        banner_affected = status.get('affected')
 
+        print_info(f"  📟 exec-status: state={state!r} "
+                   f"rows={banner_rows!r} affected={banner_affected!r}")
+
+        # ── Hard error from page ──────────────────────────────────────────
+        if state == 'error':
+            err_msg = ""
+            try:
+                err_els = driver.find_elements(By.CSS_SELECTOR, "#message.error")
+                if err_els:
+                    err_msg = (err_els[0].text or "").strip()
+            except Exception:
+                pass
+            if not err_msg:
+                err_msg = (status.get('label') or "").strip() or "query failed"
+            print_error(f"Query error: {err_msg}")
+            return {'status': 'error', 'message': err_msg,
+                    'results': [], 'affected_rows': 0}
+
+        # ── Empty result (query ran fine, zero rows) ──────────────────────
+        if state == 'empty':
+            print_info("Query returned 0 rows (per exec-status banner)")
+            print_divider()
+            print_success("Query execution complete - 0 results")
+            print_divider("═")
+            return {'status': 'success', 'results': [],
+                    'affected_rows': 0,
+                    'message': 'Query executed successfully (empty result)'}
+
+        # ── Success: parse the result table ───────────────────────────────
         print_step(6, 6, "Parsing Query Results")
         try:
+            # Parse affected_rows from banner first (authoritative for writes)
+            try:
+                if banner_affected is not None and str(banner_affected).strip() != '':
+                    affected_rows = int(str(banner_affected).strip())
+            except (ValueError, TypeError):
+                affected_rows = 0
+
+            # For write queries, the banner is the source of truth.
+            # There will be NO result <table> in the DOM.
+            if not is_read:
+                # Also try to scrape the legacy #message banner text as a
+                # secondary source, but do NOT fail if it's absent.
+                try:
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    msg = soup.find('div', id='message')
+                    if msg:
+                        m = re.search(r'(\d+)\s+row\(s\)\s+affected',
+                                      msg.get_text().strip(), re.IGNORECASE)
+                        if m:
+                            affected_rows = int(m.group(1))
+                except Exception:
+                    pass
+
+                # If we never got a count from the banner or the message div,
+                # we still consider this a success — the page said so.
+                if affected_rows:
+                    print_success(f"Query affected {affected_rows} row(s)")
+                else:
+                    print_info("Write query completed (no affected-row count available)")
+
+                print_divider()
+                print_success("Query execution complete - 0 results")
+                print_divider("═")
+                return {'status': 'success', 'results': [],
+                        'affected_rows': affected_rows,
+                        'message': f'Write query executed successfully '
+                                   f'({affected_rows} row(s) affected)'}
+
+            # ── Read query: parse the result table ────────────────────────
             soup = BeautifulSoup(driver.page_source, 'html.parser')
+
             msg = soup.find('div', id='message')
-            if msg:
+            if msg and not affected_rows:
                 m = re.search(r'(\d+)\s+row\(s\)\s+affected',
                               msg.get_text().strip(), re.IGNORECASE)
                 if m:
                     affected_rows = int(m.group(1))
-                    print_success(f"Query affected {affected_rows} row(s)")
 
-            container = soup.find('div', id='query-result') or soup.find('div', id='column-data')
+            container = (soup.find('div', id='query-result')
+                         or soup.find('div', id='column-data'))
             table = container.find('table') if container else None
             if not table:
                 table = soup.find('table')
@@ -894,22 +1077,10 @@ def execute_query(sql_query, params=None, reuse_browser=True, wait_hint=None):
                         results.append(rd)
                 print_success(f"Parsed {len(results)} rows with {len(headers)} cols")
             else:
-                nr = False
-                if container:
-                    for p in container.find_all('p'):
-                        t = p.get_text(strip=True).lower()
-                        if "no results" in t or "no records" in t or "0 rows" in t:
-                            nr = True; break
-                if nr:
-                    print_info("Query returned 0 rows")
-                elif is_read:
-                    print_warning("No result table found")
-                    results = [{'status': 'executed', 'message': 'Query completed'}]
-                elif affected_rows > 0 or not is_read:
-                    print_info("Non-read query executed")
-                else:
-                    print_warning("No result table found")
-                    results = [{'status': 'executed', 'message': 'Query completed'}]
+                # Read query with no table — treat as a successful empty result.
+                print_warning("No result table found for read query "
+                              "(treating as empty result)")
+                results = []
 
         except Exception as e:
             print_error("Failed to parse results", str(e))
