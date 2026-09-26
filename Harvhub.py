@@ -58,32 +58,49 @@ TIMEFRAME_MAP = {
 }
 NORMALIZE_SYMBOLS_PATH = Path(r"C:\xampp\htdocs\harvcore\harvox\harvhub\symbols_normalization.json")
 
+
+usersdictionary = {}   # placeholder — populated lazily by get_usersdictionary()
 def load_investors_dictionary():
     """Load brokers config from JSON file with error handling and fallback."""
     if not os.path.exists(INVESTOR_USERS):
-        print(f"CRITICAL: {INVESTOR_USERS} NOT FOUND! Using empty config.", "CRITICAL")
+        print(f"CRITICAL: {INVESTOR_USERS} NOT FOUND! Using empty config.")
         return {}
 
     try:
         with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
         # Optional: Convert numeric strings back to int where needed
         for user_brokerid, cfg in data.items():
             if "LOGIN_ID" in cfg and isinstance(cfg["LOGIN_ID"], str):
                 cfg["LOGIN_ID"] = cfg["LOGIN_ID"].strip()
             if "RISKREWARD" in cfg and isinstance(cfg["RISKREWARD"], (str, float)):
                 cfg["RISKREWARD"] = int(cfg["RISKREWARD"])
-        
+
         return data
 
     except json.JSONDecodeError as e:
-        print(f"Invalid JSON in harvhub_investors.json: {e}", "CRITICAL")
+        print(f"Invalid JSON in harvhub_investors.json: {e}")
         return {}
     except Exception as e:
-        print(f"Failed to load harvhub_investors.json: {e}", "CRITICAL")
+        print(f"Failed to load harvhub_investors.json: {e}")
         return {}
-usersdictionary = load_investors_dictionary()
+def get_usersdictionary():
+    """
+    Lazy accessor. Loads the dictionary once per process on first call.
+    Also refreshes the module-level `usersdictionary` name so any code
+    that references it directly sees populated data after first access.
+    """
+    global usersdictionary
+    if not usersdictionary:
+        usersdictionary = load_investors_dictionary()
+    return usersdictionary
+def refresh_usersdictionary():
+    """Force reload. Useful if you edit the JSON while the script is running."""
+    global usersdictionary
+    usersdictionary = load_investors_dictionary()
+    return usersdictionary
+
 
 
 #--VERIFICATIONS AND AUTHORIZATIONS--
@@ -10043,42 +10060,277 @@ def create_position_hedge(inv_id=None):
 # GRID STRATEGY #
 def symbols_dynamic_grid_prices(inv_id=None):
     """
-    DYNAMIC grid price collection - Single function to rule them all!
+    DYNAMIC grid price collection - writes limit_orders.json DIRECTLY as a
+    flat JSON array in the exact schema the martingale expects.
 
-    Reads from accountmanagement.json:
-    {
-        "grid_prices_setup": {
-            "symbols_grid_strategy": "1",              # Enable/disable grid strategy
-            "manage_grid_levels_count": "1000",        # Max grid levels count
-            "flag_same_direction_grids_with_m_and_c": "1",  # Flag closest as grid_m, others as grid_c
-            "all_grid_c_risk_reward": "1:1",           # Risk/reward for all grid_c levels
-            "enable_single_position_and_pending": "0", # Single position/pending mode
-            "grid_levels": 12,                         # Number of levels per side (bid/ask)
-            "symbols": ["BTCUSD"],                     # Symbols to process
-            "grid_multiplier": 800,                    # Pattern increment (25, 50, 250, etc.)
-            "bid_prices_order_type": "buy_stop",
-            "ask_prices_order_type": "sell_stop",
-            "skip_orders_close_to_position": "0"       # Skip orders close to position
-        }
-    }
+    TWO-PHASE MONEY-DISTANCE MODEL:
+    ------------------------------
+    PHASE 1 — FOUNDATION (anchor placement only):
+        NORMAL MODE (first_grids_stoploss_lock = false):
+            • SELL grid_m is `first_grid_amount_distance` (money) BELOW the live bid
+            • BUY  grid_m is `first_grid_amount_distance` (money) ABOVE the live ask
+            Broker min-stop distance is enforced; anchors widen if needed.
 
-    Risk/Reward rules:
-        - ONLY the closest level to current price on each side uses the
-          configured risk_reward (e.g. 8.0) when grid_levels > 1.
-        - ALL other grid levels use all_grid_c_risk_reward (e.g. "1:1").
+        LOCK MODE (first_grids_stoploss_lock = true):
+            • `first_grid_amount_distance` is the TOTAL gap between the SELL
+              grid_m entry and the BUY grid_m entry.
+            • Each side is placed at half that distance from its reference
+              price (bid for sell, ask for buy). No widening. No per-side
+              min-stop enforcement.
+            • SELL grid_m SL = BUY  grid_m entry
+            • BUY  grid_m SL = SELL grid_m entry
 
-    Grid flags:
-        - grid_m = true  → closest level to current price (main)
-        - grid_c = true  → every other grid level (child)
-        - When flag_same_direction_grids_with_m_and_c is "0" or false,
-          no grid_m/grid_c flags are set.
+    THREE-TIER GATE (applied per symbol, in order):
 
-    NOTE: Risk dictionary removed entirely. Orders are created using the
-    broker's minimum volume only. No risk filtering, no volume scaling.
+        TIER 1 — SL-locked pair + NO position
+        TIER 2 — SL-locked pair + position exists
+        TIER 3 — else block (last resort)
+
+    POSITION PROFIT-REWARD GATE (applies inside TIER 2 and TIER 3):
+
+        Config: generate_new_orders_if_position_profit_reward_is_at (e.g. "1:2")
+
+        The gate applies ONLY when the existing position is IN PROFIT
+        (profit > 0) or break-even:
+            • Compute the position's risk in USD from its SL.
+            • Read the position's current floating profit in USD.
+            • Compute current reward ratio = profit_usd / risk_usd.
+            • Parse the target from the config string (e.g. "1:2" → 2.0).
+            • ALLOW generation only if current_rr >= target_rr.
+            • Otherwise BLOCK generation for this symbol (skip).
+
+        If the position is IN LOSS (profit < 0), the gate is BYPASSED —
+        generation is allowed and the POSITION-ANCHORED INTERLOCK below
+        takes over, so the position's stop-loss is locked by the opposite
+        order rather than being left to run into a naked loss.
+
+    POSITION-ANCHORED INTERLOCK (applies when generation is allowed and
+    a live position exists on the symbol):
+        If the existing position is IN LOSS:
+            • Its SL price becomes the OPPOSITE side's grid_m entry.
+            • Its entry price becomes the OPPOSITE side's grid_m SL.
+        If the existing position is IN PROFIT (or break-even):
+            • No override — generate both sides normally.
+
+    OUTPUT:
+    -------
+    Writes a FLAT JSON ARRAY to:
+        <inv_root>/<strategy>/pending_orders/limit_orders.json
     """
+
     print(f"\n{'='*10} 💰  DYNAMIC SYMBOL PRICE COLLECTION {'='*10}")
     if inv_id:
         print(f" Processing single investor: {inv_id}")
+
+    # ------------------------------------------------------------------
+    # LAGOS TIMEZONE + MT5 SERVER OFFSET
+    # ------------------------------------------------------------------
+    import time as _time
+    from datetime import datetime, timedelta, timezone as _timezone
+
+    try:
+        from zoneinfo import ZoneInfo
+        LAGOS_TZ = ZoneInfo("Africa/Lagos")
+        _LAGOS_TZ_SOURCE = "zoneinfo"
+    except Exception:
+        LAGOS_TZ = _timezone(timedelta(hours=1))
+        _LAGOS_TZ_SOURCE = "fixed_utc+1"
+
+    def lagos_now():
+        return datetime.now(LAGOS_TZ)
+
+    def lagos_naive_now():
+        return lagos_now().replace(tzinfo=None)
+
+    def detect_mt5_server_offset_hours():
+        try:
+            if not mt5.terminal_info():
+                return 0
+            candidate_symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30"]
+            tick = None
+            for sym in candidate_symbols:
+                try:
+                    tick = mt5.symbol_info_tick(sym)
+                except Exception:
+                    tick = None
+                if tick is not None:
+                    break
+            if tick is None or not getattr(tick, 'time', None):
+                return 0
+            server_naive = datetime.fromtimestamp(tick.time)
+            utc_naive = datetime.utcnow()
+            diff_seconds = (server_naive - utc_naive).total_seconds()
+            diff_seconds = round(diff_seconds / 900.0) * 900.0
+            offset_hours = diff_seconds / 3600.0
+            if offset_hours < -12 or offset_hours > 14:
+                return 0
+            return offset_hours
+        except Exception:
+            return 0
+
+    def lagos_from_unix_timestamp(ts):
+        if not ts:
+            return None
+        try:
+            ts_float = float(ts)
+        except (TypeError, ValueError):
+            return None
+        if ts_float > 1e11:
+            ts_float = ts_float / 1000.0
+        try:
+            return datetime.fromtimestamp(ts_float, tz=_timezone.utc).astimezone(LAGOS_TZ)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # CANDLE TIMEFRAME PARSING
+    # ------------------------------------------------------------------
+    TIMEFRAME_SECONDS = {
+        "1m":  60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400,
+    }
+    TIMEFRAME_MT5_MAP = {
+        "1m":  getattr(mt5, "TIMEFRAME_M1",  1),
+        "5m":  getattr(mt5, "TIMEFRAME_M5",  5),
+        "15m": getattr(mt5, "TIMEFRAME_M15", 15),
+        "30m": getattr(mt5, "TIMEFRAME_M30", 30),
+        "1h":  getattr(mt5, "TIMEFRAME_H1",  16385),
+        "4h":  getattr(mt5, "TIMEFRAME_H4",  16388),
+    }
+
+    def parse_candle_timeframe(tf_string):
+        if not tf_string:
+            return None, None
+        key = str(tf_string).strip().lower().replace(" ", "")
+        if key in TIMEFRAME_SECONDS:
+            return TIMEFRAME_SECONDS[key], key
+        return None, None
+
+    def get_current_candle_window(timeframe_seconds, server_offset_hours):
+        now_utc_naive = datetime.utcnow()
+        server_now_naive = now_utc_naive + timedelta(hours=server_offset_hours)
+        epoch_seconds = int(server_now_naive.timestamp() if hasattr(server_now_naive, 'timestamp')
+                            else _time.mktime(server_now_naive.timetuple()))
+        candle_open_epoch = (epoch_seconds // timeframe_seconds) * timeframe_seconds
+        candle_close_epoch = candle_open_epoch + timeframe_seconds
+        open_dt = datetime.fromtimestamp(candle_open_epoch, tz=_timezone.utc).astimezone(LAGOS_TZ)
+        close_dt = datetime.fromtimestamp(candle_close_epoch, tz=_timezone.utc).astimezone(LAGOS_TZ)
+        return open_dt, close_dt
+
+    # ------------------------------------------------------------------
+    # RECENT CLOSED TRADE INSPECTION
+    # ------------------------------------------------------------------
+    def get_most_recent_closed_trade(server_offset_hours, lookback_days=7):
+        try:
+            if not mt5.terminal_info():
+                return None
+            now_utc_naive = datetime.utcnow()
+            now_server_naive = now_utc_naive + timedelta(hours=server_offset_hours)
+            start_server_naive = now_server_naive - timedelta(days=lookback_days)
+            deals = mt5.history_deals_get(start_server_naive, now_server_naive)
+            if not deals:
+                return None
+            best = None
+            for d in deals:
+                try:
+                    profit = getattr(d, 'profit', None)
+                    if profit is None:
+                        continue
+                    commission = getattr(d, 'commission', 0.0) or 0.0
+                    swap = getattr(d, 'swap', 0.0) or 0.0
+                    net = float(profit) + float(commission) + float(swap)
+                    position_id = getattr(d, 'position_id', 0)
+                    if not position_id:
+                        continue
+                    ts = getattr(d, 'time', None) or getattr(d, 'time_msc', None)
+                    close_lagos = lagos_from_unix_timestamp(ts)
+                    if close_lagos is None:
+                        continue
+                    candidate = {
+                        'ticket': getattr(d, 'ticket', 0),
+                        'symbol': getattr(d, 'symbol', ''),
+                        'profit': net,
+                        'close_time_lagos': close_lagos,
+                    }
+                    if best is None or candidate['close_time_lagos'] > best['close_time_lagos']:
+                        best = candidate
+                except Exception:
+                    continue
+            return best
+        except Exception as e:
+            print(f"  ⚠️ Could not fetch recent trades: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # PURGE HELPER
+    # ------------------------------------------------------------------
+    def purge_all_orders_and_positions_for_investor(investor_id_for_log):
+        print(f"\n  🔥 PURGE TRIGGERED for {investor_id_for_log}: "
+              f"Profit was taken within the current candle window")
+        print(f"     → Deleting ALL pending orders and closing ALL open positions")
+        print(f"     → No new grid will be generated this cycle")
+        deleted_orders = 0
+        failed_orders = 0
+        closed_positions = 0
+        failed_positions = 0
+        pending = mt5.orders_get() or []
+        for order in pending:
+            try:
+                req = {"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket}
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    deleted_orders += 1
+                    print(f"       ✅ Cancelled order #{order.ticket} ({order.symbol})")
+                else:
+                    failed_orders += 1
+                    err = res.comment if res else "no response"
+                    print(f"       Failed to cancel #{order.ticket}: {err}")
+            except Exception as e:
+                failed_orders += 1
+                print(f"       Exception cancelling #{order.ticket}: {e}")
+        positions = mt5.positions_get() or []
+        for pos in positions:
+            try:
+                tick = mt5.symbol_info_tick(pos.symbol)
+                if not tick:
+                    failed_positions += 1
+                    print(f"       Cannot get tick for {pos.symbol} - skipping position #{pos.ticket}")
+                    continue
+                is_buy = (pos.type == mt5.ORDER_TYPE_BUY)
+                close_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+                close_price = tick.bid if is_buy else tick.ask
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": pos.symbol,
+                    "volume": pos.volume,
+                    "type": close_type,
+                    "position": pos.ticket,
+                    "price": close_price,
+                    "deviation": 20,
+                    "magic": getattr(pos, 'magic', 0),
+                    "comment": "candle_circle_purge"[:31],
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    closed_positions += 1
+                    print(f"       ✅ Closed position #{pos.ticket} ({pos.symbol})")
+                else:
+                    failed_positions += 1
+                    err = res.comment if res else "no response"
+                    print(f"       Failed to close #{pos.ticket}: {err}")
+            except Exception as e:
+                failed_positions += 1
+                print(f"       Exception closing #{pos.ticket}: {e}")
+        print(f"\n  🔥 PURGE SUMMARY: "
+              f"orders cancelled={deleted_orders} (failed={failed_orders}), "
+              f"positions closed={closed_positions} (failed={failed_positions})")
+        return {
+            "orders_cancelled": deleted_orders,
+            "orders_failed": failed_orders,
+            "positions_closed": closed_positions,
+            "positions_failed": failed_positions,
+        }
 
     stats = {
         "investor_id": inv_id if inv_id else "all",
@@ -10089,7 +10341,33 @@ def symbols_dynamic_grid_prices(inv_id=None):
         "symbols_mapped": 0,
         "symbols_unchanged": 0,
         "signals_generated": False,
-        "grid_configuration": {}
+        "flat_orders_written": 0,
+        "grid_configuration": {},
+        "candle_circle": {
+            "timeframe": None,
+            "candle_open_lagos": None,
+            "candle_close_lagos": None,
+            "recent_trade_profit": None,
+            "recent_trade_close_lagos": None,
+            "recent_trade_is_profit": None,
+            "recent_trade_within_current_candle": None,
+            "purged": False,
+            "purge_stats": None,
+            "grid_skipped": False,
+        },
+        "mt5_server_offset_hours": None,
+        "tier1_lock_no_pos_generate": 0,
+        "tier1_lock_no_pos_skip": 0,
+        "tier2_lock_pos_generate": 0,
+        "tier2_lock_pos_skip": 0,
+        "tier3_position_generate": 0,
+        "tier3_position_skip": 0,
+        "tier2_profit_gate_blocked": 0,
+        "tier3_profit_gate_blocked": 0,
+        "tier2_profit_gate_bypassed_in_loss": 0,
+        "tier3_profit_gate_bypassed_in_loss": 0,
+        "position_anchored_interlocks": 0,
+        "locked_orders_written": 0,
     }
 
     def clean(s):
@@ -10098,7 +10376,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
         return str(s).replace(" ", "").replace("_", "").replace("/", "").replace(".", "").upper()
 
     def _to_bool(v):
-        """Convert various representations to boolean."""
         if v is None:
             return False
         if isinstance(v, bool):
@@ -10110,7 +10387,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
         return False
 
     def _to_int(v):
-        """Convert to integer, no fallback - raise on failure."""
         if v is None:
             raise ValueError("Cannot convert None to int")
         if isinstance(v, int):
@@ -10124,13 +10400,9 @@ def symbols_dynamic_grid_prices(inv_id=None):
             return int(v)
         raise ValueError(f"Cannot convert {type(v)} to int")
 
-    def _parse_risk_reward(rr_string):
-        """
-        Parse a risk/reward string like '1:2' or '1:1' into a numeric value.
-        Returns the reward component (e.g., '1:2' -> 2.0).
-        """
+    def _parse_risk_reward(rr_string, field_name="risk_reward"):
         if rr_string is None:
-            raise ValueError("all_grid_c_risk_reward is None")
+            raise ValueError(f"{field_name} is None")
         if isinstance(rr_string, (int, float)):
             return float(rr_string)
         if isinstance(rr_string, str):
@@ -10142,8 +10414,8 @@ def symbols_dynamic_grid_prices(inv_id=None):
             try:
                 return float(rr_string)
             except ValueError:
-                raise ValueError(f"Cannot parse risk_reward: {rr_string}")
-        raise ValueError(f"Cannot parse risk_reward: {rr_string}")
+                raise ValueError(f"Cannot parse {field_name}: {rr_string}")
+        raise ValueError(f"Cannot parse {field_name}: {rr_string}")
 
     def get_grid_configuration(config):
         settings = config.get("settings", {})
@@ -10182,22 +10454,50 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 risk_reward_value = float(legacy) if legacy else 2.0
             rr_source = "fixed_risk_reward (legacy fallback)"
 
-        grid_levels = _to_int(grid_prices_setup.get("grid_levels"))
-        grid_multiplier = _to_int(grid_prices_setup.get("grid_multiplier"))
-        manage_grid_levels_count = _to_int(grid_prices_setup.get("manage_grid_levels_count"))
+        each_direction_levels_count = _to_int(grid_prices_setup.get("each_direction_levels_count"))
+        manage_each_direction_levels_count = _to_int(grid_prices_setup.get("manage_each_direction_levels_count"))
 
-        if grid_levels is None:
-            raise ValueError(" CRITICAL: 'grid_levels' not defined in settings.grid_prices_setup. Cannot process.")
-        if grid_multiplier is None:
-            raise ValueError(" CRITICAL: 'grid_multiplier' not defined in settings.grid_prices_setup. Cannot process.")
-        if manage_grid_levels_count is None:
-            raise ValueError(" CRITICAL: 'manage_grid_levels_count' not defined in settings.grid_prices_setup. Cannot process.")
+        grid_multiplier_raw = grid_prices_setup.get("grid_multiplier")
+        if grid_multiplier_raw is None:
+            grid_multiplier = 1
+            grid_multiplier_source = "not_set (unused — money-distance model)"
+        else:
+            try:
+                grid_multiplier = _to_int(grid_multiplier_raw)
+                grid_multiplier_source = "set"
+            except Exception:
+                grid_multiplier = 1
+                grid_multiplier_source = "invalid (fallback to 1, unused)"
+
+        if each_direction_levels_count is None:
+            raise ValueError(" CRITICAL: 'each_direction_levels_count' not defined in settings.grid_prices_setup. Cannot process.")
+        if manage_each_direction_levels_count is None:
+            raise ValueError(" CRITICAL: 'manage_each_direction_levels_count' not defined in settings.grid_prices_setup. Cannot process.")
+
+        grid_amount_distance_raw = grid_prices_setup.get("grid_amount_distance")
+        grid_amount_distance_value = _to_float(grid_amount_distance_raw)
+        if grid_amount_distance_value is None or grid_amount_distance_value <= 0:
+            raise ValueError(
+                " CRITICAL: 'grid_amount_distance' must be defined and > 0 "
+                "(money distance in account currency between grid entries). Cannot process."
+            )
 
         flag_same_direction = _to_bool(grid_prices_setup.get("flag_same_direction_grids_with_m_and_c"))
+
         all_grid_c_rr_raw = grid_prices_setup.get("all_grid_c_risk_reward")
         if all_grid_c_rr_raw is None:
             raise ValueError(" CRITICAL: 'all_grid_c_risk_reward' not defined in settings.grid_prices_setup. Cannot process.")
-        all_grid_c_rr_value = _parse_risk_reward(all_grid_c_rr_raw)
+        all_grid_c_rr_value = _parse_risk_reward(all_grid_c_rr_raw, "all_grid_c_risk_reward")
+
+        all_grid_m_helpers_rr_raw = grid_prices_setup.get("all_grid_m_helpers_risk_reward")
+        if all_grid_m_helpers_rr_raw is None:
+            if flag_same_direction:
+                raise ValueError(" CRITICAL: 'all_grid_m_helpers_risk_reward' not defined in settings.grid_prices_setup. Cannot process.")
+            all_grid_m_helpers_rr_value = all_grid_c_rr_value
+        else:
+            all_grid_m_helpers_rr_value = _parse_risk_reward(
+                all_grid_m_helpers_rr_raw, "all_grid_m_helpers_risk_reward"
+            )
 
         bid_order_type = grid_prices_setup.get("bid_prices_order_type")
         if bid_order_type is None:
@@ -10206,46 +10506,163 @@ def symbols_dynamic_grid_prices(inv_id=None):
         if ask_order_type is None:
             raise ValueError(" CRITICAL: 'ask_prices_order_type' not defined in settings.grid_prices_setup. Cannot process.")
 
+        candle_tf_raw = grid_prices_setup.get("candle_timeframe_grid_circle")
+        candle_tf_seconds, candle_tf_key = parse_candle_timeframe(candle_tf_raw)
+        if candle_tf_seconds is None:
+            raise ValueError(
+                f" CRITICAL: 'candle_timeframe_grid_circle' = {candle_tf_raw!r} is not valid. "
+                f"Allowed values: {list(TIMEFRAME_SECONDS.keys())}"
+            )
+
         enable_single_position = _to_bool(grid_prices_setup.get("enable_single_position_and_pending"))
         skip_orders_close_to_position = _to_bool(grid_prices_setup.get("skip_orders_close_to_position"))
 
-        # Determine if grid_m/grid_c flags should be applied
-        apply_m_c_flags = (grid_levels > 1) and flag_same_direction
+        first_grid_distance_raw = grid_prices_setup.get("first_grid_amount_distance_away_from_current_price")
+        first_grid_distance_value = _to_float(first_grid_distance_raw)
+        if first_grid_distance_value is None or first_grid_distance_value <= 0:
+            first_grid_distance_value = 0.0
+            first_grid_distance_source = "disabled (not set or <= 0) → anchor falls back to one grid_amount_distance away from price"
+        else:
+            first_grid_distance_source = "enabled"
 
-        print(f"  📋 DYNAMIC Grid Configuration:")
-        print(f"    • Grid Levels: {grid_levels} (per side)")
-        print(f"    • Manage Grid Levels Count: {manage_grid_levels_count}")
-        print(f"    • Grid Multiplier: {grid_multiplier}")
-        print(f"    • Pattern Unit: {grid_multiplier}")
+        first_grids_stoploss_lock = _to_bool(grid_prices_setup.get("first_grids_stoploss_lock"))
+        if first_grids_stoploss_lock:
+            if first_grid_distance_value <= 0:
+                print(f"  ⚠️  'first_grids_stoploss_lock' is enabled but "
+                      f"'first_grid_amount_distance_away_from_current_price' is not set/<=0 "
+                      f"— disabling the lock (falling back to normal behaviour).")
+                first_grids_stoploss_lock = False
+                lock_source = "disabled (first_grid_amount_distance not set)"
+            else:
+                lock_source = "enabled (TOTAL gap between sell grid_m and buy grid_m; no widening)"
+        else:
+            lock_source = "disabled (normal independent anchor placement)"
+
+        generate_new_orders_if_stoploss_lock_order_and_no_position_exists = _to_bool(
+            grid_prices_setup.get("generate_new_orders_if_stoploss_lock_order_and_no_position_exists")
+        )
+        if generate_new_orders_if_stoploss_lock_order_and_no_position_exists:
+            gen_t1_source = ("TRUE: SL-locked pair exists, price between anchors, NO position → generate fresh")
+        else:
+            gen_t1_source = ("FALSE: SL-locked pair exists, price between anchors, NO position → fall through to TIER 3")
+
+        generate_new_orders_if_stoploss_lock_order_and_position_exists = _to_bool(
+            grid_prices_setup.get("generate_new_orders_if_stoploss_lock_order_and_position_exists")
+        )
+        if generate_new_orders_if_stoploss_lock_order_and_position_exists:
+            gen_t2_source = ("TRUE: SL-locked pair exists, price between anchors, position exists → generate fresh")
+        else:
+            gen_t2_source = ("FALSE: SL-locked pair exists, price between anchors, position exists → fall through to TIER 3")
+
+        generate_new_orders_if_position_exists = _to_bool(
+            grid_prices_setup.get("generate_new_orders_if_position_exists")
+        )
+        if generate_new_orders_if_position_exists:
+            gen_t3_source = ("TRUE: else-block with position exists → generate; with no position → generate normally")
+        else:
+            gen_t3_source = ("FALSE: else-block with position exists → SKIP; with no position → generate normally")
+
+        # === POSITION PROFIT-REWARD GATE ===
+        # Applies inside TIER 2 and TIER 3 whenever a live position exists
+        # AND that position is in PROFIT or break-even.
+        # When the position is IN LOSS the gate is BYPASSED — the position-
+        # anchored interlock will handle the position instead.
+        generate_new_orders_if_position_profit_reward_is_at_raw = grid_prices_setup.get(
+            "generate_new_orders_if_position_profit_reward_is_at"
+        )
+        if generate_new_orders_if_position_profit_reward_is_at_raw is None or str(generate_new_orders_if_position_profit_reward_is_at_raw).strip() == "":
+            generate_new_orders_if_position_profit_reward_is_at = None
+            gen_profit_source = "disabled (not configured) → no profit-reward gate"
+        else:
+            try:
+                generate_new_orders_if_position_profit_reward_is_at = _parse_risk_reward(
+                    generate_new_orders_if_position_profit_reward_is_at_raw,
+                    "generate_new_orders_if_position_profit_reward_is_at"
+                )
+                gen_profit_source = (
+                    f"enabled → IF position is in profit/break-even, "
+                    f"require reward ratio >= 1:{generate_new_orders_if_position_profit_reward_is_at} "
+                    f"(raw: {generate_new_orders_if_position_profit_reward_is_at_raw}); "
+                    f"if position is IN LOSS → gate bypassed (interlock handles it)"
+                )
+            except Exception as e:
+                generate_new_orders_if_position_profit_reward_is_at = None
+                gen_profit_source = f"disabled (parse error: {e}) → no profit-reward gate"
+
+        apply_m_c_flags = (each_direction_levels_count >= 1) and flag_same_direction
+
+        print(f"  📋 DYNAMIC Grid Configuration (TWO-PHASE MONEY-DISTANCE MODEL):")
+        print(f"    • Grid Levels: {each_direction_levels_count} (per side)")
+        print(f"    • Manage Grid Levels Count: {manage_each_direction_levels_count}")
+        print(f"    • Grid Multiplier (legacy display only): {grid_multiplier} ({grid_multiplier_source})")
+        print(f"    • Grid Amount Distance (money between ALL consecutive entries + SL/TP base): "
+              f"{grid_amount_distance_value} {acct_cfg.get('currency', '')}".rstrip())
+        print(f"    • First Grid Amount Distance Away From Current Price: "
+              f"{first_grid_distance_value} ({first_grid_distance_source})")
+        print(f"    • First Grids Stoploss Lock: {first_grids_stoploss_lock} ({lock_source})")
+        print(f"    • [TIER 1] SL-lock + NO position → generate: "
+              f"{generate_new_orders_if_stoploss_lock_order_and_no_position_exists} ({gen_t1_source})")
+        print(f"    • [TIER 2] SL-lock + position    → generate: "
+              f"{generate_new_orders_if_stoploss_lock_order_and_position_exists} ({gen_t2_source})")
+        print(f"    • [TIER 3] else block (position gate): "
+              f"{generate_new_orders_if_position_exists} ({gen_t3_source})")
+        print(f"    • [PROFIT GATE] Position profit-reward required: "
+              f"{generate_new_orders_if_position_profit_reward_is_at} ({gen_profit_source})")
         print(f"    • Bid Prices Order Type: {bid_order_type}")
         print(f"    • Ask Prices Order Type: {ask_order_type}")
         print(f"    • Flag Same Direction Grids With M And C: {flag_same_direction}")
         print(f"    • Apply M/C Flags: {apply_m_c_flags}")
         print(f"    • Closest-level Risk/Reward: 1:{risk_reward_value} (source: {rr_source})")
+        print(f"    • Grid M Helpers Risk/Reward: 1:{all_grid_m_helpers_rr_value} (raw: {all_grid_m_helpers_rr_raw})")
         print(f"    • All Grid C Risk/Reward: 1:{all_grid_c_rr_value} (raw: {all_grid_c_rr_raw})")
+        print(f"    • Candle Timeframe Grid Circle: {candle_tf_key} ({candle_tf_seconds}s)")
         print(f"    • Enable Single Position And Pending: {enable_single_position}")
         print(f"    • Skip Orders Close To Position: {skip_orders_close_to_position}")
 
         stats["grid_configuration"] = {
-            "levels": grid_levels,
-            "manage_grid_levels_count": manage_grid_levels_count,
+            "levels": each_direction_levels_count,
+            "manage_each_direction_levels_count": manage_each_direction_levels_count,
             "multiplier": grid_multiplier,
+            "multiplier_source": grid_multiplier_source,
+            "grid_amount_distance": grid_amount_distance_value,
             "bid_order_type": bid_order_type,
             "ask_order_type": ask_order_type,
             "risk_reward": risk_reward_value,
             "risk_reward_source": rr_source,
             "all_grid_c_risk_reward": all_grid_c_rr_value,
             "all_grid_c_risk_reward_raw": all_grid_c_rr_raw,
+            "all_grid_m_helpers_risk_reward": all_grid_m_helpers_rr_value,
+            "all_grid_m_helpers_risk_reward_raw": all_grid_m_helpers_rr_raw,
             "flag_same_direction_grids_with_m_and_c": flag_same_direction,
             "apply_m_c_flags": apply_m_c_flags,
+            "candle_timeframe_grid_circle": candle_tf_key,
+            "candle_timeframe_grid_circle_seconds": candle_tf_seconds,
             "enable_single_position_and_pending": enable_single_position,
-            "skip_orders_close_to_position": skip_orders_close_to_position
+            "skip_orders_close_to_position": skip_orders_close_to_position,
+            "first_grid_amount_distance_away_from_current_price": first_grid_distance_value,
+            "first_grid_amount_distance_away_from_current_price_source": first_grid_distance_source,
+            "first_grids_stoploss_lock": first_grids_stoploss_lock,
+            "first_grids_stoploss_lock_source": lock_source,
+            "generate_new_orders_if_stoploss_lock_order_and_no_position_exists": generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+            "generate_new_orders_if_stoploss_lock_order_and_no_position_exists_source": gen_t1_source,
+            "generate_new_orders_if_stoploss_lock_order_and_position_exists": generate_new_orders_if_stoploss_lock_order_and_position_exists,
+            "generate_new_orders_if_stoploss_lock_order_and_position_exists_source": gen_t2_source,
+            "generate_new_orders_if_position_exists": generate_new_orders_if_position_exists,
+            "generate_new_orders_if_position_exists_source": gen_t3_source,
+            "generate_new_orders_if_position_profit_reward_is_at": generate_new_orders_if_position_profit_reward_is_at,
+            "generate_new_orders_if_position_profit_reward_is_at_source": gen_profit_source,
         }
 
-        return (grid_levels, grid_multiplier, bid_order_type, ask_order_type,
-                risk_reward_value, all_grid_c_rr_value, flag_same_direction,
-                apply_m_c_flags, manage_grid_levels_count,
-                enable_single_position, skip_orders_close_to_position)
+        return (each_direction_levels_count, grid_multiplier, bid_order_type, ask_order_type,
+                risk_reward_value, all_grid_c_rr_value, all_grid_m_helpers_rr_value,
+                flag_same_direction, apply_m_c_flags, manage_each_direction_levels_count,
+                enable_single_position, skip_orders_close_to_position,
+                candle_tf_key, candle_tf_seconds, first_grid_distance_value,
+                grid_amount_distance_value, first_grids_stoploss_lock,
+                generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                generate_new_orders_if_position_exists,
+                generate_new_orders_if_position_profit_reward_is_at)
 
     def fetch_current_prices(symbol, resolution_cache):
         try:
@@ -10253,14 +10670,12 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 res = resolution_cache[symbol]
                 normalized_symbol = res['broker_sym']
                 symbol_info = res['info']
-
                 if symbol_info is None:
                     return False, None, None, None, None, None, None, f"Symbol '{symbol}' previously failed to resolve"
             else:
                 normalized_symbol = get_normalized_symbol(symbol)
                 symbol_info = mt5.symbol_info(normalized_symbol)
                 resolution_cache[symbol] = {'broker_sym': normalized_symbol, 'info': symbol_info}
-
                 if symbol_info:
                     if normalized_symbol != symbol:
                         print(f"    └─ ✅ {symbol} -> {normalized_symbol} (Mapped & Cached)")
@@ -10271,26 +10686,19 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 else:
                     print(f"    └─  MT5: '{normalized_symbol}' (from '{symbol}') not found in MarketWatch")
                     return False, None, None, None, None, None, None, f"Symbol '{normalized_symbol}' not found in MarketWatch"
-
             if not symbol_info:
                 return False, None, None, None, None, None, None, f"Symbol info not available for {normalized_symbol}"
-
             if not mt5.symbol_select(normalized_symbol, True):
                 return False, normalized_symbol, None, None, None, None, None, f"Failed to select symbol: {normalized_symbol}"
-
             tick = mt5.symbol_info_tick(normalized_symbol)
             if not tick:
                 return False, normalized_symbol, None, None, None, None, None, "Tick data not available"
-
             current_bid = tick.bid
             current_ask = tick.ask
             current_price = (current_bid + current_ask) / 2
-
             digits = symbol_info.digits
             print(f"✅ {normalized_symbol} (Bid: {current_bid:.{digits}f}, Ask: {current_ask:.{digits}f})")
-
             return True, normalized_symbol, current_bid, current_ask, current_price, tick, symbol_info, None
-
         except Exception as e:
             return False, None, None, None, None, None, None, str(e)
 
@@ -10298,17 +10706,54 @@ def symbols_dynamic_grid_prices(inv_id=None):
         try:
             volume_min = symbol_info.volume_min
             volume_step = symbol_info.volume_step
-
             print(f"        📊 Live volume information:")
             print(f"          • Minimum volume: {volume_min}")
             print(f"          • Volume step: {volume_step}")
             print(f"          • Maximum volume: {symbol_info.volume_max}")
-
             return volume_min, volume_step
-
         except Exception as e:
             print(f"        ⚠️  Could not get minimum volume: {e}")
             return 0.01, 0.01
+
+    def get_min_stop_distance_price(symbol_info):
+        try:
+            point = getattr(symbol_info, 'point', 0) or 0
+            if point <= 0:
+                return 0.0
+            stops_level = getattr(symbol_info, 'trade_stops_level', 0) or 0
+            freeze_level = getattr(symbol_info, 'trade_freeze_level', 0) or 0
+            min_points = max(int(stops_level), int(freeze_level))
+            if min_points <= 0:
+                return 0.0
+            return (min_points + 1) * point
+        except Exception:
+            return 0.0
+
+    def price_distance_to_usd(symbol_info, price_distance, volume, account_currency):
+        try:
+            tick_size = symbol_info.trade_tick_size
+            tick_value = symbol_info.trade_tick_value
+            if not tick_size or tick_size <= 0:
+                return None
+            if not tick_value or tick_value <= 0:
+                return None
+            if not volume or volume <= 0:
+                return None
+            amount_in_acct_ccy = (price_distance / tick_size) * tick_value * volume
+            if account_currency and account_currency != 'USD':
+                usd_symbol = f"{account_currency}USD"
+                if mt5.symbol_select(usd_symbol, True):
+                    usd_tick = mt5.symbol_info_tick(usd_symbol)
+                    if usd_tick and usd_tick.bid:
+                        return amount_in_acct_ccy * usd_tick.bid
+                usd_symbol = f"USD{account_currency}"
+                if mt5.symbol_select(usd_symbol, True):
+                    usd_tick = mt5.symbol_info_tick(usd_symbol)
+                    if usd_tick and usd_tick.ask > 0:
+                        return amount_in_acct_ccy * (1.0 / usd_tick.ask)
+            return amount_in_acct_ccy
+        except Exception:
+            return None
 
     def calculate_risk_in_usd(symbol_info, entry_price, exit_price, volume, account_currency):
         try:
@@ -10316,7 +10761,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             tick_size = symbol_info.trade_tick_size
             tick_value = symbol_info.trade_tick_value
             risk_in_account_currency = (risk_distance_points / tick_size) * tick_value * volume
-
             if account_currency != 'USD':
                 usd_symbol = f"{account_currency}USD"
                 if mt5.symbol_select(usd_symbol, True):
@@ -10339,612 +10783,803 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         risk_in_usd = risk_in_account_currency
             else:
                 risk_in_usd = risk_in_account_currency
-
             return risk_in_usd
-
         except Exception as e:
             print(f"        ⚠️  Could not calculate risk in USD: {e}")
             return 0.0
 
+    def money_distance_to_price_distance(symbol_info, money_amount, volume):
+        try:
+            tick_size = symbol_info.trade_tick_size
+            tick_value = symbol_info.trade_tick_value
+            if not tick_size or tick_size <= 0:
+                return None
+            if not tick_value or tick_value <= 0:
+                return None
+            if not volume or volume <= 0:
+                return None
+            ticks = money_amount / (tick_value * volume)
+            return ticks * tick_size
+        except Exception:
+            return None
+
+    def price_distance_to_money(symbol_info, price_distance, volume):
+        try:
+            tick_size = symbol_info.trade_tick_size
+            tick_value = symbol_info.trade_tick_value
+            if not tick_size or tick_size <= 0:
+                return None
+            if not tick_value or tick_value <= 0:
+                return None
+            if not volume or volume <= 0:
+                return None
+            ticks = price_distance / tick_size
+            return ticks * tick_value * volume
+        except Exception:
+            return None
+
+    def is_valid_entry_for_order_type(order_type, entry, current_bid, current_ask):
+        if entry is None or current_bid is None or current_ask is None:
+            return False
+        ot = str(order_type or "").strip().lower()
+        if ot in ("sell_stop", "sell_limit"):
+            return entry < current_bid
+        if ot in ("buy_stop", "buy_limit"):
+            return entry > current_ask
+        return False
+
     # ------------------------------------------------------------------
-    # PATTERN GENERATION — fixed & consistent
+    # EXISTING SL-LOCK DETECTION
     # ------------------------------------------------------------------
-    def generate_pattern_levels(price, direction, num_levels, multiplier, price_digits=None):
+    def find_existing_sl_locked_pair_for_symbol(symbol_name):
+        try:
+            all_orders = mt5.orders_get(symbol=symbol_name) or []
+        except Exception:
+            return None
+
+        if not all_orders:
+            return None
+
+        sell_stops = []
+        buy_stops = []
+        for o in all_orders:
+            try:
+                if o.type == mt5.ORDER_TYPE_SELL_STOP:
+                    sell_stops.append(o)
+                elif o.type == mt5.ORDER_TYPE_BUY_STOP:
+                    buy_stops.append(o)
+            except Exception:
+                continue
+
+        si = mt5.symbol_info(symbol_name)
+        tol = (si.point * 2) if si and si.point else 1e-6
+
+        for s in sell_stops:
+            for b in buy_stops:
+                try:
+                    s_entry = getattr(s, 'price_open', None)
+                    b_entry = getattr(b, 'price_open', None)
+                    s_sl = getattr(s, 'sl', None)
+                    b_sl = getattr(b, 'sl', None)
+
+                    if s_entry is None or b_entry is None or s_sl is None or b_sl is None:
+                        continue
+
+                    if abs(s_sl - b_entry) <= tol and abs(b_sl - s_entry) <= tol:
+                        return {
+                            "sell_ticket": getattr(s, 'ticket', None),
+                            "buy_ticket": getattr(b, 'ticket', None),
+                            "sell_entry": s_entry,
+                            "buy_entry": b_entry,
+                            "sell_sl": s_sl,
+                            "buy_sl": b_sl,
+                        }
+                except Exception:
+                    continue
+
+        return None
+
+    # ------------------------------------------------------------------
+    # EXISTING POSITION DETECTION
+    # ------------------------------------------------------------------
+    def find_live_positions_for_symbol(symbol_name):
+        try:
+            positions = mt5.positions_get(symbol=symbol_name) or []
+            return list(positions)
+        except Exception:
+            return []
+
+    def pick_latest_position(positions):
         """
-        Generate `num_levels` grid levels above or below `price`, spaced by
-        `multiplier`, interpreted CONSISTENTLY for both integer-priced and
-        fractional-priced instruments.
-
-        INTERPRETATION OF `multiplier`:
-          • price >= 1000  → multiplier is in absolute price units.
-                             Example: multiplier=50 on BTC @ 45000 → $50 steps.
-          • price <  1000  → multiplier is in SCALED units where the scale is
-                             10**digits. The effective price step is:
-                                 step = multiplier / (10 ** digits)
-                             Example: multiplier=50 on EURUSD (5 digits)
-                                      → 50 / 100000 = 0.00050 = 5 pips.
-                             Example: multiplier=50 on USDJPY (3 digits)
-                                      → 50 / 1000   = 0.050   = 50 pips.
-                             Example: multiplier=50 on a 2-digit index (e.g. 95.30)
-                                      → 50 / 100    = 0.50.
-
-        This lets you use values as low as `50` safely and predictably on
-        BOTH low-priced and high-priced symbols — no hidden hardcoded scale
-        fallback.
+        Return the most recent (highest-ticket) position from a list, or None.
         """
-        # Resolve digits defensively
-        digits = price_digits if isinstance(price_digits, int) and price_digits >= 0 else 2
+        if not positions:
+            return None
+        try:
+            return max(positions, key=lambda p: getattr(p, 'ticket', 0))
+        except Exception:
+            return positions[0]
 
-        pattern_levels = []
+    def evaluate_position_profit_gate(symbol_info, position, account_currency, target_rr):
+        """
+        Compute the existing position's current reward ratio and decide whether
+        the profit gate allows generation.
 
-        if price >= 1000:
-            # ---------- INTEGER-PRICED (BTC, indices, high-priced CFDs) ----------
-            unit = multiplier
-            price_int = int(price)
-            base_int = (price_int // unit) * unit
+        IMPORTANT:
+            • The gate ONLY applies when the position is in PROFIT or break-even.
+            • When the position is IN LOSS, the gate is BYPASSED — the
+              position-anchored interlock will handle the position instead,
+              so we never let the position run into a naked stop-out.
 
-            print(f"        📊 Generating integer-based patterns (multiplier={multiplier}):")
-            print(f"          • Original price: {price}")
-            print(f"          • Integer value: {price_int}")
-            print(f"          • Base integer: {base_int}")
-            print(f"          • Pattern unit: {unit} (absolute price units)")
-            print(f"          • Effective step: {unit}")
-
-            if direction == 'below':
-                for i in range(num_levels):
-                    level_int = base_int - (i * unit)
-                    pattern_levels.append(float(level_int))
-            else:
-                for i in range(num_levels):
-                    level_int = base_int + ((i + 1) * unit)
-                    pattern_levels.append(float(level_int))
-
-            return pattern_levels
-
-        # ---------- FRACTIONAL-PRICED (forex, metals, low-priced CFDs) ----------
-        scale = 10 ** digits
-        unit = multiplier
-        effective_step = unit / scale
-
-        price_scaled = int(round(price * scale))
-        base_scaled = (price_scaled // unit) * unit
-
-        print(f"        📊 Generating fractional-based patterns (multiplier={multiplier}):")
-        print(f"          • Original price: {price}")
-        print(f"          • Digits: {digits}")
-        print(f"          • Scaled integer: {price_scaled}")
-        print(f"          • Base scaled: {base_scaled}")
-        print(f"          • Scale factor: {scale} (10^{digits})")
-        print(f"          • Pattern unit (scaled): {unit}")
-        print(f"          • Effective step in price units: {effective_step}")
-
-        if direction == 'below':
-            for i in range(num_levels):
-                level_int = base_scaled - (i * unit)
-                level_price = level_int / scale
-                pattern_levels.append(level_price)
-        else:
-            for i in range(num_levels):
-                level_int = base_scaled + ((i + 1) * unit)
-                level_price = level_int / scale
-                pattern_levels.append(level_price)
-
-        return pattern_levels
-
-    def invert_order_type(order_type):
-        order_type_map = {
-            "buy_stop": "sell_stop",
-            "sell_stop": "buy_stop",
-            "buy_limit": "sell_limit",
-            "sell_limit": "buy_limit"
+        Returns a dict:
+            {
+                "target_rr":        float,      # e.g. 2.0 for "1:2"
+                "current_rr":       float|None, # profit_usd / risk_usd
+                "profit_usd":       float,      # current floating profit in USD
+                "risk_usd":         float|None, # position risk in USD from SL
+                "has_sl":           bool,
+                "in_profit":        bool,
+                "in_loss":          bool,
+                "gate_applied":     bool,       # whether the gate was actually applied
+                "gate_passed":      bool,       # final decision
+            }
+        """
+        result = {
+            "target_rr": target_rr,
+            "current_rr": None,
+            "profit_usd": 0.0,
+            "risk_usd": None,
+            "has_sl": False,
+            "in_profit": False,
+            "in_loss": False,
+            "gate_applied": False,
+            "gate_passed": True,  # default allow
         }
-        return order_type_map.get(order_type, order_type)
+
+        try:
+            pos_profit = float(getattr(position, 'profit', 0.0) or 0.0)
+            result["profit_usd"] = pos_profit
+            result["in_profit"] = pos_profit > 0
+            result["in_loss"] = pos_profit < 0
+        except Exception:
+            return result
+
+        # === POSITION IN LOSS → gate BYPASSED, allow generation ===
+        if result["in_loss"]:
+            result["gate_applied"] = False
+            result["gate_passed"] = True
+            return result
+
+        # === POSITION IN PROFIT OR BREAK-EVEN → gate APPLIES ===
+        result["gate_applied"] = True
+
+        pos_sl = float(getattr(position, 'sl', 0.0) or 0.0)
+        pos_entry = float(getattr(position, 'price_open', 0.0) or 0.0)
+        pos_volume = float(getattr(position, 'volume', 0.0) or 0.0)
+
+        if pos_sl <= 0:
+            result["has_sl"] = False
+            # No SL → can't compute risk → cannot evaluate reward ratio.
+            # Conservative: block generation (position is profitable but not
+            # anchored by a risk, so we require an explicit gate pass).
+            result["gate_passed"] = False
+            return result
+
+        result["has_sl"] = True
+
+        # Compute risk in USD via the same helper used for grid levels
+        try:
+            risk_usd = calculate_risk_in_usd(
+                symbol_info, pos_entry, pos_sl, pos_volume, account_currency
+            )
+            result["risk_usd"] = risk_usd
+        except Exception:
+            result["risk_usd"] = None
+
+        if not result["risk_usd"] or result["risk_usd"] <= 0:
+            result["gate_passed"] = False
+            return result
+
+        # Current reward ratio
+        try:
+            result["current_rr"] = pos_profit / result["risk_usd"]
+        except Exception:
+            result["current_rr"] = None
+
+        # Gate passes iff current_rr >= target_rr
+        if result["current_rr"] is not None and result["current_rr"] >= target_rr:
+            result["gate_passed"] = True
+        else:
+            result["gate_passed"] = False
+
+        return result
+
+    # ------------------------------------------------------------------
+    # ANCHOR-FIRST LADDER GENERATORS (per side)
+    # ------------------------------------------------------------------
+    def generate_validated_sell_ladder(
+        current_bid, num_levels,
+        first_grid_money_distance, grid_money_step,
+        symbol_info, min_volume, digits,
+        min_stop_price_distance=0.0,
+        lock_mode=False,
+    ):
+        step_price_distance = money_distance_to_price_distance(
+            symbol_info, grid_money_step, min_volume
+        )
+        if step_price_distance is None or step_price_distance <= 0:
+            print(f"        ⚠️  [SELL] Could not convert grid_amount_distance "
+                  f"({grid_money_step}) to price distance at min_volume={min_volume}")
+            return None, None, None
+
+        if first_grid_money_distance and first_grid_money_distance > 0:
+            first_price_distance = money_distance_to_price_distance(
+                symbol_info, first_grid_money_distance, min_volume
+            )
+            if first_price_distance is None or first_price_distance <= 0:
+                first_price_distance = step_price_distance
+                print(f"        ⚠️  [SELL] Could not convert first_grid_amount_distance "
+                      f"({first_grid_money_distance}) — falling back to one grid step")
+            else:
+                check_money = price_distance_to_money(symbol_info, first_price_distance, min_volume)
+                print(f"        💵 [SELL] PHASE 1 anchor gap: first_grid_amount_distance "
+                      f"{first_grid_money_distance} (money) → price gap "
+                      f"{first_price_distance:.{digits}f} "
+                      f"[= {check_money:.4f} money at min_vol {min_volume}]")
+        else:
+            first_price_distance = step_price_distance
+            print(f"        ℹ️  [SELL] first_grid_amount_distance not set/<=0 "
+                  f"— anchor falls back to one grid step ({step_price_distance:.{digits}f})")
+
+        if lock_mode:
+            anchor = round(current_bid - first_price_distance, digits)
+            print(f"        🔒 [SELL] LOCK MODE — placing anchor at exactly "
+                  f"{first_price_distance:.{digits}f} below bid (no widening)")
+            if anchor >= current_bid:
+                print(f"        ⚠️  [SELL] anchor {anchor:.{digits}f} >= bid {current_bid:.{digits}f} "
+                      f"— placing anyway (lock contract)")
+        else:
+            if min_stop_price_distance > 0 and first_price_distance < min_stop_price_distance:
+                print(f"        🔧 [SELL] anchor gap {first_price_distance:.{digits}f} < broker min stop "
+                      f"{min_stop_price_distance:.{digits}f} — raising to broker min first")
+                first_price_distance = min_stop_price_distance
+
+            safety = 0
+            MAX_SAFETY = 1000
+            while safety < MAX_SAFETY:
+                anchor_candidate = round(current_bid - first_price_distance, digits)
+                gap = current_bid - anchor_candidate
+                if anchor_candidate < current_bid and gap >= min_stop_price_distance:
+                    break
+                first_price_distance += step_price_distance
+                safety += 1
+            if safety >= MAX_SAFETY:
+                print(f"        ⚠️  [SELL] Could not find a valid anchor after "
+                      f"{MAX_SAFETY} widening attempts — aborting SELL side.")
+                return None, None, None
+            if safety > 0:
+                print(f"        🔧 [SELL] Anchor gap auto-widened by {safety} step(s)")
+            anchor = round(current_bid - first_price_distance, digits)
+
+        levels = [anchor]
+        for _ in range(1, num_levels):
+            next_level = round(levels[-1] - step_price_distance, digits)
+            levels.append(next_level)
+
+        print(f"        📐 [SELL] anchor(grid_m entry)={anchor:.{digits}f} "
+              f"(gap from bid = {current_bid - anchor:.{digits}f} price), "
+              f"then every entry steps by {step_price_distance:.{digits}f} price")
+
+        return levels, step_price_distance, first_price_distance
+
+    def generate_validated_buy_ladder(
+        current_ask, num_levels,
+        first_grid_money_distance, grid_money_step,
+        symbol_info, min_volume, digits,
+        min_stop_price_distance=0.0,
+        lock_mode=False,
+    ):
+        step_price_distance = money_distance_to_price_distance(
+            symbol_info, grid_money_step, min_volume
+        )
+        if step_price_distance is None or step_price_distance <= 0:
+            print(f"        ⚠️  [BUY] Could not convert grid_amount_distance "
+                  f"({grid_money_step}) to price distance at min_volume={min_volume}")
+            return None, None, None
+
+        if first_grid_money_distance and first_grid_money_distance > 0:
+            first_price_distance = money_distance_to_price_distance(
+                symbol_info, first_grid_money_distance, min_volume
+            )
+            if first_price_distance is None or first_price_distance <= 0:
+                first_price_distance = step_price_distance
+                print(f"        ⚠️  [BUY] Could not convert first_grid_amount_distance "
+                      f"({first_grid_money_distance}) — falling back to one grid step")
+            else:
+                check_money = price_distance_to_money(symbol_info, first_price_distance, min_volume)
+                print(f"        💵 [BUY] PHASE 1 anchor gap: first_grid_amount_distance "
+                      f"{first_grid_money_distance} (money) → price gap "
+                      f"{first_price_distance:.{digits}f} "
+                      f"[= {check_money:.4f} money at min_vol {min_volume}]")
+        else:
+            first_price_distance = step_price_distance
+            print(f"        ℹ️  [BUY] first_grid_amount_distance not set/<=0 "
+                  f"— anchor falls back to one grid step ({step_price_distance:.{digits}f})")
+
+        if lock_mode:
+            anchor = round(current_ask + first_price_distance, digits)
+            print(f"        🔒 [BUY] LOCK MODE — placing anchor at exactly "
+                  f"{first_price_distance:.{digits}f} above ask (no widening)")
+            if anchor <= current_ask:
+                print(f"        ⚠️  [BUY] anchor {anchor:.{digits}f} <= ask {current_ask:.{digits}f} "
+                      f"— placing anyway (lock contract)")
+        else:
+            if min_stop_price_distance > 0 and first_price_distance < min_stop_price_distance:
+                print(f"        🔧 [BUY] anchor gap {first_price_distance:.{digits}f} < broker min stop "
+                      f"{min_stop_price_distance:.{digits}f} — raising to broker min first")
+                first_price_distance = min_stop_price_distance
+
+            safety = 0
+            MAX_SAFETY = 1000
+            while safety < MAX_SAFETY:
+                anchor_candidate = round(current_ask + first_price_distance, digits)
+                gap = anchor_candidate - current_ask
+                if anchor_candidate > current_ask and gap >= min_stop_price_distance:
+                    break
+                first_price_distance += step_price_distance
+                safety += 1
+            if safety >= MAX_SAFETY:
+                print(f"        ⚠️  [BUY] Could not find a valid anchor after "
+                      f"{MAX_SAFETY} widening attempts — aborting BUY side.")
+                return None, None, None
+            if safety > 0:
+                print(f"        🔧 [BUY] Anchor gap auto-widened by {safety} step(s)")
+            anchor = round(current_ask + first_price_distance, digits)
+
+        levels = [anchor]
+        for _ in range(1, num_levels):
+            next_level = round(levels[-1] + step_price_distance, digits)
+            levels.append(next_level)
+
+        print(f"        📐 [BUY] anchor(grid_m entry)={anchor:.{digits}f} "
+              f"(gap from ask = {anchor - current_ask:.{digits}f} price), "
+              f"then every entry steps by {step_price_distance:.{digits}f} price")
+
+        return levels, step_price_distance, first_price_distance
 
     def build_level(entry, order_type, sl, tp, rr_label, min_volume, symbol_info, account_currency, digits,
-                    is_main=False, apply_m_c_flags=False):
-        """Build a single grid level dict with grid_m / grid_c flags."""
-        if entry >= 1000:
-            sl_r = round(sl, 2)
-            tp_r = round(tp, 2)
-        else:
-            sl_r = round(sl, digits)
-            tp_r = round(tp, digits)
-
+                    is_main=False, is_helper=False, apply_m_c_flags=False,
+                    sl_locked=False, sl_lock_partner_entry=None,
+                    position_anchored=False):
+        sl_r = round(sl, digits)
+        tp_r = round(tp, digits)
         risk = calculate_risk_in_usd(symbol_info, entry, sl_r, min_volume, account_currency)
-
         level_dict = {
             "entry": entry,
-            "exit": sl_r,           # exit = stoploss
+            "exit": sl_r,
             "tp": tp_r,
             "volume": min_volume,
             "risk_in_usd": round(risk, 2),
             "order_type": order_type,
             "risk_reward": rr_label
         }
-
+        if sl_locked:
+            level_dict["sl_locked"] = True
+            if sl_lock_partner_entry is not None:
+                level_dict["sl_lock_partner_entry"] = round(sl_lock_partner_entry, digits)
+        if position_anchored:
+            level_dict["position_anchored"] = True
         if apply_m_c_flags:
             level_dict["grid_m"] = bool(is_main)
-            level_dict["grid_c"] = (not bool(is_main))
-
+            level_dict["grid_c"] = not bool(is_main)
+            level_dict["grid_mh"] = bool(is_helper)
+            if is_main:
+                level_dict["grid_c"] = False
+                level_dict["grid_mh"] = False
         return level_dict
 
-    def create_grid_orders_structure(bid_pattern_levels, ask_pattern_levels, bid_order_type, ask_order_type,
-                                    risk_reward_value, all_grid_c_rr_value, digits, min_volume, volume_step,
-                                    symbol_info, account_currency, multiplier, current_bid, current_ask,
-                                    apply_m_c_flags):
-        print(f"\n      📊 Creating grid orders structure:")
-        print(f"      📊 Using multiplier: {multiplier}")
-        print(f"      📊 Using broker minimum volume: {min_volume} (no risk scaling)")
+    def create_ladder_orders(
+        bid_levels, ask_levels,
+        bid_order_type, ask_order_type,
+        risk_reward_value, all_grid_c_rr_value, all_grid_m_helpers_rr_value,
+        digits, min_volume,
+        symbol_info, account_currency,
+        grid_step_price_distance,
+        apply_m_c_flags,
+        first_grids_stoploss_lock=False,
+        first_grid_money_distance=0.0,
+        position_anchor=None,
+    ):
+        """
+        position_anchor (optional): dict with keys:
+            is_buy       : bool — direction of the existing position
+            entry        : float — position's open price
+            sl           : float — position's stop loss price
+        When provided AND the position is in loss, the OPPOSITE side's
+        grid_m is overridden: its entry becomes pos.sl and its SL becomes
+        pos.entry, effectively interlocking the new order with the existing
+        losing position.
+        """
+        print(f"\n      📊 Building order structure from validated ladders:")
+        print(f"      📊 Grid step (price @ min vol {min_volume}): {grid_step_price_distance:.{digits}f}")
         print(f"      📊 Apply M/C flags: {apply_m_c_flags}")
-        if apply_m_c_flags:
-            print(f"      📊 Closest level per side uses R:R = 1:{risk_reward_value} → grid_m: true")
-            print(f"      📊 All other levels use R:R = 1:{all_grid_c_rr_value} → grid_c: true")
-        else:
-            print(f"      📊 All levels use R:R = 1:{risk_reward_value}")
+        if position_anchor:
+            print(f"      📌 Position anchor supplied: "
+                  f"is_buy={position_anchor['is_buy']}, "
+                  f"entry={position_anchor['entry']:.{digits}f}, "
+                  f"sl={position_anchor['sl']:.{digits}f}")
 
-        # ---------- BID SIDE (sell_stop, below bid) ----------
-        grid_bid_levels = []
-        for idx, level_price in enumerate(bid_pattern_levels):
-            sl = level_price + multiplier
+        helpers_needed = int(risk_reward_value) // 2 if apply_m_c_flags else 0
+        print(f"      📊 helpers_needed = int(main_rr) // 2 = int({risk_reward_value}) // 2 = {helpers_needed}")
 
-            if idx == 0 and apply_m_c_flags:
-                tp = level_price - (multiplier * risk_reward_value)
-                rr_label = f"1:{risk_reward_value}"
-                is_main = True
+        sl_price_dist = grid_step_price_distance
+        tp_price_dist_for_c = grid_step_price_distance * all_grid_c_rr_value
+        tp_price_dist_for_m = grid_step_price_distance * risk_reward_value
+        tp_price_dist_for_mh = grid_step_price_distance * all_grid_m_helpers_rr_value
+
+        lock_active = False
+        lock_reason = "lock disabled by config"
+        sell_m_entry = bid_levels[0] if bid_levels else None
+        buy_m_entry = ask_levels[0] if ask_levels else None
+
+        # Position-anchored override: determine target side
+        pos_anchor_active = False
+        pos_anchor_side = None   # "sell" or "buy"
+        pos_anchor_entry = None  # what the opposite side's entry becomes
+        pos_anchor_sl = None     # what the opposite side's SL becomes
+
+        if position_anchor is not None:
+            pos_is_buy = position_anchor.get("is_buy", False)
+            pos_entry = position_anchor.get("entry")
+            pos_sl = position_anchor.get("sl")
+            if pos_entry is not None and pos_sl is not None and pos_sl > 0:
+                # Opposite side of the existing position
+                pos_anchor_side = "sell" if pos_is_buy else "buy"
+                pos_anchor_entry = pos_sl        # position SL becomes opposite entry
+                pos_anchor_sl = pos_entry        # position entry becomes opposite SL
+                pos_anchor_active = True
+                print(f"      📌 POSITION-ANCHORED INTERLOCK: opposite side = {pos_anchor_side.upper()}")
+                print(f"         → entry becomes pos.sl = {pos_anchor_entry:.{digits}f}")
+                print(f"         → SL    becomes pos.entry = {pos_anchor_sl:.{digits}f}")
+
+        # If the position anchor overrides one side, adjust that side's grid_m
+        # BEFORE the lock check.
+        if pos_anchor_active:
+            if pos_anchor_side == "sell" and sell_m_entry is not None:
+                sell_m_entry = pos_anchor_entry
+                if bid_levels:
+                    bid_levels = [sell_m_entry] + list(bid_levels[1:])
+            elif pos_anchor_side == "buy" and buy_m_entry is not None:
+                buy_m_entry = pos_anchor_entry
+                if ask_levels:
+                    ask_levels = [buy_m_entry] + list(ask_levels[1:])
+
+        if first_grids_stoploss_lock:
+            if sell_m_entry is None or buy_m_entry is None:
+                lock_reason = "lock requested but one side has no anchor — cannot lock"
+            elif not (sell_m_entry < buy_m_entry):
+                lock_reason = "lock requested but sell_m >= buy_m (price not between anchors) — cannot lock"
             else:
-                tp = level_price - (multiplier * all_grid_c_rr_value)
-                rr_label = f"1:{all_grid_c_rr_value}"
-                is_main = False
+                lock_active = True
+                actual_gap_price = buy_m_entry - sell_m_entry
+                actual_gap_money = price_distance_to_money(
+                    symbol_info, actual_gap_price, min_volume
+                )
+                gap_money_str = f"{actual_gap_money:.4f}" if actual_gap_money is not None else "n/a"
+                lock_reason = (f"LOCK ACTIVE — sell_m={sell_m_entry:.{digits}f}, "
+                               f"buy_m={buy_m_entry:.{digits}f}, "
+                               f"gap = {actual_gap_price:.{digits}f} price = "
+                               f"{gap_money_str} money "
+                               f"(target {first_grid_money_distance})")
 
-            lvl = build_level(level_price, ask_order_type, sl, tp, rr_label,
-                              min_volume, symbol_info, account_currency, digits,
-                              is_main=is_main, apply_m_c_flags=apply_m_c_flags)
+        print(f"      🔒 First-grids stoploss lock: {lock_active} ({lock_reason})")
+
+        # ---------------- SELL side ----------------
+        grid_bid_levels = []
+        for idx, level_price in enumerate(bid_levels):
+            is_main = (idx == 0) and apply_m_c_flags
+            is_helper = (0 < idx <= helpers_needed) and apply_m_c_flags
+            sl = level_price + sl_price_dist
+            sl_locked_here = False
+            sl_lock_partner = None
+            pos_anchored_here = False
+
+            if idx == 0 and pos_anchor_active and pos_anchor_side == "sell":
+                # Override: entry already set above; SL is pos entry
+                sl = pos_anchor_sl
+                pos_anchored_here = True
+                print(f"        📌 [SELL grid_m] OVERRIDDEN: entry={level_price:.{digits}f}, "
+                      f"SL={sl:.{digits}f} (pos anchor)")
+            elif idx == 0 and lock_active and buy_m_entry is not None:
+                sl = buy_m_entry
+                sl_locked_here = True
+                sl_lock_partner = buy_m_entry
+
+            if is_main:
+                tp = level_price - tp_price_dist_for_m
+                rr_label = f"1:{risk_reward_value}"
+            elif is_helper:
+                tp = level_price - tp_price_dist_for_mh
+                rr_label = f"1:{all_grid_m_helpers_rr_value}"
+            else:
+                tp = level_price - tp_price_dist_for_c
+                rr_label = f"1:{all_grid_c_rr_value}"
+
+            lvl = build_level(
+                level_price, ask_order_type, sl, tp, rr_label,
+                min_volume, symbol_info, account_currency, digits,
+                is_main=is_main, is_helper=is_helper,
+                apply_m_c_flags=apply_m_c_flags,
+                sl_locked=sl_locked_here,
+                sl_lock_partner_entry=sl_lock_partner,
+                position_anchored=pos_anchored_here,
+            )
             grid_bid_levels.append(lvl)
 
-        # ---------- ASK SIDE (buy_stop, above ask) ----------
+        # ---------------- BUY side ----------------
         grid_ask_levels = []
-        for idx, level_price in enumerate(ask_pattern_levels):
-            sl = level_price - multiplier
+        for idx, level_price in enumerate(ask_levels):
+            is_main = (idx == 0) and apply_m_c_flags
+            is_helper = (0 < idx <= helpers_needed) and apply_m_c_flags
+            sl = level_price - sl_price_dist
+            sl_locked_here = False
+            sl_lock_partner = None
+            pos_anchored_here = False
 
-            if idx == 0 and apply_m_c_flags:
-                tp = level_price + (multiplier * risk_reward_value)
+            if idx == 0 and pos_anchor_active and pos_anchor_side == "buy":
+                sl = pos_anchor_sl
+                pos_anchored_here = True
+                print(f"        📌 [BUY grid_m] OVERRIDDEN: entry={level_price:.{digits}f}, "
+                      f"SL={sl:.{digits}f} (pos anchor)")
+            elif idx == 0 and lock_active and sell_m_entry is not None:
+                sl = sell_m_entry
+                sl_locked_here = True
+                sl_lock_partner = sell_m_entry
+
+            if is_main:
+                tp = level_price + tp_price_dist_for_m
                 rr_label = f"1:{risk_reward_value}"
-                is_main = True
+            elif is_helper:
+                tp = level_price + tp_price_dist_for_mh
+                rr_label = f"1:{all_grid_m_helpers_rr_value}"
             else:
-                tp = level_price + (multiplier * all_grid_c_rr_value)
+                tp = level_price + tp_price_dist_for_c
                 rr_label = f"1:{all_grid_c_rr_value}"
-                is_main = False
 
-            lvl = build_level(level_price, bid_order_type, sl, tp, rr_label,
-                              min_volume, symbol_info, account_currency, digits,
-                              is_main=is_main, apply_m_c_flags=apply_m_c_flags)
+            lvl = build_level(
+                level_price, bid_order_type, sl, tp, rr_label,
+                min_volume, symbol_info, account_currency, digits,
+                is_main=is_main, is_helper=is_helper,
+                apply_m_c_flags=apply_m_c_flags,
+                sl_locked=sl_locked_here,
+                sl_lock_partner_entry=sl_lock_partner,
+                position_anchored=pos_anchored_here,
+            )
             grid_ask_levels.append(lvl)
 
-        # Report
         if apply_m_c_flags:
             if grid_bid_levels:
                 main = grid_bid_levels[0]
-                print(f"        • MAIN SELL level (grid_m): {main['entry']:.{digits}f} "
-                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} ({main['risk_reward']})")
-                print(f"        • Other {len(grid_bid_levels)-1} SELL levels (grid_c): 1:{all_grid_c_rr_value}")
-
+                bid_helper_count = sum(1 for lvl in grid_bid_levels if lvl.get("grid_mh", False))
+                bid_child_count = len(grid_bid_levels) - 1 - bid_helper_count
+                lock_note = " [SL LOCKED]" if main.get("sl_locked") else ""
+                pos_note = " [POS-ANCHORED]" if main.get("position_anchored") else ""
+                print(f"        • SELL main (grid_m): entry={main['entry']:.{digits}f} "
+                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} "
+                      f"({main['risk_reward']}){lock_note}{pos_note}")
+                print(f"        • {bid_helper_count} SELL helper(s) (grid_mh): 1:{all_grid_m_helpers_rr_value}")
+                print(f"        • {bid_child_count} SELL child level(s) (grid_c): 1:{all_grid_c_rr_value}")
             if grid_ask_levels:
                 main = grid_ask_levels[0]
-                print(f"        • MAIN BUY level (grid_m): {main['entry']:.{digits}f} "
-                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} ({main['risk_reward']})")
-                print(f"        • Other {len(grid_ask_levels)-1} BUY levels (grid_c): 1:{all_grid_c_rr_value}")
-        else:
-            if grid_bid_levels:
-                print(f"        • {len(grid_bid_levels)} SELL levels (no M/C flags) with R:R = 1:{all_grid_c_rr_value}")
-            if grid_ask_levels:
-                print(f"        • {len(grid_ask_levels)} BUY levels (no M/C flags) with R:R = 1:{all_grid_c_rr_value}")
+                ask_helper_count = sum(1 for lvl in grid_ask_levels if lvl.get("grid_mh", False))
+                ask_child_count = len(grid_ask_levels) - 1 - ask_helper_count
+                lock_note = " [SL LOCKED]" if main.get("sl_locked") else ""
+                pos_note = " [POS-ANCHORED]" if main.get("position_anchored") else ""
+                print(f"        • BUY main (grid_m): entry={main['entry']:.{digits}f} "
+                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} "
+                      f"({main['risk_reward']}){lock_note}{pos_note}")
+                print(f"        • {ask_helper_count} BUY helper(s) (grid_mh): 1:{all_grid_m_helpers_rr_value}")
+                print(f"        • {ask_child_count} BUY child level(s) (grid_c): 1:{all_grid_c_rr_value}")
 
-        # Selection flags (max entry on bid side, min entry on ask side)
         if grid_bid_levels:
             max_entry_bid = max(level["entry"] for level in grid_bid_levels)
             for level in grid_bid_levels:
                 level["selected_bid"] = (level["entry"] == max_entry_bid)
-                if level["selected_bid"]:
-                    print(f"        • Selected BID level at {max_entry_bid:.{digits}f} as oldest")
-
         if grid_ask_levels:
             min_entry_ask = min(level["entry"] for level in grid_ask_levels)
             for level in grid_ask_levels:
                 level["selected_ask"] = (level["entry"] == min_entry_ask)
-                if level["selected_ask"]:
-                    print(f"        • Selected ASK level at {min_entry_ask:.{digits}f} as youngest")
 
         print(f"        • Grid sell levels: {len(grid_bid_levels)}")
         print(f"        • Grid buy levels: {len(grid_ask_levels)}")
-
         return grid_bid_levels, grid_ask_levels
 
-    def generate_order_counter(level_data, price_digits, apply_m_c_flags=False):
-        """Build a counter order from a level. Counters are always grid_c: true when flags apply."""
-        original_order_type = level_data.get("order_type", "")
-        inverted_order_type = invert_order_type(original_order_type)
-        counter_entry = level_data.get("exit")
-        counter_exit = level_data.get("entry")
-        risk_reward = 1
+    def build_flat_record(level, symbol, category_name, digits, current_prices,
+                          grid_side, grid_config, generated_at, strategy_name,
+                          symbol_info, min_volume, account_currency):
+        is_main = bool(level.get("grid_m", False))
+        is_child = bool(level.get("grid_c", False))
+        is_helper = bool(level.get("grid_mh", False))
+        is_sl_locked = bool(level.get("sl_locked", False))
+        is_pos_anchored = bool(level.get("position_anchored", False))
 
-        if inverted_order_type in ["sell_stop", "sell_limit"]:
-            risk_distance = counter_exit - counter_entry
-            counter_tp = counter_entry - risk_distance
-        elif inverted_order_type in ["buy_stop", "buy_limit"]:
-            risk_distance = counter_entry - counter_exit
-            counter_tp = counter_entry + risk_distance
+        entry = level.get("entry")
+        order_type_str = str(level.get("order_type", "")).strip().lower()
+        is_buy_side = "buy" in order_type_str
+
+        current_bid = current_prices.get("bid")
+        current_ask = current_prices.get("ask")
+
+        if is_buy_side:
+            reference_price = current_ask
+            reference_key = "current_ask"
+            distance_key = "distance_from_ask"
         else:
-            counter_tp = counter_entry
+            reference_price = current_bid
+            reference_key = "current_bid"
+            distance_key = "distance_from_bid"
 
-        if counter_entry >= 1000:
-            counter_tp = round(counter_tp, 2)
-        else:
-            counter_tp = round(counter_tp, price_digits)
+        distance_price = None
+        distance_usd = None
+        if entry is not None and reference_price is not None:
+            distance_price = abs(entry - reference_price)
+            distance_usd = price_distance_to_usd(
+                symbol_info, distance_price, min_volume, account_currency
+            )
 
-        counter_dict = {
-            "entry": counter_entry,
-            "exit": counter_exit,
-            "tp": counter_tp,
-            "volume": level_data.get("volume"),
-            "risk_in_usd": level_data.get("risk_in_usd"),
-            "order_type": inverted_order_type,
-            "risk_reward": "1:1"
+        min_stop_price = get_min_stop_distance_price(symbol_info)
+        min_stop_usd = None
+        if min_stop_price > 0:
+            min_stop_usd = price_distance_to_usd(
+                symbol_info, min_stop_price, min_volume, account_currency
+            )
+
+        flat = {
+            "symbol": symbol,
+            "timeframe": "grid",
+            "category": category_name,
+            "risk_reward": level.get("risk_reward"),
+            "order_type": level.get("order_type"),
+            "entry": entry,
+            "exit": level.get("exit"),
+            "tp": level.get("tp"),
+            "volume": level.get("volume"),
+            "risk_in_usd": level.get("risk_in_usd"),
+            "grid_m": is_main,
+            "grid_c": is_child,
+            "grid_mh": is_helper,
+            "is_grid_order": True,
+            "grid_side": grid_side,
+            "each_direction_levels_count": grid_config.get("levels"),
+            "grid_multiplier": grid_config.get("multiplier"),
+            "strategy": strategy_name,
+            "generated_at": generated_at,
+            "digits": digits,
+            "current_bid": current_bid,
+            "current_ask": current_ask,
+            reference_key: reference_price,
+            distance_key: round(distance_usd, 4) if distance_usd is not None else None,
+            "distance_price": round(distance_price, digits) if distance_price is not None else None,
+            "min_stop_distance_price": round(min_stop_price, digits) if min_stop_price > 0 else None,
+            "min_stop_distance_usd": round(min_stop_usd, 4) if min_stop_usd is not None else None,
         }
 
-        if apply_m_c_flags:
-            counter_dict["grid_m"] = False
-            counter_dict["grid_c"] = True
+        if is_sl_locked:
+            flat["sl_locked"] = True
+            if level.get("sl_lock_partner_entry") is not None:
+                flat["sl_lock_partner_entry"] = level.get("sl_lock_partner_entry")
 
-        return counter_dict
+        if is_pos_anchored:
+            flat["position_anchored"] = True
 
-    def add_order_counters_to_grid_levels(grid_bid_levels, grid_ask_levels, digits, apply_m_c_flags=False):
-        print(f"\n      📊 GENERATING ORDER COUNTERS:")
-        for level in grid_bid_levels:
-            level["order_counter"] = generate_order_counter(level, digits, apply_m_c_flags)
-        for level in grid_ask_levels:
-            level["order_counter"] = generate_order_counter(level, digits, apply_m_c_flags)
-        print(f"        • Added counters to {len(grid_bid_levels)} sell levels")
-        print(f"        • Added counters to {len(grid_ask_levels)} buy levels")
-        return grid_bid_levels, grid_ask_levels
+        return {k: v for k, v in flat.items() if v is not None}
 
-    def save_individual_symbol_price(prices_dir, symbol, price_data):
-        symbol_file = prices_dir / f"{symbol}.json"
-        with open(symbol_file, 'w', encoding='utf-8') as f:
-            json.dump(price_data, f, indent=4)
-
-    def save_all_symbols_prices(prices_dir, all_symbols_price_data, acc_info, bid_order_type, ask_order_type,
-                                risk_reward_value, all_grid_c_rr_value, total_categories, total_symbols,
-                                successful_symbols, failed_symbols, category_results, grid_levels, grid_multiplier,
-                                manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                                enable_single_position, skip_orders_close_to_position):
+    def save_symbols_prices_snapshot(prices_dir, all_symbols_price_data, acc_info,
+                                     grid_config, candle_tf_key, candle_tf_seconds,
+                                     first_grid_distance_value, grid_amount_distance_value,
+                                     first_grids_stoploss_lock,
+                                     generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                                     generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                                     generate_new_orders_if_position_exists,
+                                     generate_new_orders_if_position_profit_reward_is_at):
         symbols_file = prices_dir / "symbols_prices.json"
-        final_data = {
-            "account_type": "",
+        snapshot = {
             "account_login": acc_info.login,
             "account_server": acc_info.server,
             "account_balance": acc_info.balance,
             "account_currency": acc_info.currency,
             "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "grid_configuration": {
-                "levels": grid_levels,
-                "manage_grid_levels_count": manage_grid_levels_count,
-                "multiplier": grid_multiplier,
-                "bid_order_type": bid_order_type,
-                "ask_order_type": ask_order_type,
-                "closest_level_risk_reward": risk_reward_value,
-                "all_grid_c_risk_reward": all_grid_c_rr_value,
-                "flag_same_direction_grids_with_m_and_c": flag_same_direction,
-                "apply_m_c_flags": apply_m_c_flags,
-                "enable_single_position_and_pending": enable_single_position,
-                "skip_orders_close_to_position": skip_orders_close_to_position
+                "levels": grid_config.get("levels"),
+                "manage_each_direction_levels_count": grid_config.get("manage_each_direction_levels_count"),
+                "multiplier": grid_config.get("multiplier"),
+                "grid_amount_distance": grid_amount_distance_value,
+                "first_grid_amount_distance_away_from_current_price": first_grid_distance_value,
+                "first_grids_stoploss_lock": first_grids_stoploss_lock,
+                "generate_new_orders_if_stoploss_lock_order_and_no_position_exists": generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                "generate_new_orders_if_stoploss_lock_order_and_position_exists": generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                "generate_new_orders_if_position_exists": generate_new_orders_if_position_exists,
+                "generate_new_orders_if_position_profit_reward_is_at": generate_new_orders_if_position_profit_reward_is_at,
+                "bid_order_type": grid_config.get("bid_order_type"),
+                "ask_order_type": grid_config.get("ask_order_type"),
+                "closest_level_risk_reward": grid_config.get("risk_reward"),
+                "all_grid_c_risk_reward": grid_config.get("all_grid_c_risk_reward"),
+                "all_grid_m_helpers_risk_reward": grid_config.get("all_grid_m_helpers_risk_reward"),
+                "candle_timeframe_grid_circle": candle_tf_key,
+                "candle_timeframe_grid_circle_seconds": candle_tf_seconds,
             },
-            "total_categories": total_categories,
-            "total_symbols": total_symbols,
-            "successful_symbols": successful_symbols,
-            "failed_symbols": failed_symbols,
-            "success_rate_percent": round((successful_symbols/total_symbols*100), 1) if total_symbols > 0 else 0,
-            "categories": category_results,
-            **all_symbols_price_data
+            "candle_circle": stats.get("candle_circle", {}),
+            "symbols": all_symbols_price_data,
         }
         with open(symbols_file, 'w', encoding='utf-8') as f:
-            json.dump(final_data, f, indent=4, default=str)
-        print(f"    📁 Saved all symbol prices to: {symbols_file}")
-        print(f"    📊 Total symbols in file: {len(all_symbols_price_data)}")
-
-    def save_category_summary(prices_dir, category, symbols, category_price_data,
-                             category_symbols_success, category_symbols_failed,
-                             login_id, bid_order_type, ask_order_type, risk_reward_value,
-                             all_grid_c_rr_value, grid_levels, grid_multiplier,
-                             manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                             enable_single_position, skip_orders_close_to_position):
-        category_file = prices_dir / f"{category}_prices.json"
-        category_summary = {
-            "category": category,
-            "account_type": "",
-            "account_login": login_id,
-            "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "total_symbols": len(symbols),
-            "successful_symbols": category_symbols_success,
-            "failed_symbols": category_symbols_failed,
-            "grid_configuration": {
-                "levels": grid_levels,
-                "manage_grid_levels_count": manage_grid_levels_count,
-                "multiplier": grid_multiplier,
-                "bid_order_type": bid_order_type,
-                "ask_order_type": ask_order_type,
-                "closest_level_risk_reward": risk_reward_value,
-                "all_grid_c_risk_reward": all_grid_c_rr_value,
-                "flag_same_direction_grids_with_m_and_c": flag_same_direction,
-                "apply_m_c_flags": apply_m_c_flags,
-                "enable_single_position_and_pending": enable_single_position,
-                "skip_orders_close_to_position": skip_orders_close_to_position
-            },
-            "symbols": category_price_data
-        }
-        with open(category_file, 'w', encoding='utf-8') as f:
-            json.dump(category_summary, f, indent=4)
-
-    def filter_signals_with_counters(prices_dir, category_price_data, symbols_dict,
-                                     bid_order_type, ask_order_type, risk_reward_value,
-                                     all_grid_c_rr_value, account_balance, account_currency,
-                                     grid_levels, grid_multiplier, manage_grid_levels_count,
-                                     flag_same_direction, apply_m_c_flags,
-                                     enable_single_position, skip_orders_close_to_position):
-        """Collect ALL orders (no filtering) and save to limit_orders.json with grid_m / grid_c flags."""
-        print(f"\n      📊 COLLECTING ALL SIGNALS (NO RISK FILTERING)")
-
-        signals_data = {
-            "account_type": "",
-            "account_balance": account_balance,
-            "account_currency": account_currency,
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "grid_configuration": {
-                "levels": grid_levels,
-                "manage_grid_levels_count": manage_grid_levels_count,
-                "multiplier": grid_multiplier,
-                "bid_order_type": bid_order_type,
-                "ask_order_type": ask_order_type,
-                "closest_level_risk_reward": risk_reward_value,
-                "all_grid_c_risk_reward": all_grid_c_rr_value,
-                "flag_same_direction_grids_with_m_and_c": flag_same_direction,
-                "apply_m_c_flags": apply_m_c_flags,
-                "enable_single_position_and_pending": enable_single_position,
-                "skip_orders_close_to_position": skip_orders_close_to_position
-            },
-            "categories": {},
-            "summary": {
-                "total_symbols_with_signals": 0,
-                "total_bid_orders": 0,
-                "total_ask_orders": 0,
-                "total_counter_orders": 0,
-                "total_orders": 0
-            }
-        }
-
-        total_bid_orders = 0
-        total_ask_orders = 0
-        total_counter_orders = 0
-        symbols_with_signals = 0
-
-        for category, symbols in symbols_dict.items():
-            category_signals = {}
-            category_bid_count = 0
-            category_ask_count = 0
-            category_counter_count = 0
-
-            for raw_symbol in symbols:
-                normalized_symbol = get_normalized_symbol(raw_symbol)
-                if normalized_symbol in category_price_data:
-                    price_data = category_price_data[normalized_symbol]
-
-                    collected_bid_levels = []
-                    for level in price_data["grid_orders"]["bid_levels"]:
-                        collected_level = {
-                            "entry": level["entry"],
-                            "exit": level["exit"],
-                            "tp": level["tp"],
-                            "volume": level["volume"],
-                            "risk_in_usd": level["risk_in_usd"],
-                            "order_type": level["order_type"],
-                            "risk_reward": level["risk_reward"],
-                            "order_counter": level["order_counter"]
-                        }
-                        if apply_m_c_flags:
-                            collected_level["grid_m"] = level.get("grid_m", False)
-                            collected_level["grid_c"] = level.get("grid_c", True)
-                        collected_bid_levels.append(collected_level)
-
-                    collected_ask_levels = []
-                    for level in price_data["grid_orders"]["ask_levels"]:
-                        collected_level = {
-                            "entry": level["entry"],
-                            "exit": level["exit"],
-                            "tp": level["tp"],
-                            "volume": level["volume"],
-                            "risk_in_usd": level["risk_in_usd"],
-                            "order_type": level["order_type"],
-                            "risk_reward": level["risk_reward"],
-                            "order_counter": level["order_counter"]
-                        }
-                        if apply_m_c_flags:
-                            collected_level["grid_m"] = level.get("grid_m", False)
-                            collected_level["grid_c"] = level.get("grid_c", True)
-                        collected_ask_levels.append(collected_level)
-
-                    if collected_bid_levels or collected_ask_levels:
-                        category_signals[raw_symbol] = {
-                            "digits": price_data["digits"],
-                            "current_prices": price_data["current_prices"],
-                            "bid_orders": collected_bid_levels,
-                            "ask_orders": collected_ask_levels
-                        }
-
-                        symbols_with_signals += 1
-                        category_bid_count += len(collected_bid_levels)
-                        category_ask_count += len(collected_ask_levels)
-                        category_counter_count += len(collected_bid_levels) + len(collected_ask_levels)
-
-                        total_bid_orders += len(collected_bid_levels)
-                        total_ask_orders += len(collected_ask_levels)
-                        total_counter_orders += len(collected_bid_levels) + len(collected_ask_levels)
-
-            if category_signals:
-                signals_data["categories"][category] = {
-                    "symbols": category_signals,
-                    "summary": {
-                        "symbols_with_signals": len(category_signals),
-                        "bid_orders": category_bid_count,
-                        "ask_orders": category_ask_count,
-                        "counter_orders": category_counter_count,
-                        "total_orders": category_bid_count + category_ask_count + category_counter_count
-                    }
-                }
-
-        signals_data["summary"]["total_symbols_with_signals"] = symbols_with_signals
-        signals_data["summary"]["total_bid_orders"] = total_bid_orders
-        signals_data["summary"]["total_ask_orders"] = total_ask_orders
-        signals_data["summary"]["total_counter_orders"] = total_counter_orders
-        signals_data["summary"]["total_orders"] = total_bid_orders + total_ask_orders + total_counter_orders
-
-        pending_dir = prices_dir / "pending_orders"
-        pending_dir.mkdir(exist_ok=True)
-        signals_file = pending_dir / "limit_orders.json"
-        with open(signals_file, 'w', encoding='utf-8') as f:
-            json.dump(signals_data, f, indent=4)
-
-        print(f"      📊 SIGNALS SUMMARY:")
-        print(f"        • Symbols with signals: {symbols_with_signals}")
-        print(f"        • Total bid orders: {total_bid_orders}")
-        print(f"        • Total ask orders: {total_ask_orders}")
-        print(f"        • Total counter orders: {total_counter_orders}")
-        print(f"        • Total orders: {total_bid_orders + total_ask_orders + total_counter_orders}")
-
-        stats["signals_generated"] = True
-        return signals_data, signals_file
-
-    def rearrange_orders_with_counters(signals_file_path, apply_m_c_flags=False):
-        """Extract counters as standalone orders, preserving grid_m / grid_c flags."""
-        print(f"\n      🔄 REARRANGING ORDERS - Extracting counter orders...")
-        with open(signals_file_path, 'r', encoding='utf-8') as f:
-            signals_data = json.load(f)
-
-        rearranged_signals = {
-            "account_type": signals_data.get("account_type", ""),
-            "account_balance": signals_data.get("account_balance", 0),
-            "account_currency": signals_data.get("account_currency", "USD"),
-            "generated_at": signals_data.get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-            "grid_configuration": signals_data.get("grid_configuration", {}),
-            "categories": {},
-            "summary": {
-                "total_symbols_with_signals": 0,
-                "total_bid_orders": 0,
-                "total_ask_orders": 0,
-                "total_orders": 0
-            }
-        }
-
-        for category_name, category_data in signals_data.get("categories", {}).items():
-            rearranged_category = {
-                "symbols": {},
-                "summary": {
-                    "symbols_with_signals": 0,
-                    "bid_orders": 0,
-                    "ask_orders": 0,
-                    "total_orders": 0
-                }
-            }
-
-            category_bid_total = 0
-            category_ask_total = 0
-            category_symbols_count = 0
-
-            for symbol, symbol_data in category_data.get("symbols", {}).items():
-                new_bid_orders = []
-                if "bid_orders" in symbol_data:
-                    for order in symbol_data["bid_orders"]:
-                        order_copy = {k: v for k, v in order.items() if k != "order_counter"}
-                        new_bid_orders.append(order_copy)
-                        if "order_counter" in order:
-                            new_bid_orders.append(order["order_counter"])
-
-                new_ask_orders = []
-                if "ask_orders" in symbol_data:
-                    for order in symbol_data["ask_orders"]:
-                        order_copy = {k: v for k, v in order.items() if k != "order_counter"}
-                        new_ask_orders.append(order_copy)
-                        if "order_counter" in order:
-                            new_ask_orders.append(order["order_counter"])
-
-                if new_bid_orders or new_ask_orders:
-                    rearranged_category["symbols"][symbol] = {
-                        "digits": symbol_data.get("digits", 0),
-                        "current_prices": symbol_data.get("current_prices", {}),
-                        "bid_orders": new_bid_orders,
-                        "ask_orders": new_ask_orders
-                    }
-                    category_symbols_count += 1
-                    category_bid_total += len(new_bid_orders)
-                    category_ask_total += len(new_ask_orders)
-
-            rearranged_category["summary"]["symbols_with_signals"] = category_symbols_count
-            rearranged_category["summary"]["bid_orders"] = category_bid_total
-            rearranged_category["summary"]["ask_orders"] = category_ask_total
-            rearranged_category["summary"]["total_orders"] = category_bid_total + category_ask_total
-
-            rearranged_signals["categories"][category_name] = rearranged_category
-
-        total_symbols = 0
-        total_bid_orders = 0
-        total_ask_orders = 0
-
-        for category_data in rearranged_signals["categories"].values():
-            total_symbols += category_data["summary"]["symbols_with_signals"]
-            total_bid_orders += category_data["summary"]["bid_orders"]
-            total_ask_orders += category_data["summary"]["ask_orders"]
-
-        rearranged_signals["summary"]["total_symbols_with_signals"] = total_symbols
-        rearranged_signals["summary"]["total_bid_orders"] = total_bid_orders
-        rearranged_signals["summary"]["total_ask_orders"] = total_ask_orders
-        rearranged_signals["summary"]["total_orders"] = total_bid_orders + total_ask_orders
-
-        rearranged_path = signals_file_path.parent / f"limit_orders.json"
-        with open(rearranged_path, 'w', encoding='utf-8') as f:
-            json.dump(rearranged_signals, f, indent=4)
-
-        print(f"      ✅ Rearranged signals saved to: {rearranged_path}")
-        print(f"      📊 REARRANGED SUMMARY:")
-        print(f"        • Symbols with signals: {total_symbols}")
-        print(f"        • Total bid orders: {total_bid_orders}")
-        print(f"        • Total ask orders: {total_ask_orders}")
-        print(f"        • Total orders: {total_bid_orders + total_ask_orders}")
-        print(f"        • Note: Counter orders have been extracted as standalone orders")
-
-        return rearranged_signals
+            json.dump(snapshot, f, indent=4, default=str)
+        print(f"    📁 Saved symbol snapshot to: {symbols_file}")
 
     def print_investor_summary(user_brokerid, total_categories, total_symbols, successful_symbols,
                               failed_symbols, bid_order_type, ask_order_type, risk_reward_value,
-                              all_grid_c_rr_value, prices_dir, grid_levels, grid_multiplier,
-                              manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                              enable_single_position, skip_orders_close_to_position):
+                              all_grid_c_rr_value, all_grid_m_helpers_rr_value,
+                              prices_dir, each_direction_levels_count, grid_multiplier,
+                              manage_each_direction_levels_count, flag_same_direction, apply_m_c_flags,
+                              enable_single_position, skip_orders_close_to_position,
+                              candle_tf_key, candle_tf_seconds, first_grid_distance_value,
+                              grid_amount_distance_value, flat_orders_written,
+                              first_grids_stoploss_lock, locked_orders_count,
+                              generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                              generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                              generate_new_orders_if_position_exists,
+                              generate_new_orders_if_position_profit_reward_is_at,
+                              tier1_gen, tier1_skip,
+                              tier2_gen, tier2_skip,
+                              tier3_gen, tier3_skip,
+                              tier2_profit_gate_blocked,
+                              tier3_profit_gate_blocked,
+                              tier2_profit_gate_bypassed_in_loss,
+                              tier3_profit_gate_bypassed_in_loss,
+                              pos_anchored_interlocks):
         print(f"\n  📊  INVESTOR SUMMARY: {user_brokerid}")
-        print(f"    • Grid Configuration: {grid_levels} levels, multiplier={grid_multiplier}")
-        print(f"    • Manage Grid Levels Count: {manage_grid_levels_count}")
+        print(f"    • Grid Configuration: {each_direction_levels_count} levels, "
+              f"grid_amount_distance={grid_amount_distance_value}")
+        print(f"    • Manage Grid Levels Count: {manage_each_direction_levels_count}")
         print(f"    • Flag Same Direction M/C: {flag_same_direction} | Apply M/C Flags: {apply_m_c_flags}")
+        print(f"    • Candle Timeframe Grid Circle: {candle_tf_key} ({candle_tf_seconds}s)")
+        print(f"    • First Grid Amount Distance Away From Current Price: {first_grid_distance_value}")
+        print(f"    • First Grids Stoploss Lock (config): {first_grids_stoploss_lock}")
+        print(f"    • [TIER 1] SL-lock + NO position → generate: {generate_new_orders_if_stoploss_lock_order_and_no_position_exists}")
+        print(f"    • [TIER 2] SL-lock + position    → generate: {generate_new_orders_if_stoploss_lock_order_and_position_exists}")
+        print(f"    • [TIER 3] else block (position) → generate: {generate_new_orders_if_position_exists}")
+        print(f"    • [PROFIT GATE] Position profit reward required: {generate_new_orders_if_position_profit_reward_is_at}")
+        print(f"      ↳ applies only when position is in profit/break-even; loss → bypassed")
+        print(f"    • Locked grid_m orders written this cycle: {locked_orders_count}")
+        print(f"    • Position-anchored interlocks created this cycle: {pos_anchored_interlocks}")
+        print(f"    • [Tier 1] GENERATED: {tier1_gen} | SKIPPED: {tier1_skip}")
+        print(f"    • [Tier 2] GENERATED: {tier2_gen} | SKIPPED: {tier2_skip} | "
+              f"PROFIT-GATE-BLOCKED: {tier2_profit_gate_blocked} | "
+              f"PROFIT-GATE-BYPASSED (in loss): {tier2_profit_gate_bypassed_in_loss}")
+        print(f"    • [Tier 3] GENERATED: {tier3_gen} | SKIPPED: {tier3_skip} | "
+              f"PROFIT-GATE-BLOCKED: {tier3_profit_gate_blocked} | "
+              f"PROFIT-GATE-BYPASSED (in loss): {tier3_profit_gate_bypassed_in_loss}")
+        print(f"    • Grid Amount Distance: {grid_amount_distance_value}")
         print(f"    • Categories processed: {total_categories}")
         print(f"    • Total symbols: {total_symbols}")
         print(f"    • Successful: {successful_symbols}")
         print(f"    • Failed: {failed_symbols}")
-        print(f"    • Success rate: {(successful_symbols/total_symbols*100):.1f}%")
+        if total_symbols > 0:
+            print(f"    • Success rate: {(successful_symbols/total_symbols*100):.1f}%")
         print(f"    • Order Types: Bid={bid_order_type}, Ask={ask_order_type}")
         if apply_m_c_flags:
-            print(f"    • Closest-level R:R (grid_m): 1:{risk_reward_value}  |  Other levels (grid_c): 1:{all_grid_c_rr_value}")
+            print(f"    • Closest-level R:R (grid_m): 1:{risk_reward_value}")
+            print(f"    • Helpers R:R (grid_mh): 1:{all_grid_m_helpers_rr_value}")
+            print(f"    • Other levels R:R (grid_c): 1:{all_grid_c_rr_value}")
         else:
             print(f"    • All levels R:R: 1:{all_grid_c_rr_value}")
         print(f"    • Enable Single Position And Pending: {enable_single_position}")
         print(f"    • Skip Orders Close To Position: {skip_orders_close_to_position}")
+        print(f"    • Flat orders written to limit_orders.json: {flat_orders_written}")
         print(f"    • Price files saved to: {prices_dir}")
 
-    # Main processing
+    # ==================================================================
+    # MAIN PROCESSING
+    # ==================================================================
     if inv_id:
         broker_cfg = usersdictionary.get(inv_id)
         if not broker_cfg:
@@ -10981,7 +11616,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 print(f"\n  {'='*10} ⏭️  SKIPPING DYNAMIC PRICE COLLECTION {'='*10}")
                 print(f"  Investor: {inv_id}")
                 print(f"  Reason: 'symbols_grid_strategy' is set to FALSE in settings.grid_prices_setup")
-                print(f"  Action: Set to \"1\" (or true) to enable automatic grid price generation")
                 print(f"  {'='*55}\n")
                 return stats
 
@@ -10995,15 +11629,21 @@ def symbols_dynamic_grid_prices(inv_id=None):
             else:
                 symbols_dict = config.get("symbols_dictionary", {})
                 if not symbols_dict:
-                    print(f" [{inv_id}] ⚠️ No symbols found (checked settings.grid_prices_setup.symbols and symbols_dictionary)")
+                    print(f" [{inv_id}] ⚠️ No symbols found")
                     return stats
                 print(f"\n  📋 Symbols loaded from legacy 'symbols_dictionary'")
 
             try:
-                (grid_levels, grid_multiplier, bid_order_type, ask_order_type,
-                 risk_reward_value, all_grid_c_rr_value, flag_same_direction,
-                 apply_m_c_flags, manage_grid_levels_count,
-                 enable_single_position, skip_orders_close_to_position) = get_grid_configuration(config)
+                (each_direction_levels_count, grid_multiplier, bid_order_type, ask_order_type,
+                 risk_reward_value, all_grid_c_rr_value, all_grid_m_helpers_rr_value,
+                 flag_same_direction, apply_m_c_flags, manage_each_direction_levels_count,
+                 enable_single_position, skip_orders_close_to_position,
+                 candle_tf_key, candle_tf_seconds, first_grid_distance_value,
+                 grid_amount_distance_value, first_grids_stoploss_lock,
+                 generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                 generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                 generate_new_orders_if_position_exists,
+                 generate_new_orders_if_position_profit_reward_is_at) = get_grid_configuration(config)
             except ValueError as e:
                 print(f" [{inv_id}] {e}")
                 return stats
@@ -11035,32 +11675,135 @@ def symbols_dynamic_grid_prices(inv_id=None):
 
             if not strategy_name:
                 print(f"   SKIPPED - No strategy name found from invested_with for {inv_id}")
-                print(f"     → Cannot create grid prices without strategy folder")
                 return stats
 
             prices_dir = inv_root / strategy_name
             prices_dir.mkdir(exist_ok=True)
             print(f"\n  📁 Prices will be saved to: {prices_dir}")
 
+            # ============================================================
+            # CANDLE-TIMEFRAME GRID CIRCLE CHECK
+            # ============================================================
+            print(f"\n  🕯️  CANDLE-TIMEFRAME GRID CIRCLE CHECK")
+            print(f"  {'─'*60}")
+
+            server_offset = detect_mt5_server_offset_hours()
+            stats["mt5_server_offset_hours"] = server_offset
+            print(f"  🌐 MT5 server offset: {server_offset:+.2f}h from UTC")
+            print(f"  🕒 Lagos time now: {lagos_now().strftime('%Y-%m-%d %H:%M:%S %Z')} (source: {_LAGOS_TZ_SOURCE})")
+
+            candle_open_lagos, candle_close_lagos = get_current_candle_window(
+                candle_tf_seconds, server_offset
+            )
+            print(f"  🕯️  Candle timeframe: {candle_tf_key} ({candle_tf_seconds}s)")
+            print(f"     • Candle OPEN  (Lagos): {candle_open_lagos.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"     • Candle CLOSE (Lagos): {candle_close_lagos.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+            stats["candle_circle"]["timeframe"] = candle_tf_key
+            stats["candle_circle"]["candle_open_lagos"] = candle_open_lagos.strftime('%Y-%m-%d %H:%M:%S %Z')
+            stats["candle_circle"]["candle_close_lagos"] = candle_close_lagos.strftime('%Y-%m-%d %H:%M:%S %Z')
+
+            recent_trade = get_most_recent_closed_trade(server_offset, lookback_days=7)
+            recent_trade_is_profit = None
+            recent_trade_within_current_candle = None
+
+            if recent_trade is None:
+                print(f"  📭 No recent closed trades found in MT5 history")
+                print(f"     → Proceeding with normal grid generation")
+            else:
+                print(f"  📜 Most recent closed trade:")
+                print(f"     • Ticket: {recent_trade['ticket']}")
+                print(f"     • Symbol: {recent_trade['symbol']}")
+                print(f"     • Net profit: ${recent_trade['profit']:.2f}")
+                print(f"     • Close time (Lagos): {recent_trade['close_time_lagos'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
+
+                recent_trade_is_profit = recent_trade['profit'] > 0
+                if recent_trade_is_profit:
+                    print(f"  ✅ Recent trade is a PROFIT (${recent_trade['profit']:.2f})")
+                    within = (candle_open_lagos <= recent_trade['close_time_lagos'] < candle_close_lagos)
+                    recent_trade_within_current_candle = within
+                    if within:
+                        print(f"     ⚠️ This profit CLOSED WITHIN the current {candle_tf_key} candle window")
+                        print(f"        → PURGE ALL pending orders AND close ALL open positions")
+                        print(f"        → SKIP grid generation this cycle")
+                        purge_stats = purge_all_orders_and_positions_for_investor(inv_id)
+                        stats["candle_circle"]["recent_trade_profit"] = recent_trade['profit']
+                        stats["candle_circle"]["recent_trade_close_lagos"] = recent_trade['close_time_lagos'].strftime('%Y-%m-%d %H:%M:%S %Z')
+                        stats["candle_circle"]["recent_trade_is_profit"] = True
+                        stats["candle_circle"]["recent_trade_within_current_candle"] = True
+                        stats["candle_circle"]["purged"] = True
+                        stats["candle_circle"]["purge_stats"] = purge_stats
+                        stats["candle_circle"]["grid_skipped"] = True
+                        stats["signals_generated"] = False
+                        print(f"\n  ⏭️  GRID GENERATION SKIPPED (profit taken within current candle)")
+                        return stats
+                    else:
+                        print(f"     ✅ Profit was taken BEFORE the current candle window")
+                        print(f"        → Proceeding with normal grid generation")
+                else:
+                    print(f"  ⚠️ Recent trade is a LOSS (${recent_trade['profit']:.2f})")
+                    print(f"     → Proceeding with normal grid generation")
+
+            stats["candle_circle"]["recent_trade_profit"] = recent_trade['profit'] if recent_trade else None
+            stats["candle_circle"]["recent_trade_close_lagos"] = (
+                recent_trade['close_time_lagos'].strftime('%Y-%m-%d %H:%M:%S %Z') if recent_trade else None
+            )
+            stats["candle_circle"]["recent_trade_is_profit"] = recent_trade_is_profit
+            stats["candle_circle"]["recent_trade_within_current_candle"] = recent_trade_within_current_candle
+
+            # ============================================================
+            # NORMAL GRID GENERATION -> FLAT limit_orders.json
+            # ============================================================
             total_categories = len(symbols_dict)
             total_symbols = 0
             successful_symbols = 0
             failed_symbols = 0
             category_results = {}
-            all_category_price_data = {}
             all_symbols_price_data = {}
             resolution_cache = {}
+            flat_orders = []
+            locked_orders_total = 0
+            pos_anchored_interlocks_total = 0
+            tier1_gen = 0
+            tier1_skip = 0
+            tier2_gen = 0
+            tier2_skip = 0
+            tier3_gen = 0
+            tier3_skip = 0
+            tier2_profit_gate_blocked = 0
+            tier3_profit_gate_blocked = 0
+            tier2_profit_gate_bypassed_in_loss = 0
+            tier3_profit_gate_bypassed_in_loss = 0
+            generated_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            pattern_desc = []
-            for i in range(grid_levels):
-                pattern_desc.append(f"{i * grid_multiplier:03d}")
-            print(f"\n  🎯 DYNAMIC PATTERN: Levels will end in: {', '.join(pattern_desc)}")
+            print(f"\n  🎯 GRID SPACING MODEL: TWO-PHASE MONEY-DISTANCE")
+            print(f"     PHASE 1 — FOUNDATION (anchor placement only):")
+            if first_grids_stoploss_lock:
+                print(f"       • LOCK MODE: first_grid_amount_distance = TOTAL gap between anchors")
+                print(f"       • Each side placed at HALF that distance from its reference price")
+                print(f"       • NO widening. NO per-side min-stop enforcement.")
+                print(f"       • SLs are interlocked: sell SL = buy entry, buy SL = sell entry")
+            else:
+                print(f"       • NORMAL MODE: each anchor placed first_grid_amount_distance from price")
+                print(f"       • Broker min-stop enforced; anchors widen if needed")
+            print(f"     • THREE-TIER GATE:")
+            print(f"       TIER 1: SL-locked pair + NO position → "
+                  f"{generate_new_orders_if_stoploss_lock_order_and_no_position_exists}")
+            print(f"       TIER 2: SL-locked pair + position    → "
+                  f"{generate_new_orders_if_stoploss_lock_order_and_position_exists}")
+            print(f"       TIER 3: else block (position gate)   → "
+                  f"{generate_new_orders_if_position_exists}")
+            print(f"     • POSITION PROFIT-REWARD GATE: reward ratio must be "
+                  f">= 1:{generate_new_orders_if_position_profit_reward_is_at} "
+                  f"WHEN position is in profit/break-even. "
+                  f"If position is IN LOSS → gate bypassed (interlock handles it)")
+            print(f"     • POSITION-ANCHORED INTERLOCK: when a position exists IN LOSS, "
+                  f"its SL→opposite entry, its entry→opposite SL")
 
             for category, symbols in symbols_dict.items():
                 print(f"\n  📂 Category: {category.upper()} ({len(symbols)} symbols)")
                 category_symbols_success = 0
                 category_symbols_failed = 0
-                category_price_data = {}
 
                 for raw_symbol in symbols:
                     total_symbols += 1
@@ -11076,158 +11819,485 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         category_symbols_failed += 1
                         continue
 
+                    # ----------------------------------------------------------
+                    # THREE-TIER GATE + POSITION PROFIT-REWARD GATE
+                    # ----------------------------------------------------------
+                    skip_this_symbol = False
+                    decision_made = False
+
+                    lock_pair = find_existing_sl_locked_pair_for_symbol(normalized_symbol) if first_grids_stoploss_lock else None
+                    lock_pair_price_inside = False
+                    if lock_pair is not None:
+                        s_entry = lock_pair["sell_entry"]
+                        b_entry = lock_pair["buy_entry"]
+                        lock_pair_price_inside = (current_bid > s_entry) and (current_ask < b_entry)
+
+                    if lock_pair is not None and lock_pair_price_inside:
+                        live_positions = find_live_positions_for_symbol(normalized_symbol)
+
+                        print(f"\n        🔒 SL-LOCKED PAIR DETECTED for {normalized_symbol}:")
+                        print(f"          • sell_stop #{lock_pair['sell_ticket']}: "
+                              f"entry={s_entry:.{symbol_info.digits}f} SL={lock_pair['sell_sl']:.{symbol_info.digits}f}")
+                        print(f"          • buy_stop  #{lock_pair['buy_ticket']}: "
+                              f"entry={b_entry:.{symbol_info.digits}f} SL={lock_pair['buy_sl']:.{symbol_info.digits}f}")
+                        print(f"          • current BID={current_bid:.{symbol_info.digits}f}, "
+                              f"ASK={current_ask:.{symbol_info.digits}f}")
+                        print(f"          • position exists? {bool(live_positions)} ({len(live_positions)} position(s))")
+
+                        if not live_positions:
+                            print(f"        ▶ [TIER 1] SL-lock + NO position")
+                            if generate_new_orders_if_stoploss_lock_order_and_no_position_exists:
+                                print(f"        🔄 [TIER 1] config=TRUE → GENERATE fresh orders")
+                                tier1_gen += 1
+                                decision_made = True
+                            else:
+                                print(f"        ↩️  [TIER 1] config=FALSE → fall through to TIER 3")
+                        else:
+                            # === TIER 2: check the profit gate BEFORE its own config ===
+                            print(f"        ▶ [TIER 2] SL-lock + position exists")
+                            profit_gate_ok = True
+                            if generate_new_orders_if_position_profit_reward_is_at is not None:
+                                chosen_pos_t2 = pick_latest_position(live_positions)
+                                if chosen_pos_t2 is not None:
+                                    gate_eval = evaluate_position_profit_gate(
+                                        symbol_info, chosen_pos_t2, account_currency,
+                                        generate_new_orders_if_position_profit_reward_is_at
+                                    )
+                                    print(f"        📊 [TIER 2] POSITION PROFIT CHECK:")
+                                    print(f"           • ticket #{getattr(chosen_pos_t2, 'ticket', '?')}")
+                                    print(f"           • floating profit (USD): ${gate_eval['profit_usd']:.4f}")
+                                    print(f"           • position risk (USD):   "
+                                          f"${gate_eval['risk_usd']:.4f}" if gate_eval['risk_usd'] is not None else "n/a")
+                                    print(f"           • current reward ratio:  "
+                                          f"1:{gate_eval['current_rr']:.4f}" if gate_eval['current_rr'] is not None else "n/a")
+                                    print(f"           • target reward ratio:   1:{gate_eval['target_rr']}")
+                                    print(f"           • in profit?             {gate_eval['in_profit']}")
+                                    print(f"           • in loss?               {gate_eval['in_loss']}")
+                                    print(f"           • gate applied?          {gate_eval['gate_applied']}")
+                                    print(f"           • gate passed?           {gate_eval['gate_passed']}")
+
+                                    if gate_eval['in_loss']:
+                                        print(f"        📌 [TIER 2] Position is IN LOSS → "
+                                              f"PROFIT GATE BYPASSED (interlock will handle)")
+                                        tier2_profit_gate_bypassed_in_loss += 1
+
+                                    profit_gate_ok = gate_eval['gate_passed']
+                                else:
+                                    print(f"        ⚠️  [TIER 2] Position gate: no position to evaluate "
+                                          f"— allowing (unexpected)")
+                            else:
+                                print(f"        ℹ️  [TIER 2] Profit-reward gate DISABLED (config not set) "
+                                      f"— proceeding to TIER 2 decision")
+
+                            if not profit_gate_ok:
+                                print(f"        ⏭️  [TIER 2] PROFIT GATE BLOCKED → fall through to TIER 3")
+                                tier2_profit_gate_blocked += 1
+                                # falls to TIER 3
+                            elif generate_new_orders_if_stoploss_lock_order_and_position_exists:
+                                print(f"        🔄 [TIER 2] config=TRUE → GENERATE fresh orders")
+                                tier2_gen += 1
+                                decision_made = True
+                            else:
+                                print(f"        ↩️  [TIER 2] config=FALSE → fall through to TIER 3")
+                    else:
+                        if lock_pair is not None:
+                            print(f"\n        ℹ️  SL-locked pair exists for {normalized_symbol} but price is OUTSIDE anchors "
+                                  f"— TIER 1/TIER 2 do not apply")
+                        else:
+                            print(f"\n        ℹ️  No existing SL-locked pair for {normalized_symbol} "
+                                  f"— TIER 1/TIER 2 do not apply")
+
+                    if not decision_made:
+                        live_positions_t3 = find_live_positions_for_symbol(normalized_symbol)
+                        print(f"        ▶ [TIER 3] else block (position gate)")
+                        if live_positions_t3:
+                            print(f"          • position exists ({len(live_positions_t3)} position(s))")
+
+                            # === TIER 3: check the profit gate BEFORE its own config ===
+                            profit_gate_ok_t3 = True
+                            if generate_new_orders_if_position_profit_reward_is_at is not None:
+                                chosen_pos_t3 = pick_latest_position(live_positions_t3)
+                                if chosen_pos_t3 is not None:
+                                    gate_eval_t3 = evaluate_position_profit_gate(
+                                        symbol_info, chosen_pos_t3, account_currency,
+                                        generate_new_orders_if_position_profit_reward_is_at
+                                    )
+                                    print(f"        📊 [TIER 3] POSITION PROFIT CHECK:")
+                                    print(f"           • ticket #{getattr(chosen_pos_t3, 'ticket', '?')}")
+                                    print(f"           • floating profit (USD): ${gate_eval_t3['profit_usd']:.4f}")
+                                    print(f"           • position risk (USD):   "
+                                          f"${gate_eval_t3['risk_usd']:.4f}" if gate_eval_t3['risk_usd'] is not None else "n/a")
+                                    print(f"           • current reward ratio:  "
+                                          f"1:{gate_eval_t3['current_rr']:.4f}" if gate_eval_t3['current_rr'] is not None else "n/a")
+                                    print(f"           • target reward ratio:   1:{gate_eval_t3['target_rr']}")
+                                    print(f"           • in profit?             {gate_eval_t3['in_profit']}")
+                                    print(f"           • in loss?               {gate_eval_t3['in_loss']}")
+                                    print(f"           • gate applied?          {gate_eval_t3['gate_applied']}")
+                                    print(f"           • gate passed?           {gate_eval_t3['gate_passed']}")
+
+                                    if gate_eval_t3['in_loss']:
+                                        print(f"        📌 [TIER 3] Position is IN LOSS → "
+                                              f"PROFIT GATE BYPASSED (interlock will handle)")
+                                        tier3_profit_gate_bypassed_in_loss += 1
+
+                                    profit_gate_ok_t3 = gate_eval_t3['gate_passed']
+                                else:
+                                    print(f"        ⚠️  [TIER 3] Position gate: no position to evaluate "
+                                          f"— allowing (unexpected)")
+                            else:
+                                print(f"        ℹ️  [TIER 3] Profit-reward gate DISABLED (config not set) "
+                                      f"— proceeding to TIER 3 decision")
+
+                            if not profit_gate_ok_t3:
+                                print(f"        ⏭️  [TIER 3] PROFIT GATE BLOCKED → SKIP generation")
+                                skip_this_symbol = True
+                                tier3_profit_gate_blocked += 1
+                                successful_symbols += 1
+                                category_symbols_success += 1
+                            elif generate_new_orders_if_position_exists:
+                                print(f"        🔄 [TIER 3] config=TRUE → GENERATE")
+                                tier3_gen += 1
+                            else:
+                                print(f"        ⏭️  [TIER 3] config=FALSE → SKIP generation")
+                                skip_this_symbol = True
+                                tier3_skip += 1
+                                successful_symbols += 1
+                                category_symbols_success += 1
+                        else:
+                            print(f"          • no position → GENERATE normally (no gate applies)")
+                            tier3_gen += 1
+
+                    if skip_this_symbol:
+                        continue
+
                     digits = symbol_info.digits
+                    min_volume, volume_step = get_min_volume(symbol_info)
 
-                    print(f"\n      📊 Generating pattern-based levels (multiplier={grid_multiplier}, {grid_levels} levels):")
-                    bid_pattern_levels = generate_pattern_levels(current_bid, 'below', grid_levels, grid_multiplier, digits)
-                    ask_pattern_levels = generate_pattern_levels(current_ask, 'above', grid_levels, grid_multiplier, digits)
+                    min_stop_price_distance = get_min_stop_distance_price(symbol_info)
+                    min_stop_usd_at_min_vol = None
+                    if min_stop_price_distance > 0:
+                        min_stop_usd_at_min_vol = price_distance_to_usd(
+                            symbol_info, min_stop_price_distance, min_volume, account_currency
+                        )
+                    print(f"        📏 Broker min stop distance (informational only in LOCK MODE): "
+                          f"{min_stop_price_distance:.{digits}f} price"
+                          + (f" (~{min_stop_usd_at_min_vol:.4f} {account_currency} at min_vol {min_volume})"
+                             if min_stop_usd_at_min_vol is not None else ""))
 
-                    if not bid_pattern_levels or not ask_pattern_levels:
-                        print(f"        ⚠️  Could not generate pattern levels for {normalized_symbol}")
+                    # ----------------------------------------------------------
+                    # POSITION-ANCHORED INTERLOCK
+                    # ----------------------------------------------------------
+                    position_anchor_for_ladder = None
+                    live_positions_now = find_live_positions_for_symbol(normalized_symbol)
+                    if live_positions_now:
+                        chosen_pos = pick_latest_position(live_positions_now)
+                        if chosen_pos is not None:
+                            pos_profit = float(getattr(chosen_pos, 'profit', 0.0) or 0.0)
+                            pos_sl = float(getattr(chosen_pos, 'sl', 0.0) or 0.0)
+                            pos_entry = float(getattr(chosen_pos, 'price_open', 0.0) or 0.0)
+                            pos_type = getattr(chosen_pos, 'type', None)
+                            pos_is_buy = (pos_type == mt5.ORDER_TYPE_BUY)
+                            print(f"\n        📌 EXISTING POSITION for {normalized_symbol}:")
+                            print(f"          • ticket #{getattr(chosen_pos,'ticket','?')}")
+                            print(f"          • direction: {'BUY' if pos_is_buy else 'SELL'}")
+                            print(f"          • entry: {pos_entry:.{digits}f}")
+                            print(f"          • SL: {pos_sl:.{digits}f}")
+                            print(f"          • floating profit (USD): ${pos_profit:.4f}")
+                            if pos_profit < 0 and pos_sl > 0:
+                                print(f"        📌 Position is IN LOSS → anchoring opposite side to it")
+                                position_anchor_for_ladder = {
+                                    "is_buy": pos_is_buy,
+                                    "entry": pos_entry,
+                                    "sl": pos_sl,
+                                }
+                                pos_anchored_interlocks_total += 1
+                            elif pos_profit < 0 and pos_sl <= 0:
+                                print(f"        ⚠️  Position is IN LOSS but has NO SL set "
+                                      f"— cannot anchor (generating normally)")
+                            else:
+                                print(f"        ℹ️  Position is in PROFIT or break-even → NOT anchoring "
+                                      f"(generating normally)")
+
+                    print(f"\n      📊 Generating TWO-PHASE ladders "
+                          f"(grid_amount_distance={grid_amount_distance_value}, "
+                          f"first_grid_amount_distance={first_grid_distance_value}, "
+                          f"stoploss_lock={first_grids_stoploss_lock}, "
+                          f"{each_direction_levels_count} levels per side):")
+                    print(f"        Reference: BID={current_bid:.{digits}f}, ASK={current_ask:.{digits}f}")
+
+                    if first_grids_stoploss_lock and first_grid_distance_value > 0:
+                        anchor_gap_money = first_grid_distance_value / 2.0
+                        print(f"        🔒 LOCK MODE: per-side anchor gap = "
+                              f"{anchor_gap_money} money (= {first_grid_distance_value} / 2)")
+                    else:
+                        anchor_gap_money = first_grid_distance_value
+
+                    bid_levels, bid_step_price, bid_first_price = generate_validated_sell_ladder(
+                        current_bid=current_bid,
+                        num_levels=each_direction_levels_count,
+                        first_grid_money_distance=anchor_gap_money,
+                        grid_money_step=grid_amount_distance_value,
+                        symbol_info=symbol_info,
+                        min_volume=min_volume,
+                        digits=digits,
+                        min_stop_price_distance=min_stop_price_distance,
+                        lock_mode=first_grids_stoploss_lock,
+                    )
+
+                    ask_levels, ask_step_price, ask_first_price = generate_validated_buy_ladder(
+                        current_ask=current_ask,
+                        num_levels=each_direction_levels_count,
+                        first_grid_money_distance=anchor_gap_money,
+                        grid_money_step=grid_amount_distance_value,
+                        symbol_info=symbol_info,
+                        min_volume=min_volume,
+                        digits=digits,
+                        min_stop_price_distance=min_stop_price_distance,
+                        lock_mode=first_grids_stoploss_lock,
+                    )
+
+                    if not bid_levels and not ask_levels:
+                        print(f"        ❌ No valid grid levels on either side for {normalized_symbol}")
                         failed_symbols += 1
                         category_symbols_failed += 1
                         continue
 
-                    if bid_pattern_levels:
-                        print(f"        SELL levels below BID {current_bid:.{digits}f}:")
-                        for i, level in enumerate(bid_pattern_levels[:5]):
-                            if level >= 1000:
-                                print(f"          {i+1}. {level:.{digits if digits < 3 else 2}f}")
-                            else:
-                                print(f"          {i+1}. {level:.{digits}f}")
+                    if bid_step_price is not None and ask_step_price is not None:
+                        grid_step_price_distance = (bid_step_price + ask_step_price) / 2.0
+                    elif bid_step_price is not None:
+                        grid_step_price_distance = bid_step_price
+                    elif ask_step_price is not None:
+                        grid_step_price_distance = ask_step_price
+                    else:
+                        grid_step_price_distance = 0.0
 
-                    if ask_pattern_levels:
-                        print(f"        BUY levels above ASK {current_ask:.{digits}f}:")
-                        for i, level in enumerate(ask_pattern_levels[:5]):
-                            if level >= 1000:
-                                print(f"          {i+1}. {level:.{digits if digits < 3 else 2}f}")
-                            else:
-                                print(f"          {i+1}. {level:.{digits}f}")
+                    print(f"        💵 Money→Price conversions @ min vol {min_volume}:")
+                    print(f"          • PHASE 2 grid_amount_distance={grid_amount_distance_value} → "
+                          f"price step (and SL/TP base)={grid_step_price_distance:.{digits}f}")
 
-                    min_volume, volume_step = get_min_volume(symbol_info)
+                    if bid_levels and ask_levels and first_grids_stoploss_lock:
+                        actual_gap_price = ask_levels[0] - bid_levels[0]
+                        actual_gap_money = price_distance_to_money(
+                            symbol_info, actual_gap_price, min_volume
+                        )
+                        gap_str = f"{actual_gap_money:.4f}" if actual_gap_money is not None else "n/a"
+                        print(f"          • LOCK GAP CHECK: sell_m={bid_levels[0]:.{digits}f}, "
+                              f"buy_m={ask_levels[0]:.{digits}f}, gap={actual_gap_price:.{digits}f} price "
+                              f"= {gap_str} money (target {first_grid_distance_value})")
 
-                    grid_bid_levels, grid_ask_levels = create_grid_orders_structure(
-                        bid_pattern_levels, ask_pattern_levels, bid_order_type, ask_order_type,
-                        risk_reward_value, all_grid_c_rr_value, digits, min_volume, volume_step,
-                        symbol_info, account_currency, grid_multiplier, current_bid, current_ask,
-                        apply_m_c_flags
+                    if bid_levels:
+                        print(f"        SELL ladder below BID {current_bid:.{digits}f}:")
+                        for i, level in enumerate(bid_levels[:6]):
+                            tag = "grid_m" if i == 0 else (
+                                "grid_mh" if i <= (int(risk_reward_value) // 2) else "grid_c"
+                            )
+                            d_usd = price_distance_to_usd(
+                                symbol_info, current_bid - level, min_volume, account_currency
+                            )
+                            d_usd_str = f"{d_usd:.4f}" if d_usd is not None else "n/a"
+                            print(f"          {i+1}. {level:.{digits}f}  [{tag}]  "
+                                  f"(dist from bid: {current_bid - level:.{digits}f} price = {d_usd_str} USD)")
+
+                    if ask_levels:
+                        print(f"        BUY ladder above ASK {current_ask:.{digits}f}:")
+                        for i, level in enumerate(ask_levels[:6]):
+                            tag = "grid_m" if i == 0 else (
+                                "grid_mh" if i <= (int(risk_reward_value) // 2) else "grid_c"
+                            )
+                            d_usd = price_distance_to_usd(
+                                symbol_info, level - current_ask, min_volume, account_currency
+                            )
+                            d_usd_str = f"{d_usd:.4f}" if d_usd is not None else "n/a"
+                            print(f"          {i+1}. {level:.{digits}f}  [{tag}]  "
+                                  f"(dist from ask: {level - current_ask:.{digits}f} price = {d_usd_str} USD)")
+
+                    safe_bid_levels = bid_levels if bid_levels else []
+                    safe_ask_levels = ask_levels if ask_levels else []
+
+                    grid_bid_levels, grid_ask_levels = create_ladder_orders(
+                        safe_bid_levels, safe_ask_levels,
+                        bid_order_type, ask_order_type,
+                        risk_reward_value, all_grid_c_rr_value, all_grid_m_helpers_rr_value,
+                        digits, min_volume,
+                        symbol_info, account_currency,
+                        grid_step_price_distance,
+                        apply_m_c_flags,
+                        first_grids_stoploss_lock=first_grids_stoploss_lock,
+                        first_grid_money_distance=first_grid_distance_value,
+                        position_anchor=position_anchor_for_ladder,
                     )
 
-                    # Add counters
-                    grid_bid_levels, grid_ask_levels = add_order_counters_to_grid_levels(
-                        grid_bid_levels, grid_ask_levels, digits, apply_m_c_flags
-                    )
+                    for lvl in (grid_bid_levels + grid_ask_levels):
+                        if lvl.get("sl_locked"):
+                            locked_orders_total += 1
 
-                    price_data = {
+                    current_prices = {
+                        "bid": current_bid,
+                        "ask": current_ask,
+                        "mid": current_price,
+                        "timestamp": generated_at_str,
+                    }
+
+                    for lvl in grid_bid_levels:
+                        rec = build_flat_record(
+                            lvl, normalized_symbol, category, digits, current_prices,
+                            "bid", stats["grid_configuration"],
+                            generated_at_str, strategy_name,
+                            symbol_info, min_volume, account_currency,
+                        )
+                        flat_orders.append(rec)
+
+                    for lvl in grid_ask_levels:
+                        rec = build_flat_record(
+                            lvl, normalized_symbol, category, digits, current_prices,
+                            "ask", stats["grid_configuration"],
+                            generated_at_str, strategy_name,
+                            symbol_info, min_volume, account_currency,
+                        )
+                        flat_orders.append(rec)
+
+                    all_symbols_price_data[normalized_symbol] = {
                         "original_symbol": raw_symbol,
                         "symbol": normalized_symbol,
                         "digits": digits,
                         "tick_size": symbol_info.trade_tick_size,
                         "tick_value": symbol_info.trade_tick_value,
                         "contract_size": symbol_info.trade_contract_size,
-                        "account_type": "",
+                        "broker_min_stop_distance_price": round(min_stop_price_distance, digits),
+                        "broker_min_stop_distance_usd_at_min_vol": (
+                            round(min_stop_usd_at_min_vol, 6) if min_stop_usd_at_min_vol is not None else None
+                        ),
                         "account_login": int(broker_cfg['LOGIN_ID']),
                         "account_server": acc_info.server,
                         "account_balance": account_balance,
                         "account_currency": account_currency,
                         "category": category,
-                        "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "current_prices": {
-                            "bid": current_bid,
-                            "ask": current_ask,
-                            "mid": current_price,
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        },
+                        "collected_at": generated_at_str,
+                        "current_prices": current_prices,
+                        "position_anchor_applied": bool(position_anchor_for_ladder),
                         "generated_levels": {
-                            "levels_below_bid": [round(price, digits) for price in bid_pattern_levels],
-                            "levels_above_ask": [round(price, digits) for price in ask_pattern_levels],
-                            "generation_method": f"dynamic_pattern_multiplier_{grid_multiplier}",
-                            "levels_requested": grid_levels,
-                            "multiplier": grid_multiplier,
-                            "patterns": pattern_desc,
-                            "price_type": "integer_based" if bid_pattern_levels and bid_pattern_levels[0] >= 1000 else "fractional_based"
+                            "levels_below_bid": [round(p, digits) for p in safe_bid_levels],
+                            "levels_above_ask": [round(p, digits) for p in safe_ask_levels],
+                            "generation_method": "two_phase_money_distance",
+                            "levels_requested": each_direction_levels_count,
+                            "levels_emitted_sell": len(safe_bid_levels),
+                            "levels_emitted_buy": len(safe_ask_levels),
+                            "grid_amount_distance": grid_amount_distance_value,
+                            "first_grid_amount_distance": first_grid_distance_value,
+                            "first_grids_stoploss_lock": first_grids_stoploss_lock,
+                            "grid_step_price_distance": round(grid_step_price_distance, digits),
+                            "first_grid_bid_price_distance": round(bid_first_price, digits) if bid_first_price else None,
+                            "first_grid_ask_price_distance": round(ask_first_price, digits) if ask_first_price else None,
+                            "validation_boundary_sell": current_bid,
+                            "validation_boundary_buy": current_ask,
                         },
-                        "grid_orders": {
-                            "bid_levels": grid_bid_levels,
-                            "ask_levels": grid_ask_levels,
-                            "configuration": {
-                                "bid_order_type": bid_order_type,
-                                "ask_order_type": ask_order_type,
-                                "closest_level_risk_reward": risk_reward_value,
-                                "all_grid_c_risk_reward": all_grid_c_rr_value,
-                                "flag_same_direction_grids_with_m_and_c": flag_same_direction,
-                                "apply_m_c_flags": apply_m_c_flags,
-                                "min_volume": min_volume,
-                                "volume_step": volume_step,
-                                "account_currency": account_currency,
-                                "source": "accountmanagement.json & live broker (min volume only)",
-                                "levels": grid_levels,
-                                "manage_grid_levels_count": manage_grid_levels_count,
-                                "multiplier": grid_multiplier,
-                                "enable_single_position_and_pending": enable_single_position,
-                                "skip_orders_close_to_position": skip_orders_close_to_position
-                            }
-                        }
                     }
-
-                    category_price_data[normalized_symbol] = price_data
-                    all_symbols_price_data[normalized_symbol] = price_data
-                    save_individual_symbol_price(prices_dir, normalized_symbol, price_data)
 
                     successful_symbols += 1
                     category_symbols_success += 1
 
-                if category_price_data:
-                    save_category_summary(
-                        prices_dir, category, symbols, category_price_data,
-                        category_symbols_success, category_symbols_failed,
-                        int(broker_cfg['LOGIN_ID']), bid_order_type, ask_order_type,
-                        risk_reward_value, all_grid_c_rr_value, grid_levels, grid_multiplier,
-                        manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                        enable_single_position, skip_orders_close_to_position
-                    )
-
+                if category_symbols_success > 0:
                     category_results[category] = {
                         "total": len(symbols),
                         "success": category_symbols_success,
-                        "failed": category_symbols_failed
+                        "failed": category_symbols_failed,
                     }
 
-                    print(f"    📁 Saved category file: {category}_prices.json ({category_symbols_success}/{len(symbols)} symbols)")
-                    all_category_price_data.update(category_price_data)
+            # ============================================================
+            # WRITE THE FLAT limit_orders.json DIRECTLY
+            # ============================================================
+            if flat_orders:
+                pending_dir = prices_dir / "pending_orders"
+                pending_dir.mkdir(exist_ok=True)
+                limit_orders_path = pending_dir / "limit_orders.json"
+                with open(limit_orders_path, 'w', encoding='utf-8') as f:
+                    json.dump(flat_orders, f, indent=4)
 
-            if successful_symbols > 0:
-                save_all_symbols_prices(
+                stats["flat_orders_written"] = len(flat_orders)
+                stats["signals_generated"] = True
+
+                main_count = sum(1 for o in flat_orders if o.get("grid_m"))
+                helper_count = sum(1 for o in flat_orders if o.get("grid_mh") and not o.get("grid_m"))
+                child_count = sum(1 for o in flat_orders if o.get("grid_c") and not o.get("grid_mh") and not o.get("grid_m"))
+                buy_stop_count = sum(1 for o in flat_orders if "buy" in str(o.get("order_type", "")).lower())
+                sell_stop_count = sum(1 for o in flat_orders if "sell" in str(o.get("order_type", "")).lower())
+                pos_anchored_count = sum(1 for o in flat_orders if o.get("position_anchored"))
+
+                print(f"\n      💾 WROTE FLAT limit_orders.json: {limit_orders_path}")
+                print(f"        • Total flat orders: {len(flat_orders)}")
+                print(f"        • Buy_stop orders: {buy_stop_count}")
+                print(f"        • Sell_stop orders: {sell_stop_count}")
+                print(f"        • grid_m (main) orders: {main_count}")
+                print(f"        • grid_mh (helper) orders: {helper_count}")
+                print(f"        • grid_c (child) orders: {child_count}")
+                print(f"        • SL-locked (interlocked) orders: {locked_orders_total}")
+                print(f"        • Position-anchored grid_m orders: {pos_anchored_count}")
+                print(f"        • [Tier 1] GEN: {tier1_gen} | SKIP: {tier1_skip}")
+                print(f"        • [Tier 2] GEN: {tier2_gen} | SKIP: {tier2_skip} | "
+                      f"PROFIT-GATE-BLOCKED: {tier2_profit_gate_blocked} | "
+                      f"PROFIT-GATE-BYPASSED (in loss): {tier2_profit_gate_bypassed_in_loss}")
+                print(f"        • [Tier 3] GEN: {tier3_gen} | SKIP: {tier3_skip} | "
+                      f"PROFIT-GATE-BLOCKED: {tier3_profit_gate_blocked} | "
+                      f"PROFIT-GATE-BYPASSED (in loss): {tier3_profit_gate_bypassed_in_loss}")
+
+                save_symbols_prices_snapshot(
                     prices_dir, all_symbols_price_data, acc_info,
-                    bid_order_type, ask_order_type, risk_reward_value, all_grid_c_rr_value,
-                    total_categories, total_symbols, successful_symbols, failed_symbols,
-                    category_results, grid_levels, grid_multiplier,
-                    manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                    enable_single_position, skip_orders_close_to_position
+                    stats["grid_configuration"], candle_tf_key, candle_tf_seconds,
+                    first_grid_distance_value, grid_amount_distance_value,
+                    first_grids_stoploss_lock,
+                    generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                    generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                    generate_new_orders_if_position_exists,
+                    generate_new_orders_if_position_profit_reward_is_at,
                 )
-
-                signals_data, signals_file = filter_signals_with_counters(
-                    prices_dir, all_category_price_data, symbols_dict,
-                    bid_order_type, ask_order_type, risk_reward_value, all_grid_c_rr_value,
-                    account_balance, account_currency, grid_levels, grid_multiplier,
-                    manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                    enable_single_position, skip_orders_close_to_position
-                )
-
-                rearrange_orders_with_counters(signals_file, apply_m_c_flags)
 
                 print_investor_summary(
                     inv_id, total_categories, total_symbols, successful_symbols,
                     failed_symbols, bid_order_type, ask_order_type, risk_reward_value,
-                    all_grid_c_rr_value, prices_dir, grid_levels, grid_multiplier,
-                    manage_grid_levels_count, flag_same_direction, apply_m_c_flags,
-                    enable_single_position, skip_orders_close_to_position
+                    all_grid_c_rr_value, all_grid_m_helpers_rr_value,
+                    prices_dir, each_direction_levels_count, grid_multiplier,
+                    manage_each_direction_levels_count, flag_same_direction, apply_m_c_flags,
+                    enable_single_position, skip_orders_close_to_position,
+                    candle_tf_key, candle_tf_seconds, first_grid_distance_value,
+                    grid_amount_distance_value, len(flat_orders),
+                    first_grids_stoploss_lock, locked_orders_total,
+                    generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                    generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                    generate_new_orders_if_position_exists,
+                    generate_new_orders_if_position_profit_reward_is_at,
+                    tier1_gen, tier1_skip,
+                    tier2_gen, tier2_skip,
+                    tier3_gen, tier3_skip,
+                    tier2_profit_gate_blocked,
+                    tier3_profit_gate_blocked,
+                    tier2_profit_gate_bypassed_in_loss,
+                    tier3_profit_gate_bypassed_in_loss,
+                    pos_anchored_interlocks_total,
                 )
+            else:
+                pending_dir = prices_dir / "pending_orders"
+                pending_dir.mkdir(exist_ok=True)
+                limit_orders_path = pending_dir / "limit_orders.json"
+                with open(limit_orders_path, 'w', encoding='utf-8') as f:
+                    json.dump([], f, indent=4)
+                print(f"\n      💾 WROTE EMPTY limit_orders.json (no valid orders generated)")
 
-                stats["total_symbols"] = total_symbols
-                stats["successful_symbols"] = successful_symbols
-                stats["failed_symbols"] = failed_symbols
-                stats["total_categories"] = total_categories
+            stats["total_symbols"] = total_symbols
+            stats["successful_symbols"] = successful_symbols
+            stats["failed_symbols"] = failed_symbols
+            stats["total_categories"] = total_categories
+            stats["locked_orders_written"] = locked_orders_total
+            stats["tier1_lock_no_pos_generate"] = tier1_gen
+            stats["tier1_lock_no_pos_skip"] = tier1_skip
+            stats["tier2_lock_pos_generate"] = tier2_gen
+            stats["tier2_lock_pos_skip"] = tier2_skip
+            stats["tier3_position_generate"] = tier3_gen
+            stats["tier3_position_skip"] = tier3_skip
+            stats["tier2_profit_gate_blocked"] = tier2_profit_gate_blocked
+            stats["tier3_profit_gate_blocked"] = tier3_profit_gate_blocked
+            stats["tier2_profit_gate_bypassed_in_loss"] = tier2_profit_gate_bypassed_in_loss
+            stats["tier3_profit_gate_bypassed_in_loss"] = tier3_profit_gate_bypassed_in_loss
+            stats["position_anchored_interlocks"] = pos_anchored_interlocks_total
 
         except Exception as e:
             print(f" [{inv_id}]  Error: {e}")
@@ -11236,7 +12306,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
 
     return stats
 
-def manage_grid_levels_in_json(inv_id=None):
+def manage_each_direction_levels_count_in_json(inv_id=None):
     """
     Standalone function that filters valid STEPUP and STEPDOWN orders from limit_orders.json,
     identifying the leaders in each group and keeping only the configured number of orders per side.
@@ -11245,7 +12315,7 @@ def manage_grid_levels_in_json(inv_id=None):
     STEPDOWN orders: buy_limit & sell_stop - valid if entry price is BELOW current BID
 
     Reads from accountmanagement.json:
-        settings.grid_prices_setup.manage_grid_levels_count   (string OR number)
+        settings.grid_prices_setup.manage_each_direction_levels_count   (string OR number)
 
     Count rules:
         - If missing/invalid -> SKIP this investor (do not default)
@@ -11348,8 +12418,8 @@ def manage_grid_levels_in_json(inv_id=None):
         # ========== LOAD CONFIGURATION ==========
         def load_config():
             """
-            Load accountmanagement.json and read manage_grid_levels_count from
-            settings.grid_prices_setup.manage_grid_levels_count.
+            Load accountmanagement.json and read manage_each_direction_levels_count from
+            settings.grid_prices_setup.manage_each_direction_levels_count.
             Returns int or None (None means skip investor).
             """
             try:
@@ -11358,15 +12428,15 @@ def manage_grid_levels_in_json(inv_id=None):
 
                 settings = config.get("settings", {})
                 grid_setup = settings.get("grid_prices_setup", {})
-                raw_count = grid_setup.get("manage_grid_levels_count", None)
+                raw_count = grid_setup.get("manage_each_direction_levels_count", None)
 
                 if raw_count is None:
-                    print(f"  ⏭️  'manage_grid_levels_count' missing in settings.grid_prices_setup - skipping")
+                    print(f"  ⏭️  'manage_each_direction_levels_count' missing in settings.grid_prices_setup - skipping")
                     return None
 
                 count = _to_int(raw_count)
                 if count is None:
-                    print(f"  ⏭️  'manage_grid_levels_count' invalid ({raw_count!r}) - skipping")
+                    print(f"  ⏭️  'manage_each_direction_levels_count' invalid ({raw_count!r}) - skipping")
                     return None
                 return count
             except Exception as e:
@@ -11445,6 +12515,7 @@ def manage_grid_levels_in_json(inv_id=None):
                 if '_volume' in key.lower() and isinstance(value, (int, float)):
                     return key, value
             return None, None
+
 
         orders_path, orders_data = load_limit_orders()
         if orders_path is None or orders_data is None:
@@ -11919,14 +12990,14 @@ def manage_position_and_pending_orders(inv_id=None):
     Manages positions and pending orders to ensure controlled number of items PER SYMBOL.
 
     Reads:
-        settings.grid_prices_setup.manage_grid_levels_count  (string OR number)
+        settings.grid_prices_setup.manage_each_direction_levels_count  (string OR number)
         settings.grid_prices_setup.enable_single_position_and_pending  (string OR number)
 
     Behavior:
         - If 'enable_single_position_and_pending' is missing OR falsy ("0", "false")
           -> SKIP this investor (no management, no deletion).
         - If 'enable_single_position_and_pending' is truthy ("1", "true")
-          -> proceed with management using 'manage_grid_levels_count'
+          -> proceed with management using 'manage_each_direction_levels_count'
              (if that count is missing -> skip; no default).
     """
     print(f"\n{'='*10} 🎯 DYNAMIC POSITION & PENDING ORDER MANAGEMENT (PER SYMBOL) {'='*10}")
@@ -12020,18 +13091,18 @@ def manage_position_and_pending_orders(inv_id=None):
                 continue
 
             # Read management count
-            raw_count = grid_setup.get("manage_grid_levels_count", None)
+            raw_count = grid_setup.get("manage_each_direction_levels_count", None)
             if raw_count is None:
-                print(f"  └─ ⏭️  'manage_grid_levels_count' missing in settings.grid_prices_setup - skipping")
+                print(f"  └─ ⏭️  'manage_each_direction_levels_count' missing in settings.grid_prices_setup - skipping")
                 continue
 
             management_count = _to_int(raw_count)
             if management_count is None:
-                print(f"  └─ ⏭️  'manage_grid_levels_count' invalid ({raw_count!r}) - skipping")
+                print(f"  └─ ⏭️  'manage_each_direction_levels_count' invalid ({raw_count!r}) - skipping")
                 continue
 
             if management_count < 0:
-                print(f"  └─ ⏭️  'manage_grid_levels_count' negative ({management_count}) - skipping")
+                print(f"  └─ ⏭️  'manage_each_direction_levels_count' negative ({management_count}) - skipping")
                 continue
 
             print(f"  └─ ✅ Dynamic management ENABLED with count = {management_count}")
@@ -12406,364 +13477,16 @@ def manage_single_position_and_pending(inv_id=None):
     print(f"\n{'='*10} 🏁 SINGLE POSITION & PENDING ORDER MANAGEMENT COMPLETE {'='*10}\n")
     return stats
 
-def convert_grid_prices_to_limit_orders(inv_id=None):
-    """
-    Convert grid prices structure to flat limit_orders.json format.
-    READS from and SAVES BACK to the same file: prices/pending/limit_orders.json
-
-    Only processes if symbols_grid_strategy is enabled in accountmanagement.json.
-
-    Carries grid_m (main / closest to price) and grid_c (child) flags into the
-    flat order objects.
-
-    ORDER OF EMITTED ORDERS (per symbol):
-        1) Both mains first (one per side — buy_stop and sell_stop).
-        2) Then all children, interleaved so that NO two consecutive orders
-           share the same order_type (buy_stop / sell_stop).
-
-    This guarantees that opposite-side orders are placed in alternation,
-    never two of the same direction back-to-back.
-
-    IMPORTANT: If no valid orders found, the file will be overwritten with an empty array []
-    """
-    print(f"\n{'='*10} 🔄 CONVERT GRID PRICES TO FLAT LIMIT ORDERS {'='*10}")
-
-    stats = {
-        "investor_id": inv_id if inv_id else "all",
-        "investors_processed": 0,
-        "total_orders": 0,
-        "buy_stop_orders": 0,
-        "sell_stop_orders": 0,
-        "main_orders": 0,
-        "child_orders": 0,
-        "files_updated": 0,
-        "skipped_investors": 0,
-        "skip_reasons": []
-    }
-
-    investors_to_process = [inv_id] if inv_id else list(usersdictionary.keys())
-
-    for investor_id in investors_to_process:
-        print(f"\n📋 Processing investor: {investor_id}")
-
-        inv_root = Path(INV_PATH) / investor_id
-
-        # ========== CHECK: symbols_grid_strategy from accountmanagement.json ==========
-        acc_mgmt_path = inv_root / "accountmanagement.json"
-        if not acc_mgmt_path.exists():
-            print(f"   ⚠️ accountmanagement.json not found - skipping")
-            stats["skipped_investors"] += 1
-            stats["skip_reasons"].append(f"{investor_id}: accountmanagement.json not found")
-            continue
-
-        try:
-            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
-                acc_config = json.load(f)
-
-            settings = acc_config.get("settings", {})
-            grid_setup = settings.get("grid_prices_setup", {})
-
-            grid_strategy_raw = grid_setup.get("symbols_grid_strategy", None)
-            if grid_strategy_raw is None:
-                symbols_grid_strategy_enabled = False
-            elif isinstance(grid_strategy_raw, bool):
-                symbols_grid_strategy_enabled = grid_strategy_raw
-            elif isinstance(grid_strategy_raw, (int, float)):
-                symbols_grid_strategy_enabled = grid_strategy_raw != 0
-            elif isinstance(grid_strategy_raw, str):
-                symbols_grid_strategy_enabled = grid_strategy_raw.strip().lower() in ("1", "true", "yes", "on", "enabled")
-            else:
-                symbols_grid_strategy_enabled = False
-
-            if not symbols_grid_strategy_enabled:
-                print(f"   ⏭️ SKIPPED: symbols_grid_strategy is DISABLED in settings.grid_prices_setup")
-                print(f"      • Set 'symbols_grid_strategy': \"1\" to enable conversion")
-                stats["skipped_investors"] += 1
-                stats["skip_reasons"].append(f"{investor_id}: symbols_grid_strategy disabled")
-                continue
-
-            print(f"   ✅ symbols_grid_strategy is enabled - proceeding with conversion")
-
-            print(f"   ✅ symbols_grid_strategy is enabled - proceeding with conversion")
-
-        except Exception as e:
-            print(f"   ⚠️ Could not read accountmanagement.json: {e} - skipping")
-            stats["skipped_investors"] += 1
-            stats["skip_reasons"].append(f"{investor_id}: error reading config: {str(e)[:50]}")
-            continue
-
-        # ========== READ FROM: prices/pending/limit_orders.json ==========
-        strategy_name = None
-        if FETCHED_INVESTORS:
-            try:
-                with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
-                    investor_users = json.load(f)
-
-                investor_cfg = investor_users.get(investor_id)
-                if investor_cfg:
-                    strategy_name = investor_cfg.get("invested_with", "")
-            except Exception as e:
-                pass
-
-        if not strategy_name:
-            print(f"    SKIPPED - No strategy name found from invested_with for {investor_id}")
-            stats["skipped_investors"] += 1
-            stats["skip_reasons"].append(f"{investor_id}: no strategy name from invested_with")
-            continue
-
-        signals_file = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
-
-        if not signals_file.exists():
-            print(f"   ⚠️ limit_orders.json not found at {signals_file}")
-            stats["skipped_investors"] += 1
-            stats["skip_reasons"].append(f"{investor_id}: limit_orders.json not found")
-            continue
-
-        try:
-            with open(signals_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            if isinstance(data, list):
-                print(f"   ⏭️ SKIPPED: limit_orders.json is already a flat list structure")
-                print(f"      • Found {len(data)} orders in flat format")
-                print(f"      • No conversion needed")
-                stats["skipped_investors"] += 1
-                stats["skip_reasons"].append(f"{investor_id}: already flat list format")
-                continue
-
-            if not isinstance(data, dict):
-                print(f"   ⏭️ SKIPPED: Invalid data structure - expected dict, got {type(data).__name__}")
-                stats["skipped_investors"] += 1
-                stats["skip_reasons"].append(f"{investor_id}: invalid structure: {type(data).__name__}")
-                continue
-
-            if "categories" not in data:
-                print(f"   ⏭️ SKIPPED: Missing 'categories' key in limit_orders.json")
-                print(f"      • Available keys: {list(data.keys())}")
-                stats["skipped_investors"] += 1
-                stats["skip_reasons"].append(f"{investor_id}: missing 'categories' key")
-                continue
-
-            # ========== FLATTEN ORDERS ==========
-            flat_orders = []
-            grid_config = data.get("grid_configuration", {})
-            generated_at = data.get("generated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
-            categories = data.get("categories", {})
-            total_bid_orders_found = 0
-            total_ask_orders_found = 0
-
-            def _build_flat_order(order, symbol, category_name, digits, current_prices, grid_side):
-                """Build a single flat order dict from a nested order."""
-                grid_m = bool(order.get("grid_m", False))
-                grid_c = bool(order.get("grid_c", not grid_m))
-
-                flat_order = {
-                    "symbol": symbol,
-                    "timeframe": "grid",
-                    "category": category_name,
-                    "risk_reward": order.get("risk_reward", grid_config.get("risk_reward", 3)),
-                    "order_type": order.get("order_type"),
-                    "entry": order.get("entry"),
-                    "exit": order.get("exit"),
-                    "tp": order.get("tp"),
-                    "volume": order.get("volume"),
-                    "risk_in_usd": order.get("risk_in_usd"),
-                    "grid_m": grid_m,
-                    "grid_c": grid_c,
-                    "is_grid_order": True,
-                    "grid_side": grid_side,
-                    "grid_levels": grid_config.get("levels"),
-                    "grid_multiplier": grid_config.get("multiplier"),
-                    "strategy": f"dynamic_grid_{grid_config.get('multiplier', 50)}",
-                    "generated_at": generated_at,
-                    "digits": digits,
-                    "current_bid": current_prices.get("bid"),
-                    "current_ask": current_prices.get("ask")
-                }
-                return {k: v for k, v in flat_order.items() if v is not None}
-
-            def _interleave_by_order_type(orders_a, orders_b):
-                """
-                Merge two queues so that no two consecutive emitted orders
-                share the same order_type. Falls back to appending when one
-                queue can no longer provide an alternating order_type.
-                """
-                merged = []
-                a = list(orders_a)
-                b = list(orders_b)
-                last_type = None
-
-                while a or b:
-                    picked = None
-                    picked_from = None
-
-                    # Try to pick from A if it doesn't collide with last_type
-                    if a and (last_type is None or a[0].get("order_type") != last_type):
-                        picked = a.pop(0)
-                        picked_from = "a"
-                    # Else try B
-                    elif b and (last_type is None or b[0].get("order_type") != last_type):
-                        picked = b.pop(0)
-                        picked_from = "b"
-                    # Both leading items collide — take the longer queue's next
-                    # available opposite-type item by scanning forward.
-                    else:
-                        # Prefer A if it has a non-colliding item somewhere
-                        a_idx = next((i for i, o in enumerate(a)
-                                      if last_type is None or o.get("order_type") != last_type), None)
-                        b_idx = next((i for i, o in enumerate(b)
-                                      if last_type is None or o.get("order_type") != last_type), None)
-
-                        if a_idx is not None and (b_idx is None or a_idx <= b_idx):
-                            picked = a.pop(a_idx)
-                            picked_from = "a"
-                        elif b_idx is not None:
-                            picked = b.pop(b_idx)
-                            picked_from = "b"
-                        elif a:
-                            picked = a.pop(0)
-                            picked_from = "a"
-                        elif b:
-                            picked = b.pop(0)
-                            picked_from = "b"
-
-                    if picked is None:
-                        break
-
-                    merged.append(picked)
-                    last_type = picked.get("order_type")
-
-                return merged
-
-            for category_name, category_data in categories.items():
-                symbols_data = category_data.get("symbols", {})
-
-                for symbol, symbol_data in symbols_data.items():
-                    digits = symbol_data.get("digits", 5)
-                    current_prices = symbol_data.get("current_prices", {})
-
-                    bid_orders = symbol_data.get("bid_orders", [])
-                    ask_orders = symbol_data.get("ask_orders", [])
-
-                    if bid_orders or ask_orders:
-                        print(f"   📊 {symbol}: {len(bid_orders)} bid_orders, {len(ask_orders)} ask_orders")
-                        total_bid_orders_found += len(bid_orders)
-                        total_ask_orders_found += len(ask_orders)
-
-                    # --- Build flat dicts per side ---
-                    bid_flats = []
-                    for order in bid_orders:
-                        if isinstance(order, dict):
-                            bid_flats.append(_build_flat_order(
-                                order, symbol, category_name, digits, current_prices, "bid"))
-
-                    ask_flats = []
-                    for order in ask_orders:
-                        if isinstance(order, dict):
-                            ask_flats.append(_build_flat_order(
-                                order, symbol, category_name, digits, current_prices, "ask"))
-
-                    # --- Split each side into mains and children, preserving relative order ---
-                    bid_mains    = [o for o in bid_flats if o.get("grid_m")]
-                    bid_children = [o for o in bid_flats if not o.get("grid_m")]
-                    ask_mains    = [o for o in ask_flats if o.get("grid_m")]
-                    ask_children = [o for o in ask_flats if not o.get("grid_m")]
-
-                    # --- Emit mains first, alternating order_type ---
-                    mains_combined = _interleave_by_order_type(bid_mains, ask_mains)
-                    flat_orders.extend(mains_combined)
-
-                    # --- Emit children, alternating order_type ---
-                    children_combined = _interleave_by_order_type(bid_children, ask_children)
-                    flat_orders.extend(children_combined)
-
-                    # --- Stats ---
-                    for o in bid_mains + ask_mains:
-                        stats["main_orders"] += 1
-                    for o in bid_children + ask_children:
-                        stats["child_orders"] += 1
-
-                    for o in bid_flats + ask_flats:
-                        ot = o.get("order_type", "")
-                        if "buy" in ot.lower():
-                            stats["buy_stop_orders"] += 1
-                        elif "sell" in ot.lower():
-                            stats["sell_stop_orders"] += 1
-
-            # ========== SAVE BACK AS FLAT ARRAY ==========
-            with open(signals_file, 'w', encoding='utf-8') as f:
-                json.dump(flat_orders, f, indent=4)
-
-            if flat_orders:
-                stats["investors_processed"] += 1
-                stats["total_orders"] += len(flat_orders)
-                stats["files_updated"] += 1
-
-                print(f"\n  ✅ CONVERTED & OVERWRITTEN: {signals_file}")
-                print(f"     • Original bid orders: {total_bid_orders_found}")
-                print(f"     • Original ask orders: {total_ask_orders_found}")
-                print(f"     • Total flat orders: {len(flat_orders)}")
-                print(f"     • Buy_stop orders: {stats['buy_stop_orders']}")
-                print(f"     • Sell_stop orders: {stats['sell_stop_orders']}")
-                print(f"     • grid_m (main) orders: {stats['main_orders']}")
-                print(f"     • grid_c (child) orders: {stats['child_orders']}")
-
-                print(f"\n  📝 Order sequence (first 8) - NO two same order_type in a row:")
-                for i, order in enumerate(flat_orders[:8]):
-                    flag = "grid_m" if order.get("grid_m") else "grid_c"
-                    print(f"     {i+1}. [{flag}] {order['order_type']} "
-                          f"{order['symbol']} @ {order['entry']} (side={order['grid_side']})")
-
-                if len(flat_orders) > 8:
-                    print(f"     ... and {len(flat_orders) - 8} more orders")
-            else:
-                print(f"\n  ✅ EMPTIED limit_orders.json - No valid orders found, saved as empty array []")
-                print(f"     • Original file had: categories={len(categories)}")
-                print(f"     • Original bid orders: {total_bid_orders_found}")
-                print(f"     • Original ask orders: {total_ask_orders_found}")
-                stats["investors_processed"] += 1
-                stats["files_updated"] += 1
-
-        except json.JSONDecodeError as e:
-            print(f"   JSON parsing error: {e}")
-            stats["skipped_investors"] += 1
-            stats["skip_reasons"].append(f"{investor_id}: JSON parse error")
-        except Exception as e:
-            print(f"   Error: {e}")
-            import traceback
-            traceback.print_exc()
-            stats["skipped_investors"] += 1
-            stats["skip_reasons"].append(f"{investor_id}: {str(e)[:50]}")
-
-    # ========== PRINT SUMMARY ==========
-    print(f"\n{'='*60}")
-    print(f"📊 CONVERSION SUMMARY")
-    print(f"  • Investors processed: {stats['investors_processed']}")
-    print(f"  • Total orders converted: {stats['total_orders']}")
-    print(f"  • Buy_stop orders: {stats['buy_stop_orders']}")
-    print(f"  • Sell_stop orders: {stats['sell_stop_orders']}")
-    print(f"  • grid_m (main) orders: {stats['main_orders']}")
-    print(f"  • grid_c (child) orders: {stats['child_orders']}")
-    print(f"  • Files updated: {stats['files_updated']}")
-    print(f"  • Skipped investors: {stats['skipped_investors']}")
-
-    if stats['skip_reasons']:
-        print(f"\n  ⏭️ Skipped investors details:")
-        for reason in stats['skip_reasons'][:10]:
-            print(f"     • {reason}")
-        if len(stats['skip_reasons']) > 10:
-            print(f"     • ... and {len(stats['skip_reasons']) - 10} more")
-
-    print(f"{'='*60}")
-
-    return stats
-
 def trailing_amount_distance_limit(inv_id=None):
     """
     TRAILING AMOUNT DISTANCE LIMIT — Deletes the closest pending order per direction
     when its monetary distance from current price (measured at broker's minimum
     volume for that symbol) drops below the configured limit.
+
+    Additionally, this function now closes ANY open position that is currently
+    in profit by more than 1 (in account currency). This acts as an immediate
+    profit‑taking mechanism: if any running position shows > 1 profit, it is
+    closed at market price regardless of pending orders.
 
     The "distance" is NOT a raw price difference. It is the profit/loss value
     (in account currency) that would result between:
@@ -12779,7 +13502,9 @@ def trailing_amount_distance_limit(inv_id=None):
         settings.grid_prices_setup.trailing_amount_distance_limit
 
     Behavior:
-        - For each symbol with pending orders:
+        - First, for each open position (on the account):
+            * If position.profit > 1.0 (account currency) -> CLOSE it immediately at market.
+        - Then, for each symbol with pending orders:
             * Closest BUY-side order measured against current ASK.
             * Closest SELL-side order measured against current BID.
             * If money_dist < trailing_amount_distance_limit -> DELETE that order.
@@ -12804,6 +13529,9 @@ def trailing_amount_distance_limit(inv_id=None):
         "orders_deleted": 0,
         "orders_kept": 0,
         "orders_error": 0,
+        "positions_checked": 0,
+        "positions_closed_profit": 0,
+        "positions_close_errors": 0,
         "symbol_status": {},
         "processing_success": False
     }
@@ -12933,7 +13661,50 @@ def trailing_amount_distance_limit(inv_id=None):
 
         stats["investors_processed"] += 1
 
-        # --- FETCH PENDING ORDERS ---------------------------------------
+        # ------------------------------------------------------------------
+        # NEW: CLOSE ANY PROFITABLE POSITION (> 1 unit)
+        # ------------------------------------------------------------------
+        print(f"\n  └─ 💰 Checking open positions for profit > 1 {account_currency} ...")
+        positions = mt5.positions_get()
+        if positions:
+            print(f"      • Found {len(positions)} open position(s)")
+            for pos in positions:
+                stats["positions_checked"] += 1
+                profit = pos.profit
+                if profit > 1.0:
+                    # Determine direction and closing price
+                    is_buy = pos.type == mt5.POSITION_TYPE_BUY
+                    pos_type = "BUY" if is_buy else "SELL"
+                    tick = mt5.symbol_info_tick(pos.symbol)
+                    if not tick:
+                        print(f"        ❌ Cannot get tick for {pos.symbol} — skipping close of #{pos.ticket}")
+                        stats["positions_close_errors"] += 1
+                        continue
+
+                    close_price = tick.bid if is_buy else tick.ask
+                    print(f"        • 🎯 CLOSING {pos_type} #{pos.ticket} | {pos.symbol} | Profit: {profit:.2f} {account_currency} > 1")
+                    close_request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": pos.symbol,
+                        "volume": pos.volume,
+                        "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+                        "position": pos.ticket,
+                        "price": close_price,
+                        "deviation": 20,
+                        "magic": pos.magic if hasattr(pos, 'magic') else 0
+                    }
+                    result = mt5.order_send(close_request)
+                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        stats["positions_closed_profit"] += 1
+                        print(f"          ✅ Position #{pos.ticket} closed (profit taken)")
+                    else:
+                        error_msg = result.comment if result else "Unknown error"
+                        stats["positions_close_errors"] += 1
+                        print(f"          ❌ Failed to close #{pos.ticket}: {error_msg}")
+        else:
+            print(f"      • No open positions found.")
+
+        # --- FETCH PENDING ORDERS (existing logic) -----------------------
         pending_orders = mt5.orders_get()
         if not pending_orders:
             print(f"  └─ 📭 No pending orders on this account.")
@@ -12952,7 +13723,7 @@ def trailing_amount_distance_limit(inv_id=None):
         for order in pending_orders:
             orders_by_symbol.setdefault(order.symbol, []).append(order)
 
-        # --- PROCESS EACH SYMBOL ----------------------------------------
+        # --- PROCESS EACH SYMBOL (existing logic) ------------------------
         for symbol, symbol_orders in orders_by_symbol.items():
             stats["symbols_processed"] += 1
 
@@ -13107,6 +13878,11 @@ def trailing_amount_distance_limit(inv_id=None):
         print(f"      • Orders kept: {stats['orders_kept']}")
         if stats['orders_error'] > 0:
             print(f"      • Errors: {stats['orders_error']}")
+        if stats['positions_checked'] > 0:
+            print(f"      • Positions checked: {stats['positions_checked']}")
+            print(f"      • Positions closed for profit: {stats['positions_closed_profit']}")
+            if stats['positions_close_errors'] > 0:
+                print(f"      • Position close errors: {stats['positions_close_errors']}")
 
     # ------------------------------------------------------------------
     # FINAL SUMMARY
@@ -13119,6 +13895,10 @@ def trailing_amount_distance_limit(inv_id=None):
     print(f"   Orders deleted: {stats['orders_deleted']}")
     print(f"   Orders kept: {stats['orders_kept']}")
     print(f"   Errors: {stats['orders_error']}")
+    if stats['positions_checked'] > 0:
+        print(f"   Positions checked: {stats['positions_checked']}")
+        print(f"   Positions closed for profit: {stats['positions_closed_profit']}")
+        print(f"   Position close errors: {stats['positions_close_errors']}")
 
     if stats['symbol_status']:
         print(f"\n   Per-Symbol Status:")
@@ -13148,10 +13928,22 @@ def recent_highest_balance_target(inv_id=None):
     SECTION 2: DAILY TARGET CALCULATIONS (NO MT5 BALANCE)
     - Uses recent_highest_balance as the current balance (NO MT5 fallback)
     - Profit = recent_highest_balance - starting_balance (broker balance)
-    - OWED DEBT (backward): from execution start -> today, all weeks.
+    - OWED DEBT (backward): from execution start -> YESTERDAY, all weeks.
+      * TODAY IS NEVER OWED. Today is always PENDING.
+      * Only PAST days (date < today) can be OWED.
+      * This is enforced so the current day is always treated as in-progress.
     - PRE-PENDING SUM (forward): current week only, from tomorrow -> end of week,
       only days with "pre-pending_sum": true.
     - TOTAL DEBT = owed_debt + pre_pending_total
+
+    SOURCE-OF-TRUTH (RECENT BALANCE):
+    - recent_highest_balance and recent_highest_balance_last_update are READ
+      from FETCHED_INVESTORS ONLY.
+    - activities.json is still WRITTEN to (kept in sync) but it is NEVER
+      used as the authoritative source for the recent-balance values.
+    - This means the profile file (FETCHED_INVESTORS) is the single source
+      of truth for the recent highest balance, eliminating drift between
+      activities.json and the profile files.
 
     BALANCE-RANGE RESOLUTION:
     - Daily targets are stored as `"<range>_risk": <target>` keys.
@@ -13159,22 +13951,170 @@ def recent_highest_balance_target(inv_id=None):
       TODAY'S START-OF-DAY MT5 BALANCE (mt5_balance - today_profit).
     - This ensures the bracket matches the balance the trading day began with,
       not the live balance and not "the last key in the JSON".
+
+    TRADE-DATE ALIGNMENT:
+    - The profit that pushed the balance over a daily target must be attributed
+      to the day the trade(s) that generated it were actually made.
+    - If the latest contributing trade date is NOT today's calendar date,
+      the entire daily-target evaluation is shifted back to that trade date.
+    - This prevents a trade closed just after midnight from claiming the
+      next day's target.
+    - `recent_highest_balance_last_update` still stores the real calendar date
+      for audit purposes; only the target-resolution day is shifted.
+
+    START-OF-DAY BALANCE GUARD:
+    - The start-of-day balance from MT5 (mt5_balance - today_profit) is only
+      used for bracket resolution when its implied date is DIFFERENT from
+      the execution start date.
+    - If the execution start date IS today and we'd be using "today's start
+      of day" as the balance, we fall back to the broker balance.
+
+    ALARM CONFIRMATION GUARD:
+    - When the daily-target calculation decides the alarm should trigger
+      (today met + no owed debt, or pre-pending fully covered), we do NOT
+      trust the math alone. Before firing the alarm we re-check the LIVE
+      MT5 balance against the recent_highest_balance + expected flow.
+    - This prevents "alarm on ignorance".
+
+    STALE RECORD GUARD:
+    - If the stored `recent_highest_balance_last_update` (from
+      FETCHED_INVESTORS) is BEFORE the execution_start_date, the stored
+      record is stale/from a previous contract. We reset the recording:
+      the balance is re-anchored to the current MT5 balance (or broker
+      balance if MT5 is below it), and the date is reset to yesterday.
+
+    TIMEZONE ALIGNMENT:
+    - MT5 may be running in any server region. ALL timestamps derived from
+      MT5 (deal times, "today" boundaries, wall clock) are converted to
+      LAGOS time (Africa/Lagos, UTC+1, no DST) before any comparison.
+    - Server timezone is auto-detected; no hard-coded broker region needed.
     """
 
     global recent_highest_alert
 
     import os
     import json
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     from pathlib import Path
 
+    # ------------------------------------------------------------------
+    # LAGOS TIMEZONE SETUP (dynamic, no external deps beyond stdlib)
+    # ------------------------------------------------------------------
+    try:
+        from zoneinfo import ZoneInfo
+        LAGOS_TZ = ZoneInfo("Africa/Lagos")  # UTC+1, no DST
+        _LAGOS_TZ_SOURCE = "zoneinfo"
+    except Exception:
+        # Fallback: Lagos has no DST, so a fixed UTC+1 offset is exact.
+        LAGOS_TZ = timezone(timedelta(hours=1))
+        _LAGOS_TZ_SOURCE = "fixed_utc+1"
+
+    def lagos_now():
+        """Current time as a timezone-aware datetime in Lagos."""
+        return datetime.now(LAGOS_TZ)
+
+    def lagos_today_str():
+        """Lagos calendar date as 'YYYY-MM-DD'."""
+        return lagos_now().strftime("%Y-%m-%d")
+
+    def lagos_yesterday_str():
+        """Lagos calendar yesterday as 'YYYY-MM-DD'."""
+        return (lagos_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def lagos_naive_now():
+        """
+        Lagos wall-clock as a NAIVE datetime.
+        Used for internal date math (week numbers, day comparisons) where
+        we want the Lagos calendar but don't need tz-awareness.
+        """
+        return lagos_now().replace(tzinfo=None)
+
+    def lagos_from_timestamp(ts):
+        """
+        Convert a Unix timestamp (seconds OR milliseconds) into a
+        LAGOS-aware datetime. Returns None if ts is falsy/invalid.
+        """
+        if not ts:
+            return None
+        try:
+            ts_float = float(ts)
+        except (TypeError, ValueError):
+            return None
+
+        # Heuristic: MT5 time_msc is milliseconds since epoch (~1.7e12 now),
+        # while deal.time is seconds (~1.7e9 now).
+        if ts_float > 1e11:
+            ts_float = ts_float / 1000.0
+
+        try:
+            return datetime.fromtimestamp(ts_float, tz=timezone.utc).astimezone(LAGOS_TZ)
+        except Exception:
+            return None
+
+    def detect_mt5_server_offset_hours():
+        """
+        Best-effort detection of the MT5 server's UTC offset in hours.
+        Defaults to 0 (server == UTC) if detection fails.
+        """
+        try:
+            if not mt5.terminal_info():
+                return 0
+
+            candidate_symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30"]
+            tick = None
+            for sym in candidate_symbols:
+                try:
+                    tick = mt5.symbol_info_tick(sym)
+                except Exception:
+                    tick = None
+                if tick is not None:
+                    break
+
+            if tick is None or not getattr(tick, 'time', None):
+                return 0
+
+            server_naive = datetime.fromtimestamp(tick.time)
+            utc_naive = datetime.utcnow()
+
+            diff_seconds = (server_naive - utc_naive).total_seconds()
+
+            # Round to nearest 15 minutes
+            diff_seconds = round(diff_seconds / 900.0) * 900.0
+            offset_hours = diff_seconds / 3600.0
+
+            # Sanity clamp
+            if offset_hours < -12 or offset_hours > 14:
+                return 0
+
+            return offset_hours
+        except Exception:
+            return 0
+
+    def lagos_window_to_server_naive(lagos_start_aware, lagos_end_aware):
+        """
+        Convert a Lagos-aware [start, end] window into naive datetimes that
+        MT5's history_deals_get() will interpret in the SERVER's timezone.
+        """
+        server_offset = detect_mt5_server_offset_hours()
+
+        start_utc_naive = lagos_start_aware.astimezone(timezone.utc).replace(tzinfo=None)
+        end_utc_naive = lagos_end_aware.astimezone(timezone.utc).replace(tzinfo=None)
+
+        start_server_naive = start_utc_naive + timedelta(hours=server_offset)
+        end_server_naive = end_utc_naive + timedelta(hours=server_offset)
+
+        return start_server_naive, end_server_naive, server_offset
+
+    # ------------------------------------------------------------------
+    # ALERT / STATS INIT (use Lagos timestamps for audit fields)
+    # ------------------------------------------------------------------
     recent_highest_alert = {
         'is_triggered': False,
         'investor_id': inv_id if inv_id else "all",
         'old_balance': None,
         'new_balance': None,
         'difference': None,
-        'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+        'timestamp': lagos_now().strftime('%I:%M:%S %p'),
         'action': None,
         'last_update_date': None,
         'today_profit': None,
@@ -13184,6 +14124,7 @@ def recent_highest_balance_target(inv_id=None):
     }
 
     print(f"\n{'='*10} 📊 RECENT HIGHEST BALANCE TARGET {'='*10}")
+    print(f" 🕒 Lagos time now: {lagos_now().strftime('%Y-%m-%d %H:%M:%S %Z')} (source: {_LAGOS_TZ_SOURCE})")
     if inv_id:
         print(f" 🎯 Target Investor: {inv_id}")
 
@@ -13196,10 +14137,12 @@ def recent_highest_balance_target(inv_id=None):
         "new_high_recorded_only": 0,
         "field_created": 0,
         "broker_balance_corrections": 0,
+        "stale_record_resets": 0,
+        "alarm_confirmations_blocked": 0,
         "activities_updated": 0,
         "files_updated": 0,
         "errors": [],
-        "current_time": datetime.now().strftime('%I:%M:%S %p'),
+        "current_time": lagos_now().strftime('%I:%M:%S %p'),
         "processing_success": False,
         "details": []
     }
@@ -13234,7 +14177,7 @@ def recent_highest_balance_target(inv_id=None):
 
     def add_notification(notifications_dict, section_key, message, message_type, timestamp=None):
         if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = lagos_now().strftime("%Y-%m-%d %H:%M:%S")
 
         last_msg = get_last_message(notifications_dict, section_key)
 
@@ -13267,7 +14210,7 @@ def recent_highest_balance_target(inv_id=None):
 
     def add_execution_notification(executions_dict, section_key, message, message_type, timestamp=None):
         if timestamp is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = lagos_now().strftime("%Y-%m-%d %H:%M:%S")
 
         last_msg = get_last_message(executions_dict, section_key)
 
@@ -13299,7 +14242,7 @@ def recent_highest_balance_target(inv_id=None):
         return True
 
     def get_mt5_balance():
-        """Get current MT5 account balance - ONLY USED IN SECTION 1"""
+        """Get current MT5 account balance - ONLY USED IN SECTION 1."""
         try:
             if not mt5.terminal_info():
                 print(f"   MT5 not connected")
@@ -13313,23 +14256,55 @@ def recent_highest_balance_target(inv_id=None):
             print(f"   Error getting MT5 balance: {e}")
             return None
 
-    def get_mt5_today_profit():
-        """Get today's realised profit from MT5 history deals."""
+    def get_mt5_today_profit_and_latest_trade_date():
+        """
+        Get today's realised profit from MT5 history deals AND the most
+        recent deal time that contributed to that profit.
+        All times are resolved in LAGOS time.
+        """
         try:
             if not mt5.terminal_info():
-                return 0.0
-            today = datetime.now()
-            start_of_day = datetime(today.year, today.month, today.day, 0, 0, 0)
-            deals = mt5.history_deals_get(start_of_day, datetime.now())
+                return 0.0, None, 0
+
+            lagos_now_aware = lagos_now()
+            lagos_start_aware = lagos_now_aware.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
+            start_srv, end_srv, srv_offset = lagos_window_to_server_naive(
+                lagos_start_aware, lagos_now_aware
+            )
+
+            deals = mt5.history_deals_get(start_srv, end_srv)
+
             total = 0.0
+            latest_time_lagos = None
+
             if deals:
                 for deal in deals:
-                    if deal.profit is not None:
-                        total += deal.profit
-            return total
+                    if deal.profit is None:
+                        continue
+                    total += deal.profit
+
+                    deal_ts = getattr(deal, 'time', None)
+                    if not deal_ts:
+                        deal_ts = getattr(deal, 'time_msc', None)
+
+                    deal_time_lagos = lagos_from_timestamp(deal_ts)
+
+                    if deal_time_lagos is not None:
+                        if latest_time_lagos is None or deal_time_lagos > latest_time_lagos:
+                            latest_time_lagos = deal_time_lagos
+
+            return total, latest_time_lagos, srv_offset
         except Exception as e:
-            print(f"  ⚠️ Could not get today's profit: {e}")
-            return 0.0
+            print(f"  ⚠️ Could not get today's profit / trade date: {e}")
+            return 0.0, None, 0
+
+    def get_mt5_today_profit():
+        """Backward-compatible wrapper (Lagos-aligned)."""
+        profit, _, _ = get_mt5_today_profit_and_latest_trade_date()
+        return profit
 
     def get_week_number_from_date(start_date, target_date):
         if not start_date or not target_date:
@@ -13351,10 +14326,6 @@ def recent_highest_balance_target(inv_id=None):
     # BALANCE-RANGE RESOLUTION
     # ------------------------------------------------------------------
     def _parse_range_key(range_str):
-        """
-        Parse a range key like '1-5.99' or '5000' into (low, high).
-        Returns (lo, hi) or None if unparseable.
-        """
         if not range_str:
             return None
         try:
@@ -13362,22 +14333,11 @@ def recent_highest_balance_target(inv_id=None):
                 lo_str, hi_str = range_str.split('-', 1)
                 return float(lo_str), float(hi_str)
             else:
-                # Single number -> treat as an open-ended upper bound
                 return 0.0, float(range_str)
         except (TypeError, ValueError):
             return None
 
     def _resolve_target_for_balance(day_config, balance):
-        """
-        Given a day config dict with `<range>_risk` keys and a balance,
-        return the target whose range contains `balance`.
-
-        Fallback rules:
-        - If balance is None          -> use the FIRST _risk key.
-        - If no range matches         -> use the range whose lower bound
-                                         is closest below the balance.
-        - If still nothing            -> use the FIRST _risk key.
-        """
         risk_pairs = []
         for key, value in day_config.items():
             if '_risk' not in key:
@@ -13399,26 +14359,19 @@ def recent_highest_balance_target(inv_id=None):
         if balance is None:
             return risk_pairs[0][2]
 
-        # Exact bracket match
         for lo, hi, target_val, _key in risk_pairs:
             if lo <= balance <= hi:
                 return target_val
 
-        # Fallback: closest lower-bound bracket
         below = [p for p in risk_pairs if p[0] <= balance]
         if below:
             below.sort(key=lambda p: p[0])
             return below[-1][2]
 
-        # Fallback: smallest bracket
         risk_pairs.sort(key=lambda p: p[0])
         return risk_pairs[0][2]
 
     def get_weekly_targets_from_config(investor_data, week_number, balance=None):
-        """
-        Extract all day targets for a specific week, resolving the
-        balance-range bracket using `balance` (today's starting balance).
-        """
         week_config = get_week_config(investor_data, week_number)
         if not week_config:
             return {}
@@ -13542,6 +14495,9 @@ def recent_highest_balance_target(inv_id=None):
     def parse_date_flexible(date_str):
         if not date_str:
             return None
+        # Handle JSON null-ish strings
+        if isinstance(date_str, str) and date_str.strip().upper() == "NULL":
+            return None
         formats = [
             "%Y-%m-%d",
             "%B %d, %Y",
@@ -13559,25 +14515,60 @@ def recent_highest_balance_target(inv_id=None):
                 continue
         return None
 
-    def get_recent_balance_from_activities(inv_id):
-        try:
-            inv_root = Path(INV_PATH) / inv_id
-            activities_path = inv_root / "activities.json"
-            if not activities_path.exists():
-                return None, None
-            with open(activities_path, 'r', encoding='utf-8') as f:
-                activities = json.load(f)
-            balance = activities.get('recent_highest_balance')
-            date = activities.get('recent_highest_balance_last_update')
-            if balance is not None:
-                try:
-                    return float(balance), str(date) if date else None
-                except (ValueError, TypeError):
-                    return None, None
-            return None, None
-        except Exception as e:
-            print(f"  ⚠️ Error reading activities.json for {inv_id}: {e}")
-            return None, None
+    # ------------------------------------------------------------------
+    # SOURCE-OF-TRUTH READER — reads from FETCHED_INVESTORS ONLY
+    # ------------------------------------------------------------------
+    def get_recent_balance_from_fetched(inv_id):
+        """
+        Read recent_highest_balance and recent_highest_balance_last_update
+        from FETCHED_INVESTORS ONLY (the source of truth).
+
+        Falls back to any other loaded profile file if FETCHED_INVESTORS
+        does not have a valid entry for this investor (belt-and-braces),
+        but the primary and intended source is FETCHED_INVESTORS.
+
+        Returns (balance_float, date_str) or (None, None) if missing/invalid.
+        """
+        candidate_containers = [
+            (fetched_data, "FETCHED_INVESTORS"),
+            (updated_data, "UPDATED_INVESTORS"),
+            (all_fetched_data, "ALL_FETCHED_INVESTORS"),
+            (all_updated_data, "ALL_UPDATED_INVESTORS"),
+        ]
+
+        for container, label in candidate_containers:
+            if not isinstance(container, dict):
+                continue
+            inv = container.get(inv_id)
+            if not isinstance(inv, dict):
+                continue
+
+            raw_balance = inv.get('recent_highest_balance')
+            raw_date = inv.get('recent_highest_balance_last_update')
+
+            # Treat missing / NULL as no record
+            if raw_balance is None:
+                continue
+            if isinstance(raw_balance, str) and raw_balance.strip().upper() == "NULL":
+                continue
+
+            try:
+                balance_float = float(raw_balance)
+            except (ValueError, TypeError):
+                continue
+
+            date_str = None
+            if raw_date is not None:
+                if isinstance(raw_date, str) and raw_date.strip().upper() == "NULL":
+                    date_str = None
+                else:
+                    date_str = str(raw_date)
+
+            print(f"  🔎 [RECENT BALANCE SOURCE] {label} → balance=${balance_float:.2f} date={date_str!r}")
+            return balance_float, date_str
+
+        print(f"  🔎 [RECENT BALANCE SOURCE] No valid recent_highest_balance found in any profile file")
+        return None, None
 
     def get_days_ordered_from_start(start_date, listed_days):
         if not start_date:
@@ -13605,23 +14596,22 @@ def recent_highest_balance_target(inv_id=None):
     # SECTION 2 CORE
     # ------------------------------------------------------------------
     def calculate_daily_target_status(investor_data, profit, execution_start_date,
-                                      inv_id=None, starting_balance_for_today=None):
+                                      inv_id=None, starting_balance_for_today=None,
+                                      effective_today=None):
         """
         SECTION 2: Calculate daily target status.
 
         `starting_balance_for_today` is the MT5 balance the day began with
-        (mt5_balance - today_profit). It is used to resolve the `<range>_risk`
-        bracket for each day's target.
+        (mt5_balance - today_profit). Used for `<range>_risk` bracket resolution.
+
+        `effective_today` is the date the current profit run should be
+        attributed to (Lagos time).
+
+        TODAY RULE:
+        - TODAY is 'met' if covered, otherwise 'pending'. NEVER 'owed'.
 
         MISSED-DAY HANDLING:
-        - `include_missed_days` controls whether PAST days that were not
-          covered by profit are treated as "owed" debt.
-        - If False (default): past missed days are marked status='skipped',
-          they do NOT consume profit, and they do NOT create debt.
-        - If True: past missed days are evaluated normally and become 'owed'.
-        - TODAY is ALWAYS evaluated regardless of the flag, because today is
-          not a "missed" day — it's the day currently in progress.
-        - Entirely-past weeks are short-circuited when include_missed_days=False.
+        - `include_missed_days` controls past-day OWED treatment.
         """
         result = {
             'weekly_targets': {},
@@ -13635,7 +14625,8 @@ def recent_highest_balance_target(inv_id=None):
             'total_all_debt': 0.0,
             'daily_target_owed': 0.0,
             'balance_used_for_bracket': starting_balance_for_today,
-            'include_missed_days': False
+            'include_missed_days': False,
+            'effective_today': effective_today.strftime("%Y-%m-%d") if effective_today else None
         }
 
         if not execution_start_date:
@@ -13647,9 +14638,17 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  ⚠️ Could not parse execution start date: {execution_start_date}")
             return result
 
-        current_date = datetime.now()
+        if effective_today is None:
+            effective_today = lagos_naive_now()
+        else:
+            if effective_today.tzinfo is not None:
+                effective_today = effective_today.astimezone(LAGOS_TZ).replace(tzinfo=None)
+
+        current_date = effective_today
         today_str = current_date.strftime("%Y-%m-%d")
         current_week = get_week_number_from_date(start_date, current_date)
+
+        lagos_wall_now = lagos_naive_now()
 
         daily_target_config = investor_data.get('daily_target_config', {})
         include_missed_days = daily_target_config.get('include_missed_days', False) if daily_target_config else False
@@ -13658,7 +14657,12 @@ def recent_highest_balance_target(inv_id=None):
         print(f"\n  📊 CALCULATING DAILY TARGET STATUS (SECTION 2)")
         print(f"  ──────────────────────────────────────────")
         print(f"  📅 Execution Start: {start_date.strftime('%Y-%m-%d')} ({start_date.strftime('%A')})")
-        print(f"  📅 Current Date: {current_date.strftime('%Y-%m-%d')} ({current_date.strftime('%A')})")
+        print(f"  📅 Current Date (Lagos wall clock): {lagos_wall_now.strftime('%Y-%m-%d')} ({lagos_wall_now.strftime('%A')})")
+        if effective_today.strftime("%Y-%m-%d") != lagos_wall_now.strftime("%Y-%m-%d"):
+            print(f"  📅 EFFECTIVE TODAY (trade-date aligned, Lagos): {effective_today.strftime('%Y-%m-%d')} ({effective_today.strftime('%A')})")
+            print(f"     ⚠️ Profit attributed to trade date, NOT calendar date")
+        else:
+            print(f"  📅 Effective Date (Lagos): {effective_today.strftime('%Y-%m-%d')} ({effective_today.strftime('%A')})")
         print(f"  📆 Current Week: {current_week}")
         print(f"  💰 Total Profit: ${profit:.2f}")
         print(f"  📌 Week starts on: {start_date.strftime('%A')} (execution start day)")
@@ -13670,7 +14674,6 @@ def recent_highest_balance_target(inv_id=None):
 
         for week_num in range(1, current_week + 1):
             week_key = f"week_{week_num}"
-            # ---- Pass today's starting balance into the resolver ----
             week_targets = get_weekly_targets_from_config(
                 investor_data, week_num, balance=starting_balance_for_today
             )
@@ -13683,9 +14686,6 @@ def recent_highest_balance_target(inv_id=None):
             week_start_date = start_date + timedelta(days=(week_num - 1) * 7)
             week_end_date = week_start_date + timedelta(days=6)
 
-            # ------------------------------------------------------------
-            # SHORT-CIRCUIT: fully-past week + include_missed_days=False
-            # ------------------------------------------------------------
             week_is_entirely_past = week_end_date.date() < current_date.date()
             if week_is_entirely_past and not include_missed_days:
                 print(f"\n  📆 {week_key.upper()}: {week_start_date.strftime('%Y-%m-%d')} ({week_start_date.strftime('%A')}) to {week_end_date.strftime('%Y-%m-%d')} ({week_end_date.strftime('%A')})")
@@ -13702,7 +14702,6 @@ def recent_highest_balance_target(inv_id=None):
 
             remaining_profit = profit
 
-            # Safe sum — week_targets values are guaranteed numeric now
             total_week_target = sum(
                 (week_targets.get(day.lower()) or 0.0) for day in ordered_days
             )
@@ -13731,32 +14730,33 @@ def recent_highest_balance_target(inv_id=None):
                 is_today = (day_date_str == today_str)
                 is_past_day = check_date.date() < current_date.date()
                 is_future = check_date.date() > current_date.date()
-                is_past_or_today = check_date.date() <= current_date.date()
 
-                # ------------------------------------------------------------
-                # MISSED-DAY GATE
-                # Past days (not today) are 'skipped' when include_missed_days=False.
-                # They consume no profit and create no debt.
-                # TODAY is always evaluated.
-                # ------------------------------------------------------------
-                if is_past_day and not include_missed_days:
-                    status = 'skipped'
-                    profit_allocated = 0.0
-                    # remaining_profit is NOT touched
-                elif is_past_or_today:
+                if is_past_day:
+                    if not include_missed_days:
+                        status = 'skipped'
+                        profit_allocated = 0.0
+                    else:
+                        if remaining_profit >= target:
+                            status = 'met'
+                            profit_allocated = target
+                            remaining_profit -= target
+                        else:
+                            status = 'owed'
+                            profit_allocated = remaining_profit
+                            remaining_profit = 0
+                elif is_today:
                     if remaining_profit >= target:
                         status = 'met'
                         profit_allocated = target
                         remaining_profit -= target
                     else:
-                        status = 'owed'
+                        status = 'pending'
                         profit_allocated = remaining_profit
                         remaining_profit = 0
                 else:
                     status = 'pending'
                     profit_allocated = 0.0
 
-                # Pre-pending only applies to FUTURE days in the CURRENT week
                 is_pre_pending_day = False
                 if (week_num == current_week
                         and is_future
@@ -13783,8 +14783,9 @@ def recent_highest_balance_target(inv_id=None):
                     else:
                         result['today_met'] = False
                         result['today_target_met'] = False
-                        print(f"\n   TODAY ({day_name_proper}): Target NOT MET. Profit allocation: ${profit_allocated:.2f} < ${target:.2f}")
-                        print(f"     Remaining needed: ${target - profit_allocated:.2f}")
+                        print(f"\n  ⏳ TODAY ({day_name_proper}): Target PENDING (in-progress). Profit allocation: ${profit_allocated:.2f} < ${target:.2f}")
+                        print(f"     Remaining needed today: ${target - profit_allocated:.2f}")
+                        print(f"     📌 Today is NEVER declared OWED — it is always PENDING until met.")
 
             week_met = sum(1 for d in result['weekly_targets'][week_key].values() if d['status'] == 'met')
             week_owed = sum(1 for d in result['weekly_targets'][week_key].values() if d['status'] == 'owed')
@@ -13816,11 +14817,10 @@ def recent_highest_balance_target(inv_id=None):
         result['total_all_debt'] = total_all_debt
         result['daily_target_owed'] = total_all_debt
 
-        # ALARM LOGIC
         if result['pre_pending_enabled']:
             print(f"\n  🔮 PRE-PENDING MODE ACTIVE (current week)")
             print(f"  ──────────────────────────────────────")
-            print(f"  💰 Owed Debt (backward): ${total_owed:.2f}")
+            print(f"  💰 Owed Debt (backward, PAST days only): ${total_owed:.2f}")
             print(f"  🔮 Pre-Pending Sum (forward, current week): ${result['pre_pending_total']:.2f}")
             print(f"  📊 Total All Debt (daily_target_owed): ${total_all_debt:.2f}")
             if not include_missed_days:
@@ -13841,15 +14841,15 @@ def recent_highest_balance_target(inv_id=None):
             else:
                 result['alarm_trigger'] = False
                 if not result['today_met']:
-                    print(f"\n  🔇 Alarm OFF: Today's target not met")
+                    print(f"\n  🔇 Alarm OFF: Today's target not met (still PENDING)")
                 if total_owed > 0:
                     print(f"\n  🔇 Alarm OFF: Owed debts exist (${total_owed:.2f} remaining needed)")
 
         print(f"\n  📊 FINAL STATUS:")
         print(f"  ──────────────────")
         print(f"  Include Missed Days: {'YES ✅' if include_missed_days else 'NO ⏭️'}")
-        print(f"  Today's Target Met: {'YES ✅' if result['today_met'] else 'NO '}")
-        print(f"  Total Owed (backward): ${total_owed:.2f}")
+        print(f"  Today's Target Met: {'YES ✅' if result['today_met'] else 'NO ⏳ (PENDING)'}")
+        print(f"  Total Owed (backward, PAST days only): ${total_owed:.2f}")
         print(f"  Pre-Pending Total (forward, current week): ${result['pre_pending_total']:.2f}")
         print(f"  Pre-Pending Enabled: {'YES 🔮' if result['pre_pending_enabled'] else 'NO'}")
         print(f"  Total All Debt: ${total_all_debt:.2f}")
@@ -13857,7 +14857,67 @@ def recent_highest_balance_target(inv_id=None):
         print(f"  Alarm Trigger: {'YES 🚨' if result['alarm_trigger'] else 'NO 🔇'}")
 
         return result
-    
+
+    # ------------------------------------------------------------------
+    # ALARM CONFIRMATION GUARD
+    # ------------------------------------------------------------------
+    def confirm_alarm_with_mt5(alarm_result, mt5_balance, starting_balance,
+                               today_profit, latest_trade_dt):
+        """
+        Confirm the alarm decision against the LIVE MT5 balance before firing.
+        """
+        try:
+            if not alarm_result.get('alarm_trigger'):
+                return False, "alarm_not_requested", 0.0
+
+            if mt5_balance is None:
+                return False, "mt5_balance_unavailable", 0.0
+
+            starting_balance = float(starting_balance or 0.0)
+
+            today_target = 0.0
+            for week_data in alarm_result.get('weekly_targets', {}).values():
+                for day_name, day_data in week_data.items():
+                    if day_data.get('date') == alarm_result.get('effective_today'):
+                        today_target = float(day_data.get('daily_target', 0.0) or 0.0)
+                        break
+
+            if alarm_result.get('pre_pending_enabled'):
+                total_debt = float(alarm_result.get('total_all_debt', 0.0) or 0.0)
+                required_minimum = starting_balance + total_debt
+                mode_label = "PRE-PENDING"
+            else:
+                total_debt = 0.0
+                required_minimum = starting_balance + today_target
+                mode_label = "DAILY"
+
+            print(f"\n  🔐 ALARM CONFIRMATION GUARD ({mode_label}):")
+            print(f"     Stored recent_highest_balance math has triggered the alarm")
+            print(f"     Now verifying against LIVE MT5 balance...")
+            print(f"     ├─ Starting balance: ${starting_balance:.2f}")
+            if alarm_result.get('pre_pending_enabled'):
+                print(f"     ├─ Total debt (owed + pre-pending): ${total_debt:.2f}")
+            else:
+                print(f"     ├─ Today's target: ${today_target:.2f}")
+            print(f"     ├─ Required minimum live MT5 balance: ${required_minimum:.2f}")
+            print(f"     └─ Actual LIVE MT5 balance: ${mt5_balance:.2f}")
+
+            if mt5_balance + 0.01 < required_minimum:
+                shortfall = required_minimum - mt5_balance
+                reason = (
+                    f"live MT5 balance ${mt5_balance:.2f} is below required minimum "
+                    f"${required_minimum:.2f} (shortfall ${shortfall:.2f})"
+                )
+                print(f"     🚫 ALARM BLOCKED — {reason}")
+                print(f"     📌 The stored recent_highest_balance math claims the target was met,")
+                print(f"        but the live account cannot back that claim.")
+                return False, reason, required_minimum
+
+            print(f"     ✅ ALARM CONFIRMED — live balance meets the required minimum")
+            return True, "confirmed", required_minimum
+        except Exception as e:
+            return False, f"confirmation_error: {e}", 0.0
+
     # ------------------------------------------------------------------
     # FILE I/O
     # ------------------------------------------------------------------
@@ -13866,11 +14926,13 @@ def recent_highest_balance_target(inv_id=None):
             inv_root = Path(INV_PATH) / inv_id
             activities_path = inv_root / "activities.json"
 
+            lagos_now_str = lagos_now().strftime("%Y-%m-%d %H:%M:%S")
+
             if activities_path.exists():
                 with open(activities_path, 'r', encoding='utf-8') as f:
                     activities = json.load(f)
             else:
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                current_time = lagos_now_str
                 activities = {
                     "recent_highest_balance": str(round(new_balance, 2)),
                     "recent_highest_balance_last_update": update_date,
@@ -13906,7 +14968,7 @@ def recent_highest_balance_target(inv_id=None):
             if update_date_field:
                 activities['recent_highest_balance_last_update'] = update_date
 
-            activities['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            activities['last_updated'] = lagos_now_str
 
             if daily_target_met is not None and isinstance(daily_target_met, dict):
                 if 'daily_target_owed' not in daily_target_met:
@@ -13921,10 +14983,10 @@ def recent_highest_balance_target(inv_id=None):
                         current_peak = float(activities['peak_balance'])
                         if new_balance > current_peak:
                             activities['peak_balance'] = str(round(new_balance, 2))
-                            activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            activities['peak_balance_date'] = lagos_now_str
                     except (ValueError, TypeError):
                         activities['peak_balance'] = str(round(new_balance, 2))
-                        activities['peak_balance_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        activities['peak_balance_date'] = lagos_now_str
 
             with open(activities_path, 'w', encoding='utf-8') as f:
                 json.dump(activities, f, indent=4)
@@ -13950,6 +15012,18 @@ def recent_highest_balance_target(inv_id=None):
 
     def sync_all_files(inv_id, balance, date, message, exec_message, msg_type,
                        daily_target_met=None, update_balance=True, update_date_field=True):
+        """
+        Write the current recent_highest_balance / date / daily_target_met
+        to ALL storage locations:
+          - activities.json
+          - FETCHED_INVESTORS
+          - UPDATED_INVESTORS
+          - ALL_FETCHED_INVESTORS
+          - ALL_UPDATED_INVESTORS
+
+        Note: activities.json is a WRITE-ONLY sink here. It is never read
+        back as the source of truth.
+        """
         files_updated = 0
 
         if update_activities_json(inv_id, balance, date, daily_target_met, update_balance, update_date_field):
@@ -13962,6 +15036,8 @@ def recent_highest_balance_target(inv_id=None):
             (all_fetched_data, "ALL_FETCHED_INVESTORS"),
             (all_updated_data, "ALL_UPDATED_INVESTORS")
         ]
+
+        lagos_ts = lagos_now().strftime("%Y-%m-%d %H:%M:%S")
 
         for data_dict, file_name in file_updates:
             if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
@@ -13982,8 +15058,8 @@ def recent_highest_balance_target(inv_id=None):
                         data_dict[inv_id]['notifications'] = {}
                     if 'executions_notification' not in data_dict[inv_id]:
                         data_dict[inv_id]['executions_notification'] = {}
-                    add_notification(data_dict[inv_id]['notifications'], 'RecentBalance', message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    add_execution_notification(data_dict[inv_id]['executions_notification'], 'RecentBalance', exec_message, msg_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    add_notification(data_dict[inv_id]['notifications'], 'RecentBalance', message, msg_type, lagos_ts)
+                    add_execution_notification(data_dict[inv_id]['executions_notification'], 'RecentBalance', exec_message, msg_type, lagos_ts)
             else:
                 new_entry = {
                     'recent_highest_balance': str(round(balance, 2)),
@@ -13998,35 +15074,6 @@ def recent_highest_balance_target(inv_id=None):
 
         stats["files_updated"] += 4
         return files_updated
-
-    def get_highest_balance_from_all_files(inv_id):
-        highest_balance = None
-        highest_date = None
-        source_file = None
-
-        file_checks = [
-            (fetched_data, "FETCHED_INVESTORS"),
-            (updated_data, "UPDATED_INVESTORS"),
-            (all_fetched_data, "ALL_FETCHED_INVESTORS"),
-            (all_updated_data, "ALL_UPDATED_INVESTORS")
-        ]
-
-        for data_dict, file_name in file_checks:
-            if inv_id in data_dict and isinstance(data_dict[inv_id], dict):
-                balance = data_dict[inv_id].get('recent_highest_balance')
-                date = data_dict[inv_id].get('recent_highest_balance_last_update')
-
-                if balance is not None:
-                    try:
-                        balance_float = float(balance)
-                        if highest_balance is None or balance_float > highest_balance:
-                            highest_balance = balance_float
-                            highest_date = str(date) if date else None
-                            source_file = file_name
-                    except (ValueError, TypeError):
-                        continue
-
-        return highest_balance, highest_date, source_file
 
     def ensure_dict(value):
         if isinstance(value, dict):
@@ -14072,7 +15119,7 @@ def recent_highest_balance_target(inv_id=None):
         try:
             with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
                 fetched_data = json.load(f)
-            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS")
+            print(f" │ Loaded {len(fetched_data)} profiles from FETCHED_INVESTORS (SOURCE OF TRUTH for recent balance)")
         except Exception as e:
             print(f" │ Error loading FETCHED_INVESTORS: {e}")
             stats["errors"].append(f"Failed to load FETCHED_INVESTORS: {e}")
@@ -14136,8 +15183,6 @@ def recent_highest_balance_target(inv_id=None):
     print(f"\n 📋 Processing {len(investors_to_process)} investors...")
 
     has_updates = False
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     for inv_id in investors_to_process:
         print(f"\n{'─'*80}")
@@ -14145,7 +15190,7 @@ def recent_highest_balance_target(inv_id=None):
         print(f"{'─'*80}")
 
         # ============================================================
-        # SECTION 1: MT5 BALANCE MANAGEMENT
+        # SECTION 1: MT5 BALANCE MANAGEMENT (LAGOS-ALIGNED)
         # ============================================================
         print(f"\n  🔵 SECTION 1: MT5 BALANCE MANAGEMENT")
         print(f"  ─────────────────────────────────────")
@@ -14162,13 +15207,127 @@ def recent_highest_balance_target(inv_id=None):
         broker_balance = get_broker_balance_from_fetched(inv_id)
         execution_start_date = get_execution_start_date_from_activities(inv_id)
 
-        existing_recent, existing_last_update = get_recent_balance_from_activities(inv_id)
+        # ------------------------------------------------------------------
+        # SOURCE-OF-TRUTH: read recent_highest_balance from FETCHED_INVESTORS
+        # ------------------------------------------------------------------
+        existing_recent, existing_last_update = get_recent_balance_from_fetched(inv_id)
 
-        # ---- Compute today's start-of-day balance ----
-        today_profit = get_mt5_today_profit()
+        # ---- Lagos-aligned profit + latest trade date ----
+        today_profit, latest_trade_dt, srv_offset = get_mt5_today_profit_and_latest_trade_date()
         today_start_balance = mt5_balance - today_profit
-        print(f"  📅 Today's realised profit: ${today_profit:.2f}")
-        print(f"  🎯 Today's START-OF-DAY balance: ${today_start_balance:.2f}")
+
+        wall_clock_now = lagos_naive_now()          # Lagos wall clock (naive)
+        wall_clock_now_aware = lagos_now()          # Lagos aware, for date math
+
+        # ------------------------------------------------------------------
+        # TRADE-DATE ALIGNMENT (Lagos)
+        # ------------------------------------------------------------------
+        effective_today = wall_clock_now  # default (naive Lagos)
+
+        if today_profit > 0 and latest_trade_dt is not None:
+            latest_trade_lagos_naive = latest_trade_dt.replace(tzinfo=None)
+
+            if latest_trade_lagos_naive.date() < wall_clock_now.date():
+                effective_today = latest_trade_lagos_naive
+                print(f"  📅 Today's realised profit: ${today_profit:.2f} (Lagos day)")
+                print(f"  🎯 Today's START-OF-DAY balance: ${today_start_balance:.2f}")
+                print(f"  🕒 Latest contributing trade (Lagos): {latest_trade_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                print(f"  🌐 MT5 server offset detected: {srv_offset:+.2f}h from UTC")
+                print(f"  ⚠️ TRADE-DATE MISMATCH (Lagos): Profit was made on "
+                      f"{latest_trade_lagos_naive.strftime('%A %Y-%m-%d')}, "
+                      f"but processing on {wall_clock_now.strftime('%A %Y-%m-%d')}")
+                print(f"  🔁 SHIFTING target resolution to trade date: "
+                      f"{effective_today.strftime('%Y-%m-%d')} ({effective_today.strftime('%A')})")
+            else:
+                print(f"  📅 Today's realised profit: ${today_profit:.2f} (Lagos day)")
+                print(f"  🎯 Today's START-OF-DAY balance: ${today_start_balance:.2f}")
+                print(f"  🕒 Latest contributing trade (Lagos): {latest_trade_dt.strftime('%Y-%m-%d %H:%M:%S %Z')} (same Lagos day ✅)")
+                print(f"  🌐 MT5 server offset detected: {srv_offset:+.2f}h from UTC")
+        else:
+            print(f"  📅 Today's realised profit: ${today_profit:.2f} (Lagos day)")
+            print(f"  🎯 Today's START-OF-DAY balance: ${today_start_balance:.2f}")
+            print(f"  🌐 MT5 server offset detected: {srv_offset:+.2f}h from UTC")
+            if today_profit > 0:
+                print(f"  🕒 Latest contributing trade date: unavailable (using Lagos wall clock)")
+
+        # Lagos calendar strings for audit fields
+        yesterday_str = lagos_yesterday_str()
+        today_str = lagos_today_str()
+
+        # ------------------------------------------------------------------
+        # START-OF-DAY BALANCE GUARD
+        # ------------------------------------------------------------------
+        use_start_of_day = True
+        if execution_start_date:
+            exec_start_parsed = parse_date_flexible(execution_start_date)
+            if exec_start_parsed:
+                exec_start_date_str = exec_start_parsed.strftime("%Y-%m-%d")
+                if exec_start_date_str == today_str:
+                    use_start_of_day = False
+                    print(f"\n  🛡️ START-OF-DAY BALANCE GUARD:")
+                    print(f"     Execution start date ({exec_start_date_str}) == today ({today_str})")
+                    print(f"     → Falling back to broker_balance for bracket resolution")
+                    print(f"     → Using contract-aware balance: ${broker_balance if broker_balance is not None else mt5_balance:.2f}")
+                    today_start_balance = broker_balance if broker_balance is not None else mt5_balance
+                else:
+                    print(f"\n  🛡️ START-OF-DAY BALANCE GUARD:")
+                    print(f"     Execution start date ({exec_start_date_str}) != today ({today_str})")
+                    print(f"     → Using MT5 start-of-day balance for bracket resolution: ${today_start_balance:.2f}")
+        else:
+            print(f"\n  🛡️ START-OF-DAY BALANCE GUARD:")
+            print(f"     No execution start date found — using MT5 start-of-day balance: ${today_start_balance:.2f}")
+
+        # ------------------------------------------------------------------
+        # STALE RECORD GUARD
+        # ------------------------------------------------------------------
+        stale_record_detected = False
+        if existing_recent is not None and existing_last_update and execution_start_date:
+            exec_start_parsed = parse_date_flexible(execution_start_date)
+            stored_date_parsed = parse_date_flexible(existing_last_update)
+            if exec_start_parsed and stored_date_parsed:
+                if stored_date_parsed.date() < exec_start_parsed.date():
+                    stale_record_detected = True
+
+        if stale_record_detected:
+            print(f"\n  🧹 STALE RECORD GUARD:")
+            print(f"     Stored recent_highest_balance_last_update = {existing_last_update}")
+            print(f"     Execution start date = {execution_start_date}")
+            print(f"     → Stored record is from a PREVIOUS contract (date is behind execution start)")
+            print(f"     → Resetting recent_highest_balance recording for the new contract")
+
+            if broker_balance is not None:
+                reset_balance = broker_balance
+            else:
+                reset_balance = mt5_balance
+
+            if mt5_balance < reset_balance:
+                print(f"     ⚠️ MT5 balance ${mt5_balance:.2f} < reset anchor ${reset_balance:.2f}")
+                print(f"     → Using broker_balance as reset anchor: ${reset_balance:.2f}")
+            else:
+                reset_balance = mt5_balance
+                print(f"     → Using MT5 balance as reset anchor: ${reset_balance:.2f}")
+
+            print(f"     → New date: {yesterday_str} (yesterday, Lagos)")
+            print(f"     → New balance: ${reset_balance:.2f}")
+
+            sync_all_files(
+                inv_id,
+                reset_balance,
+                yesterday_str,
+                None,
+                None,
+                None,
+                None,
+                update_balance=True,
+                update_date_field=True
+            )
+
+            existing_recent = reset_balance
+            existing_last_update = yesterday_str
+            stats["stale_record_resets"] += 1
+            has_updates = True
+
+            print(f"     ✅ Record reset complete")
 
         # Initialize if doesn't exist
         if existing_recent is None:
@@ -14195,10 +15354,10 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  📈 Total Profit: ${total_profit:.2f}")
 
             if not execution_start_date:
-                execution_start_date = datetime.now().strftime("%Y-%m-%d")
+                execution_start_date = today_str
 
             print(f"\n  ✅ INITIALIZED: Recent Highest Balance = ${init_balance:.2f}")
-            print(f"  📅 Date set to: {yesterday_str} (YESTERDAY)")
+            print(f"  📅 Date set to: {yesterday_str} (YESTERDAY, Lagos)")
             print(f"  🔇 Alarm OFF - Trading allowed")
 
             recent_highest_alert = {
@@ -14207,7 +15366,7 @@ def recent_highest_balance_target(inv_id=None):
                 'old_balance': None,
                 'new_balance': init_balance,
                 'difference': None,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'timestamp': lagos_now().strftime('%I:%M:%S %p'),
                 'action': 'initialized',
                 'last_update_date': yesterday_str,
                 'today_profit': None,
@@ -14256,11 +15415,11 @@ def recent_highest_balance_target(inv_id=None):
             print(f"  📅 Date preserved: {existing_last_update}")
 
         # ============================================================
-        # SECTION 2: DAILY TARGET CALCULATIONS
+        # SECTION 2: DAILY TARGET CALCULATIONS (LAGOS-ALIGNED)
         # ============================================================
         print(f"\n  🟢 SECTION 2: DAILY TARGET CALCULATIONS")
         print(f"  ────────────────────────────────────────")
-        print(f"  📊 Using recent_highest_balance: ${existing_recent:.2f}")
+        print(f"  📊 Using recent_highest_balance (from FETCHED_INVESTORS): ${existing_recent:.2f}")
 
         daily_target_config = get_investor_daily_target_config(inv_id)
 
@@ -14284,16 +15443,17 @@ def recent_highest_balance_target(inv_id=None):
         print(f"  💰 Total Profit: ${total_profit:.2f}")
 
         if not execution_start_date:
-            execution_start_date = datetime.now().strftime("%Y-%m-%d")
-            print(f"  ⚠️ No execution start date found - using today: {execution_start_date}")
+            execution_start_date = today_str
+            print(f"  ⚠️ No execution start date found - using today (Lagos): {execution_start_date}")
 
-        # ---- Calculate daily target status, passing today's start balance ----
+        # ---- Calculate daily target status with Lagos effective_today ----
         result = calculate_daily_target_status(
             {'daily_target_config': daily_target_config},
             total_profit,
             execution_start_date,
             inv_id,
-            starting_balance_for_today=today_start_balance
+            starting_balance_for_today=today_start_balance,
+            effective_today=effective_today
         )
 
         weekly_targets = result['weekly_targets']
@@ -14306,6 +15466,27 @@ def recent_highest_balance_target(inv_id=None):
         pre_pending_enabled = result['pre_pending_enabled']
         total_all_debt = result['total_all_debt']
         daily_target_owed_combined = result['daily_target_owed']
+
+        # ------------------------------------------------------------------
+        # ALARM CONFIRMATION GUARD
+        # ------------------------------------------------------------------
+        alarm_confirmed = False
+        alarm_block_reason = None
+        alarm_required_minimum = 0.0
+
+        if alarm_trigger:
+            print(f"\n  🔐 MATH SAYS ALARM SHOULD TRIGGER — requesting live confirmation...")
+            alarm_confirmed, alarm_block_reason, alarm_required_minimum = confirm_alarm_with_mt5(
+                result,
+                mt5_balance,
+                starting_balance,
+                today_profit,
+                latest_trade_dt
+            )
+            if not alarm_confirmed:
+                alarm_trigger = False
+                stats["alarm_confirmations_blocked"] += 1
+                print(f"  🚫 ALARM DOWNGRADED to OFF due to failed confirmation")
 
         if weekly_targets:
             print(f"\n  📊 WEEKLY TARGET BREAKDOWN:")
@@ -14348,20 +15529,32 @@ def recent_highest_balance_target(inv_id=None):
         daily_target_met['pre_pending_enabled'] = pre_pending_enabled
         daily_target_met['total_all_debt'] = total_all_debt
         daily_target_met['balance_used_for_bracket'] = today_start_balance
+        daily_target_met['effective_today'] = result.get('effective_today')
+        daily_target_met['latest_trade_date'] = (
+            latest_trade_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if latest_trade_dt else None
+        )
+        daily_target_met['trade_date_aligned'] = bool(
+            effective_today.strftime("%Y-%m-%d") != wall_clock_now.strftime("%Y-%m-%d")
+        )
+        daily_target_met['timezone'] = "Africa/Lagos"
+        daily_target_met['mt5_server_offset_hours'] = srv_offset
+        daily_target_met['alarm_confirmed_against_live_mt5'] = bool(alarm_confirmed)
+        if alarm_block_reason:
+            daily_target_met['alarm_blocked_reason'] = alarm_block_reason
 
         if alarm_trigger:
-            print(f"\n  🚨 ALARM TRIGGERED!")
+            print(f"\n  🚨 ALARM TRIGGERED (CONFIRMED)!")
             print(f"  ───────────────────")
             if pre_pending_enabled:
                 print(f"  🔮 Pre-Pending Mode: All debt (owed + current-week pre-pending) covered")
-                print(f"     Owed Debt (backward): ${total_owed:.2f}")
+                print(f"     Owed Debt (backward, PAST days only): ${total_owed:.2f}")
                 print(f"     Pre-Pending Sum (forward): ${pre_pending_total:.2f}")
                 print(f"     Daily Target Owed (combined): ${daily_target_owed_combined:.2f}")
                 print(f"     📌 Today's date IGNORED - alarm stays ON until new week")
             else:
                 print(f"  ✅ Today's target met: {today_met}")
-                print(f"  ✅ No owed debts: {total_owed == 0}")
-            print(f"  📅 Updating recent_highest_balance_last_update to TODAY: {today_str}")
+                print(f"  ✅ No owed debts (PAST days only): {total_owed == 0}")
+            print(f"  📅 Updating recent_highest_balance_last_update to TODAY (Lagos): {today_str}")
             print(f"  🚨 TRADING SUSPENDED!")
 
             recent_highest_alert = {
@@ -14370,7 +15563,7 @@ def recent_highest_balance_target(inv_id=None):
                 'old_balance': existing_recent,
                 'new_balance': existing_recent,
                 'difference': 0,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'timestamp': lagos_now().strftime('%I:%M:%S %p'),
                 'action': 'alarm_triggered',
                 'last_update_date': today_str,
                 'today_profit': today_profit,
@@ -14380,7 +15573,12 @@ def recent_highest_balance_target(inv_id=None):
                 'pre_pending_enabled': pre_pending_enabled,
                 'pre_pending_total': pre_pending_total,
                 'total_all_debt': total_all_debt,
-                'daily_target_owed': daily_target_owed_combined
+                'daily_target_owed': daily_target_owed_combined,
+                'effective_today': effective_today.strftime("%Y-%m-%d"),
+                'trade_date_aligned': daily_target_met['trade_date_aligned'],
+                'timezone': "Africa/Lagos",
+                'alarm_confirmed_against_live_mt5': True,
+                'alarm_required_minimum': alarm_required_minimum
             }
 
             if pre_pending_enabled:
@@ -14391,6 +15589,7 @@ def recent_highest_balance_target(inv_id=None):
                 exec_message = f"🚨 SERVER ALERT: {inv_id} daily target met at ${existing_recent:.2f} - Trading SUSPENDED"
             msg_type = 'danger'
 
+            # Audit trail uses Lagos calendar date.
             sync_all_files(inv_id, existing_recent, today_str, message, exec_message, msg_type, daily_target_met, update_balance=False, update_date_field=True)
 
             stats["new_high_alerts"] += 1
@@ -14398,16 +15597,22 @@ def recent_highest_balance_target(inv_id=None):
 
         else:
             print(f"\n  🔇 ALARM OFF - Trading continues")
+            if alarm_block_reason:
+                print(f"  🚫 ALARM WAS BLOCKED BY CONFIRMATION GUARD:")
+                print(f"     Reason: {alarm_block_reason}")
+                if alarm_required_minimum > 0:
+                    print(f"     Required live MT5 minimum: ${alarm_required_minimum:.2f}")
+                    print(f"     Actual live MT5 balance:   ${mt5_balance:.2f}")
             if pre_pending_enabled:
                 print(f"  🔮 Pre-Pending Mode Active - Total debt still outstanding")
-                print(f"     Owed Debt (backward): ${total_owed:.2f}")
+                print(f"     Owed Debt (backward, PAST days only): ${total_owed:.2f}")
                 print(f"     Pre-Pending Sum (forward): ${pre_pending_total:.2f}")
                 print(f"     Daily Target Owed (combined): ${daily_target_owed_combined:.2f}")
             else:
                 if not today_met:
-                    print(f"   Today's target not met")
+                    print(f"   Today's target not met (still PENDING)")
                 if total_owed > 0:
-                    print(f"  ⚠️ Owed debts exist: ${total_owed:.2f} remaining needed")
+                    print(f"  ⚠️ Owed debts exist (PAST days only): ${total_owed:.2f} remaining needed")
             print(f"  📅 Date NOT updated - kept as: {existing_last_update}")
 
             recent_highest_alert = {
@@ -14416,17 +15621,27 @@ def recent_highest_balance_target(inv_id=None):
                 'old_balance': existing_recent,
                 'new_balance': existing_recent,
                 'difference': 0,
-                'timestamp': datetime.now().strftime('%I:%M:%S %p'),
+                'timestamp': lagos_now().strftime('%I:%M:%S %p'),
                 'action': 'alarm_off',
                 'last_update_date': existing_last_update,
                 'today_profit': today_profit,
                 'daily_target_risk': None,
                 'profit_met_risk_threshold': today_met,
-                'alarm_blocked_reason': f"Total debt outstanding: ${daily_target_owed_combined:.2f}" if pre_pending_enabled else (f"Today's target not met" if not today_met else f"Owed debts: ${total_owed:.2f}"),
+                'alarm_blocked_reason': (
+                    alarm_block_reason
+                    if alarm_block_reason
+                    else (
+                        f"Total debt outstanding: ${daily_target_owed_combined:.2f}" if pre_pending_enabled
+                        else (f"Today's target still PENDING" if not today_met else f"Owed debts (PAST days): ${total_owed:.2f}")
+                    )
+                ),
                 'pre_pending_enabled': pre_pending_enabled,
                 'pre_pending_total': pre_pending_total,
                 'total_all_debt': total_all_debt,
-                'daily_target_owed': daily_target_owed_combined
+                'daily_target_owed': daily_target_owed_combined,
+                'effective_today': effective_today.strftime("%Y-%m-%d"),
+                'trade_date_aligned': daily_target_met['trade_date_aligned'],
+                'timezone': "Africa/Lagos"
             }
 
             sync_all_files(inv_id, existing_recent, existing_last_update, None, None, None, daily_target_met, update_balance=False, update_date_field=False)
@@ -14444,6 +15659,9 @@ def recent_highest_balance_target(inv_id=None):
             "total_profit": total_profit,
             "today_target_met": today_met,
             "alarm_triggered": alarm_trigger,
+            "alarm_confirmed_against_live_mt5": alarm_confirmed,
+            "alarm_blocked_reason": alarm_block_reason,
+            "alarm_required_minimum": alarm_required_minimum,
             "total_owed": total_owed,
             "total_owed_with_shortage": total_owed_with_shortage,
             "pre_pending_enabled": pre_pending_enabled,
@@ -14451,7 +15669,13 @@ def recent_highest_balance_target(inv_id=None):
             "total_all_debt": total_all_debt,
             "daily_target_owed": daily_target_owed_combined,
             "last_update_date": today_str if alarm_trigger else existing_last_update,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "effective_today": effective_today.strftime("%Y-%m-%d"),
+            "latest_trade_date": latest_trade_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if latest_trade_dt else None,
+            "trade_date_aligned": daily_target_met['trade_date_aligned'],
+            "timezone": "Africa/Lagos",
+            "mt5_server_offset_hours": srv_offset,
+            "recent_balance_source": "FETCHED_INVESTORS",
+            "timestamp": lagos_now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
     # ================================================================
@@ -14465,7 +15689,7 @@ def recent_highest_balance_target(inv_id=None):
         try:
             with open(FETCHED_INVESTORS, 'w', encoding='utf-8') as f:
                 json.dump(fetched_data, f, indent=4)
-            print(f" │ ✅ Updated: {FETCHED_INVESTORS}")
+            print(f" │ ✅ Updated: {FETCHED_INVESTORS} (SOURCE OF TRUTH)")
         except Exception as e:
             print(f" │  Error saving FETCHED_INVESTORS: {e}")
             stats["errors"].append(f"Failed to save FETCHED_INVESTORS: {e}")
@@ -14495,7 +15719,7 @@ def recent_highest_balance_target(inv_id=None):
             stats["errors"].append(f"Failed to save ALL_UPDATED_INVESTORS: {e}")
 
         print(f"\n │ ✅ All investor files updated successfully (existing data preserved).")
-        print(f" │ ✅ activities.json (SOURCE OF TRUTH) updated for {stats['activities_updated']} investor(s)")
+        print(f" │ ✅ activities.json (write-only sink) updated for {stats['activities_updated']} investor(s)")
         stats["processing_success"] = True
     else:
         print("\n │ ℹ️ No updates needed. All files are up to date.")
@@ -14504,6 +15728,8 @@ def recent_highest_balance_target(inv_id=None):
     print(f"\n{'='*10} 📊 RECENT BROKER BALANCE SUMMARY {'='*10}")
     print(f"  Investors checked: {stats['investors_checked']}")
     print(f"  Field created: {stats['field_created']}")
+    print(f"  Stale record resets: {stats['stale_record_resets']}")
+    print(f"  Alarm confirmations blocked: {stats['alarm_confirmations_blocked']}")
     print(f"  New highs recorded (total): {stats['new_high_recorded_only']}")
     print(f"  New high alerts triggered: {stats['new_high_alerts']}")
     print(f"  Investors updated: {stats['investors_updated']}")
@@ -14517,6 +15743,15 @@ def recent_highest_balance_target(inv_id=None):
             if detail.get('alarm_triggered'):
                 mode = "PRE-PENDING" if detail.get('pre_pending_enabled') else "DAILY"
                 print(f"     • {detail['investor_id']}: Balance: ${detail['recent_highest_balance']:.2f} [{mode}] 🔴")
+
+    if stats['alarm_confirmations_blocked'] > 0:
+        print(f"\n  🚫 ALARM CONFIRMATIONS BLOCKED: {stats['alarm_confirmations_blocked']} investor(s)")
+        for detail in stats['details']:
+            if detail.get('alarm_blocked_reason'):
+                print(f"     • {detail['investor_id']}: {detail['alarm_blocked_reason']}")
+
+    if stats['stale_record_resets'] > 0:
+        print(f"\n  🧹 STALE RECORD RESETS: {stats['stale_record_resets']} investor(s)")
 
     if stats['new_high_recorded_only'] > 0:
         print(f"\n  📈 NEW HIGHS RECORDED: {stats['new_high_recorded_only']} investor(s)")
@@ -14666,8 +15901,496 @@ def martingale_system(inv_id=None):
             
             return total_risk, position_risks
 
+        # ========== LEVERAGE / MARGIN VALIDATION HELPERS ==========
+        def _get_account_margin_state():
+            """
+            Returns a dict with the account's current margin state:
+                {
+                    "balance": float,
+                    "equity": float,
+                    "margin": float,          # margin currently used by open positions
+                    "free_margin": float,
+                    "margin_level": float or None,
+                    "leverage": int,
+                    "currency": str,
+                }
+            Returns None if account info is unavailable.
+            """
+            acc = mt5.account_info()
+            if acc is None:
+                return None
+            return {
+                "balance": float(acc.balance),
+                "equity": float(acc.equity),
+                "margin": float(acc.margin),
+                "free_margin": float(acc.margin_free),
+                "margin_level": float(acc.margin_level) if acc.margin_level else None,
+                "leverage": int(acc.leverage),
+                "currency": acc.currency,
+            }
 
+        def _calc_order_margin(order_type_str, symbol, volume, price):
+            """
+            Wrapper around mt5.order_calc_margin.
+            order_type_str: 'buy' or 'sell' (case-insensitive)
+            Returns margin (float) or None on failure.
+            """
+            try:
+                ot = order_type_str.strip().lower()
+                if ot.startswith("buy"):
+                    mt5_type = mt5.ORDER_TYPE_BUY
+                elif ot.startswith("sell"):
+                    mt5_type = mt5.ORDER_TYPE_SELL
+                else:
+                    # Fall back to any inference
+                    mt5_type = mt5.ORDER_TYPE_BUY if 'buy' in ot else mt5.ORDER_TYPE_SELL
+                margin = mt5.order_calc_margin(mt5_type, symbol, float(volume), float(price))
+                if margin is None or margin <= 0:
+                    return None
+                return float(margin)
+            except Exception:
+                return None
 
+        def _calc_group_margin(orders_with_side, buffer_pct=0.0):
+            """
+            Sum the margin required for a list of (order_dict, side, volume_override) tuples.
+            Each order_dict must contain 'symbol' and 'entry'.
+            Returns (total_margin, list_of_individual_results) or (None, []).
+            """
+            total = 0.0
+            details = []
+            for item in orders_with_side:
+                order = item["order"]
+                side = item["side"]
+                vol = item["volume"]
+                symbol = order.get("symbol")
+                entry = order.get("entry")
+
+                if not symbol or entry is None or vol is None or vol <= 0:
+                    details.append({"order": order, "side": side, "volume": vol,
+                                    "margin": None, "ok": False, "reason": "missing_data"})
+                    continue
+
+                margin = _calc_order_margin(side, symbol, vol, entry)
+                if margin is None:
+                    details.append({"order": order, "side": side, "volume": vol,
+                                    "margin": None, "ok": False, "reason": "calc_failed"})
+                    continue
+
+                total += margin
+                details.append({"order": order, "side": side, "volume": vol,
+                                "margin": margin, "ok": True, "reason": "ok"})
+            return total, details
+
+        def _shrink_volume_to_fit_margin(order, side, symbol_info, desired_volume,
+                                         max_margin_allowed, price):
+            """
+            Given a desired volume and a maximum margin budget for this single order,
+            return the largest valid volume (rounded to volume_step, >= volume_min)
+            whose margin <= max_margin_allowed.
+            Returns (final_volume, final_margin, was_shrunk).
+            """
+            if desired_volume is None or desired_volume <= 0:
+                return 0.0, 0.0, False
+
+            min_vol = symbol_info.volume_min if symbol_info else 0.01
+            step = symbol_info.volume_step if symbol_info and symbol_info.volume_step > 0 else 0.01
+
+            # First check: does the desired volume fit?
+            margin = _calc_order_margin(side, order.get("symbol"), desired_volume, price)
+            if margin is None:
+                return desired_volume, 0.0, False
+            if margin <= max_margin_allowed:
+                return desired_volume, margin, False
+
+            # Binary search for the largest volume that fits
+            low = min_vol
+            high = desired_volume
+            best_vol = 0.0
+            best_margin = 0.0
+
+            low_margin = _calc_order_margin(side, order.get("symbol"), low, price)
+            if low_margin is None or low_margin > max_margin_allowed:
+                # Even min volume does not fit — refuse this order entirely
+                return 0.0, 0.0, True
+
+            best_vol = low
+            best_margin = low_margin
+
+            for _ in range(40):
+                mid = (low + high) / 2.0
+                steps = round(mid / step) if step > 0 else 0
+                mid = max(min_vol, round(steps * step, 2))
+                if mid <= best_vol:
+                    break
+                m = _calc_order_margin(side, order.get("symbol"), mid, price)
+                if m is None:
+                    high = mid
+                    continue
+                if m <= max_margin_allowed:
+                    best_vol = mid
+                    best_margin = m
+                    low = mid
+                else:
+                    high = mid
+
+            # Round final
+            steps = round(best_vol / step) if step > 0 else 0
+            best_vol = max(min_vol, round(steps * step, 2))
+            best_margin = _calc_order_margin(side, order.get("symbol"), best_vol, price) or 0.0
+
+            return best_vol, best_margin, True
+
+        def _validate_single_order_margin(order, side, desired_volume, buffer_pct=10.0):
+            """
+            Validate one order's margin against the account's free margin.
+            buffer_pct: percentage of free margin to keep as safety buffer.
+            Returns (final_volume, margin_used, free_margin, allowed, was_shrunk, reason)
+            """
+            acc_state = _get_account_margin_state()
+            if acc_state is None:
+                return desired_volume, 0.0, 0.0, True, False, "no_account_info"
+
+            symbol = order.get("symbol")
+            entry = order.get("entry")
+            if not symbol or entry is None:
+                return desired_volume, 0.0, 0.0, False, False, "missing_data"
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                return desired_volume, 0.0, 0.0, False, False, "no_symbol_info"
+
+            free_margin = acc_state["free_margin"]
+            allowed_margin = free_margin * (1.0 - buffer_pct / 100.0)
+            if allowed_margin <= 0:
+                return 0.0, 0.0, free_margin, False, True, "no_free_margin"
+
+            margin = _calc_order_margin(side, symbol, desired_volume, entry)
+            if margin is None:
+                return desired_volume, 0.0, free_margin, False, False, "margin_calc_failed"
+
+            if margin <= allowed_margin:
+                return desired_volume, margin, free_margin, True, False, "fits"
+
+            # Shrink
+            final_vol, final_margin, shrunk = _shrink_volume_to_fit_margin(
+                order, side, symbol_info, desired_volume, allowed_margin, entry
+            )
+            if final_vol <= 0:
+                return 0.0, 0.0, free_margin, False, True, "cannot_fit_min_volume"
+
+            return final_vol, final_margin, free_margin, True, True, "shrunk_to_fit"
+
+        def _validate_group_margin(group_items, buffer_pct=10.0):
+            """
+            Validate a whole GROUP against account free margin.
+
+            IMPORTANT: This function is ONLY called for GRID BUNDLES
+            (grid main + its helpers). Non-grid orders never use group
+            validation — they rely on per-order margin checks only.
+
+            Returns:
+                (adjusted_items, total_margin, free_margin, allowed, all_ok, notes)
+            adjusted_items: list of dicts with final volume per item.
+            """
+            acc_state = _get_account_margin_state()
+            if acc_state is None:
+                return group_items, 0.0, 0.0, 0.0, True, ["no_account_info"]
+
+            free_margin = acc_state["free_margin"]
+            allowed_margin = free_margin * (1.0 - buffer_pct / 100.0)
+            notes = []
+
+            total, details = _calc_group_margin(group_items)
+            if total is None:
+                notes.append("group_margin_calc_failed")
+                return group_items, 0.0, free_margin, allowed_margin, False, notes
+
+            if total <= allowed_margin:
+                return group_items, total, free_margin, allowed_margin, True, notes
+
+            # Need to shrink proportionally
+            scale = allowed_margin / total if total > 0 else 0.0
+            adjusted = []
+            new_total = 0.0
+            for item in group_items:
+                order = item["order"]
+                side = item["side"]
+                vol = item["volume"]
+                symbol_info = mt5.symbol_info(order.get("symbol"))
+                step = symbol_info.volume_step if symbol_info and symbol_info.volume_step > 0 else 0.01
+                min_vol = symbol_info.volume_min if symbol_info else 0.01
+
+                new_vol = vol * scale
+                steps = round(new_vol / step) if step > 0 else 0
+                new_vol = max(min_vol, round(steps * step, 2))
+
+                margin = _calc_order_margin(side, order.get("symbol"), new_vol, order.get("entry"))
+                if margin is None:
+                    new_vol = 0.0
+                    margin = 0.0
+                new_total += margin
+
+                adjusted.append({
+                    "order": order,
+                    "side": side,
+                    "volume": new_vol,
+                    "margin": margin,
+                })
+
+            notes.append(f"group_scaled_by_{scale:.4f}")
+            all_ok = new_total <= allowed_margin
+            if not all_ok:
+                notes.append("group_still_exceeds_after_scaling")
+            return adjusted, new_total, free_margin, allowed_margin, all_ok, notes
+        
+        # ========== GRID BUNDLE / FULL GRID LEVERAGE CHECKS ==========
+        def _validate_and_cap_bundle_margin(bundle_items, buffer_pct=10.0):
+            """
+            STAGE 1 LEVERAGE CHECK (grid main + its helpers).
+
+            Given a list of items [{order, side, volume}, ...] for the bundle,
+            compute the total margin. If it exceeds the allowed free-margin
+            budget, shrink all items proportionally so the bundle fits.
+
+            Returns:
+                {
+                  "items": [{order, side, volume, margin}, ...],
+                  "total_margin": float,
+                  "free_margin": float,
+                  "allowed_margin": float,
+                  "ok": bool,
+                  "notes": [str, ...],
+                  "scaled": bool,      # True if any volume was reduced
+                }
+            """
+            acc_state = _get_account_margin_state()
+            if acc_state is None:
+                return {
+                    "items": bundle_items, "total_margin": 0.0,
+                    "free_margin": 0.0, "allowed_margin": 0.0,
+                    "ok": True, "notes": ["no_account_info"], "scaled": False,
+                }
+
+            free_margin = acc_state["free_margin"]
+            allowed_margin = free_margin * (1.0 - buffer_pct / 100.0)
+            notes = []
+
+            total, _ = _calc_group_margin(bundle_items)
+            if total is None:
+                notes.append("bundle_margin_calc_failed")
+                return {
+                    "items": bundle_items, "total_margin": 0.0,
+                    "free_margin": free_margin, "allowed_margin": allowed_margin,
+                    "ok": False, "notes": notes, "scaled": False,
+                }
+
+            if total <= allowed_margin:
+                return {
+                    "items": bundle_items, "total_margin": total,
+                    "free_margin": free_margin, "allowed_margin": allowed_margin,
+                    "ok": True, "notes": notes, "scaled": False,
+                }
+
+            # Proportional shrink
+            scale = allowed_margin / total if total > 0 else 0.0
+            adjusted = []
+            new_total = 0.0
+            any_shrunk = False
+            for item in bundle_items:
+                order = item["order"]
+                side = item["side"]
+                vol = item["volume"]
+                symbol_info = mt5.symbol_info(order.get("symbol"))
+                step = symbol_info.volume_step if symbol_info and symbol_info.volume_step > 0 else 0.01
+                min_vol = symbol_info.volume_min if symbol_info else 0.01
+
+                new_vol = vol * scale
+                steps = round(new_vol / step) if step > 0 else 0
+                new_vol = max(min_vol, round(steps * step, 2))
+                if abs(new_vol - vol) > 0.001:
+                    any_shrunk = True
+
+                margin = _calc_order_margin(side, order.get("symbol"), new_vol, order.get("entry"))
+                if margin is None:
+                    new_vol = 0.0
+                    margin = 0.0
+                new_total += margin
+
+                adjusted.append({
+                    "order": order, "side": side,
+                    "volume": new_vol, "margin": margin,
+                })
+
+            notes.append(f"bundle_scaled_by_{scale:.4f}")
+            ok = new_total <= allowed_margin
+            if not ok:
+                notes.append("bundle_still_exceeds_after_scaling")
+
+            return {
+                "items": adjusted, "total_margin": new_total,
+                "free_margin": free_margin, "allowed_margin": allowed_margin,
+                "ok": ok, "notes": notes, "scaled": any_shrunk,
+            }
+
+        def _validate_full_grid_and_cut(
+            symbol, side, main_order, all_children_of_side, buffer_pct=10.0
+        ):
+            """
+            STAGE 2 LEVERAGE CHECK (grid main + ALL its grid children of the side).
+
+            RULES:
+              - The GRID MAIN and its HELPERS (grid_mh=True) are NEVER cut.
+              - Grid children that fit within the remaining margin are KEPT.
+              - Trimming walks from the outer end inward:
+                  SELL: lowest entry → upward
+                  BUY : highest entry → downward
+              - Trimming STOPS as soon as total margin ≤ allowed.
+
+            Prints a summary line:
+                Grid M and Helpers risks: $X
+                Margin: $Y
+                ...
+
+            Returns dict with kept/cut/total_margin/free_margin/allowed_margin/ok/notes.
+            """
+            acc_state = _get_account_margin_state()
+            if acc_state is None:
+                return {
+                    "kept": [(main_order, side)] + [(c, side) for c in all_children_of_side],
+                    "cut": [],
+                    "total_margin": 0.0, "free_margin": 0.0, "allowed_margin": 0.0,
+                    "ok": True, "notes": ["no_account_info"],
+                }
+
+            free_margin = acc_state["free_margin"]
+            allowed_margin = free_margin * (1.0 - buffer_pct / 100.0)
+            notes = []
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                notes.append("no_symbol_info")
+                return {
+                    "kept": [(main_order, side)] + [(c, side) for c in all_children_of_side],
+                    "cut": [],
+                    "total_margin": 0.0, "free_margin": free_margin,
+                    "allowed_margin": allowed_margin, "ok": False, "notes": notes,
+                }
+
+            contract_size = symbol_info.trade_contract_size
+
+            # ---------- Build the full ladder ----------
+            ladder = []
+            main_entry = main_order.get("entry")
+            main_vol = get_volume_field_from_order(main_order)[1] or 0.01
+            ladder.append((main_order, main_vol, main_entry, "main"))
+
+            for c in all_children_of_side:
+                c_entry = c.get("entry")
+                c_vol = get_volume_field_from_order(c)[1] or 0.01
+                role = "helper" if c.get("grid_mh", False) else "child"
+                ladder.append((c, c_vol, c_entry, role))
+
+            # Sort ascending by entry
+            ladder.sort(key=lambda x: (x[2] if x[2] is not None else 0))
+
+            # Cut direction
+            if side == "sell":
+                cut_order = list(ladder)                # lowest → highest
+                cut_label = "lowest → upward (ascending)"
+            else:
+                cut_order = list(reversed(ladder))      # highest → lowest
+                cut_label = "highest → downward (descending)"
+
+            def _margin_of(order, vol):
+                if vol <= 0:
+                    return 0.0
+                m = _calc_order_margin(side, symbol, vol, order.get("entry"))
+                return m or 0.0
+
+            def _risk_of(order, vol):
+                e = order.get("entry")
+                s = order.get("exit") or order.get("stop_loss")
+                if e is None or s is None or vol is None or vol <= 0:
+                    return 0.0
+                return abs(e - s) * vol * contract_size
+
+            current_total = sum(_margin_of(o, v) for o, v, _e, _r in ladder)
+
+            # ---- Summary: Grid M + Helpers risk & margin ----
+            gm_h_margin = 0.0
+            gm_h_risk = 0.0
+            for o, v, _e, r in ladder:
+                if r in ("main", "helper"):
+                    gm_h_margin += _margin_of(o, v)
+                    gm_h_risk += _risk_of(o, v)
+            print(f"        Ladder sorted ASCENDING ({len(ladder)} orders)")
+            print(f"        Side = {side.upper()} → cut direction: {cut_label}")
+            print(f"        Grid M and Helpers risks: ${gm_h_risk:.2f}")
+            print(f"        Grid M and Helpers margin: ${gm_h_margin:.2f}")
+            print(f"        Full ladder margin: ${current_total:.2f} "
+                  f"(allowed: ${allowed_margin:.2f})")
+
+            if current_total <= allowed_margin:
+                return {
+                    "kept": [(o, side) for o, _v, _e, _r in ladder],
+                    "cut": [],
+                    "total_margin": current_total,
+                    "free_margin": free_margin,
+                    "allowed_margin": allowed_margin,
+                    "ok": True,
+                    "notes": notes,
+                }
+
+            # ---------- Trim from the outer end inward until we fit ----------
+            cut_list = []
+            working = list(ladder)
+            current_total = sum(_margin_of(o, v) for o, v, _e, _r in working)
+
+            for order, vol, entry, role in cut_order:
+                if current_total <= allowed_margin:
+                    break
+
+                # NEVER cut the grid main
+                if order is main_order:
+                    continue
+                # NEVER cut helpers (grid_mh)
+                if role == "helper":
+                    continue
+
+                m = _margin_of(order, vol)
+                current_total -= m
+                cut_list.append((order, side, m, entry))
+                working = [item for item in working if item[0] is not order]
+                print(f"        🗑️ CUT [{side}] entry={entry} margin=${m:.2f} "
+                      f"(remaining ${current_total:.2f} / allowed ${allowed_margin:.2f})")
+
+            notes.append(f"cut_{len(cut_list)}_order(s)_{cut_label}")
+            ok = current_total <= allowed_margin
+            if not ok:
+                notes.append("full_grid_still_exceeds_after_cut")
+
+            # ---- Post-cut summary ----
+            post_gm_h_margin = 0.0
+            post_gm_h_risk = 0.0
+            for o, v, _e, r in working:
+                if r in ("main", "helper"):
+                    post_gm_h_margin += _margin_of(o, v)
+                    post_gm_h_risk += _risk_of(o, v)
+            print(f"        After cut → Grid M and Helpers risks: ${post_gm_h_risk:.2f}")
+            print(f"        After cut → Grid M and Helpers margin: ${post_gm_h_margin:.2f}")
+            print(f"        After cut → Full ladder margin: ${current_total:.2f}")
+
+            return {
+                "kept": [(o, side) for o, _v, _e, _r in working],
+                "cut": cut_list,
+                "total_margin": current_total,
+                "free_margin": free_margin,
+                "allowed_margin": allowed_margin,
+                "ok": ok,
+                "notes": notes,
+            }
+        
         def get_starting_balance_and_drawdown():
             """
             Uses MT5 balance as current balance.
@@ -15389,11 +17112,29 @@ def martingale_system(inv_id=None):
         def get_grid_side(order):
             """
             Determine the grid side/direction for a grid order.
-            Uses explicit 'grid_side' if present, otherwise infers from order_type.
-            Returns a normalized side key: 'buy' or 'sell'.
+
+            SIDE IS DERIVED FROM ORDER_TYPE FIRST (unambiguous):
+              - order_type contains "buy"  → "buy"
+              - order_type contains "sell" → "sell"
+
+            The `grid_side` field is only used as a fallback when
+            order_type is missing/unusable. This is because the grid
+            generator labels the sell_stop side as "bid" (it sits below
+            the bid price) and the buy_stop side as "ask" (it sits above
+            the ask price), which is INVERTED relative to order semantics.
+            Deriving side from order_type removes that ambiguity.
             """
             if not isinstance(order, dict):
                 return None
+
+            # ---- Primary: derive from order_type (unambiguous) ----
+            order_type = str(order.get("order_type", "")).lower()
+            if "buy" in order_type:
+                return "buy"
+            if "sell" in order_type:
+                return "sell"
+
+            # ---- Fallback: use grid_side only if order_type is missing ----
             side = order.get("grid_side")
             if isinstance(side, str) and side.strip():
                 s = side.strip().lower()
@@ -15401,11 +17142,6 @@ def martingale_system(inv_id=None):
                     return "buy"
                 if s in ("ask", "sell", "sell_stop", "sell_limit", "short"):
                     return "sell"
-            order_type = str(order.get("order_type", "")).lower()
-            if "buy" in order_type:
-                return "buy"
-            if "sell" in order_type:
-                return "sell"
             return None
 
         def get_grid_rr_from_record(order):
@@ -15505,10 +17241,37 @@ def martingale_system(inv_id=None):
             return None, None, None
         
         def get_volume_field_from_order(order):
+            # Preferred: a key containing "_volume" (e.g. "order_volume", "raw_volume")
             for key, value in order.items():
                 if '_volume' in key.lower() and isinstance(value, (int, float)):
                     return key, value
+            # Fallback: the plain "volume" key used by flat grid orders
+            if 'volume' in order and isinstance(order['volume'], (int, float)):
+                return 'volume', order['volume']
             return None, None
+        
+        def _size_volume_from_risk_target(order, symbol_info, target_risk_dollars):
+            """
+            Size an order's volume so its SL RISK equals target_risk_dollars.
+            Uses SL distance (entry → exit/stop_loss). Rounds to volume_step.
+            Returns (volume, actual_risk, risk_per_lot).
+            """
+            entry = order.get('entry')
+            stop = order.get('exit') or order.get('stop_loss')
+            if entry is None or stop is None:
+                return 0.0, 0.0, 0.0
+            sl_distance = abs(entry - stop)
+            contract_size = symbol_info.trade_contract_size
+            risk_per_lot = sl_distance * contract_size
+            if risk_per_lot <= 0:
+                return 0.0, 0.0, 0.0
+            vol = target_risk_dollars / risk_per_lot
+            step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
+            min_vol = symbol_info.volume_min if symbol_info else 0.01
+            steps = round(vol / step) if step > 0 else 0
+            vol = max(min_vol, round(steps * step, 2))
+            actual_risk = vol * risk_per_lot
+            return vol, actual_risk, risk_per_lot
 
         def get_grid_main_volume_for_side(orders_list, side):
             """
@@ -15666,6 +17429,12 @@ def martingale_system(inv_id=None):
         def process_limit_orders_recovery(recovery_amount):
             """Process recovery for limit_orders.json using current stage drawdown.
 
+            SYMBOL-INDEPENDENT BEHAVIOUR:
+                - Each symbol is treated independently.
+                - Each symbol gets its own recovery target (equal split of total recovery).
+                - Each symbol has its own risk validation and margin checks.
+                - Grid orders are identified per symbol and processed independently.
+
             GRID-AWARE BEHAVIOUR:
                 - Grid orders are identified by is_grid_order == True AND
                   (grid_m == True OR grid_c == True).
@@ -15742,7 +17511,21 @@ def martingale_system(inv_id=None):
                     print(f"  │ No symbols found")
                     return False, {}
                 
-                print(f"  │ Symbols: {', '.join(all_symbols)}")
+                # ==============================================================
+                # SYMBOL-INDEPENDENT RECOVERY TARGETS
+                # ==============================================================
+                symbols_list = sorted(all_symbols)
+                symbols_count = len(symbols_list)
+                
+                print(f"  │ Symbols: {', '.join(symbols_list)}")
+                print(f"  │ Symbol-independent processing: {symbols_count} symbol(s)")
+                print(f"  │ Total recovery: ${total_recovery:.2f}")
+                print(f"  │ Recovery per symbol: ${total_recovery / symbols_count:.2f}")
+                
+                # Build per-symbol recovery map
+                symbol_recovery_map = {}
+                for symbol in symbols_list:
+                    symbol_recovery_map[symbol] = total_recovery / symbols_count
 
                 # ==============================================================
                 # ACCOUNTMANAGEMENT R:R VALUES (used only for non-grid fallbacks)
@@ -15764,11 +17547,14 @@ def martingale_system(inv_id=None):
                     acct_minimum_rr = None
 
                 # ==============================================================
-                # SPLIT ORDERS: GRID vs NON-GRID
+                # SPLIT ORDERS: GRID vs NON-GRID (per symbol)
                 # ==============================================================
-                grid_mains_by_symbol_side = {}   # {(symbol, side): order_dict}
-                grid_children_by_symbol_side = {}  # {(symbol, side): [order_dict, ...]}
-                non_grid_orders = []             # list of (symbol, order_dict)
+                # Non-grid orders by symbol
+                non_grid_by_symbol = {}
+                # Grid mains by symbol+side
+                grid_mains_by_symbol_side = {}
+                # Grid children by symbol+side
+                grid_children_by_symbol_side = {}
 
                 for order in orders_data:
                     if not isinstance(order, dict):
@@ -15780,7 +17566,7 @@ def martingale_system(inv_id=None):
                         side = get_grid_side(order)
                         if side is None:
                             # Cannot determine side -> treat as non-grid
-                            non_grid_orders.append((sym, order))
+                            non_grid_by_symbol.setdefault(sym, []).append(order)
                             continue
                         if is_grid_main(order):
                             grid_mains_by_symbol_side[(sym, side)] = order
@@ -15788,29 +17574,29 @@ def martingale_system(inv_id=None):
                             grid_children_by_symbol_side.setdefault((sym, side), []).append(order)
                         else:
                             # is_grid_order True but neither main nor child (shouldn't happen)
-                            non_grid_orders.append((sym, order))
+                            non_grid_by_symbol.setdefault(sym, []).append(order)
                     else:
-                        non_grid_orders.append((sym, order))
+                        non_grid_by_symbol.setdefault(sym, []).append(order)
 
                 # ==============================================================
-                # PART A: NON-GRID ORDERS (existing behaviour, per symbol)
+                # PART A: NON-GRID ORDERS (per symbol, independent)
                 # ==============================================================
-                non_grid_symbols = sorted({sym for sym, _ in non_grid_orders})
+                non_grid_symbols = sorted(non_grid_by_symbol.keys())
                 if non_grid_symbols:
-                    print(f"\n  │ Non-grid symbols (standard martingale): {', '.join(non_grid_symbols)}")
+                    print(f"\n  │ Non-grid symbols (standard martingale, independent per symbol): {', '.join(non_grid_symbols)}")
                     for symbol in non_grid_symbols:
-                        symbol_orders = [o for (s, o) in non_grid_orders if s == symbol]
+                        symbol_orders = non_grid_by_symbol[symbol]
                         if not symbol_orders:
                             continue
 
+                        # Each symbol gets its own recovery target
+                        symbol_recovery = symbol_recovery_map.get(symbol, total_recovery)
+                        
                         default_volume = get_default_volume_from_limit_orders(orders_data, symbol)
                         sample_entry, sample_stop, sample_order_type = get_sample_order_from_limit_orders(orders_data, symbol)
 
                         if not sample_entry or not sample_stop:
                             continue
-
-                        symbols_count = len(non_grid_symbols)
-                        symbol_recovery = total_recovery / symbols_count if symbols_count > 0 else total_recovery
 
                         symbol_info = mt5.symbol_info(symbol)
                         if not symbol_info:
@@ -15826,6 +17612,8 @@ def martingale_system(inv_id=None):
                         if price_diff * contract_size <= 0:
                             continue
 
+                        print(f"\n  │ 📊 Symbol: {symbol} (independent recovery target: ${symbol_recovery:.2f})")
+                        
                         estimated_volume = symbol_recovery / (price_diff * contract_size)
                         required_volume = round(estimated_volume, 2)
 
@@ -15854,6 +17642,28 @@ def martingale_system(inv_id=None):
                                 actual_risk = price_diff * safe_volume * contract_size
                                 risk_check_passed = (actual_risk <= stage_max_risk * stoploss_multiplier)
 
+                        # ---------------- LEVERAGE / MARGIN CHECK (per symbol) ----------------
+                        order_side = "buy" if is_buy else "sell"
+                        leverage_check_order = {
+                            "symbol": symbol,
+                            "entry": sample_entry,
+                            "order_type": sample_order_type,
+                        }
+                        final_vol, margin_used, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                            leverage_check_order, order_side, safe_volume, buffer_pct=10.0
+                        )
+                        if not ok or final_vol <= 0:
+                            print(f"  │ ⚠️ {symbol}: LEVERAGE CHECK failed — cannot place even min volume "
+                                  f"(free ${free_margin:.2f}, reason: {reason})")
+                            continue
+                        if shrunk:
+                            print(f"  │ 🔻 {symbol}: LEVERAGE CHECK shrunk volume {safe_volume:.2f} → {final_vol:.2f} "
+                                  f"(margin ${margin_used:.2f}, free ${free_margin:.2f})")
+                            safe_volume = final_vol
+                            actual_risk = price_diff * safe_volume * contract_size
+                            risk_check_passed = (actual_risk <= stage_max_risk * stoploss_multiplier)
+                        # ---------------- END LEVERAGE CHECK ----------------
+
                         if safe_volume >= 0.01:
                             volumes_to_update[symbol] = safe_volume
                             status = "✓" if risk_check_passed else ""
@@ -15877,98 +17687,108 @@ def martingale_system(inv_id=None):
                                 stats["order_risk_validation"][symbol]["required_risk"] = abs(required_risk_calc)
 
                 # ==============================================================
-                # PART B: GRID ORDERS
+                # PART B: GRID ORDERS (per symbol, independent)
                 #   - Grid mains receive martingale (same as non-grid but with
                 #     their own record R:R for reference).
                 #   - Grid children mirror the grid main's final volume per side.
                 # ==============================================================
                 if grid_mains_by_symbol_side or grid_children_by_symbol_side:
-                    print(f"\n  │ Grid orders detected — applying grid-aware recovery")
-                    grid_main_volumes = {}  # {(symbol, side): final_volume}
-                    all_grid_symbols = sorted({sym for (sym, _) in
-                                               set(grid_mains_by_symbol_side.keys()) |
-                                               set(grid_children_by_symbol_side.keys())})
-
-                    # ---- Grid mains: run martingale normally ----
-                    for (symbol, side), main_order in grid_mains_by_symbol_side.items():
-                        symbol_info = mt5.symbol_info(symbol)
-                        if not symbol_info:
-                            continue
-                        if not symbol_info.visible:
-                            mt5.symbol_select(symbol, True)
-
-                        entry = main_order.get('entry')
-                        stop = main_order.get('exit') or main_order.get('stop_loss')
-                        order_type = main_order.get('order_type', '')
-                        vol_key, current_vol = get_volume_field_from_order(main_order)
-
-                        if entry is None or stop is None or not vol_key:
-                            continue
-
-                        rr_val, rr_src = resolve_grid_rr(main_order, acct_fixed_rr, acct_minimum_rr)
-                        print(f"  │ [GRID MAIN] {symbol} {side} R:R = 1:{rr_val} (source: {rr_src})")
-
-                        symbols_count = max(1, len(all_grid_symbols))
-                        symbol_recovery = total_recovery / symbols_count
-
-                        is_buy = 'buy' in order_type.lower()
-                        price_diff = abs(entry - stop)
-                        contract_size = symbol_info.trade_contract_size
-                        if price_diff * contract_size <= 0:
-                            continue
-
-                        estimated_volume = symbol_recovery / (price_diff * contract_size)
-                        required_volume = max(0.01, round(estimated_volume, 2))
-
-                        safe_volume, risk_check_passed, actual_risk = calculate_safe_volume(
-                            required_volume, symbol, entry, stop, order_type,
-                            stage_max_risk, is_exact_stage_completion, current_vol,
-                            stoploss_multiplier
-                        )
-
-                        if default_min_risk_floor > 0:
-                            min_vol = default_min_risk_floor / (price_diff * contract_size)
-                            min_vol = round(min_vol, 2)
-                            volume_step = symbol_info.volume_step or 0.01
-                            steps = round(min_vol / volume_step) if volume_step > 0 else 0
-                            min_vol = max(0.01, round(steps * volume_step, 2))
-                            if safe_volume < min_vol:
-                                print(f"  │ ⚠️ [GRID MAIN] {symbol}: enforcing min volume {min_vol:.2f} lots")
-                                safe_volume = min_vol
-                                actual_risk = price_diff * safe_volume * contract_size
-                                risk_check_passed = (actual_risk <= stage_max_risk * stoploss_multiplier)
-
-                        # Apply volume to the grid main
-                        if safe_volume >= 0.01 and (current_vol is None or abs(current_vol - safe_volume) > 0.001):
-                            main_order[vol_key] = safe_volume
-                            if symbol not in volumes_to_update:
-                                volumes_to_update[symbol] = safe_volume
-                            print(f"  │ ✓ [GRID MAIN] {symbol} {side}: {current_vol:.2f} → {safe_volume:.2f} lots "
-                                  f"(risk ${actual_risk:.2f}, R:R 1:{rr_val})")
-                        else:
-                            print(f"  │ − [GRID MAIN] {symbol} {side}: keeping {current_vol:.2f} lots")
-
-                        grid_main_volumes[(symbol, side)] = safe_volume if safe_volume >= 0.01 else current_vol
-
-                    # ---- Grid children: mirror main volume per side ----
-                    for (symbol, side), children in grid_children_by_symbol_side.items():
-                        main_vol = grid_main_volumes.get((symbol, side))
-                        if main_vol is None:
-                            # No main found for this side -> fall back to normal per-symbol recovery
-                            print(f"  │ ⚠️ [GRID CHILD] {symbol} {side}: no grid main found, leaving as-is")
-                            continue
-                        for child in children:
-                            vol_key, old_vol = get_volume_field_from_order(child)
-                            if not vol_key:
+                    print(f"\n  │ Grid orders detected — applying grid-aware recovery (independent per symbol)")
+                    
+                    # Group grid mains by symbol for independent processing
+                    grid_symbols = sorted(set(
+                        [sym for (sym, _) in grid_mains_by_symbol_side.keys()] +
+                        [sym for (sym, _) in grid_children_by_symbol_side.keys()]
+                    ))
+                    
+                    for grid_symbol in grid_symbols:
+                        symbol_recovery = symbol_recovery_map.get(grid_symbol, total_recovery)
+                        print(f"\n  │ 📊 Grid Symbol: {grid_symbol} (independent recovery target: ${symbol_recovery:.2f})")
+                        
+                        grid_main_volumes = {}  # {(symbol, side): final_volume}
+                        
+                        # ---- Grid mains for this symbol ----
+                        for (symbol, side), main_order in grid_mains_by_symbol_side.items():
+                            if symbol != grid_symbol:
                                 continue
-                            if old_vol is None or abs(old_vol - main_vol) > 0.001:
-                                child[vol_key] = main_vol
+                                
+                            symbol_info = mt5.symbol_info(symbol)
+                            if not symbol_info:
+                                continue
+                            if not symbol_info.visible:
+                                mt5.symbol_select(symbol, True)
+
+                            entry = main_order.get('entry')
+                            stop = main_order.get('exit') or main_order.get('stop_loss')
+                            order_type = main_order.get('order_type', '')
+                            vol_key, current_vol = get_volume_field_from_order(main_order)
+
+                            if entry is None or stop is None or not vol_key:
+                                continue
+
+                            rr_val, rr_src = resolve_grid_rr(main_order, acct_fixed_rr, acct_minimum_rr)
+                            print(f"  │ [GRID MAIN] {symbol} {side} R:R = 1:{rr_val} (source: {rr_src})")
+
+                            is_buy = 'buy' in order_type.lower()
+                            price_diff = abs(entry - stop)
+                            contract_size = symbol_info.trade_contract_size
+                            if price_diff * contract_size <= 0:
+                                continue
+
+                            estimated_volume = symbol_recovery / (price_diff * contract_size)
+                            required_volume = max(0.01, round(estimated_volume, 2))
+
+                            safe_volume, risk_check_passed, actual_risk = calculate_safe_volume(
+                                required_volume, symbol, entry, stop, order_type,
+                                stage_max_risk, is_exact_stage_completion, current_vol,
+                                stoploss_multiplier
+                            )
+
+                            if default_min_risk_floor > 0:
+                                min_vol = default_min_risk_floor / (price_diff * contract_size)
+                                min_vol = round(min_vol, 2)
+                                volume_step = symbol_info.volume_step or 0.01
+                                steps = round(min_vol / volume_step) if volume_step > 0 else 0
+                                min_vol = max(0.01, round(steps * volume_step, 2))
+                                if safe_volume < min_vol:
+                                    print(f"  │ ⚠️ [GRID MAIN] {symbol}: enforcing min volume {min_vol:.2f} lots")
+                                    safe_volume = min_vol
+                                    actual_risk = price_diff * safe_volume * contract_size
+                                    risk_check_passed = (actual_risk <= stage_max_risk * stoploss_multiplier)
+
+                            # Apply volume to the grid main
+                            if safe_volume >= 0.01 and (current_vol is None or abs(current_vol - safe_volume) > 0.001):
+                                main_order[vol_key] = safe_volume
                                 if symbol not in volumes_to_update:
-                                    volumes_to_update[symbol] = main_vol
-                                print(f"  │ ✓ [GRID CHILD] {symbol} {side}: {old_vol:.2f} → {main_vol:.2f} lots "
-                                      f"(mirrors grid main, no martingale)")
+                                    volumes_to_update[symbol] = safe_volume
+                                print(f"  │ ✓ [GRID MAIN] {symbol} {side}: {current_vol:.2f} → {safe_volume:.2f} lots "
+                                      f"(risk ${actual_risk:.2f}, R:R 1:{rr_val})")
                             else:
-                                print(f"  │ − [GRID CHILD] {symbol} {side}: already at {main_vol:.2f} lots")
+                                print(f"  │ − [GRID MAIN] {symbol} {side}: keeping {current_vol:.2f} lots")
+
+                            grid_main_volumes[(symbol, side)] = safe_volume if safe_volume >= 0.01 else current_vol
+
+                        # ---- Grid children for this symbol: mirror main volume per side ----
+                        for (symbol, side), children in grid_children_by_symbol_side.items():
+                            if symbol != grid_symbol:
+                                continue
+                                
+                            main_vol = grid_main_volumes.get((symbol, side))
+                            if main_vol is None:
+                                print(f"  │ ⚠️ [GRID CHILD] {symbol} {side}: no grid main found, leaving as-is")
+                                continue
+                            for child in children:
+                                vol_key, old_vol = get_volume_field_from_order(child)
+                                if not vol_key:
+                                    continue
+                                if old_vol is None or abs(old_vol - main_vol) > 0.001:
+                                    child[vol_key] = main_vol
+                                    if symbol not in volumes_to_update:
+                                        volumes_to_update[symbol] = main_vol
+                                    print(f"  │ ✓ [GRID CHILD] {symbol} {side}: {old_vol:.2f} → {main_vol:.2f} lots "
+                                          f"(mirrors grid main, no martingale)")
+                                else:
+                                    print(f"  │ − [GRID CHILD] {symbol} {side}: already at {main_vol:.2f} lots")
 
                 # ==============================================================
                 # SAVE RESULTS
@@ -15988,29 +17808,37 @@ def martingale_system(inv_id=None):
                 print(f"  ✗ Error: {e}")
                 stats["errors"] += 1
                 return False, {}
-            
+
+
         def reset_limit_orders_to_default():
             """
-            Reset all limit orders to default risk volume based on account_balance_default_risk_management.
-            This runs when there is NO drawdown to recover.
+            Reset all limit orders to default risk volume based on
+            account_balance_default_risk_management. This runs when there is
+            NO drawdown to recover.
 
-            GRID-AWARE BEHAVIOUR:
-                - Grid mains are reset to default risk independently.
-                - Grid children then mirror the grid main's volume per side.
-                - Non-grid orders are reset as before.
+            SYMBOL-INDEPENDENT BEHAVIOUR:
+                - Each symbol is processed independently.
+                - Each symbol has its own default risk calculation and margin checks.
+
+            GRID-AWARE BEHAVIOUR (no drawdown → flat default risk):
+                - Grid MAIN (grid_m=True): sized to default risk from its own SL distance.
+                - Grid HELPERS (grid_mh=True): each sized to default risk independently.
+                - Grid CHILDREN (grid_c, not grid_mh): each sized to default risk independently.
+                - Non-grid orders: sized to default risk as before.
+                - NO mirroring. Every order independently uses default risk.
             """
             print(f"\n  🔄 STEP 3: Reset to Default Risk (No Drawdown)")
             print(f"  {'─'*40}")
-            
+
             # Get stoploss factor multiplier
             stoploss_multiplier = config_data.get("stoploss_factor_multiplier", 1.0)
             if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
                 print(f"  │ Stoploss factor multiplier applied: {stoploss_multiplier}x")
-            
+
             # Get default risk from config
             default_risk_map = config.get("account_balance_default_risk_management", {})
             default_risk = None
-            
+
             if default_risk_map:
                 for range_str, risk_value in default_risk_map.items():
                     try:
@@ -16018,13 +17846,13 @@ def martingale_system(inv_id=None):
                         low_str, high_str = raw_range.split("-")
                         low = float(low_str)
                         high = float(high_str)
-                        
+
                         if low <= current_balance <= high:
                             default_risk = float(risk_value)
                             break
                     except Exception:
                         continue
-            
+
             if default_risk is None:
                 print(f"  │ No default risk config found for balance ${current_balance:.2f}")
                 print(f"  │ Using minimum volume 0.01 lots")
@@ -16036,32 +17864,35 @@ def martingale_system(inv_id=None):
                     print(f"  │ Default risk from config (with {stoploss_multiplier}x multiplier): ${default_risk:.2f}")
                 else:
                     print(f"  │ Default risk from config: ${default_risk:.2f}")
-            
+
             # Load limit orders
             orders_path, orders_data = load_limit_orders()
             if orders_path is None or orders_data is None:
                 print(f"  │ No limit_orders.json found")
                 return False
-            
+
             try:
                 # Get all symbols
                 all_symbols = get_all_symbols_from_limit_orders(orders_data)
-                
+
                 if not all_symbols:
                     print(f"  │ No symbols found")
                     return False
-                
-                print(f"  │ Symbols: {', '.join(all_symbols)}")
+
+                symbols_list = sorted(all_symbols)
+                print(f"  │ Symbols: {', '.join(symbols_list)}")
+                print(f"  │ Symbol-independent processing: {len(symbols_list)} symbol(s)")
                 print(f"  │ Resetting to default risk (${default_risk:.2f})...")
-                
+
                 updates_count = 0
 
                 # --------------------------------------------------------------
-                # SPLIT: GRID vs NON-GRID
+                # SPLIT: GRID vs NON-GRID (per symbol)
                 # --------------------------------------------------------------
-                grid_mains = {}            # {(symbol, side): order}
-                grid_children = {}         # {(symbol, side): [order, ...]}
-                non_grid_by_symbol = {}    # {symbol: [order, ...]}
+                non_grid_by_symbol = {}      # {symbol: [order, ...]}
+                grid_mains = {}              # {(symbol, side): order}
+                grid_helpers = {}            # {(symbol, side): [order, ...]}
+                grid_c = {}                  # {(symbol, side): [order, ...]}
 
                 for order in orders_data:
                     if not isinstance(order, dict):
@@ -16077,16 +17908,22 @@ def martingale_system(inv_id=None):
                         if is_grid_main(order):
                             grid_mains[(sym, side)] = order
                         elif is_grid_child(order):
-                            grid_children.setdefault((sym, side), []).append(order)
+                            if order.get("grid_mh", False):
+                                grid_helpers.setdefault((sym, side), []).append(order)
+                            else:
+                                grid_c.setdefault((sym, side), []).append(order)
                         else:
+                            # is_grid_order True but neither main nor child
                             non_grid_by_symbol.setdefault(sym, []).append(order)
                     else:
                         non_grid_by_symbol.setdefault(sym, []).append(order)
 
                 # --------------------------------------------------------------
-                # NON-GRID: reset per symbol using a sample order
+                # NON-GRID: reset per symbol using a sample order (independent)
                 # --------------------------------------------------------------
                 for symbol, orders in non_grid_by_symbol.items():
+                    print(f"\n  │ 📊 Non-grid symbol: {symbol} (independent)")
+                    
                     sample_entry, sample_stop, sample_order_type = get_sample_order_from_limit_orders(orders_data, symbol)
                     if not sample_entry or not sample_stop:
                         continue
@@ -16124,6 +17961,26 @@ def martingale_system(inv_id=None):
                             print(f"  │ → ENFORCING minimum volume: {min_volume_for_risk:.2f} lots")
                             target_volume = min_volume_for_risk
 
+                    # ---------------- LEVERAGE / MARGIN CHECK (per symbol) ----------------
+                    order_side = "buy" if is_buy else "sell"
+                    leverage_check_order = {
+                        "symbol": symbol,
+                        "entry": sample_entry,
+                        "order_type": sample_order_type,
+                    }
+                    final_vol, margin_used, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                        leverage_check_order, order_side, target_volume, buffer_pct=10.0
+                    )
+                    if not ok or final_vol <= 0:
+                        print(f"  │ ⚠️ {symbol}: LEVERAGE CHECK failed — cannot place even min volume "
+                              f"(free ${free_margin:.2f}, reason: {reason}) — leaving unchanged")
+                        continue
+                    if shrunk:
+                        print(f"  │ 🔻 {symbol}: LEVERAGE CHECK shrunk volume {target_volume:.2f} → {final_vol:.2f} "
+                              f"(margin ${margin_used:.2f}, free ${free_margin:.2f})")
+                        target_volume = final_vol
+                    # ---------------- END LEVERAGE CHECK ----------------
+
                     actual_risk = price_diff * target_volume * symbol_info.trade_contract_size
                     print(f"  │ {symbol}: {target_volume:.2f} lots → ${actual_risk:.2f} risk (target: ${default_risk:.2f})")
 
@@ -16134,71 +17991,94 @@ def martingale_system(inv_id=None):
                             updates_count += 1
 
                 # --------------------------------------------------------------
-                # GRID MAINS: reset each main independently
+                # GRID MAINS + GRID_mh HELPERS + GRID_c OUTLIERS:
+                #   each sized to default risk independently per symbol.
+                #   NO mirroring — every order independently uses default risk.
                 # --------------------------------------------------------------
-                grid_main_volumes = {}  # {(symbol, side): volume}
-                for (symbol, side), main_order in grid_mains.items():
-                    symbol_info = mt5.symbol_info(symbol)
+
+                def _reset_one_grid_order(order, sym, sd, tag):
+                    nonlocal updates_count
+                    symbol_info = mt5.symbol_info(sym)
                     if not symbol_info:
-                        continue
+                        return
                     if not symbol_info.visible:
-                        mt5.symbol_select(symbol, True)
+                        mt5.symbol_select(sym, True)
 
-                    entry = main_order.get('entry')
-                    stop = main_order.get('exit') or main_order.get('stop_loss')
-                    order_type = main_order.get('order_type', '')
-                    vol_key, old_volume = get_volume_field_from_order(main_order)
+                    entry = order.get('entry')
+                    stop = order.get('exit') or order.get('stop_loss')
+                    vol_key, old_vol = get_volume_field_from_order(order)
                     if entry is None or stop is None or not vol_key:
-                        continue
+                        return
 
-                    is_buy = 'buy' in order_type.lower()
-                    price_diff = (entry - stop) if is_buy else (stop - entry)
-                    if price_diff <= 0:
-                        continue
-                    risk_per_lot = price_diff * symbol_info.trade_contract_size
+                    # Default risk → size volume from SL risk
+                    risk_target = float(default_risk) if default_risk > 0 else float(default_minimum_risk)
+                    new_vol, actual_risk, risk_per_lot = _size_volume_from_risk_target(
+                        order, symbol_info, risk_target
+                    )
+                    if new_vol <= 0:
+                        return
 
-                    target_volume = round(default_risk / risk_per_lot, 2) if default_risk > 0 else 0.01
-                    min_volume = symbol_info.volume_min
-                    max_volume = symbol_info.volume_max
-                    volume_step = symbol_info.volume_step
-                    steps = round(target_volume / volume_step) if volume_step > 0 else 0
-                    target_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
+                    # Enforce default-risk floor as minimum volume
+                    if default_risk > 0 and risk_per_lot > 0:
+                        min_vol_for_floor = round(default_risk / risk_per_lot, 2)
+                        step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
+                        min_vol = symbol_info.volume_min if symbol_info else 0.01
+                        steps = round(min_vol_for_floor / step) if step > 0 else 0
+                        min_vol_for_floor = max(min_vol, round(steps * step, 2))
+                        if new_vol < min_vol_for_floor:
+                            new_vol = min_vol_for_floor
+                            actual_risk = risk_per_lot * new_vol
 
-                    if default_risk > 0:
-                        min_vol = round(default_risk / risk_per_lot, 2)
-                        steps = round(min_vol / volume_step) if volume_step > 0 else 0
-                        min_vol = max(min_volume, round(steps * volume_step, 2))
-                        if target_volume < min_vol:
-                            target_volume = min_vol
+                    # Individual margin check
+                    side = "buy" if 'buy' in order.get('order_type', '').lower() else "sell"
+                    valid_vol, _, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                        order, side, new_vol, buffer_pct=10.0
+                    )
+                    if not ok or valid_vol <= 0:
+                        print(f"  │ ⚠️ [{tag}] {sym} {sd}: cannot fit even min volume "
+                              f"(free ${free_margin:.2f}, reason: {reason}) — leaving unchanged")
+                        return
+                    if shrunk:
+                        print(f"  │ 🔻 [{tag}] {sym} {sd}: margin shrink {new_vol:.2f} → {valid_vol:.2f}")
+                        new_vol = valid_vol
+                        actual_risk = risk_per_lot * new_vol
 
-                    actual_risk = price_diff * target_volume * symbol_info.trade_contract_size
-                    print(f"  │ [GRID MAIN] {symbol} {side}: {old_volume:.2f} → {target_volume:.2f} lots "
-                          f"(risk ${actual_risk:.2f})")
-
-                    if abs(old_volume - target_volume) > 0.001:
-                        main_order[vol_key] = target_volume
+                    if abs(old_vol - new_vol) > 0.001:
+                        order[vol_key] = new_vol
                         updates_count += 1
+                        print(f"  │ [{tag}] {sym} {sd}: {old_vol:.2f} → {new_vol:.2f} lots "
+                              f"(risk ${actual_risk:.2f}, target ${risk_target:.2f})")
+                    else:
+                        print(f"  │ [{tag}] {sym} {sd}: already at {old_vol:.2f} lots "
+                              f"(risk ${actual_risk:.2f})")
 
-                    grid_main_volumes[(symbol, side)] = target_volume
-
-                # --------------------------------------------------------------
-                # GRID CHILDREN: mirror main volume per side
-                # --------------------------------------------------------------
-                for (symbol, side), children in grid_children.items():
-                    main_vol = grid_main_volumes.get((symbol, side))
-                    if main_vol is None:
-                        print(f"  │ ⚠️ [GRID CHILD] {symbol} {side}: no main found, leaving unchanged")
-                        continue
-                    for child in children:
-                        vol_key, old_volume = get_volume_field_from_order(child)
-                        if not vol_key:
-                            continue
-                        if abs(old_volume - main_vol) > 0.001:
-                            child[vol_key] = main_vol
-                            updates_count += 1
-                            print(f"  │ [GRID CHILD] {symbol} {side}: {old_volume:.2f} → {main_vol:.2f} lots "
-                                  f"(mirrors grid main)")
+                # --- Grid mains (per symbol) ---
+                grid_symbols = sorted(set(
+                    [sym for (sym, _) in grid_mains.keys()] +
+                    [sym for (sym, _) in grid_helpers.keys()] +
+                    [sym for (sym, _) in grid_c.keys()]
+                ))
                 
+                for grid_symbol in grid_symbols:
+                    print(f"\n  │ 📊 Grid symbol: {grid_symbol} (independent)")
+                    
+                    # Grid mains for this symbol
+                    for (sym, sd), order in grid_mains.items():
+                        if sym == grid_symbol:
+                            _reset_one_grid_order(order, sym, sd, "GRID MAIN")
+
+                    # Grid helpers (grid_mh) for this symbol
+                    for (sym, sd), lst in grid_helpers.items():
+                        if sym == grid_symbol:
+                            for order in lst:
+                                _reset_one_grid_order(order, sym, sd, "GRID HELPER")
+
+                    # Grid children / outliers (grid_c) for this symbol
+                    for (sym, sd), lst in grid_c.items():
+                        if sym == grid_symbol:
+                            for order in lst:
+                                _reset_one_grid_order(order, sym, sd, "GRID C")
+
                 if updates_count > 0:
                     save_limit_orders(orders_path, orders_data)
                     print(f"\n  ✓ Reset {updates_count} order(s) to default risk volume")
@@ -16206,32 +18086,54 @@ def martingale_system(inv_id=None):
                 else:
                     print(f"  │ No changes needed - volumes already at default")
                     return False
-                    
+
             except Exception as e:
                 print(f"  ✗ Error resetting to default: {e}")
                 stats["errors"] += 1
                 return False
-        
+
+
         # ========== SECTION 7: PRE-SCALING (LIMIT ORDERS ONLY) ==========
         def process_pre_scaling():
             """
             Process pre-scaling based on martingale type and assumption.
-            
-            Assumption modes:
-            - stoploss_factor: Uses exit (stop loss) for risk calculation
-            - takeprofit_factor: Uses tp (take profit) for profit calculation
-            - The drawdown is recovered from each order's TP profit
-            - Remaining profit after recovery becomes the target for scaling
-            
-            IMPORTANT: NEVER scales DOWN volumes. Only scales UP or keeps the same.
-            NEW: Checks MT5 pending orders and deletes those that don't match system analysis.
+
+            SYMBOL-INDEPENDENT BEHAVIOUR:
+            - Each symbol is treated independently with its own recovery target.
+            - The total target (final_target_risk) is split equally across symbols.
+            - Non-grid scaling, grid bundle scaling, and linear scaling all use
+              the per-symbol target rather than the global total target.
+
+            GRID BUNDLE LOGIC:
+            - Each grid main (grid_m True) is paired with N helpers chosen from
+              grid children of the same symbol + same side, where:
+                  N = int(main_rr) // 2
+              Helpers are ordered using the SAME ordering as linear scaling:
+                  STEPUP   -> sort entry ascending
+                  STEPDOWN -> sort entry descending
+              Only the first N are taken as helpers.
+
+            - Bundle target split (equal shares):
+                  full_target = main_risk_dollars * main_rr
+                  share       = full_target / (N + 1)
+              Main and each helper target the same share.
+
+            - Outliers (grid children NOT in any bundle) target:
+                  outlier_pool = full_target * 0.05
+                  outlier_share = outlier_pool / outlier_count
+
+            - Group margin check is applied ONLY to grid bundles.
+              Non-grid orders and outliers rely on individual margin checks.
+
+            - Linear scaling still runs afterwards, but its internal group
+              margin check only fires for grid bundles.
             """
             if not martingale_pre_scaling:
                 return False
-            
+
             stoploss_multiplier = config_data.get("stoploss_factor_multiplier", 1.0)
             martingale_linear_scaling = config_data.get("martingale_linear_scaling", False)
-            
+
             print(f"\n{'='*60}")
             print(f"  🎯 PRE-SCALING ANALYSIS")
             print(f"{'='*60}")
@@ -16244,7 +18146,7 @@ def martingale_system(inv_id=None):
                 print(f"  │   └─ Remaining profit after recovery becomes the scaling target")
             else:
                 print(f"  │   └─ Using SL risk (standard behavior)")
-            
+
             print(f"  │ Linear scaling: {'✓ ENABLED' if martingale_linear_scaling else '✗ DISABLED'}")
             print(f"  │ Initial risk adder: {'✓ ENABLED' if enable_initial_risk_retention else '✗ DISABLED'}")
             print(f"  │   - retention: {initial_risk_retention_percentage}%")
@@ -16258,51 +18160,51 @@ def martingale_system(inv_id=None):
             def remove_invalid_price_levels(orders_data, symbol):
                 if not orders_data or not isinstance(orders_data, list):
                     return orders_data, 0, []
-                
+
                 symbol_info = mt5.symbol_info(symbol)
                 if not symbol_info:
                     return orders_data, 0, []
-                
+
                 current_bid = symbol_info.bid
                 current_ask = symbol_info.ask
-                
+
                 if current_bid is None or current_ask is None:
                     return orders_data, 0, []
-                
+
                 filtered_orders = []
                 removed_count = 0
-                
+
                 for order in orders_data:
                     if not isinstance(order, dict):
                         filtered_orders.append(order)
                         continue
-                    
+
                     order_symbol = order.get('symbol')
                     if order_symbol != symbol:
                         filtered_orders.append(order)
                         continue
-                    
+
                     entry = order.get('entry')
                     order_type = order.get('order_type', '').lower()
-                    
+
                     if entry is None:
                         filtered_orders.append(order)
                         continue
-                    
+
                     is_valid = True
-                    
+
                     if order_type in ['buy_stop', 'sell_limit']:
                         if entry <= current_ask:
                             is_valid = False
                     elif order_type in ['sell_stop', 'buy_limit']:
                         if entry >= current_bid:
                             is_valid = False
-                    
+
                     if is_valid:
                         filtered_orders.append(order)
                     else:
                         removed_count += 1
-                
+
                 return filtered_orders, removed_count, []
 
             def load_limit_orders():
@@ -16311,7 +18213,7 @@ def martingale_system(inv_id=None):
                     try:
                         with open(FETCHED_INVESTORS, 'r', encoding='utf-8') as f:
                             investor_users = json.load(f)
-                        
+
                         investor_cfg = investor_users.get(user_brokerid)
                         if investor_cfg:
                             strategy_name = investor_cfg.get("invested_with", "")
@@ -16322,12 +18224,12 @@ def martingale_system(inv_id=None):
                     return None, None
 
                 limit_orders_path = inv_root / strategy_name / "pending_orders" / "limit_orders.json"
-                
+
                 if limit_orders_path.exists():
                     with open(limit_orders_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
                     return limit_orders_path, data
-                
+
                 return None, None
 
             def save_limit_orders(file_path, data):
@@ -16337,33 +18239,23 @@ def martingale_system(inv_id=None):
 
             def analyze_initial_risk_from_risk_config(limit_orders_data):
                 """
-                Analyzes initial risk from account_balance_default_risk_management dictionary.
-                Uses the default risk value for the current balance as the initial risk.
-                Retention logic: 
-                - 100% retention = keep 100%, remove 0%
-                - 90% retention = keep 90%, remove 10%
-                - 0% retention = keep 0%, remove 100%
-                Uses effective current balance for range matching.
-
-                GRID-AWARE: Only grid mains and non-grid orders contribute to initial
-                risk. Grid children are excluded (they mirror the main's volume and
-                must not be counted twice).
+                Analyzes initial risk from account_balance_default_risk_management.
+                Only grid mains and non-grid orders contribute.
+                Grid children (helpers + outliers) are excluded.
                 """
                 initial_risk_orders = {}
-                
+
                 if not limit_orders_data or not isinstance(limit_orders_data, list):
                     return initial_risk_orders
-                
-                # ========== GET DEFAULT RISK FROM CONFIG BASED ON EFFECTIVE CURRENT BALANCE ==========
+
                 default_risk_map = config.get("account_balance_default_risk_management", {})
                 default_risk_value = 0
-                
-                # Get effective current balance
+
                 effective_balance_for_risk = get_effective_current_balance()
                 if effective_balance_for_risk is None:
                     print(f"  ⚠️ Could not get effective balance for initial risk analysis")
                     return initial_risk_orders
-                
+
                 if default_risk_map:
                     for range_str, risk_value in default_risk_map.items():
                         try:
@@ -16371,19 +18263,18 @@ def martingale_system(inv_id=None):
                             low_str, high_str = raw_range.split("-")
                             low = float(low_str)
                             high = float(high_str)
-                            
+
                             if low <= effective_balance_for_risk <= high:
                                 default_risk_value = float(risk_value)
                                 print(f"  │ Default risk from config for effective balance ${effective_balance_for_risk:.2f}: ${default_risk_value:.2f}")
                                 break
                         except Exception:
                             continue
-                
+
                 if default_risk_value == 0:
                     print(f"  │ ⚠️ No default risk found for effective balance ${effective_balance_for_risk:.2f}, using 0")
                     return initial_risk_orders
-                
-                # ========== GROUP ORDERS BY SYMBOL (only grid mains + non-grid) ==========
+
                 symbol_orders = {}
                 for order in limit_orders_data:
                     if isinstance(order, dict):
@@ -16394,43 +18285,37 @@ def martingale_system(inv_id=None):
                             if is_grid_child(order):
                                 # Grid children are excluded from initial risk
                                 continue
-                            # grid mains and non-grid flow through
                         if symbol not in symbol_orders:
                             symbol_orders[symbol] = []
                         symbol_orders[symbol].append(order)
-                
-                # ========== APPLY DEFAULT RISK TO EACH SYMBOL ==========
+
                 for symbol, orders_list in symbol_orders.items():
-                    # Get first order to determine entry, stop, and order type
                     sample_order = orders_list[0] if orders_list else None
                     if not sample_order:
                         continue
-                    
+
                     entry = sample_order.get('entry')
                     stop = sample_order.get('exit') or sample_order.get('stop_loss')
                     order_type = sample_order.get('order_type', 'Unknown')
                     volume_key, volume = get_volume_field_from_order(sample_order)
-                    
+
                     if entry and stop and volume and volume > 0:
                         symbol_info = mt5.symbol_info(symbol)
                         if symbol_info:
                             contract_size = symbol_info.trade_contract_size
                             price_diff = abs(entry - stop)
                             risk_per_lot = price_diff * contract_size
-                            
-                            # Calculate volume needed to achieve default risk
+
                             required_volume = default_risk_value / risk_per_lot if risk_per_lot > 0 else 0.01
                             required_volume = round(required_volume, 2)
-                            
-                            # Apply volume constraints
+
                             min_volume = symbol_info.volume_min if symbol_info else 0.01
                             volume_step = symbol_info.volume_step if symbol_info else 0.01
                             steps = round(required_volume / volume_step) if volume_step > 0 else 0
                             required_volume = max(min_volume, round(steps * volume_step, 2))
-                            
-                            # Calculate actual risk at required volume
+
                             actual_risk = risk_per_lot * required_volume
-                            
+
                             initial_risk_order_info = {
                                 'order_type': order_type,
                                 'entry': entry,
@@ -16441,37 +18326,34 @@ def martingale_system(inv_id=None):
                                 'source': 'default_risk_config',
                                 'default_risk_from_config': default_risk_value
                             }
-                            
-                            # CORRECT RETENTION LOGIC:
-                            # retention_percentage = how much to KEEP
-                            # 100% = keep all, remove 0%
-                            # 90% = keep 90%, remove 10%
-                            # 0% = keep 0%, remove 100%
+
                             if initial_risk_retention_percentage > 0:
-                                # Calculate how much to KEEP
                                 kept_amount = actual_risk * (initial_risk_retention_percentage / 100)
                                 initial_risk_order_info['risk'] = kept_amount
                                 initial_risk_order_info['kept'] = kept_amount
                                 initial_risk_order_info['retention_percentage'] = initial_risk_retention_percentage
-                                # Calculate how much was REMOVED (for display)
                                 removed_amount = actual_risk - kept_amount
                                 initial_risk_order_info['retention_applied'] = removed_amount
-                                
+
                                 print(f"  │ {symbol}: Default risk ${default_risk_value:.2f} → Volume {required_volume:.2f} lots → Risk ${actual_risk:.2f}")
                                 print(f"  │   ├─ Keeping {initial_risk_retention_percentage}%: ${kept_amount:.2f}")
                                 print(f"  │   └─ Removing {100 - initial_risk_retention_percentage}%: ${removed_amount:.2f}")
                             else:
                                 print(f"  │ {symbol}: Default risk ${default_risk_value:.2f} → Volume {required_volume:.2f} lots → Risk ${actual_risk:.2f}")
                                 print(f"  │   └─ 0% retention: Keeping nothing")
-                            
+
                             initial_risk_orders[symbol] = initial_risk_order_info
-                
+
                 return initial_risk_orders
-                
+
             def get_volume_field_from_order(order):
+                # Preferred: a key containing "_volume" (e.g. "order_volume", "raw_volume")
                 for key, value in order.items():
                     if '_volume' in key.lower() and isinstance(value, (int, float)):
                         return key, value
+                # Fallback: the plain "volume" key used by flat grid orders
+                if 'volume' in order and isinstance(order['volume'], (int, float)):
+                    return 'volume', order['volume']
                 return None, None
 
             def get_current_volumes_from_limit_orders(orders_data):
@@ -16487,153 +18369,153 @@ def martingale_system(inv_id=None):
                 return volumes
 
             def calculate_order_risk(order, symbol_info):
-                """Calculate the risk of a single limit order using exit (stop loss)"""
                 entry = order.get('entry')
                 stop = order.get('exit') or order.get('stop_loss')
                 volume_key, volume = get_volume_field_from_order(order)
-                
+
                 if not entry or not stop or not volume or volume <= 0:
                     return 0
-                
+
                 price_diff = abs(entry - stop)
                 contract_size = symbol_info.trade_contract_size if symbol_info else 1
                 risk = price_diff * volume * contract_size
                 return risk
 
             def calculate_order_profit_tp(order, symbol_info):
-                """
-                Calculate the profit of a single limit order using tp (take profit)
-                Used for takeprofit_factor assumption
-                """
                 entry = order.get('entry')
                 tp = order.get('tp') or order.get('target')
                 volume_key, volume = get_volume_field_from_order(order)
-                
+
                 if not entry or not tp or not volume or volume <= 0:
                     return 0
-                
+
                 price_diff = abs(entry - tp)
                 contract_size = symbol_info.trade_contract_size if symbol_info else 1
                 profit = price_diff * volume * contract_size
                 return profit
 
             def get_default_risk_from_config():
-                """Get default risk from account_balance_default_risk_management using effective balance"""
                 default_risk_map = config.get("account_balance_default_risk_management", {})
-                
+
                 if not default_risk_map:
                     print(f"  ⚠️ No default risk map found in config!")
                     return None
-                
-                # Get effective current balance
+
                 effective_balance_for_risk = get_effective_current_balance()
                 if effective_balance_for_risk is None:
                     print(f"  ⚠️ Could not get effective balance for default risk")
                     return None
-                
+
                 for range_str, risk_value in default_risk_map.items():
                     try:
                         raw_range = range_str.split("_")[0]
                         low_str, high_str = raw_range.split("-")
                         low = float(low_str)
                         high = float(high_str)
-                        
+
                         if low <= effective_balance_for_risk <= high:
                             default_risk = float(risk_value)
-                            # Apply multiplier if in stoploss_factor mode
                             if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
                                 return default_risk * stoploss_multiplier
                             return default_risk
                     except Exception:
                         continue
-                
+
                 print(f"  ⚠️ No default risk found for balance ${effective_balance_for_risk:.2f}")
                 return None
-                
+
             def scale_order_volume_to_target(order, symbol_info, target_risk):
                 """
                 Scale a single order's volume to match target risk.
-                ALWAYS scales to target risk (up or down) within constraints.
-                Returns: (new_volume, actual_risk, scaled)
+                Individual margin check only. Never used for grid bundles
+                as a group — bundle members go through bundle-aware scaling.
                 """
                 entry = order.get('entry')
                 stop = order.get('exit') or order.get('stop_loss')
                 volume_key, current_volume = get_volume_field_from_order(order)
-                
+
                 if not entry or not stop or not current_volume or current_volume <= 0:
                     return current_volume, 0, False
-                
+
                 price_diff = abs(entry - stop)
                 contract_size = symbol_info.trade_contract_size if symbol_info else 1
                 risk_per_lot = price_diff * contract_size
-                
+
                 if risk_per_lot <= 0:
                     return current_volume, 0, False
-                
-                # Apply stoploss multiplier to target risk if in stoploss_factor mode
+
                 if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
                     adjusted_target_risk = target_risk * stoploss_multiplier
                 else:
                     adjusted_target_risk = target_risk
-                
-                # Calculate current risk
+
                 current_risk = risk_per_lot * current_volume
-                
-                # Calculate required volume to achieve target risk
+
                 required_volume = adjusted_target_risk / risk_per_lot
                 required_volume = round(required_volume, 2)
-                
-                # Apply volume constraints - MINIMUM ONLY, NO MAXIMUM
+
                 min_volume = symbol_info.volume_min if symbol_info else 0.01
                 volume_step = symbol_info.volume_step if symbol_info else 0.01
-                
-                # Round to step
+
                 steps = round(required_volume / volume_step) if volume_step > 0 else 0
                 required_volume = max(min_volume, round(steps * volume_step, 2))
-                
-                # Calculate actual risk at required volume
+
                 actual_risk = risk_per_lot * required_volume
-                
-                threshold = 0.10  # $0.10 threshold for precision
-                
-                # Check if we're already at target risk (within threshold)
+
+                threshold = 0.10
+
                 if abs(current_risk - adjusted_target_risk) <= threshold:
                     return current_volume, current_risk, False
-                
-                # Scale to target risk
-                return required_volume, actual_risk, True
 
-            def scale_order_volume_to_target_profit(order, symbol_info, target_profit, default_risk_floor, order_index=0):
+                side = "buy" if 'buy' in order.get('order_type', '').lower() else "sell"
+                final_vol, final_margin, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                    order, side, required_volume, buffer_pct=10.0
+                )
+
+                if not ok or final_vol <= 0:
+                    print(f"        │ ⚠️ LEVERAGE CHECK: order cannot be placed even at minimum volume "
+                          f"(free margin ${free_margin:.2f}, reason: {reason}) — keeping current volume")
+                    return current_volume, current_risk, False
+
+                if shrunk:
+                    print(f"        │ 🔻 LEVERAGE CHECK: required volume {required_volume:.2f} lots "
+                          f"needs margin > allowed. Shrunk to {final_vol:.2f} lots "
+                          f"(margin ${final_margin:.2f}, free ${free_margin:.2f})")
+
+                final_risk = risk_per_lot * final_vol
+
+                return final_vol, final_risk, True
+
+            def scale_order_volume_to_target_profit(order, symbol_info, target_profit,
+                                                    default_risk_floor, order_index=0,
+                                                    skip_leverage=False, quiet=False):
                 """
                 Scale a single order's volume based on TP profit.
-                Used for takeprofit_factor assumption.
-                
-                STEP 1: Scale volume to match default risk floor (if current risk > default)
-                STEP 2: Calculate TP profit at default risk volume
-                STEP 3: If TP profit < target_profit, scale UP to meet target
-                IMPORTANT: NEVER scales DOWN below default risk floor
-                
-                Returns: (new_volume, actual_profit, scaled, remaining_profit, steps_taken, volume_changed)
+
+                quiet=True suppresses the [STEPUP]/[STEPDOWN] chatter — used
+                when called from the bundle/outlier helpers which do their
+                own summary printing.
                 """
+                def _p(*args, **kwargs):
+                    if not quiet:
+                        print(*args, **kwargs)
+
                 entry = order.get('entry')
                 tp = order.get('tp') or order.get('target')
                 volume_key, current_volume = get_volume_field_from_order(order)
                 order_type = order.get('order_type', 'Unknown').upper()
                 symbol = order.get('symbol', 'Unknown')
-                
+
                 if not entry or not tp or not current_volume or current_volume <= 0:
                     return current_volume, 0, False, 0, "no_data", False
-                
-                # Calculate price difference for TP
+
                 price_diff = abs(entry - tp)
                 contract_size = symbol_info.trade_contract_size if symbol_info else 1
                 profit_per_lot = price_diff * contract_size
-                
+
                 if profit_per_lot <= 0:
                     return current_volume, 0, False, 0, "invalid_price", False
-                
-                # ========== STEP 1: Calculate risk at current volume ==========
-                # Get stop loss for risk calculation
+
                 stop = order.get('exit') or order.get('stop_loss')
                 if stop:
                     risk_price_diff = abs(entry - stop)
@@ -16642,8 +18524,7 @@ def martingale_system(inv_id=None):
                 else:
                     current_risk = 0
                     risk_per_lot = 0
-                
-                # Determine direction for display
+
                 order_type_lower = order_type.lower()
                 if 'sell_limit' in order_type_lower or 'buy_stop' in order_type_lower:
                     direction = "STEPUP"
@@ -16651,125 +18532,139 @@ def martingale_system(inv_id=None):
                     direction = "STEPDOWN"
                 else:
                     direction = "UNKNOWN"
-                
-                # ========== STEP 2: Scale to default risk floor if current risk > default ==========
+
                 steps_taken = []
                 final_volume = current_volume
                 volume_changed = False
-                
+
                 if current_risk > default_risk_floor and default_risk_floor > 0:
-                    # Scale down to default risk
                     target_volume_for_default = default_risk_floor / risk_per_lot
                     target_volume_for_default = round(target_volume_for_default, 2)
-                    
-                    # Apply volume constraints
+
                     min_volume = symbol_info.volume_min if symbol_info else 0.01
                     volume_step = symbol_info.volume_step if symbol_info else 0.01
                     steps = round(target_volume_for_default / volume_step) if volume_step > 0 else 0
                     target_volume_for_default = max(min_volume, round(steps * volume_step, 2))
-                    
+
                     if target_volume_for_default < current_volume:
-                        steps_taken.append(f"scaled_down_to_default_risk")
+                        steps_taken.append("scaled_down_to_default_risk")
                         final_volume = target_volume_for_default
-                        volume_changed = True  # <-- CRITICAL FIX: Mark that volume changed
-                        print(f"        [{direction}] Order #{order_index}: Scaling DOWN to default risk floor ${default_risk_floor:.2f}")
-                        print(f"        └─ Volume: {current_volume:.2f} → {final_volume:.2f} lots (risk: ${current_risk:.2f} → ${default_risk_floor:.2f})")
-                
-                # ========== STEP 3: Calculate TP profit at current (or scaled) volume ==========
+                        volume_changed = True
+                        _p(f"        [{direction}] Order #{order_index}: Scaling DOWN to default risk floor ${default_risk_floor:.2f}")
+                        _p(f"        └─ Volume: {current_volume:.2f} → {final_volume:.2f} lots (risk: ${current_risk:.2f} → ${default_risk_floor:.2f})")
+
                 current_tp_profit = profit_per_lot * final_volume
-                
-                # ========== STEP 4: Check if TP profit covers target ==========
                 remaining_profit = current_tp_profit - target_profit
-                
-                # If TP profit already covers the target, keep current volume
+
                 if remaining_profit >= 0:
-                    # Only print if we didn't already print the scaling message
+                    if not skip_leverage:
+                        side = "buy" if 'buy' in order_type_lower else "sell"
+                        valid_vol, _, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                            order, side, final_volume, buffer_pct=10.0
+                        )
+                        if not ok or valid_vol <= 0:
+                            _p(f"        │ ⚠️ LEVERAGE CHECK: order cannot be placed even at min volume "
+                               f"(free ${free_margin:.2f}, reason: {reason}) — keeping current")
+                            return current_volume, profit_per_lot * current_volume, False, 0, "leverage_reject", False
+                        if shrunk:
+                            _p(f"        │ 🔻 LEVERAGE CHECK: volume {final_volume:.2f} shrunk to {valid_vol:.2f} "
+                               f"to fit margin (free ${free_margin:.2f})")
+                            final_volume = valid_vol
+                            current_tp_profit = profit_per_lot * final_volume
+                            remaining_profit = current_tp_profit - target_profit
+                            volume_changed = True
+
                     if not volume_changed:
-                        print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers the ${target_profit:.2f} target")
-                        print(f"        └─ Remaining profit: ${remaining_profit:.2f} - Keeping current volume {final_volume:.2f} lots (NO SCALING)")
+                        _p(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} already covers the ${target_profit:.2f} target")
+                        _p(f"        └─ Remaining profit: ${remaining_profit:.2f} - Keeping current volume {final_volume:.2f} lots (NO SCALING)")
                     return final_volume, current_tp_profit, volume_changed, remaining_profit, steps_taken, volume_changed
-                
-                # ========== STEP 5: Need to scale UP to meet target ==========
+
                 deficit = target_profit - current_tp_profit
-                print(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} is short of ${target_profit:.2f} target")
-                print(f"        └─ Deficit: ${deficit:.2f}")
-                
-                # Calculate required volume to meet target
+                _p(f"        [{direction}] Order #{order_index}: TP profit ${current_tp_profit:.2f} is short of ${target_profit:.2f} target")
+                _p(f"        └─ Deficit: ${deficit:.2f}")
+
                 required_volume = target_profit / profit_per_lot
                 required_volume = round(required_volume, 2)
-                
-                # Apply volume constraints
+
                 min_volume = symbol_info.volume_min if symbol_info else 0.01
                 volume_step = symbol_info.volume_step if symbol_info else 0.01
                 max_volume = symbol_info.volume_max if symbol_info else 100
-                
-                # Ensure we don't go below the volume that achieves default risk
+
                 if default_risk_floor > 0 and risk_per_lot > 0:
                     min_volume_for_risk = default_risk_floor / risk_per_lot
                     min_volume_for_risk = round(min_volume_for_risk, 2)
                     steps = round(min_volume_for_risk / volume_step) if volume_step > 0 else 0
                     min_volume_for_risk = max(min_volume, round(steps * volume_step, 2))
                     min_volume = max(min_volume, min_volume_for_risk)
-                
+
                 steps = round(required_volume / volume_step) if volume_step > 0 else 0
                 required_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
-                
-                # ========== STEP 6: NEVER SCALE DOWN - only scale UP ==========
+
                 if required_volume < final_volume:
-                    print(f"        Required volume {required_volume:.2f} is LESS than current {final_volume:.2f}")
-                    print(f"        → Keeping current volume (NO DOWNSCALING)")
+                    _p(f"        Required volume {required_volume:.2f} is LESS than current {final_volume:.2f}")
+                    _p(f"        → Keeping current volume (NO DOWNSCALING)")
                     return final_volume, current_tp_profit, volume_changed, current_tp_profit - target_profit, steps_taken, volume_changed
-                
-                # Calculate actual profit at required volume
+
+                if not skip_leverage:
+                    side = "buy" if 'buy' in order_type_lower else "sell"
+                    valid_vol, _, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                        order, side, required_volume, buffer_pct=10.0
+                    )
+                    if not ok or valid_vol <= 0:
+                        _p(f"        │ ⚠️ LEVERAGE CHECK: cannot place scaled volume {required_volume:.2f} "
+                           f"(free ${free_margin:.2f}, reason: {reason}) — keeping current volume")
+                        return final_volume, current_tp_profit, volume_changed, current_tp_profit - target_profit, steps_taken, volume_changed
+                    if shrunk:
+                        _p(f"        │ 🔻 LEVERAGE CHECK: target volume {required_volume:.2f} shrunk to {valid_vol:.2f} "
+                           f"to fit margin (free ${free_margin:.2f})")
+                    required_volume = valid_vol
+
                 actual_profit = profit_per_lot * required_volume
                 actual_remaining = actual_profit - target_profit
-                
-                steps_taken.append(f"scaled_up_to_target")
-                volume_changed = True  # <-- Mark that volume changed
-                
-                # Calculate new risk at required volume
-                new_risk = risk_per_lot * required_volume if stop else 0
-                
-                print(f"        → Scaling UP to meet target:")
-                print(f"        └─ Volume: {final_volume:.2f} → {required_volume:.2f} lots")
-                print(f"        └─ New risk: ${new_risk:.2f}")
-                print(f"        └─ New TP profit: ${actual_profit:.2f}")
-                print(f"        └─ Remaining after target: ${actual_remaining:.2f}")
-                
-                return required_volume, actual_profit, True, actual_remaining, steps_taken, volume_changed
 
+                steps_taken.append("scaled_up_to_target")
+                volume_changed = True
+
+                new_risk = risk_per_lot * required_volume if stop else 0
+
+                _p(f"        → Scaling UP to meet target:")
+                _p(f"        └─ Volume: {final_volume:.2f} → {required_volume:.2f} lots")
+                _p(f"        └─ New risk: ${new_risk:.2f}")
+                _p(f"        └─ New TP profit: ${actual_profit:.2f}")
+                _p(f"        └─ Remaining after target: ${actual_remaining:.2f}")
+
+                return required_volume, actual_profit, True, actual_remaining, steps_taken, volume_changed
 
             def group_orders_by_linear(orders_data):
                 stepup_linear = []
                 stepdown_linear = []
-                
+
                 if not orders_data or not isinstance(orders_data, list):
                     return stepup_linear, stepdown_linear
-                
+
                 for idx, order in enumerate(orders_data):
                     if not isinstance(order, dict):
                         continue
-                    
+
                     order_type = order.get('order_type', '').lower()
                     entry = order.get('entry')
-                    
+
                     if not entry:
                         continue
-                    
+
                     order_info = {'order': order, 'index': idx}
-                    
+
                     if 'sell_limit' in order_type or 'buy_stop' in order_type:
                         stepup_linear.append(order_info)
                     elif 'buy_limit' in order_type or 'sell_stop' in order_type:
                         stepdown_linear.append(order_info)
-                
+
                 stepup_linear.sort(key=lambda x: x['order'].get('entry', 0))
                 stepdown_linear.sort(key=lambda x: x['order'].get('entry', 0), reverse=True)
-                
+
                 return stepup_linear, stepdown_linear
 
             def get_direction_from_order(order):
-                """Get STEPUP or STEPDOWN direction from order type"""
                 order_type = order.get('order_type', '').lower()
                 if 'sell_limit' in order_type or 'buy_stop' in order_type:
                     return "STEPUP"
@@ -16777,34 +18672,466 @@ def martingale_system(inv_id=None):
                     return "STEPDOWN"
                 return "UNKNOWN"
 
-            def apply_linear_step_scaling(orders_linear, linear_name, symbol_info, 
-                                        total_extra_risk, calculation_details, 
-                                        current_limit_volumes=None):
+            def _resolve_main_rr_for_risk(main_order):
+                """
+                Resolve the DYNAMIC R:R for the grid main.
+                Priority: own record > accountmanagement fixed > minimum > 1.0.
+                Returns (rr_value, source_string).
+                """
+                acct_cfg = config.get("accountmanagement", {}) or {}
+                acct_fixed_rr = None
+                acct_minimum_rr = None
+                try:
+                    fr = acct_cfg.get("fixed_risk_reward")
+                    if fr is not None:
+                        acct_fixed_rr = float(str(fr).replace('%', '')) if not isinstance(fr, (int, float)) else float(fr)
+                except Exception:
+                    acct_fixed_rr = None
+                try:
+                    mr = acct_cfg.get("minimum_risk_reward")
+                    if mr is not None:
+                        acct_minimum_rr = float(str(mr).replace('%', '')) if not isinstance(mr, (int, float)) else float(mr)
+                except Exception:
+                    acct_minimum_rr = None
+                return resolve_grid_rr(main_order, acct_fixed_rr, acct_minimum_rr)
+
+            def _size_volume_from_risk_target(order, symbol_info, target_risk_dollars):
+                """
+                Size an order's volume so its SL RISK equals target_risk_dollars.
+                Uses the SL distance (entry → stop_loss). Rounds to volume_step.
+                Returns (volume, actual_risk, risk_per_lot).
+                """
+                entry = order.get('entry')
+                stop = order.get('exit') or order.get('stop_loss')
+                if entry is None or stop is None:
+                    return 0.0, 0.0, 0.0
+                sl_distance = abs(entry - stop)
+                contract_size = symbol_info.trade_contract_size
+                risk_per_lot = sl_distance * contract_size
+                if risk_per_lot <= 0:
+                    return 0.0, 0.0, 0.0
+                vol = target_risk_dollars / risk_per_lot
+                step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
+                min_vol = symbol_info.volume_min if symbol_info else 0.01
+                steps = round(vol / step) if step > 0 else 0
+                vol = max(min_vol, round(steps * step, 2))
+                actual_risk = vol * risk_per_lot
+                return vol, actual_risk, risk_per_lot
+
+            def _size_volume_from_tp_target(order, symbol_info, target_tp_dollars):
+                """
+                Size an order's volume so its TP PROFIT equals target_tp_dollars.
+                Uses the TP distance (entry → tp/target). Rounds to volume_step.
+                Returns (volume, actual_tp, tp_per_lot).
+                """
+                entry = order.get('entry')
+                tp = order.get('tp') or order.get('target')
+                if entry is None or tp is None:
+                    return 0.0, 0.0, 0.0
+                tp_distance = abs(entry - tp)
+                contract_size = symbol_info.trade_contract_size
+                tp_per_lot = tp_distance * contract_size
+                if tp_per_lot <= 0:
+                    return 0.0, 0.0, 0.0
+                vol = target_tp_dollars / tp_per_lot
+                step = symbol_info.volume_step if symbol_info.volume_step > 0 else 0.01
+                min_vol = symbol_info.volume_min if symbol_info else 0.01
+                steps = round(vol / step) if step > 0 else 0
+                vol = max(min_vol, round(steps * step, 2))
+                actual_tp = vol * tp_per_lot
+                return vol, actual_tp, tp_per_lot
+
+            # ==============================================================
+            # GRID BUNDLE HELPERS
+            # ==============================================================
+            def _build_grid_bundle_for_side(symbol, side, main_order, all_children_of_side):
+                """
+                Build a bundle for one grid main + one side.
+
+                helpers_needed = int(main_rr) // 2
+
+                HELPER SELECTION PRIORITY:
+                    1. Children marked grid_mh=True (actual grid helpers, R:R 1:1 default)
+                    2. If not enough grid_mh children, fill the remainder with
+                       regular grid children using the same ordering as linear scaling
+                       (STEPUP: entry asc; STEPDOWN: entry desc).
+
+                All remaining children (not chosen as helpers) become outliers.
+
+                Returns dict or None if the main has no usable entry / R:R.
+                """
+                if not main_order:
+                    return None
+
+                rr_val, rr_src = resolve_grid_rr_for_bundle(main_order)
+                if rr_val is None or rr_val <= 0:
+                    print(f"     ⚠️ [BUNDLE] {symbol} {side}: main has no usable R:R — skipping bundle")
+                    return None
+
+                helpers_needed = int(rr_val) // 2
+
+                # Sort children using the SAME ordering as linear scaling
+                def _sort_key(child_order):
+                    entry = child_order.get('entry', 0) or 0
+                    return entry
+
+                if side == "buy":
+                    # STEPUP direction: entry ascending
+                    sorted_children = sorted(all_children_of_side, key=_sort_key)
+                else:
+                    # STEPDOWN direction: entry descending
+                    sorted_children = sorted(all_children_of_side, key=_sort_key, reverse=True)
+
+                # ---- Prefer grid_mh helpers first ----
+                mh_children = [c for c in sorted_children if c.get("grid_mh", False)]
+                non_mh_children = [c for c in sorted_children if not c.get("grid_mh", False)]
+
+                helpers = []
+                if helpers_needed > 0:
+                    # Take up to helpers_needed from mh_children first
+                    helpers.extend(mh_children[:helpers_needed])
+                    remaining_needed = helpers_needed - len(helpers)
+                    if remaining_needed > 0:
+                        # Fill the rest from non-mh children
+                        helpers.extend(non_mh_children[:remaining_needed])
+
+                # Outliers = everything not chosen as a helper
+                helper_ids = {id(c) for c in helpers}
+                outliers = [c for c in sorted_children if id(c) not in helper_ids]
+
+                print(f"     [BUNDLE] {symbol} {side}: helpers_needed={helpers_needed}, "
+                      f"grid_mh available={len(mh_children)}, selected={len(helpers)}, "
+                      f"outliers={len(outliers)}")
+
+                return {
+                    "symbol": symbol,
+                    "side": side,
+                    "main": main_order,
+                    "main_rr": float(rr_val),
+                    "helpers": list(helpers),
+                    "outliers": list(outliers),
+                    "helpers_needed": helpers_needed,
+                }
+
+            def resolve_grid_rr_for_bundle(main_order):
+                """
+                Resolve the R:R for a grid MAIN only.
+                Priority: own record risk_reward > accountmanagement fixed > minimum > 1.0
+                """
+                acct_cfg = config.get("accountmanagement", {}) or {}
+                acct_fixed_rr = None
+                acct_minimum_rr = None
+                try:
+                    fr = acct_cfg.get("fixed_risk_reward")
+                    if fr is not None:
+                        acct_fixed_rr = float(str(fr).replace('%', '')) if not isinstance(fr, (int, float)) else float(fr)
+                except Exception:
+                    acct_fixed_rr = None
+                try:
+                    mr = acct_cfg.get("minimum_risk_reward")
+                    if mr is not None:
+                        acct_minimum_rr = float(str(mr).replace('%', '')) if not isinstance(mr, (int, float)) else float(mr)
+                except Exception:
+                    acct_minimum_rr = None
+                rr_val, rr_src = resolve_grid_rr(main_order, acct_fixed_rr, acct_minimum_rr)
+                print(f"     [BUNDLE] main R:R = 1:{rr_val} (source: {rr_src})")
+                return rr_val, rr_src
+
+            def _apply_bundle_scaling(bundle, symbol_info, base_target_risk):
+                """
+                Scale the grid MAIN + its HELPERS using DYNAMIC R:R for the main
+                and HARDCODED 1:1 for helpers.
+
+                SPLIT LOGIC (corrected — dynamic main R:R):
+                    - Grid MAIN TP target = full_target / 2
+                      Grid MAIN's risk = main_TP_target / main_rr
+                      (dynamic — read from the main's own record / config)
+                    - Helpers pool = full_target / 2
+                      Each helper TP target = helpers_pool / helpers_count
+                      Helper R:R = 1:1 → helper risk = helper TP target
+                    - If no helpers: main takes FULL target, risk = full_target / main_rr
+
+                Volume sizing happens BEFORE the margin check:
+                    - Main: size volume so its SL risk equals main_risk_dollars
+                    - Helper: size volume so its SL risk equals helper_TP_target
+                      (because R:R 1:1, helper SL risk == helper TP target)
+                    - Outliers: size volume so SL risk equals default risk (1:1)
+
+                The default risk floor ($default_minimum_risk) is enforced as a
+                MINIMUM per-order target. Bundle total may slightly exceed the
+                drawdown target after floor enforcement — acceptable.
+
+                Returns dict or None.
+                """
+                symbol = bundle["symbol"]
+                side = bundle["side"]
+                main_order = bundle["main"]
+                helpers = bundle["helpers"]
+                helpers_needed = bundle["helpers_needed"]
+
+                main_entry = main_order.get('entry')
+                main_stop = main_order.get('exit') or main_order.get('stop_loss')
+                main_vol_key, main_current_vol = get_volume_field_from_order(main_order)
+
+                if main_entry is None or main_stop is None or not main_vol_key:
+                    print(f"     ⚠️ [BUNDLE] {symbol} {side}: main missing entry/stop — skipping")
+                    return None
+
+                # ------------------------------------------------------------
+                # RESOLVE FULL TARGET
+                # ------------------------------------------------------------
+                if base_target_risk is not None and base_target_risk > 0:
+                    full_target = float(base_target_risk)
+                    target_source = "drawdown_recovery_target"
+                else:
+                    full_target = float(default_minimum_risk)
+                    target_source = "default_risk_floor_fallback"
+
+                # ------------------------------------------------------------
+                # RESOLVE MAIN'S DYNAMIC R:R
+                # ------------------------------------------------------------
+                main_rr, main_rr_src = _resolve_main_rr_for_risk(main_order)
+                if main_rr is None or main_rr <= 0:
+                    main_rr = 1.0
+                    main_rr_src = "fallback_1:1"
+
+                usable_helpers = []
+                for child in helpers:
+                    child_entry = child.get('entry')
+                    child_tp = child.get('tp') or child.get('target')
+                    if child_entry and child_tp:
+                        usable_helpers.append(child)
+                helpers_count = len(usable_helpers)
+
+                per_order_floor = float(default_minimum_risk)
+
+                # ------------------------------------------------------------
+                # HALF-AND-HALF SPLIT (TP targets)
+                # ------------------------------------------------------------
+                if helpers_count > 0:
+                    main_tp_target = full_target / 2.0
+                    helpers_pool = full_target / 2.0
+                    helper_tp_target = helpers_pool / helpers_count
+                    split_mode = "half-and-half (main = 50%, helpers share 50% @ R:R 1:1)"
+                else:
+                    main_tp_target = full_target
+                    helpers_pool = 0.0
+                    helper_tp_target = 0.0
+                    split_mode = "solo (no helpers — main risks it all)"
+
+                # ---- Floor enforcement on TP targets ----
+                floor_adjustments = []
+                if helpers_count > 0 and helper_tp_target < per_order_floor:
+                    floor_adjustments.append(
+                        f"helper TP target ${helper_tp_target:.2f} < floor ${per_order_floor:.2f} → raised"
+                    )
+                    helper_tp_target = per_order_floor
+                if main_tp_target < per_order_floor:
+                    floor_adjustments.append(
+                        f"main TP target ${main_tp_target:.2f} < floor ${per_order_floor:.2f} → raised"
+                    )
+                    main_tp_target = per_order_floor
+
+                # ------------------------------------------------------------
+                # CONVERT TP TARGETS TO RISK BUDGETS
+                # ------------------------------------------------------------
+                # Grid main: dynamic R:R → main_risk = main_TP / main_rr
+                main_risk_dollars = main_tp_target / main_rr
+                # Helpers: R:R 1:1 → helper_risk = helper_TP
+                helper_risk_dollars = helper_tp_target  # 1:1
+
+                effective_total = main_tp_target + (helpers_count * helper_tp_target)
+
+                print(f"\n     🎯 [BUNDLE] {symbol} {side}:")
+                print(f"        Target source: {target_source}")
+                print(f"        Split mode: {split_mode}")
+                print(f"        Drawdown recovery target: ${base_target_risk:.2f}")
+                print(f"        Main R:R = 1:{main_rr} (source: {main_rr_src}) — DYNAMIC")
+                print(f"        Helper R:R = 1:1 (grid_mh default — HARDCODED)")
+                print(f"        helpers_needed = {helpers_needed}, usable helpers = {helpers_count}")
+                print(f"        Bundle full target   = ${full_target:.2f}")
+                print(f"        Main TP target       = ${main_tp_target:.2f} (50%)")
+                print(f"        Main RISK budget     = ${main_risk_dollars:.2f} "
+                      f"(= TP / R:R = {main_tp_target:.2f} / {main_rr})")
+                if helpers_count > 0:
+                    print(f"        Helpers pool         = ${helpers_pool:.2f} (50%)")
+                    print(f"        Helper TP target     = ${helper_tp_target:.2f} each (x{helpers_count})")
+                    print(f"        Helper RISK budget   = ${helper_risk_dollars:.2f} each (R:R 1:1)")
+                else:
+                    print(f"        Helper TP target     = n/a (no helpers)")
+                print(f"        Default risk floor   = ${per_order_floor:.2f}")
+                print(f"        Effective bundle total = ${effective_total:.2f}")
+                for adj in floor_adjustments:
+                    print(f"        ⚠️ {adj}")
+
+                # ------------------------------------------------------------
+                # SIZE VOLUMES FROM RISK BUDGETS (BEFORE MARGIN CHECK)
+                # ------------------------------------------------------------
+                desired_items = []
+
+                # Main: size from SL risk budget
+                main_new_vol, main_actual_risk, main_risk_per_lot = _size_volume_from_risk_target(
+                    main_order, symbol_info, main_risk_dollars
+                )
+                desired_items.append({
+                    "order": main_order, "side": side,
+                    "volume": main_new_vol, "role": "main",
+                    "risk": main_actual_risk, "risk_per_lot": main_risk_per_lot,
+                })
+
+                # Helpers: size from SL risk budget (== TP target at 1:1)
+                helper_vols = {}
+                for h_idx, child in enumerate(usable_helpers, start=1):
+                    h_vol, h_actual_risk, h_risk_per_lot = _size_volume_from_risk_target(
+                        child, symbol_info, helper_risk_dollars
+                    )
+                    desired_items.append({
+                        "order": child, "side": side,
+                        "volume": h_vol, "role": "helper",
+                        "risk": h_actual_risk, "risk_per_lot": h_risk_per_lot,
+                    })
+                    helper_vols[id(child)] = h_vol
+
+                if not desired_items:
+                    return None
+
+                # ---- Pre-cap risk summary ----
+                pre_cap_main_risk = desired_items[0]["risk"] if desired_items else 0.0
+                pre_cap_helper_risk = sum(it["risk"] for it in desired_items if it["role"] == "helper")
+                pre_cap_total_risk = pre_cap_main_risk + pre_cap_helper_risk
+
+                print(f"\n        📏 Volume sizing (BEFORE margin check):")
+                for it in desired_items:
+                    o = it["order"]
+                    print(f"           [{it['role']:6s}] vol={it['volume']:.2f} "
+                          f"risk=${it['risk']:.2f} "
+                          f"(risk/lot=${it['risk_per_lot']:.2f}) "
+                          f"entry={o.get('entry')}")
+                print(f"           Grid M + Helpers risk : ${pre_cap_total_risk:.2f}")
+
+                # ------------------------------------------------------------
+                # STAGE 1 LEVERAGE CHECK
+                # ------------------------------------------------------------
+                print(f"\n        🔎 [STAGE 1] Bundle leverage check (main + {helpers_count} helpers):")
+                cap = _validate_and_cap_bundle_margin(desired_items, buffer_pct=10.0)
+                print(f"           Bundle margin (raw)   : ${cap['total_margin']:.2f}")
+                print(f"           Allowed (free * 0.90) : ${cap['allowed_margin']:.2f}")
+                for note in cap["notes"]:
+                    print(f"           └─ {note}")
+
+                by_id_vol = {id(it["order"]): it["volume"] for it in cap["items"]}
+                for item in desired_items:
+                    if id(item["order"]) in by_id_vol:
+                        item["volume"] = by_id_vol[id(item["order"])]
+
+                # Individual margin safety net
+                for item in desired_items:
+                    valid_vol, _, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                        item["order"], item["side"], item["volume"], buffer_pct=10.0
+                    )
+                    if not ok or valid_vol <= 0:
+                        print(f"        ⚠️ individual margin check failed for "
+                              f"{item['order'].get('symbol')} (free ${free_margin:.2f}, "
+                              f"reason: {reason}) — using 0.0")
+                        item["volume"] = 0.0
+                    elif shrunk:
+                        print(f"        🔻 individual shrink: {item['volume']:.2f} → {valid_vol:.2f} "
+                              f"(free ${free_margin:.2f})")
+                        item["volume"] = valid_vol
+
+                final_main_vol = next((it["volume"] for it in desired_items if it["role"] == "main"),
+                                      main_current_vol)
+                final_helper_vols = {id(it["order"]): it["volume"]
+                                     for it in desired_items if it["role"] == "helper"}
+
+                return {
+                    "main_vol": final_main_vol,
+                    "helper_vols": final_helper_vols,
+                    "bundle_target": full_target,
+                    "main_tp_target": main_tp_target,
+                    "helpers_pool": helpers_pool,
+                    "helper_tp_target": helper_tp_target,
+                    "main_risk_dollars": main_risk_dollars,
+                    "helper_risk_dollars": helper_risk_dollars,
+                    "main_rr": main_rr,
+                    "all_items": desired_items,
+                }
+
+            def _apply_outlier_scaling(outliers, symbol_info, base_target_risk, main_rr,
+                                       main_risk_dollars):
+                """
+                Outliers = grid children NOT in a bundle (grid_c).
+
+                Outliers are HARDCODED R:R 1:1. Each outlier's TP target =
+                its RISK target = the DEFAULT RISK for the current balance.
+                Outliers DO NOT share a pool — each targets the default risk.
+
+                Volume is sized from SL RISK (not TP), because R:R 1:1 means
+                risk == TP target. Sizing from SL is what makes the risk land
+                exactly on the default risk value.
+
+                Returns dict {order_id: new_volume}.
+                """
+                if not outliers:
+                    return {}
+
+                per_outlier_risk_target = float(default_minimum_risk)
+
+                print(f"\n     🔻 [OUTLIERS] each grid_c RISK target = ${per_outlier_risk_target:.2f} "
+                      f"(default risk, R:R 1:1) × {len(outliers)} outliers")
+
+                final_vols = {}
+                for o_idx, child in enumerate(outliers, start=1):
+                    child_entry = child.get('entry')
+                    child_stop = child.get('exit') or child.get('stop_loss')
+                    if not child_entry or not child_stop:
+                        continue
+                    vol, actual_risk, risk_per_lot = _size_volume_from_risk_target(
+                        child, symbol_info, per_outlier_risk_target
+                    )
+                    # Individual margin check
+                    side = get_grid_side(child) or "sell"
+                    valid_vol, _, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                        child, side, vol, buffer_pct=10.0
+                    )
+                    if not ok or valid_vol <= 0:
+                        final_vols[id(child)] = 0.0
+                        continue
+                    if shrunk:
+                        print(f"        🔻 [OUTLIER #{o_idx}] margin shrink: {vol:.2f} → {valid_vol:.2f}")
+                        vol = valid_vol
+                    final_vols[id(child)] = vol
+                return final_vols
+
+            def apply_linear_step_scaling(orders_linear, linear_name, symbol_info,
+                                        total_extra_risk, calculation_details,
+                                        current_limit_volumes=None,
+                                        is_grid_bundle=False):
                 """
                 Apply linear scaling to a group of orders.
-                Uses the appropriate calculation based on martingale_factor.
-                
-                IMPORTANT: NEVER scales DOWN. Only scales UP or keeps current volume.
-                Uses current_limit_volumes to get the ACTUAL current volume after recovery processing.
+
+                If is_grid_bundle=True, the internal group margin check runs.
+                Otherwise (non-grid linear group), only individual margin checks run.
                 """
                 linear_updates = {}
-                
+
                 if not orders_linear:
                     return linear_updates
-                
+
                 print(f"\n     📊 {linear_name.upper()} LINEAR SCALING:")
                 print(f"        Orders in linear: {len(orders_linear)}")
-                
-                # Apply multiplier to total_extra_risk if in stoploss_factor mode
+                print(f"        Grid bundle? {'YES (group margin check will run)' if is_grid_bundle else 'NO (individual only)'}")
+
                 if martingale_factor == "stoploss_factor" and stoploss_multiplier != 1.0:
                     total_extra_risk = total_extra_risk * stoploss_multiplier
                     print(f"        LEADER amount (with {stoploss_multiplier}x multiplier): ${total_extra_risk:.2f}")
                 else:
                     print(f"        LEADER amount (first order risk): ${total_extra_risk:.2f}")
-                
+
                 calculated_volumes = []
-                calculated_amounts = []  # risk or profit depending on assumption
-                
+                calculated_amounts = []
+                desired_items = []
+
                 for idx, order_info in enumerate(orders_linear):
                     order = order_info['order']
                     order_index = order_info['index']
@@ -16812,68 +19139,56 @@ def martingale_system(inv_id=None):
                     entry = order.get('entry')
                     order_type = order.get('order_type', '')
                     direction = get_direction_from_order(order)
-                    
-                    # Get current volume from limit_orders.json (already scaled)
+
                     if current_limit_volumes and symbol in current_limit_volumes:
                         current_volume = current_limit_volumes[symbol]
                     else:
                         current_volume = get_volume_field_from_order(order)[1] or 0.01
-                    
+
                     if martingale_factor == "takeprofit_factor":
-                        # Use TP for profit calculation
                         tp = order.get('tp') or order.get('target')
                         if not entry or not tp:
                             continue
-                        
                         price_diff = abs(entry - tp)
                         amount_per_lot = price_diff * symbol_info.trade_contract_size
                         amount_type = "profit"
                     else:
-                        # Use stoploss for risk calculation (standard)
                         stop = order.get('exit') or order.get('stop_loss')
                         if not entry or not stop:
                             continue
-                        
                         is_buy = 'buy' in order_type.lower()
                         if is_buy:
                             price_diff = entry - stop
                         else:
                             price_diff = stop - entry
-                        
                         if price_diff <= 0:
                             continue
-                        
                         amount_per_lot = price_diff * symbol_info.trade_contract_size
                         amount_type = "risk"
-                    
-                    # Use current_volume (already scaled) instead of reading from order
+
                     current_amount = amount_per_lot * current_volume
-                    
+
                     if idx == 0:
-                        # LEADER order - use current volume (already scaled)
                         leader_volume = current_volume
                         leader_amount = current_amount
-                        
                         print(f"\n        🔹 [{direction}] Order #1 (LEADER): {symbol} @ {entry:.5f} ({order_type})")
                         print(f"          ├─ LEADER {amount_type}: ${leader_amount:.2f}")
                         print(f"          ├─ Volume: {leader_volume:.2f} lots")
-                        
                         if martingale_factor == "takeprofit_factor":
                             remaining = leader_amount - total_extra_risk
                             print(f"          ├─ Recovered from drawdown: ${total_extra_risk:.2f}")
                             print(f"          └─ Remaining profit after recovery: ${remaining:.2f}")
                         else:
                             print(f"          └─ This is the LEADER amount for scaling")
-                        
                         calculated_volumes.append(leader_volume)
                         calculated_amounts.append(leader_amount)
-                        
+                        desired_items.append({
+                            "order": order,
+                            "side": "buy" if 'buy' in order_type.lower() else "sell",
+                            "volume": leader_volume,
+                        })
                     else:
-                        # Subsequent orders - progressive scaling
                         previous_amount = calculated_amounts[idx - 1]
-                        
-                        # CRITICAL: NEVER SCALE DOWN
-                        # If current amount already >= previous amount, keep current volume
                         if current_amount >= previous_amount:
                             print(f"\n        [{direction}] Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
                             print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
@@ -16882,105 +19197,153 @@ def martingale_system(inv_id=None):
                             print(f"          └─ → Keeping current volume (NO DOWNSCALING)")
                             calculated_volumes.append(current_volume)
                             calculated_amounts.append(current_amount)
+                            desired_items.append({
+                                "order": order,
+                                "side": "buy" if 'buy' in order_type.lower() else "sell",
+                                "volume": current_volume,
+                            })
                             continue
-                        
+
                         additional_volume = (previous_amount - current_amount) / amount_per_lot
                         additional_volume = round(additional_volume, 2)
-                        
+
                         new_volume = current_volume + additional_volume
                         new_volume = round(new_volume, 2)
-                        
+
                         min_volume = symbol_info.volume_min
                         max_volume = symbol_info.volume_max
                         volume_step = symbol_info.volume_step
-                        
+
                         steps = round(new_volume / volume_step) if volume_step > 0 else 0
                         new_volume = max(min_volume, min(max_volume, round(steps * volume_step, 2)))
-                        
+
                         new_amount = amount_per_lot * new_volume
-                        
+
                         print(f"\n        [{direction}] Order #{idx+1}: {symbol} @ {entry:.5f} ({order_type})")
                         print(f"          ├─ Current volume: {current_volume:.2f} lots ({amount_type}: ${current_amount:.2f})")
                         print(f"          ├─ Target to match (from previous): ${previous_amount:.2f}")
                         print(f"          ├─ Additional volume needed: {additional_volume:.2f} lots")
                         print(f"          ├─ New volume: {new_volume:.2f} lots")
                         print(f"          └─ New {amount_type}: ${new_amount:.2f}")
-                        
+
                         calculated_volumes.append(new_volume)
                         calculated_amounts.append(new_amount)
-                        
-                        if abs(current_volume - new_volume) > 0.001:
-                            linear_updates[order_index] = new_volume
-                        
-                        # Store the linear update details for display
-                        if 'linear_scaling_details' not in calculation_details:
-                            calculation_details['linear_scaling_details'] = []
-                        calculation_details['linear_scaling_details'].append({
-                            'order_index': order_index + 1,
-                            'symbol': symbol,
-                            'direction': direction,
-                            'old_volume': current_volume,
-                            'new_volume': new_volume,
-                            'old_amount': current_amount,
-                            'new_amount': new_amount,
-                            'amount_type': amount_type
+                        desired_items.append({
+                            "order": order,
+                            "side": "buy" if 'buy' in order_type.lower() else "sell",
+                            "volume": new_volume,
                         })
-                
-                print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
-                for i, (vol, amt) in enumerate(zip(calculated_volumes, calculated_amounts)):
-                    if martingale_factor == "takeprofit_factor":
-                        print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} profit (recovers ${total_extra_risk:.2f} drawdown)")
-                    else:
-                        print(f"           Order {i+1}: {vol:.2f} lots → ${amt:.2f} risk")
-                
-                return linear_updates
 
+                # ---- Individual margin checks (always) ----
+                print(f"\n        🔎 LEVERAGE VALIDATION for {linear_name.upper()} group:")
+                final_items = []
+                for item in desired_items:
+                    order = item["order"]
+                    side = item["side"]
+                    desired_vol = item["volume"]
+                    final_vol, margin, free_margin, ok, shrunk, reason = _validate_single_order_margin(
+                        order, side, desired_vol, buffer_pct=10.0
+                    )
+                    if not ok or final_vol <= 0:
+                        print(f"          ⚠️ {order.get('symbol')} {side}: cannot fit even min volume "
+                              f"(free ${free_margin:.2f}, reason: {reason}) — skipping")
+                        final_items.append({"order": order, "side": side, "volume": 0.0})
+                        continue
+                    if shrunk:
+                        print(f"          🔻 {order.get('symbol')} {side}: {desired_vol:.2f} → {final_vol:.2f} lots "
+                              f"(margin ${margin:.2f}, free ${free_margin:.2f})")
+                    final_items.append({"order": order, "side": side, "volume": final_vol})
+
+                # ---- Group margin check — ONLY for grid bundles ----
+                if is_grid_bundle:
+                    group_items = [it for it in final_items if it["volume"] > 0]
+                    if group_items:
+                        group_total, _ = _calc_group_margin(group_items)
+                        acc_state = _get_account_margin_state()
+                        if acc_state is not None and group_total is not None:
+                            allowed = acc_state["free_margin"] * 0.90
+                            if group_total > allowed:
+                                print(f"          ⚠️ GROUP MARGIN EXCEEDS FREE MARGIN: total ${group_total:.2f} > "
+                                      f"allowed ${allowed:.2f} — shrinking group proportionally")
+                                adjusted, new_total, free_margin, allowed, all_ok, notes = _validate_group_margin(
+                                    group_items, buffer_pct=10.0
+                                )
+                                for note in notes:
+                                    print(f"          └─ {note}")
+                                by_id = {id(it["order"]): it for it in adjusted}
+                                for it in final_items:
+                                    if id(it["order"]) in by_id:
+                                        it["volume"] = by_id[id(it["order"])]["volume"]
+                                print(f"          ✓ Group margin after shrink: ${new_total:.2f} (allowed ${allowed:.2f})")
+                else:
+                    print(f"          ℹ️ Non-grid linear group — skipping group margin check (individual only)")
+
+                # ---- Write back ----
+                for item in final_items:
+                    order = item["order"]
+                    final_vol = item["volume"]
+                    order_index = None
+                    for oi in orders_linear:
+                        if oi["order"] is order:
+                            order_index = oi["index"]
+                            break
+                    if order_index is None:
+                        continue
+
+                    volume_key, old_vol = get_volume_field_from_order(order)
+                    if not volume_key:
+                        continue
+
+                    if abs(old_vol - final_vol) > 0.001 and final_vol > 0:
+                        linear_updates[order_index] = final_vol
+
+                    if 'linear_scaling_details' not in calculation_details:
+                        calculation_details['linear_scaling_details'] = []
+                    calculation_details['linear_scaling_details'].append({
+                        'order_index': order_index + 1,
+                        'symbol': order.get('symbol'),
+                        'direction': get_direction_from_order(order),
+                        'old_volume': old_vol,
+                        'new_volume': final_vol,
+                    })
+
+                print(f"\n        📈 CASCADE SUMMARY for {linear_name.upper()} group:")
+                for i, item in enumerate(final_items):
+                    print(f"           Order {i+1}: {item['volume']:.2f} lots")
+
+                return linear_updates
 
             # ========== LOSS_STREAK SPECIFIC FUNCTIONS ==========
             def fetch_and_analyze_trades_with_sequential_loss():
-                """
-                Fetches all closed trades and analyzes sequential losses per symbol.
-                ONLY used for loss_streak mode.
-                Returns: (closed_positions, sequential_losses_by_symbol, last_expected_risk, stage_info)
-                """
+                # (unchanged — keep as-is from your original)
                 print(f"\n  📊 CLOSED TRADE HISTORY WITH SEQUENTIAL LOSS ANALYSIS")
                 print(f"{'─'*60}")
-                
+
                 try:
                     try:
                         from dateutil import parser as date_parser
                         has_dateutil = True
                     except ImportError:
                         has_dateutil = False
-                    
+
                     activities_path = inv_root / "activities.json"
                     execution_start_date = None
                     start_timestamp = None
-                    
+
                     if activities_path.exists():
                         with open(activities_path, 'r', encoding='utf-8') as f:
                             activities = json.load(f)
                         execution_start_date = activities.get('execution_start_date')
-                        
-                        # ========== FIX: Parse execution start date with multiple formats ==========
+
                         if execution_start_date:
                             try:
                                 if isinstance(execution_start_date, str):
-                                    # Try multiple date formats
                                     date_formats = [
-                                        '%Y-%m-%d',
-                                        '%B %d, %Y',
-                                        '%b %d, %Y',
-                                        '%Y-%m-%d %H:%M:%S',
-                                        '%Y/%m/%d',
-                                        '%d-%m-%Y',
-                                        '%d/%m/%Y',
-                                        '%m-%d-%Y',
-                                        '%m/%d/%Y',
-                                        '%B %d %Y',
-                                        '%b %d %Y',
-                                        '%d %B %Y',
-                                        '%d %b %Y'
+                                        '%Y-%m-%d', '%B %d, %Y', '%b %d, %Y',
+                                        '%Y-%m-%d %H:%M:%S', '%Y/%m/%d',
+                                        '%d-%m-%Y', '%d/%m/%Y', '%m-%d-%Y',
+                                        '%m/%d/%Y', '%B %d %Y', '%b %d %Y',
+                                        '%d %B %Y', '%d %b %Y'
                                     ]
                                     for fmt in date_formats:
                                         try:
@@ -16989,8 +19352,7 @@ def martingale_system(inv_id=None):
                                             break
                                         except ValueError:
                                             continue
-                                    
-                                    # Try using dateutil if available and previous parsing failed
+
                                     if start_timestamp is None and has_dateutil:
                                         try:
                                             start_datetime = date_parser.parse(execution_start_date)
@@ -16999,25 +19361,25 @@ def martingale_system(inv_id=None):
                                             pass
                             except:
                                 pass
-                    
+
                     if start_timestamp is None:
                         start_timestamp = int((datetime.now() - timedelta(days=30)).timestamp())
-                    
+
                     current_timestamp = int(datetime.now().timestamp())
                     if start_timestamp > current_timestamp:
                         start_timestamp = current_timestamp - (30 * 24 * 60 * 60)
-                    
+
                     print(f"  │ Execution start date: {execution_start_date if execution_start_date else 'Not found'}")
                     print(f"  │ From timestamp: {start_timestamp} ({datetime.fromtimestamp(start_timestamp).strftime('%Y-%m-%d %H:%M:%S')})")
                     print(f"  │ Present time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     print(f"{'─'*60}")
-                    
+
                     closed_trades = mt5.history_deals_get(start_timestamp, int(datetime.now().timestamp()))
-                    
+
                     if closed_trades is None or len(closed_trades) == 0:
                         print(f"  │ ℹ️ No closed trades found")
                         return [], {}, 0, {}
-                    
+
                     positions_map = {}
                     for deal in closed_trades:
                         if deal.type in [0, 1]:
@@ -17046,13 +19408,13 @@ def martingale_system(inv_id=None):
                                         positions_map[deal.position_id]['swap'] += deal.swap
                                     if deal.commission:
                                         positions_map[deal.position_id]['commission'] += deal.commission
-                    
+
                     closed_positions = []
                     for pos_id, pos_data in positions_map.items():
                         if pos_data['exit_time'] is not None:
                             holding_seconds = pos_data['exit_time'] - pos_data['entry_time']
                             holding_days = holding_seconds / (24 * 60 * 60)
-                            
+
                             symbol_info = mt5.symbol_info(pos_data['symbol'])
                             if symbol_info:
                                 pip_size = symbol_info.point * 10 if 'JPY' in pos_data['symbol'] else symbol_info.point
@@ -17062,38 +19424,37 @@ def martingale_system(inv_id=None):
                                     pips = (pos_data['entry_price'] - pos_data['exit_price']) / pip_size
                             else:
                                 pips = 0
-                            
+
                             total_profit = pos_data['profit'] + pos_data['swap'] + pos_data['commission']
                             pos_data['holding_days'] = holding_days
                             pos_data['pips'] = pips
                             pos_data['total_profit'] = total_profit
                             closed_positions.append(pos_data)
-                    
+
                     closed_positions.sort(key=lambda x: x['entry_time'])
-                    
+
                     if not closed_positions:
                         print(f"  │ ℹ️ No fully closed positions found")
                         return [], {}, 0, {}
-                    
-                    # ========== TRACK SEQUENTIAL LOSSES PER SYMBOL ==========
+
                     symbol_loss_tracking = {}
                     sequential_losses_by_symbol = {}
-                    
+
                     for pos in closed_positions:
                         symbol = pos['symbol']
                         profit = pos['total_profit']
                         is_loss = profit < 0
                         is_profit = profit > 0
-                        
+
                         if symbol not in symbol_loss_tracking:
                             symbol_loss_tracking[symbol] = {
                                 'current_losses': [],
                                 'current_loss_total': 0,
                                 'in_loss_sequence': False
                             }
-                        
+
                         tracking = symbol_loss_tracking[symbol]
-                        
+
                         if is_loss:
                             tracking['current_losses'].append(pos)
                             tracking['current_loss_total'] += abs(profit)
@@ -17110,7 +19471,7 @@ def martingale_system(inv_id=None):
                                 tracking['current_losses'] = []
                                 tracking['current_loss_total'] = 0
                                 tracking['in_loss_sequence'] = False
-                    
+
                     for symbol, tracking in symbol_loss_tracking.items():
                         if tracking['in_loss_sequence'] and tracking['current_losses']:
                             if symbol not in sequential_losses_by_symbol:
@@ -17120,8 +19481,7 @@ def martingale_system(inv_id=None):
                                 'total_loss': tracking['current_loss_total'],
                                 'count': len(tracking['current_losses'])
                             })
-                    
-                    # ========== BUILD TRADE TO SEQUENCE MAP ==========
+
                     trade_to_sequence = {}
                     for symbol, sequences in sequential_losses_by_symbol.items():
                         for seq in sequences:
@@ -17134,7 +19494,7 @@ def martingale_system(inv_id=None):
                                     'is_last': idx == len(seq['losses']) - 1,
                                     'symbol': symbol
                                 }
-                    
+
                     trade_follows_loss = {}
                     for i, pos in enumerate(closed_positions):
                         if i > 0:
@@ -17145,25 +19505,24 @@ def martingale_system(inv_id=None):
                                     'previous_loss': prev_trade,
                                     'loss_position_id': prev_trade['position_id']
                                 }
-                    
-                    # ========== PRINT TRADES WITH ANALYSIS ==========
+
                     print(f"\n  📈 CLOSED POSITIONS ({len(closed_positions)} total):")
                     print(f"{'─'*70}")
-                    
+
                     total_profit = 0
                     winning_count = 0
                     losing_count = 0
                     total_pips = 0
                     total_trades = 0
-                    
+
                     for i, pos in enumerate(closed_positions, 1):
                         entry_time = datetime.fromtimestamp(pos['entry_time']).strftime('%Y-%m-%d %H:%M')
                         exit_time = datetime.fromtimestamp(pos['exit_time']).strftime('%Y-%m-%d %H:%M')
-                        
+
                         profit = pos['total_profit']
                         total_profit += profit
                         total_trades += 1
-                        
+
                         if profit > 0:
                             winning_count += 1
                             profit_symbol = '+'
@@ -17172,9 +19531,9 @@ def martingale_system(inv_id=None):
                             profit_symbol = ''
                         else:
                             profit_symbol = ' '
-                        
+
                         total_pips += pos['pips']
-                        
+
                         print(f"\n  {i:2d}. {pos['symbol']:8s} | {pos['entry_type']:4s} | Vol: {pos['volume']:.2f}")
                         print(f"      ├─ Entry: {pos['entry_price']:.5f} @ {entry_time}")
                         print(f"      ├─ Exit:  {pos['exit_price']:.5f} @ {exit_time}")
@@ -17184,9 +19543,8 @@ def martingale_system(inv_id=None):
                             print(f"      └─ Comment: {pos['comment']}")
                         else:
                             print(f"      └─ Magic: {pos['magic']}")
-                        
                         print()
-                    
+
                     print(f"{'─'*70}")
                     print(f"  📊 SUMMARY:")
                     print(f"  │ Total closed positions: {len(closed_positions)}")
@@ -17195,52 +19553,31 @@ def martingale_system(inv_id=None):
                         print(f"  │ Losing: {losing_count} ({(losing_count/total_trades*100):.1f}%)")
                     print(f"  │ Total profit: ${total_profit:.2f}")
                     print(f"  │ Total pips: {total_pips:.1f}")
-                    
+
                     print(f"{'─'*70}")
-                    
-                    # For loss_streak mode, we use the drawdown as the base target
-                    # The drawdown already includes pre-drawdown if enabled
+
                     return closed_positions, sequential_losses_by_symbol, 0, {
                         'total_trades': total_trades,
                         'winning_count': winning_count,
                         'losing_count': losing_count,
                         'total_profit': total_profit
                     }
-                    
+
                 except Exception as e:
                     print(f"  │ ✗ Error: {e}")
                     import traceback
                     traceback.print_exc()
                     return [], {}, 0, {}
 
-            # ========== NEW: MT5 PENDING ORDERS CHECK ==========
+            # ========== MT5 PENDING ORDERS CHECK ==========
             def check_and_delete_mt5_pending_orders(system_analysis_results, target_risk, martingale_factor_type):
-                """
-                Check MT5 pending orders against system analysis results.
-                Deletes MT5 pending orders that don't match the system analysis.
-
-                SIMPLE RULES:
-                    - GRID CHILD (GC1):
-                        * NEVER checked, NEVER validated, NEVER deleted.
-                        * Completely skipped. They mirror the grid main's volume
-                          during the scaling phase, which is handled elsewhere.
-                    - GRID MAIN (GM1):
-                        * Checked against system analysis using its SL RISK
-                          (always SL risk, never TP profit — even in TP mode).
-                        * Deleted only if it doesn't match the system target.
-                    - HEDGE (H1) / REGULAR (R1) / UNKNOWN / LEGACY:
-                        * Standard behaviour: compared against system_analysis_results[symbol].
-                """
+                # (unchanged — keep as-is from your original)
                 deleted_count = 0
                 preserved_count = 0
                 skipped_grid_children = 0
                 deleted_details = []
 
-                # --------------------------------------------------------------
-                # Local comment parser (same format as orders_reward_correction)
-                # --------------------------------------------------------------
                 def parse_order_comment(comment):
-                    """Parse MT5 comment -> dict with gm, gc, hedge, regular, rr_value."""
                     result = {
                         "gm": False, "gc": False,
                         "hedge": False, "regular": False,
@@ -17288,11 +19625,7 @@ def martingale_system(inv_id=None):
                         pass
                     return result
 
-                # --------------------------------------------------------------
-                # Determine the side (buy/sell) from MT5 order type
-                # --------------------------------------------------------------
                 def get_order_side(order_type):
-                    """Return 'buy' or 'sell' from MT5 order type."""
                     if order_type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP,
                                       mt5.ORDER_TYPE_BUY_STOP_LIMIT):
                         return "buy"
@@ -17301,15 +19634,7 @@ def martingale_system(inv_id=None):
                         return "sell"
                     return None
 
-                # --------------------------------------------------------------
-                # Compute SL RISK only (always risk, never TP profit)
-                # --------------------------------------------------------------
                 def compute_order_risk(order, symbol_info):
-                    """
-                    Compute the SL risk for an MT5 pending order.
-                    ALWAYS uses stop loss (never TP).
-                    Returns (risk, price_diff, volume) or (None, None, None).
-                    """
                     entry = order.price_open
                     volume = (order.volume_initial
                               if hasattr(order, 'volume_initial')
@@ -17317,8 +19642,6 @@ def martingale_system(inv_id=None):
                     sl = order.sl
                     if not sl:
                         return None, None, None
-
-                    # Direction-aware price diff
                     if order.type in (mt5.ORDER_TYPE_BUY_LIMIT,
                                       mt5.ORDER_TYPE_BUY_STOP,
                                       mt5.ORDER_TYPE_BUY_STOP_LIMIT):
@@ -17327,7 +19650,6 @@ def martingale_system(inv_id=None):
                         price_diff = sl - entry
                     if price_diff <= 0:
                         return None, None, None
-
                     contract_size = symbol_info.trade_contract_size
                     risk = price_diff * volume * contract_size
                     return risk, price_diff, volume
@@ -17339,7 +19661,6 @@ def martingale_system(inv_id=None):
                 print(f"  Note: Grid mains use SL RISK (never TP profit)")
                 print(f"{'─'*60}\n")
 
-                # Get all MT5 pending orders
                 pending_orders = mt5.orders_get()
                 if pending_orders is None or len(pending_orders) == 0:
                     print(f"  │ No MT5 pending orders found")
@@ -17348,9 +19669,6 @@ def martingale_system(inv_id=None):
                 print(f"  │ Found {len(pending_orders)} MT5 pending order(s)")
                 print(f"{'─'*60}\n")
 
-                # --------------------------------------------------------------
-                # PROCESS EVERY PENDING ORDER
-                # --------------------------------------------------------------
                 for order in pending_orders:
                     symbol = order.symbol
                     order_type = order.type
@@ -17363,7 +19681,6 @@ def martingale_system(inv_id=None):
                     tp = order.tp
                     comment = getattr(order, 'comment', "") or ""
 
-                    # Pretty type name
                     type_name_map = {
                         mt5.ORDER_TYPE_BUY_LIMIT: "BUY_LIMIT",
                         mt5.ORDER_TYPE_SELL_LIMIT: "SELL_LIMIT",
@@ -17375,11 +19692,10 @@ def martingale_system(inv_id=None):
                     order_type_display = type_name_map.get(order_type, f"TYPE_{order_type}")
                     side = get_order_side(order_type)
 
-                    # Parse comment for grid flags
                     meta = parse_order_comment(comment)
 
                     # ----------------------------------------------------------
-                    # CASE 1: GRID CHILD (GC1) — SKIP ENTIRELY, NO CHECKS, NO DELETION
+                    # CASE 1: GRID CHILD (GC1) — SKIP ENTIRELY
                     # ----------------------------------------------------------
                     if meta["gc"]:
                         skipped_grid_children += 1
@@ -17390,7 +19706,7 @@ def martingale_system(inv_id=None):
                         continue
 
                     # ----------------------------------------------------------
-                    # CASE 2: GRID MAIN (GM1) — CHECK USING SL RISK ONLY
+                    # CASE 2: GRID MAIN (GM1)
                     # ----------------------------------------------------------
                     if meta["gm"]:
                         symbol_info = mt5.symbol_info(symbol)
@@ -17399,115 +19715,78 @@ def martingale_system(inv_id=None):
                                   f"ticket #{order_ticket} — no symbol info, skipping")
                             continue
 
-                        # ALWAYS compute SL risk, never TP profit
+                        # SL risk (always SL for grid mains)
                         actual_risk, price_diff, vol = compute_order_risk(order, symbol_info)
-                        if actual_risk is None:
-                            print(f"  ⚠️ [GRID MAIN] {symbol} {order_type_display} "
-                                  f"ticket #{order_ticket} — cannot compute SL risk (no SL), skipping")
-                            preserved_count += 1
-                            continue
 
                         print(f"\n  📋 [GRID MAIN] {symbol} {order_type_display} ticket #{order_ticket}")
                         print(f"       Comment: \"{comment}\"")
                         print(f"       Entry: {entry} | SL: {sl} | Volume: {volume:.2f}")
-                        print(f"       SL Risk: ${actual_risk:.2f}")
 
                         system_entry = system_analysis_results.get(symbol)
-                        if system_entry is None:
-                            deleted_count += 1
-                            print(f"  ❌ [GRID MAIN] {symbol} {order_type_display} "
-                                  f"risk ${actual_risk:.2f} - Symbol not in system analysis")
-                            print(f"    └─ 🗑️ DELETED")
-                            deleted_details.append({
-                                'symbol': symbol,
-                                'order_type': order_type_display,
-                                'ticket': order_ticket,
-                                'entry': entry,
-                                'volume': volume,
-                                'actual_amount': actual_risk,
-                                'system_amount': 0,
-                                'diff': actual_risk,
-                                'kind': 'grid_main'
-                            })
-                            try:
-                                cancel_request = {
-                                    "action": mt5.TRADE_ACTION_REMOVE,
-                                    "order": order_ticket
-                                }
-                                result = mt5.order_send(cancel_request)
-                                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                    print(f"       └─ ✅ Order {order_ticket} deleted successfully")
-                                else:
-                                    error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
-                                    print(f"       └─ ❌ Failed to delete order {order_ticket}: {error_msg}")
-                            except Exception as e:
-                                print(f"       └─ ❌ Error deleting order {order_ticket}: {e}")
+
+                        # --------------------------------------------------
+                        # LEVERAGE-AWARE PRESERVE:
+                        # If the system's last-known volume for this symbol
+                        # matches the live MT5 volume (within tolerance), the
+                        # order is considered "within leverage" and is PRESERVED
+                        # even if risk deviates from the target.
+                        # This prevents Stage 1 / Stage 2 scaling from being
+                        # undone by the pending-order checker.
+                        # --------------------------------------------------
+                        if system_entry is not None:
+                            system_volume = system_entry.get('volume', 0)
+                            volume_matches = abs(volume - system_volume) <= 0.001
+
+                            if volume_matches:
+                                preserved_count += 1
+                                print(f"       System volume  : {system_volume:.2f} (matches live {volume:.2f})")
+                                print(f"       SL risk        : ${actual_risk:.2f}" if actual_risk else "       SL risk        : N/A")
+                                print(f"    └─ ✅ PRESERVED (leverage-aware: volume matches system)")
+                                continue
+
+                        # Volume does NOT match system => the order is stale
+                        # relative to the current system analysis. Delete it.
+                        if actual_risk is None:
+                            print(f"  ⚠️ [GRID MAIN] {symbol} {order_type_display} "
+                                  f"ticket #{order_ticket} — cannot compute SL risk, skipping")
+                            preserved_count += 1
                             continue
 
-                        # ALWAYS compare against system RISK, never TP profit
-                        system_volume = system_entry.get('volume', 0)
-                        system_risk = system_entry.get('risk', 0)
-
-                        tolerance = 0.10
-                        is_match = (abs(actual_risk - system_risk) / system_risk <= tolerance
-                                    if system_risk > 0 else False)
-                        volume_matches = abs(volume - system_volume) <= 0.001
-
-                        print(f"       System analysis: volume {system_volume:.2f}, risk ${system_risk:.2f}")
-
-                        if is_match and volume_matches:
-                            preserved_count += 1
-                            print(f"  ✓ [GRID MAIN] {symbol} {order_type_display} "
-                                  f"risk ${actual_risk:.2f} = system ${system_risk:.2f} "
-                                  f"(vol {volume:.2f} = {system_volume:.2f})")
-                            print(f"    └─ ✅ PRESERVED")
-                        else:
-                            reason = []
-                            if not is_match:
-                                reason.append(f"risk ${actual_risk:.2f} != system ${system_risk:.2f}")
-                            if not volume_matches:
-                                reason.append(f"volume {volume:.2f} != system {system_volume:.2f}")
-                            deleted_count += 1
-                            print(f"  ❌ [GRID MAIN] {symbol} {order_type_display} "
-                                  f"{', '.join(reason)}")
-                            print(f"    └─ 🗑️ DELETED")
-                            deleted_details.append({
-                                'symbol': symbol,
-                                'order_type': order_type_display,
-                                'ticket': order_ticket,
-                                'entry': entry,
-                                'volume': volume,
-                                'actual_amount': actual_risk,
-                                'system_amount': system_risk,
-                                'diff': actual_risk - system_risk,
-                                'kind': 'grid_main'
-                            })
-                            try:
-                                cancel_request = {
-                                    "action": mt5.TRADE_ACTION_REMOVE,
-                                    "order": order_ticket
-                                }
-                                result = mt5.order_send(cancel_request)
-                                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                                    print(f"       └─ ✅ Order {order_ticket} deleted successfully")
-                                else:
-                                    error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
-                                    print(f"       └─ ❌ Failed to delete order {order_ticket}: {error_msg}")
-                            except Exception as e:
-                                print(f"       └─ ❌ Error deleting order {order_ticket}: {e}")
+                        deleted_count += 1
+                        print(f"  ❌ [GRID MAIN] {symbol} {order_type_display} "
+                              f"volume {volume:.2f} != system {system_entry.get('volume', 0):.2f}"
+                              if system_entry else
+                              f"  ❌ [GRID MAIN] {symbol} {order_type_display} "
+                              f"symbol not in system analysis")
+                        print(f"    └─ 🗑️ DELETED")
+                        deleted_details.append({
+                            'symbol': symbol, 'order_type': order_type_display,
+                            'ticket': order_ticket, 'entry': entry, 'volume': volume,
+                            'actual_amount': actual_risk or 0,
+                            'system_amount': system_entry.get('risk', 0) if system_entry else 0,
+                            'diff': (actual_risk or 0) - (system_entry.get('risk', 0) if system_entry else 0),
+                            'kind': 'grid_main'
+                        })
+                        try:
+                            cancel_request = {"action": mt5.TRADE_ACTION_REMOVE, "order": order_ticket}
+                            result = mt5.order_send(cancel_request)
+                            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                                print(f"       └─ ✅ Order {order_ticket} deleted successfully")
+                            else:
+                                error_msg = result.comment if result else f"Error code: {mt5.last_error()}"
+                                print(f"       └─ ❌ Failed to delete order {order_ticket}: {error_msg}")
+                        except Exception as e:
+                            print(f"       └─ ❌ Error deleting order {order_ticket}: {e}")
                         continue
 
-                    # ----------------------------------------------------------
-                    # CASE 3: NON-GRID (HEDGE / REGULAR / UNKNOWN / LEGACY)
-                    # ----------------------------------------------------------
+                    # Non-grid
                     symbol_info = mt5.symbol_info(symbol)
                     if not symbol_info:
                         continue
 
                     actual_risk, price_diff, vol = compute_order_risk(order, symbol_info)
                     if actual_risk is None:
-                        print(f"  ⚠️ {symbol} {order_type_display} ticket #{order_ticket} — "
-                              f"cannot compute SL risk (no SL), skipping")
+                        print(f"  ⚠️ {symbol} {order_type_display} ticket #{order_ticket} — cannot compute SL risk, skipping")
                         preserved_count += 1
                         continue
 
@@ -17527,8 +19806,7 @@ def martingale_system(inv_id=None):
 
                         if is_match and volume_matches:
                             preserved_count += 1
-                            print(f"  ✓ {symbol} {order_type_display} risk ${actual_risk:.2f} "
-                                  f"= system ${system_risk:.2f} (vol {volume:.2f} = {system_volume:.2f})")
+                            print(f"  ✓ {symbol} {order_type_display} risk ${actual_risk:.2f} = system ${system_risk:.2f} (vol {volume:.2f} = {system_volume:.2f})")
                             print(f"    └─ ✅ PRESERVED")
                         else:
                             reason = []
@@ -17540,21 +19818,13 @@ def martingale_system(inv_id=None):
                             print(f"  ❌ {symbol} {order_type_display} {', '.join(reason)}")
                             print(f"    └─ 🗑️ DELETED")
                             deleted_details.append({
-                                'symbol': symbol,
-                                'order_type': order_type_display,
-                                'ticket': order_ticket,
-                                'entry': entry,
-                                'volume': volume,
-                                'actual_amount': actual_risk,
-                                'system_amount': system_risk,
-                                'diff': actual_risk - system_risk,
-                                'kind': 'regular'
+                                'symbol': symbol, 'order_type': order_type_display,
+                                'ticket': order_ticket, 'entry': entry, 'volume': volume,
+                                'actual_amount': actual_risk, 'system_amount': system_risk,
+                                'diff': actual_risk - system_risk, 'kind': 'regular'
                             })
                             try:
-                                cancel_request = {
-                                    "action": mt5.TRADE_ACTION_REMOVE,
-                                    "order": order_ticket
-                                }
+                                cancel_request = {"action": mt5.TRADE_ACTION_REMOVE, "order": order_ticket}
                                 result = mt5.order_send(cancel_request)
                                 if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                                     print(f"       └─ ✅ Order {order_ticket} deleted successfully")
@@ -17565,25 +19835,16 @@ def martingale_system(inv_id=None):
                                 print(f"       └─ ❌ Error deleting order {order_ticket}: {e}")
                     else:
                         deleted_count += 1
-                        print(f"  ❌ {symbol} {order_type_display} risk ${actual_risk:.2f} "
-                              f"- Symbol not in system analysis")
+                        print(f"  ❌ {symbol} {order_type_display} risk ${actual_risk:.2f} - Symbol not in system analysis")
                         print(f"    └─ 🗑️ DELETED")
                         deleted_details.append({
-                            'symbol': symbol,
-                            'order_type': order_type_display,
-                            'ticket': order_ticket,
-                            'entry': entry,
-                            'volume': volume,
-                            'actual_amount': actual_risk,
-                            'system_amount': 0,
-                            'diff': actual_risk,
-                            'kind': 'regular'
+                            'symbol': symbol, 'order_type': order_type_display,
+                            'ticket': order_ticket, 'entry': entry, 'volume': volume,
+                            'actual_amount': actual_risk, 'system_amount': 0,
+                            'diff': actual_risk, 'kind': 'regular'
                         })
                         try:
-                            cancel_request = {
-                                "action": mt5.TRADE_ACTION_REMOVE,
-                                "order": order_ticket
-                            }
+                            cancel_request = {"action": mt5.TRADE_ACTION_REMOVE, "order": order_ticket}
                             result = mt5.order_send(cancel_request)
                             if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                                 print(f"       └─ ✅ Order {order_ticket} deleted successfully")
@@ -17602,118 +19863,85 @@ def martingale_system(inv_id=None):
                 print(f"{'─'*60}")
 
                 return deleted_count, preserved_count, deleted_details
-            
+
             # ========== MAIN EXECUTION ==========
-            
-            # STEP 1: Get BASE TARGET RISK based on martingale type
-            # Note: total_drawdown already includes pre-drawdown assumption if enabled
-            # The drawdown IS the shortage from recent_highest_balance
-            
+
             if martingale_type == "balance_based":
-                # For balance_based: base target is drawdown
                 print(f"\n  📊 BALANCE-BASED TARGET CALCULATION")
-                
                 base_target_risk = total_drawdown
                 print(f"  │ Drawdown: ${total_drawdown:.2f}")
-                
-                # If no drawdown, use default risk
                 if base_target_risk == 0:
                     print(f"\n  📊 No drawdown - using default risk from config")
                     default_risk = get_default_risk_from_config()
                     if default_risk is None:
                         print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
-                        print(f"  → Cannot proceed without default risk. Skipping pre-scaling.")
                         return False
                     print(f"  │ Default risk from config: ${default_risk:.2f}")
                     base_target_risk = default_risk
-                
                 print(f"\n  📊 BALANCE-BASED BASE TARGET:")
                 print(f"  │ Drawdown amount: ${total_drawdown:.2f}")
                 print(f"  │ Base target risk: ${base_target_risk:.2f}")
-                
             else:
-                # For loss_streak: analyze closed trades for display only
                 print(f"\n  📊 LOSS_STREAK TARGET CALCULATION")
-                
-                # For loss_streak, we use the drawdown as the base target
-                # The drawdown already includes pre-drawdown if enabled
                 base_target_risk = total_drawdown
                 print(f"  │ Drawdown: ${total_drawdown:.2f}")
-                
-                # If no drawdown, use default risk
                 if base_target_risk == 0:
                     print(f"\n  📊 No drawdown - using default risk from config")
                     default_risk = get_default_risk_from_config()
                     if default_risk is None:
                         print(f"  ❌ CRITICAL: No default risk found in config for balance {current_balance:.2f}")
-                        print(f"  → Cannot proceed without default risk. Skipping pre-scaling.")
                         return False
                     print(f"  │ Default risk from config: ${default_risk:.2f}")
                     base_target_risk = default_risk
-                
                 print(f"\n  📊 LOSS_STREAK BASE TARGET:")
                 print(f"  │ Total drawdown: ${total_drawdown:.2f}")
                 print(f"  │ Base target risk: ${base_target_risk:.2f}")
-            
-            # STEP 2: Load limit orders
+
             limit_orders_path, limit_orders_data = load_limit_orders()
-            
+
             if not limit_orders_data or not isinstance(limit_orders_data, list):
                 print(f"  │ No limit_orders.json data found")
                 return False
-            
-            # ========== CALCULATE FINAL TARGET RISK ==========
+
             final_target_risk = base_target_risk
             applied_highest_retention = 0
             applied_recovery_adder = 0
             initial_risk_value = 0
-            
+
             print(f"\n{'='*60}")
             print(f"  📊 CALCULATING FINAL TARGET RISK")
             print(f"{'='*60}")
             print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
-            print(f"  │ Retention Logic: percentage = how much to KEEP (100% = keep all, 0% = keep nothing)")
+            print(f"  │ Retention Logic: percentage = how much to KEEP")
             print(f"  │ Pre-drawdown already included in base target: {total_drawdown:.2f}")
 
-            # Start with base target
             final_target_risk = base_target_risk
             applied_highest_retention = 0
             applied_recovery_adder = 0
             initial_risk_value = 0
 
-            # STEP 3: Add initial risk from Limit Orders (if enabled)
             if enable_initial_risk_retention:
-                # Analyze initial risk from limit orders
                 limit_initial_risk_orders = analyze_initial_risk_from_risk_config(limit_orders_data)
-                
-                # Get initial risk for each symbol
                 total_initial_risk = 0
                 for symbol, order_info in limit_initial_risk_orders.items():
                     initial_risk = order_info['original_risk']
                     total_initial_risk += initial_risk
                     print(f"\n  │ {symbol} initial risk: ${initial_risk:.2f}")
-                    
-                    # Apply initial risk retention
-                    # CORRECT: retention_percentage = how much to KEEP
                     if initial_risk_retention_percentage > 0:
                         kept_initial_risk = initial_risk * (initial_risk_retention_percentage / 100)
                         removed_initial_risk = initial_risk - kept_initial_risk
-                        initial_risk_after_retention = kept_initial_risk  # Keep the kept amount
+                        initial_risk_after_retention = kept_initial_risk
                         applied_highest_retention += removed_initial_risk
                         print(f"  │   ├─ Keeping {initial_risk_retention_percentage}% of initial risk: ${kept_initial_risk:.2f}")
                         print(f"  │   └─ Removing {100 - initial_risk_retention_percentage}%: -${removed_initial_risk:.2f}")
                     else:
-                        initial_risk_after_retention = 0  # Keep nothing
+                        initial_risk_after_retention = 0
                         print(f"  │   └─ initial risk retention: 0% (keeping nothing)")
-                    
-                    # Add the kept amount to final target
                     final_target_risk += initial_risk_after_retention
                     print(f"  │   └─ Added to target: +${initial_risk_after_retention:.2f}")
-                
                 initial_risk_value = total_initial_risk
 
-            # STEP 4: Apply Recovery Adder to final target
             if recovery_adder_percentage > 0:
                 applied_recovery_adder = final_target_risk * (recovery_adder_percentage / 100)
                 final_target_risk_before_adder = final_target_risk
@@ -17724,14 +19952,13 @@ def martingale_system(inv_id=None):
 
             print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
             print(f"{'='*60}")
-            
-            # ========== STEP 5: APPLY SMART SCALING TO LIMIT ORDERS ==========
+
             print(f"\n{'='*60}")
             print(f"  🎯 APPLYING SMART SCALING TO LIMIT ORDERS")
             print(f"{'='*60}")
             print(f"  │ Assumption: {martingale_factor.upper()}")
             print(f"  │ Base target risk: ${base_target_risk:.2f}")
-            
+
             if martingale_factor == "takeprofit_factor":
                 print(f"  │ TAKEPROFIT FACTOR MODE:")
                 print(f"  │   - Orders will be scaled based on TP profit")
@@ -17744,54 +19971,59 @@ def martingale_system(inv_id=None):
                 print(f"  │   - Orders will be scaled based on SL risk")
                 print(f"  │   - Using standard risk-based calculation")
                 print(f"  │   - Orders scaled to match target risk: ${final_target_risk:.2f}")
-            
+
             print(f"{'─'*60}")
-            
-            # Store system analysis results for MT5 pending order comparison
+
             system_analysis_results = {}
-            
+
             try:
-                # ========== STEP 6: REMOVE INVALID PRICE LEVELS ==========
+                # STEP 6: Remove invalid price levels
                 print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
                 print(f"{'─'*60}")
-                
+
                 symbols_in_orders = set()
                 for order in limit_orders_data:
                     if isinstance(order, dict) and order.get('symbol'):
                         symbols_in_orders.add(order['symbol'])
-                
+
                 total_removed = 0
                 for symbol in symbols_in_orders:
                     filtered_orders, removed_count, _ = remove_invalid_price_levels(limit_orders_data, symbol)
                     if removed_count > 0:
                         total_removed += removed_count
                         limit_orders_data = filtered_orders
-                
+
                 if total_removed > 0:
                     print(f"\n  📝 Removing {total_removed} invalid order(s) from limit_orders.json...")
                     save_limit_orders(limit_orders_path, limit_orders_data)
                     print(f"  ✓ Removed {total_removed} invalid order(s)")
-                
-                # Get current volumes after removal and STORE BEFORE SCALING
+
                 current_limit_volumes_before_scaling = get_current_volumes_from_limit_orders(limit_orders_data)
                 print(f"\n  📄 Current limit_orders.json volumes:")
                 for symbol, vol in current_limit_volumes_before_scaling.items():
                     print(f"     {symbol}: {vol:.2f} lots")
-                
-                # ========== STEP 7: SCALE LIMIT ORDERS BASED ON ASSUMPTION ==========
+
+                # ==============================================================
+                # SYMBOL-INDEPENDENT TARGET SPLIT
+                # ==============================================================
+                # Collect all symbols from limit_orders_data to compute
+                # per-symbol recovery targets for this pre-scaling pass.
+                all_scaling_symbols = set()
+                for order in limit_orders_data:
+                    if isinstance(order, dict) and order.get('symbol'):
+                        all_scaling_symbols.add(order['symbol'])
+
+                num_scaling_symbols = max(1, len(all_scaling_symbols))
+                per_symbol_target = final_target_risk / num_scaling_symbols
+
+                print(f"\n  📊 SYMBOL-INDEPENDENT PRE-SCALING TARGETS:")
+                print(f"  │ Total symbols: {num_scaling_symbols}")
+                print(f"  │ Symbols: {', '.join(sorted(all_scaling_symbols))}")
+                print(f"  │ Total final target: ${final_target_risk:.2f}")
+                print(f"  │ Target per symbol: ${per_symbol_target:.2f}")
+
+                # ========== STEP 7: SCALE ORDERS (GRID-BUNDLE-AWARE) ==========
                 print(f"\n  📈 STEP: Scaling Limit Orders")
-                print(f"{'─'*60}")
-                if martingale_factor == "takeprofit_factor":
-                    print(f"  TAKEPROFIT FACTOR MODE:")
-                    print(f"  │ Drawdown recovery target: ${final_target_risk:.2f}")
-                    print(f"  │ Each order's TP profit will recover the drawdown")
-                    print(f"  │ Remaining profit after recovery is the scaling target")
-                    print(f"  │ IMPORTANT: NEVER scales DOWN below default risk")
-                    print(f"  │ First scales DOWN to default risk if higher, then UP if needed")
-                else:
-                    print(f"  STOPLOSS FACTOR MODE (standard):")
-                    print(f"  │ Target risk: ${final_target_risk:.2f}")
-                    print(f"  │ Will scale orders to match target risk")
                 print(f"{'─'*60}")
 
                 all_symbols = set()
@@ -17799,12 +20031,10 @@ def martingale_system(inv_id=None):
                     if isinstance(order, dict) and order.get('symbol'):
                         all_symbols.add(order['symbol'])
 
-                # ==============================================================
-                # SPLIT ORDERS: GRID MAINS / GRID CHILDREN / NON-GRID
-                # ==============================================================
-                grid_mains_by_symbol = {}       # {symbol: [order_dict, ...]}
-                grid_children_by_symbol = {}    # {symbol: [order_dict, ...]}
-                non_grid_by_symbol = {}         # {symbol: [order_dict, ...]}
+                # Split orders
+                grid_mains_by_symbol = {}
+                grid_children_by_symbol = {}
+                non_grid_by_symbol = {}
 
                 for order in limit_orders_data:
                     if not isinstance(order, dict):
@@ -17822,79 +20052,66 @@ def martingale_system(inv_id=None):
                     else:
                         non_grid_by_symbol.setdefault(sym, []).append(order)
 
-                # Symbols that actually need independent scaling = mains + non-grid
-                symbols_to_scale = set(non_grid_by_symbol.keys()) | set(grid_mains_by_symbol.keys())
-
                 total_scaled = 0
                 scaling_results_by_symbol = {}
-                grid_main_final_volumes = {}   # {symbol: {side: volume}}
+                grid_main_final_volumes = {}
 
-                for symbol in sorted(symbols_to_scale):
-                    print(f"\n  🔹 Scaling {symbol} orders:")
-                    
+                # ---------------- NON-GRID SCALING (SYMBOL-INDEPENDENT) ----------------
+                # Non-grid orders: standard path, individual margin only, no group check.
+                # Each symbol uses its own per-symbol target.
+                for symbol, orders in non_grid_by_symbol.items():
+                    symbol_target = per_symbol_target
+
+                    print(f"\n  🔹 [NON-GRID] Scaling {symbol} orders (independent target: ${symbol_target:.2f}):")
                     symbol_info = mt5.symbol_info(symbol)
                     if not symbol_info:
                         print(f"     No symbol info for {symbol} - skipping")
                         continue
-                    
-                    # Orders to scale for this symbol = non-grid + grid mains
+
                     symbol_orders = []
                     for idx, order in enumerate(limit_orders_data):
                         if not isinstance(order, dict) or order.get('symbol') != symbol:
                             continue
-                        if is_grid_child(order):
-                            continue  # children are handled after mains
+                        if is_grid_order(order):
+                            continue  # skip grid mains/children here
                         symbol_orders.append({'order': order, 'index': idx})
-                    
+
                     if not symbol_orders:
-                        print(f"     No scalable orders found for {symbol}")
                         continue
-                    
-                    # Get a sample order to calculate per-lot amount
+
                     sample_order = symbol_orders[0]['order']
-                    
+
                     if martingale_factor == "takeprofit_factor":
-                        # ========== TAKEPROFIT FACTOR SCALING ==========
                         sample_entry = sample_order.get('entry')
                         sample_tp = sample_order.get('tp') or sample_order.get('target')
                         sample_stop = sample_order.get('exit') or sample_order.get('stop_loss')
-                        
+
                         if not sample_entry or not sample_tp:
-                            print(f"     No tp found in sample order for {symbol} - skipping")
                             continue
-                        
-                        # Calculate per-lot TP profit
+
                         price_diff = abs(sample_entry - sample_tp)
                         profit_per_lot = price_diff * symbol_info.trade_contract_size
-                        
-                        # Calculate per-lot risk for display
+
                         if sample_stop:
                             risk_price_diff = abs(sample_entry - sample_stop)
                             risk_per_lot = risk_price_diff * symbol_info.trade_contract_size
                         else:
                             risk_per_lot = 0
-                        
-                        # Get default risk floor from config
+
                         default_risk_floor = default_minimum_risk
-                        if default_risk_floor is None:
-                            default_risk_floor = 20.0  # Fallback
-                        
+
                         print(f"     Using Order TP profit: Each order will make ${profit_per_lot:.2f} per lot")
                         print(f"     Default risk floor: ${default_risk_floor:.2f}")
-                        print(f"     Target profit per order: ${final_target_risk:.2f}")
-                        print(f"     Number of orders: {len(symbol_orders)}")
-                        print()
-                        
+                        print(f"     Target profit per order (symbol-independent): ${symbol_target:.2f}")
+
                         scaled_count = 0
                         for item in symbol_orders:
                             order = item['order']
                             order_index = item['index']
                             volume_key, current_volume = get_volume_field_from_order(order)
-                            
                             if not volume_key or current_volume <= 0:
                                 continue
-                            
-                            # Get the order's stop for risk calculation
+
                             stop = order.get('exit') or order.get('stop_loss')
                             if stop:
                                 entry = order.get('entry')
@@ -17902,25 +20119,23 @@ def martingale_system(inv_id=None):
                                 risk_per_lot_order = risk_price_diff * symbol_info.trade_contract_size
                             else:
                                 risk_per_lot_order = 0
-                            
+
                             new_volume, actual_profit, scaled, remaining, steps, volume_changed = scale_order_volume_to_target_profit(
-                                order, symbol_info, final_target_risk, default_risk_floor, order_index
+                                order, symbol_info, symbol_target, default_risk_floor, order_index
                             )
-                            
+
                             direction = get_direction_from_order(order)
-                            
+
                             if scaled or volume_changed:
                                 order[volume_key] = new_volume
                                 scaled_count += 1
                                 total_scaled += 1
                                 order_type = order.get('order_type', 'Unknown').upper()
                                 new_risk = risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0
-                                
                                 print(f"\n        ✅ SCALED [{direction}] {order_type} #{order_index}:")
                                 print(f"        └─ Volume: {current_volume:.2f} → {new_volume:.2f} lots")
                                 print(f"        └─ Risk: ${risk_per_lot_order * current_volume:.2f} → ${new_risk:.2f}")
                                 print(f"        └─ TP Profit: ${profit_per_lot * current_volume:.2f} → ${actual_profit:.2f}")
-                                print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
                             else:
                                 final_risk = risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0
                                 final_profit = profit_per_lot * new_volume
@@ -17928,9 +20143,7 @@ def martingale_system(inv_id=None):
                                 print(f"        └─ Volume: {new_volume:.2f} lots")
                                 print(f"        └─ Risk: ${final_risk:.2f}")
                                 print(f"        └─ TP Profit: ${final_profit:.2f}")
-                                print(f"        └─ Drawdown recovered: ${final_target_risk:.2f}")
-                            
-                            # Record system analysis result for this symbol
+
                             if symbol not in system_analysis_results:
                                 system_analysis_results[symbol] = {
                                     'volume': new_volume,
@@ -17941,59 +20154,38 @@ def martingale_system(inv_id=None):
                                 system_analysis_results[symbol]['volume'] = new_volume
                                 system_analysis_results[symbol]['risk'] = risk_per_lot_order * new_volume if risk_per_lot_order > 0 else 0
                                 system_analysis_results[symbol]['profit'] = actual_profit if martingale_factor == "takeprofit_factor" else 0
-                            
-                            # If this is a grid main, record its final volume per side
-                            if is_grid_main(order):
-                                side = get_grid_side(order)
-                                if side:
-                                    grid_main_final_volumes.setdefault(symbol, {})[side] = new_volume
-                        
+
                         if scaled_count > 0:
                             scaling_results_by_symbol[symbol] = {
                                 'scaled': scaled_count,
                                 'total_orders': len(symbol_orders),
-                                'target_per_order': final_target_risk,
+                                'target_per_order': symbol_target,
                                 'mode': martingale_factor
                             }
-                            print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
-                        else:
-                            print(f"\n     ℹ️ No scaling needed for {symbol}")
-                            
                     else:
-                        # ========== STOPLOSS FACTOR SCALING (STANDARD) ==========
                         sample_entry = sample_order.get('entry')
                         sample_stop = sample_order.get('exit') or sample_order.get('stop_loss')
-                        
                         if not sample_entry or not sample_stop:
-                            print(f"     No valid sample order for {symbol}")
                             continue
-                        
+
                         price_diff = abs(sample_entry - sample_stop)
                         risk_per_lot = price_diff * symbol_info.trade_contract_size
-                        
                         if risk_per_lot <= 0:
-                            print(f"     Invalid risk per lot - skipping")
                             continue
-                        
-                        print(f"     Risk per lot: ${risk_per_lot:.2f}")
-                        print(f"     Target risk per order: ${final_target_risk:.2f}")
-                        print(f"     Number of orders: {len(symbol_orders)}")
-                        print()
-                        
+
                         scaled_count = 0
                         for item in symbol_orders:
                             order = item['order']
                             order_index = item['index']
                             volume_key, current_volume = get_volume_field_from_order(order)
                             direction = get_direction_from_order(order)
-                            
                             if not volume_key or current_volume <= 0:
                                 continue
-                            
+
                             new_volume, actual_risk, scaled = scale_order_volume_to_target(
-                                order, symbol_info, final_target_risk
+                                order, symbol_info, symbol_target
                             )
-                            
+
                             if scaled:
                                 order[volume_key] = new_volume
                                 scaled_count += 1
@@ -18006,8 +20198,8 @@ def martingale_system(inv_id=None):
                                 current_risk = risk_per_lot * current_volume
                                 print(f"\n        ℹ️ [{direction}] Order #{order_index} - NO SCALING NEEDED:")
                                 print(f"        └─ Volume: {current_volume:.2f} lots")
-                                print(f"        └─ Risk: ${current_risk:.2f} (target: ${final_target_risk:.2f})")
-                            
+                                print(f"        └─ Risk: ${current_risk:.2f} (target: ${symbol_target:.2f})")
+
                             if symbol not in system_analysis_results:
                                 system_analysis_results[symbol] = {
                                     'volume': new_volume if scaled else current_volume,
@@ -18017,78 +20209,151 @@ def martingale_system(inv_id=None):
                             else:
                                 system_analysis_results[symbol]['volume'] = new_volume if scaled else current_volume
                                 system_analysis_results[symbol]['risk'] = actual_risk if scaled else current_risk
-                            
-                            # If this is a grid main, record its final volume per side
-                            if is_grid_main(order):
-                                side = get_grid_side(order)
-                                if side:
-                                    grid_main_final_volumes.setdefault(symbol, {})[side] = new_volume if scaled else current_volume
-                        
+
                         if scaled_count > 0:
                             scaling_results_by_symbol[symbol] = {
                                 'scaled': scaled_count,
                                 'total_orders': len(symbol_orders),
-                                'target_per_order': final_target_risk,
+                                'target_per_order': symbol_target,
                                 'mode': martingale_factor
                             }
-                            print(f"\n     ✓ Scaled {scaled_count} order(s) for {symbol}")
-                        else:
-                            print(f"\n     ℹ️ No scaling needed for {symbol}")
 
-                # ==============================================================
-                # PROPAGATE GRID MAIN VOLUMES TO GRID CHILDREN
-                #
-                # If a side has no grid main (e.g. the buy main was removed as
-                # an invalid price level), fall back to the OTHER side's main
-                # volume for the same symbol so children still mirror a main.
-                # ==============================================================
-                if grid_children_by_symbol:
-                    print(f"\n  🔁 Propagating grid main volumes to grid children...")
-                    for symbol, children in grid_children_by_symbol.items():
-                        symbol_info = mt5.symbol_info(symbol)
-                        if not symbol_info:
+                # ---------------- GRID BUNDLE SCALING (SYMBOL-INDEPENDENT) ----------------
+                # For each symbol, build a bundle per side (from the main),
+                # scale the bundle, scale the outliers to default risk.
+                # Then run the STAGE 2 full-grid leverage check on main + ALL children.
+                # Each symbol uses its own per-symbol target.
+                for symbol, mains in grid_mains_by_symbol.items():
+                    symbol_target = per_symbol_target
+
+                    symbol_info = mt5.symbol_info(symbol)
+                    if not symbol_info:
+                        continue
+                    if not symbol_info.visible:
+                        mt5.symbol_select(symbol, True)
+
+                    print(f"\n  📊 Grid Symbol: {symbol} (independent target: ${symbol_target:.2f})")
+
+                    children_all = grid_children_by_symbol.get(symbol, [])
+
+                    children_by_side = {"buy": [], "sell": []}
+                    for child in children_all:
+                        cside = get_grid_side(child)
+                        if cside in children_by_side:
+                            children_by_side[cside].append(child)
+
+                    for main_order in mains:
+                        side = get_grid_side(main_order)
+                        if side not in children_by_side:
                             continue
-                        side_map = dict(grid_main_final_volumes.get(symbol, {}))
 
-                        # Build a fallback: if one side has no main volume,
-                        # use the other side's main volume for the same symbol.
-                        buy_vol = side_map.get("buy")
-                        sell_vol = side_map.get("sell")
-                        if buy_vol is not None and sell_vol is None:
-                            side_map["sell"] = buy_vol
-                            print(f"     ↪ {symbol} sell: no sell main — using buy main volume "
-                                  f"{buy_vol:.2f} lots as fallback")
-                        elif sell_vol is not None and buy_vol is None:
-                            side_map["buy"] = sell_vol
-                            print(f"     ↪ {symbol} buy: no buy main — using sell main volume "
-                                  f"{sell_vol:.2f} lots as fallback")
+                        bundle = _build_grid_bundle_for_side(
+                            symbol, side, main_order, children_by_side[side]
+                        )
+                        if bundle is None:
+                            continue
 
-                        for child in children:
-                            side = get_grid_side(child)
-                            if not side:
-                                continue
-                            main_vol = side_map.get(side)
-                            if main_vol is None:
-                                print(f"     ⚠️ {symbol} {side}: no grid main volume found, leaving child unchanged")
-                                continue
-                            vol_key, old_vol = get_volume_field_from_order(child)
-                            if not vol_key:
-                                continue
-                            if abs(old_vol - main_vol) > 0.001:
-                                child[vol_key] = main_vol
+                        # ---- Scale the bundle (main + helpers) using symbol's target ----
+                        bundle_result = _apply_bundle_scaling(bundle, symbol_info, symbol_target)
+                        if bundle_result is None:
+                            continue
+
+                        # Apply main volume
+                        main_vol_key, main_old_vol = get_volume_field_from_order(main_order)
+                        main_new_vol = bundle_result["main_vol"]
+                        if main_vol_key and abs(main_old_vol - main_new_vol) > 0.001 and main_new_vol > 0:
+                            main_order[main_vol_key] = main_new_vol
+                            total_scaled += 1
+                            print(f"     ✓ [BUNDLE MAIN] {symbol} {side}: {main_old_vol:.2f} → {main_new_vol:.2f} lots")
+
+                        # Apply helper volumes
+                        for child in bundle["helpers"]:
+                            child_vol_key, child_old_vol = get_volume_field_from_order(child)
+                            child_new_vol = bundle_result["helper_vols"].get(id(child), child_old_vol)
+                            if child_vol_key and abs(child_old_vol - child_new_vol) > 0.001 and child_new_vol > 0:
+                                child[child_vol_key] = child_new_vol
                                 total_scaled += 1
-                                print(f"     ✓ [GRID CHILD] {symbol} {side}: {old_vol:.2f} → {main_vol:.2f} lots "
-                                      f"(mirrors grid main)")
-                                # Update system analysis result so MT5 pending check uses main volume
-                                system_analysis_results[symbol] = {
-                                    'volume': main_vol,
-                                    'risk': system_analysis_results.get(symbol, {}).get('risk', 0),
-                                    'profit': system_analysis_results.get(symbol, {}).get('profit', 0)
-                                }
-                            else:
-                                print(f"     − [GRID CHILD] {symbol} {side}: already at {main_vol:.2f} lots")
+                                print(f"     ✓ [BUNDLE HELPER] {symbol} {side}: {child_old_vol:.2f} → {child_new_vol:.2f} lots")
+
+                        # ---- Scale outliers using symbol's target ----
+                        main_entry = main_order.get('entry')
+                        main_stop = main_order.get('exit') or main_order.get('stop_loss')
+                        main_rr = bundle["main_rr"]
+                        if main_entry is not None and main_stop is not None and main_rr:
+                            main_price_diff = abs(main_entry - main_stop)
+                            main_risk_per_lot = main_price_diff * symbol_info.trade_contract_size
+                            main_risk_dollars = main_risk_per_lot * (main_new_vol or main_old_vol or 0.01)
+                        else:
+                            main_risk_dollars = 0
+
+                        outlier_vols = _apply_outlier_scaling(
+                            bundle["outliers"], symbol_info, symbol_target,
+                            main_rr, main_risk_dollars
+                        )
+                        for child in bundle["outliers"]:
+                            child_vol_key, child_old_vol = get_volume_field_from_order(child)
+                            child_new_vol = outlier_vols.get(id(child), child_old_vol)
+                            if child_vol_key and abs(child_old_vol - child_new_vol) > 0.001 and child_new_vol > 0:
+                                child[child_vol_key] = child_new_vol
+                                total_scaled += 1
+                                print(f"     ✓ [OUTLIER] {symbol} {side}: {child_old_vol:.2f} → {child_new_vol:.2f} lots")
+
+                        # ==============================================================
+                        # STAGE 2 LEVERAGE CHECK — full grid (main + ALL children)
+                        # Per-symbol check: only this symbol's orders are considered.
+                        # ==============================================================
+                        print(f"\n     🔎 [STAGE 2] Full grid leverage check: {symbol} {side}")
+                        full_check = _validate_full_grid_and_cut(
+                            symbol, side,
+                            main_order,
+                            children_by_side[side],
+                            buffer_pct=10.0,
+                        )
+                        print(f"        Full-grid total margin : ${full_check['total_margin']:.2f}")
+                        print(f"        Allowed (free * 0.90)  : ${full_check['allowed_margin']:.2f}")
+                        for note in full_check["notes"]:
+                            print(f"        └─ {note}")
+
+                        # Handle cuts: mark these orders for removal from limit_orders.json
+                        cut_orders = set()
+                        for cut_order, cut_side, cut_margin, cut_entry in full_check["cut"]:
+                            cut_orders.add(id(cut_order))
+                            print(f"        🗑️ CUT [{side}] entry={cut_entry} margin=${cut_margin:.2f} "
+                                  f"— will be removed from limit_orders.json")
+
+                        if cut_orders:
+                            before_count = len(limit_orders_data)
+                            limit_orders_data = [
+                                o for o in limit_orders_data
+                                if id(o) not in cut_orders
+                            ]
+                            removed = before_count - len(limit_orders_data)
+                            total_scaled += removed
+                            print(f"        ✓ Removed {removed} order(s) from limit_orders_data (Stage 2 cut)")
+                            # Also remove them from the per-side tracking lists
+                            children_by_side[side] = [
+                                c for c in children_by_side[side] if id(c) not in cut_orders
+                            ]
+
+                        # Record for MT5 comparison (main volume only)
+                        if symbol not in system_analysis_results:
+                            system_analysis_results[symbol] = {
+                                'volume': main_new_vol,
+                                'risk': (abs(main_entry - main_stop) * main_new_vol * symbol_info.trade_contract_size)
+                                        if main_entry and main_stop else 0,
+                                'profit': 0,
+                                'stage2_cut_entries': [c[3] for c in full_check["cut"]],
+                            }
+                        else:
+                            system_analysis_results[symbol]['volume'] = main_new_vol
+                            system_analysis_results[symbol]['risk'] = (
+                                abs(main_entry - main_stop) * main_new_vol * symbol_info.trade_contract_size
+                            ) if main_entry and main_stop else 0
+                            system_analysis_results.setdefault(symbol, {}).setdefault(
+                                'stage2_cut_entries', []
+                            ).extend([c[3] for c in full_check["cut"]])
+
                 # ========== STEP 8: SAVE if any changes were made ==========
-                # Check if any volumes were actually changed
                 volumes_changed = False
                 current_volumes_after = get_current_volumes_from_limit_orders(limit_orders_data)
                 for symbol, vol in current_volumes_after.items():
@@ -18096,18 +20361,17 @@ def martingale_system(inv_id=None):
                         if abs(vol - current_limit_volumes_before_scaling[symbol]) > 0.001:
                             volumes_changed = True
                             break
-                
+
                 if total_scaled > 0 or volumes_changed:
                     print(f"\n  📝 Saving limit_orders.json with updated volumes...")
                     save_limit_orders(limit_orders_path, limit_orders_data)
                     print(f"  ✓ Saved {total_scaled if total_scaled > 0 else 'volume adjustments'}")
-                    
-                    # Verify final totals
+
                     verify_symbols = set()
                     for order in limit_orders_data:
                         if isinstance(order, dict) and order.get('symbol'):
                             verify_symbols.add(order['symbol'])
-                    
+
                     for symbol in verify_symbols:
                         symbol_info = mt5.symbol_info(symbol)
                         if symbol_info:
@@ -18124,7 +20388,7 @@ def martingale_system(inv_id=None):
                                         stepup_count += 1
                                     elif direction == "STEPDOWN":
                                         stepdown_count += 1
-                                    
+
                                     if martingale_factor == "takeprofit_factor":
                                         entry = order.get('entry')
                                         tp = order.get('tp') or order.get('target')
@@ -18137,11 +20401,11 @@ def martingale_system(inv_id=None):
                                         if entry and stop:
                                             amount = abs(entry - stop) * vol * symbol_info.trade_contract_size
                                             total_amount += amount
-                                        
+
                             print(f"     📊 {symbol} final: {total_vol:.2f} lots")
                             if martingale_factor == "takeprofit_factor":
                                 total_orders = len([o for o in limit_orders_data if isinstance(o, dict) and o.get('symbol') == symbol])
-                                total_recovery = final_target_risk * total_orders
+                                total_recovery = per_symbol_target * total_orders
                                 total_remaining = total_amount - total_recovery
                                 print(f"        Total TP profit before recovery: ${total_amount:.2f}")
                                 print(f"        Total recovered from drawdown: ${total_recovery:.2f}")
@@ -18151,8 +20415,8 @@ def martingale_system(inv_id=None):
                             print(f"        STEPUP: {stepup_count} orders, STEPDOWN: {stepdown_count} orders")
                 else:
                     print(f"\n  ℹ️ No scaling needed - all orders already at target")
-                
-                # ========== STEP 9: LINEAR SCALING ==========
+
+                # ========== STEP 9: LINEAR SCALING (SYMBOL-INDEPENDENT) ==========
                 print(f"\n{'─'*60}")
                 print(f"  📈 STEP: Linear Scaling (Progressive)")
                 print(f"{'─'*60}")
@@ -18160,65 +20424,64 @@ def martingale_system(inv_id=None):
                     print(f"  Using TP profit: Orders recover drawdown and scale progressively")
                 else:
                     print(f"  Using SL risk (standard behavior)")
-                print(f"  NOTE: Linear scaling uses the FIRST order's amount as LEADER")
+                print(f"  NOTE: Group margin check runs ONLY for grid bundles")
                 print(f"  IMPORTANT: NEVER scales DOWN, only UP or keep same")
+                print(f"  SYMBOL-INDEPENDENT: Each symbol uses its own target (${per_symbol_target:.2f})")
                 print(f"{'─'*60}")
-                
-                # ========== FIX: RELOAD current volumes after Smart Scaling ==========
+
                 current_limit_volumes = get_current_volumes_from_limit_orders(limit_orders_data)
                 print(f"\n  📄 Current limit_orders.json volumes (after Smart Scaling):")
                 for symbol, vol in current_limit_volumes.items():
                     print(f"     {symbol}: {vol:.2f} lots")
-                
+
                 order_updates = {}
                 pre_scaling_details = {}
-                
+
                 all_symbols = set()
                 for order in limit_orders_data:
                     if isinstance(order, dict) and order.get('symbol'):
                         all_symbols.add(order['symbol'])
-                
+
                 for symbol in all_symbols:
-                    print(f"\n  🔹 Linear Scaling {symbol}:")
-                    
+                    symbol_target = per_symbol_target
+
+                    print(f"\n  🔹 Linear Scaling {symbol} (independent target: ${symbol_target:.2f}):")
+
                     symbol_info = mt5.symbol_info(symbol)
                     if not symbol_info:
                         print(f"     No symbol info for {symbol}")
                         continue
-                    
+
                     symbol_orders_with_indices = []
                     for idx, order in enumerate(limit_orders_data):
                         if isinstance(order, dict) and order.get('symbol') == symbol:
                             symbol_orders_with_indices.append({'order': order, 'index': idx})
-                    
+
                     if not symbol_orders_with_indices:
                         print(f"     No orders found for {symbol}")
                         continue
-                    
+
                     first_order = symbol_orders_with_indices[0]['order']
                     first_entry = first_order.get('entry')
-                    
+
                     leader_amount = 0
-                    
+
                     if martingale_factor == "takeprofit_factor":
-                        # Calculate leader TP profit
                         first_tp = first_order.get('tp') or first_order.get('target')
                         if first_entry and first_tp:
                             price_diff = abs(first_entry - first_tp)
                             if price_diff > 0:
-                                # ========== FIX: Use current_limit_volumes instead of reading from JSON ==========
                                 first_volume = current_limit_volumes.get(symbol, 0.01)
                                 leader_amount = price_diff * first_volume * symbol_info.trade_contract_size
                                 print(f"     LEADER TP profit (before recovery): ${leader_amount:.2f}")
-                                print(f"     Drawdown recovery target: ${final_target_risk:.2f}")
-                                leader_amount = leader_amount - final_target_risk
+                                print(f"     Drawdown recovery target (symbol-independent): ${symbol_target:.2f}")
+                                leader_amount = leader_amount - symbol_target
                                 if leader_amount < 0:
-                                    leader_amount = final_target_risk * 0.01  # Minimum target
+                                    leader_amount = symbol_target * 0.01
                                     print(f"     → Set minimum remaining profit target: ${leader_amount:.2f}")
                                 else:
                                     print(f"     → LEADER remaining profit after recovery: ${leader_amount:.2f}")
                     else:
-                        # Standard risk calculation
                         first_stop = first_order.get('exit') or first_order.get('stop_loss')
                         if first_entry and first_stop:
                             is_buy = 'buy' in first_order.get('order_type', '').lower()
@@ -18226,168 +20489,170 @@ def martingale_system(inv_id=None):
                                 price_diff = first_entry - first_stop
                             else:
                                 price_diff = first_stop - first_entry
-                            
+
                             if price_diff > 0:
-                                # ========== FIX: Use current_limit_volumes instead of reading from JSON ==========
                                 first_volume = current_limit_volumes.get(symbol, 0.01)
                                 leader_amount = price_diff * first_volume * symbol_info.trade_contract_size
                                 print(f"     LEADER risk: ${leader_amount:.2f}")
-                    
+
                     if leader_amount <= 0:
                         print(f"     No valid leader amount for {symbol}")
                         continue
-                    
+
                     stepup_linear, stepdown_linear = group_orders_by_linear(limit_orders_data)
                     stepup_linear = [o for o in stepup_linear if o['order'].get('symbol') == symbol]
                     stepdown_linear = [o for o in stepdown_linear if o['order'].get('symbol') == symbol]
-                    
+
                     calculation_details = {
                         "symbol": symbol,
                         "leader_amount": leader_amount,
                         "linear_scaling_applied": martingale_linear_scaling,
                         "assumption": martingale_factor,
-                        "drawdown_recovery_target": final_target_risk
+                        "drawdown_recovery_target": symbol_target
                     }
-                    
+
+                    # Detect whether this linear group is part of a grid bundle
+                    # (i.e. at least one grid main for this symbol+side).
+                    def _linear_contains_grid_main(linear_group):
+                        return any(is_grid_main(o['order']) for o in linear_group)
+
                     if martingale_linear_scaling:
                         print(f"\n     🎯 APPLYING LINEAR SCALING WITH LEADER AMOUNT:")
                         if martingale_factor == "takeprofit_factor":
                             print(f"     LEADER amount (remaining profit after recovery): ${leader_amount:.2f}")
                         else:
                             print(f"     LEADER amount (risk): ${leader_amount:.2f}")
-                        
+
                         print(f"\n     📈 STEPUP GROUP - {len(stepup_linear)} orders:")
                         if stepup_linear:
                             print(f"        └─ Order 1: RETAINS original volume (LEADER)")
                         if len(stepup_linear) > 1:
                             print(f"        └─ Orders 2-{len(stepup_linear)}: Progressive scaling from LEADER")
                             print(f"        IMPORTANT: NEVER scales DOWN, only UP or keep same")
-                        
+
                         print(f"\n     📉 STEPDOWN GROUP - {len(stepdown_linear)} orders:")
                         if stepdown_linear:
                             print(f"        └─ Order 1: RETAINS original volume (LEADER)")
                         if len(stepdown_linear) > 1:
                             print(f"        └─ Orders 2-{len(stepdown_linear)}: Progressive scaling from LEADER")
                             print(f"        IMPORTANT: NEVER scales DOWN, only UP or keep same")
-                        
+
                         if stepup_linear:
+                            is_bundle = _linear_contains_grid_main(stepup_linear)
                             stepup_updates = apply_linear_step_scaling(
                                 stepup_linear, "STEPUP", symbol_info,
                                 leader_amount, calculation_details,
-                                current_limit_volumes  # PASS THE CURRENT VOLUMES
+                                current_limit_volumes,
+                                is_grid_bundle=is_bundle
                             )
                             order_updates.update(stepup_updates)
 
                         if stepdown_linear:
+                            is_bundle = _linear_contains_grid_main(stepdown_linear)
                             stepdown_updates = apply_linear_step_scaling(
                                 stepdown_linear, "STEPDOWN", symbol_info,
                                 leader_amount, calculation_details,
-                                current_limit_volumes  # PASS THE CURRENT VOLUMES
+                                current_limit_volumes,
+                                is_grid_bundle=is_bundle
                             )
                             order_updates.update(stepdown_updates)
-                        
+
                         calculation_details["linear_scaling_applied"] = True
-                        
                     else:
                         print(f"\n     Applying same volume to all orders (standard mode)")
                         current_volume = current_limit_volumes.get(symbol, 0)
                         if current_volume > 0:
                             for order_info in symbol_orders_with_indices:
                                 order_updates[order_info['index']] = current_volume
-                    
+
                     pre_scaling_details[f"{symbol}_limit"] = calculation_details
-                
+
                 # ========== STEP 10: APPLY UPDATES ==========
                 print(f"\n{'─'*60}")
                 print(f"  💾 APPLYING FINAL UPDATES")
                 print(f"{'─'*60}")
-                
+
                 updated = False
-                
+
                 if order_updates and limit_orders_data:
                     print(f"\n  📄 Updating limit_orders.json with scaling:")
                     updated_count = 0
-                    
+
                     for order_idx, new_volume in order_updates.items():
                         if order_idx < len(limit_orders_data):
                             order = limit_orders_data[order_idx]
                             volume_key, old_volume = get_volume_field_from_order(order)
                             direction = get_direction_from_order(order)
-                            
+
                             if volume_key and abs(old_volume - new_volume) > 0.001:
                                 order[volume_key] = new_volume
                                 updated_count += 1
                                 symbol = order.get('symbol', 'Unknown')
                                 entry = order.get('entry', 0)
                                 order_type = order.get('order_type', 'Unknown')
-                                
+
                                 if martingale_factor == "takeprofit_factor":
                                     tp = order.get('tp') or order.get('target')
                                     if tp:
-                                        amount = abs(entry - tp) * new_volume * symbol_info.trade_contract_size if symbol_info else 0
-                                        remaining = amount - final_target_risk
+                                        sym_info = mt5.symbol_info(symbol)
+                                        amount = abs(entry - tp) * new_volume * (sym_info.trade_contract_size if sym_info else 1)
+                                        sym_target = per_symbol_target
+                                        remaining = amount - sym_target
                                         print(f"        │ [{direction}] {symbol} @ {entry:.5f}: {old_volume:.2f} → {new_volume:.2f} lots")
-                                        print(f"        │   └─ TP profit: ${amount:.2f}, Recovers: ${final_target_risk:.2f}, Remaining: ${remaining:.2f}")
+                                        print(f"        │   └─ TP profit: ${amount:.2f}, Recovers: ${sym_target:.2f}, Remaining: ${remaining:.2f}")
                                 else:
                                     print(f"        │ [{direction}] {symbol} @ {entry:.5f}: {old_volume:.2f} → {new_volume:.2f} lots")
-                    
+
                     if updated_count > 0:
                         save_limit_orders(limit_orders_path, limit_orders_data)
                         updated = True
                         print(f"\n     ✓ Updated {updated_count} order(s) with scaling")
                     else:
                         print(f"     ℹ️ No scaling changes needed")
-                
+
                 stats["pre_scaling_details"] = pre_scaling_details
-                
-                # ========== STEP 11: CHECK MT5 PENDING ORDERS AGAINST SYSTEM ANALYSIS ==========
+
+                # ========== STEP 11: MT5 PENDING ORDERS ==========
                 print(f"\n{'='*60}")
                 print(f"  🗑️ CHECKING MT5 PENDING ORDERS")
                 print(f"{'='*60}")
-                
-                # Print system analysis results summary
+
                 print(f"\n  📊 System Analysis Results:")
                 for symbol, result in system_analysis_results.items():
                     if martingale_factor == "takeprofit_factor":
                         print(f"     {symbol}: Volume {result['volume']:.2f} lots, TP Profit ${result['profit']:.2f}")
                     else:
                         print(f"     {symbol}: Volume {result['volume']:.2f} lots, Risk ${result['risk']:.2f}")
-                
-                # Check and delete MT5 pending orders that don't match system analysis
+
                 mt5_deleted_count, mt5_preserved_count, mt5_deleted_details = check_and_delete_mt5_pending_orders(
                     system_analysis_results,
-                    final_target_risk,
+                    per_symbol_target,
                     martingale_factor
                 )
-                
+
                 print(f"\n{'='*60}")
                 print(f"  ✅ PRE-SCALING COMPLETE")
                 print(f"{'='*60}")
                 print(f"  │ Mode: {martingale_type.upper()}")
                 print(f"  │ Assumption: {martingale_factor.upper()}")
                 print(f"  │ Base target: ${base_target_risk:.2f}")
-                print(f"  │ Final target: ${final_target_risk:.2f}")
-                if martingale_factor == "takeprofit_factor":
-                    print(f"  │ Each order recovers ${final_target_risk:.2f} from drawdown")
-                    print(f"  │ Remaining profit after recovery is the scaling target")
-                    print(f"  │ IMPORTANT: NEVER scaled DOWN, only UP or kept same")
-                else:
-                    print(f"  │ Orders scaled to match target risk")
+                print(f"  │ Final target (total): ${final_target_risk:.2f}")
+                print(f"  │ Per-symbol target: ${per_symbol_target:.2f}")
+                print(f"  │ Symbols: {num_scaling_symbols}")
                 print(f"  │ Orders scaled: {total_scaled}")
                 print(f"  │ Linear scaling updated: {updated_count if 'updated_count' in locals() else 0}")
                 print(f"  │ MT5 Pending Orders:")
                 print(f"  │   - Preserved: {mt5_preserved_count}")
                 print(f"  │   - Deleted: {mt5_deleted_count}")
                 print(f"{'='*60}")
-                
+
                 return updated or mt5_deleted_count > 0
-                
+
             except Exception as e:
                 print(f"  ✗ Pre-scaling error: {e}")
                 import traceback
                 traceback.print_exc()
                 return False
-
 
         # ========== MAIN EXECUTION ==========
         def main():
@@ -24887,25 +27152,42 @@ def pending_orders_per_symbol_limitation(inv_id=None):
     
     return global_stats
 
-def duplicate_order_to_reach_default_risk(inv_id=None, callback_function=None):
+def chunk_orders_with_volume_beyond_max(inv_id=None, callback_function=None):
     """
-    Duplicates orders to reach target risk using MT5 calculations.
-    For each order at max volume with risk < target, creates duplicates until target is reached.
-    Ensures total risk does NOT exceed target by adjusting the last duplicate's volume.
-    Orders with risk >= target are skipped and marked as complete.
+    Chunk orders whose volume exceeds the symbol's maximum volume.
+
+    LOGIC (volume-only — risk is NOT considered):
+    -------------------------------------------------
+    For each order in pending_orders/limit_orders.json:
+        1. Read the order's broker-specific volume (e.g. deriv_volume).
+        2. Look up the symbol's volume_max, volume_min, volume_step from MT5.
+        3. IF volume <= volume_max:
+               → Leave untouched. Mark `chunked_order = False` (if not already set).
+        4. IF volume > volume_max:
+               → Chunk it into N orders where:
+                    N = ceil(volume / volume_max)
+                    First (N-1) chunks = full volume_max each  (large chunks first)
+                    Last chunk         = remaining volume
+               → Mark original + all chunks with `chunked_order = True`.
+               → If `chunked_order` is already True, skip (idempotent).
+
+    All chunk pieces are written to the sibling limit_orders.json
+    (the signal queue) so the order placer submits them to MT5.
     """
-    print(f"\n{'='*10} 🔄 DUPLICATING ORDERS TO REACH TARGET RISK {'='*10}")
-    
+    print(f"\n{'='*10} 📦 CHUNKING ORDERS WITH VOLUME BEYOND MAX {'='*10}")
+
     total_files_updated = 0
-    total_duplicates_created = 0
-    total_risk_achieved = 0.0
-    
+    total_orders_chunked = 0
+    total_orders_unchanged = 0
+    total_chunks_created = 0
+    total_volume_chunked = 0.0
+
     inv_base_path = Path(INV_PATH)
-    
+
     if not inv_base_path.exists():
         print(f" [!] Error: Investor path {INV_PATH} does not exist.")
         return False
-    
+
     if inv_id:
         inv_folder = inv_base_path / inv_id
         investor_folders = [inv_folder] if inv_folder.exists() else []
@@ -24914,374 +27196,288 @@ def duplicate_order_to_reach_default_risk(inv_id=None, callback_function=None):
             return False
     else:
         investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-    
+
     if not investor_folders:
         print(" └─ 🔘 No investor directories found.")
         return False
-    
+
     any_orders_processed = False
-    
-    # --- MT5 RISK CALCULATION (SAME AS live_usd_risk_and_scaling) ---
-    def calculate_risk_mt5(symbol, order_type_str, entry_price, exit_price, volume):
+
+    # ================================================================
+    # HELPER: round a volume DOWN to the nearest valid volume step
+    # ================================================================
+    def floor_to_step(value, step):
+        if step <= 0:
+            return value
+        # Avoid floating-point drift by working in integer multiples
         try:
-            order_type_upper = order_type_str.upper()
-            
-            if "BUY" in order_type_upper:
-                if "STOP" in order_type_upper:
-                    calc_type = mt5.ORDER_TYPE_BUY_STOP
-                elif "LIMIT" in order_type_upper:
-                    calc_type = mt5.ORDER_TYPE_BUY_LIMIT
-                else:
-                    calc_type = mt5.ORDER_TYPE_BUY
-            else:
-                if "STOP" in order_type_upper:
-                    calc_type = mt5.ORDER_TYPE_SELL_STOP
-                elif "LIMIT" in order_type_upper:
-                    calc_type = mt5.ORDER_TYPE_SELL_LIMIT
-                else:
-                    calc_type = mt5.ORDER_TYPE_SELL
-            
-            profit = mt5.order_calc_profit(calc_type, symbol, volume, entry_price, exit_price)
-            
-            if profit is not None:
-                return abs(profit)
-            else:
-                if "BUY" in order_type_upper:
-                    profit = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, symbol, volume, entry_price, exit_price)
-                else:
-                    profit = mt5.order_calc_profit(mt5.ORDER_TYPE_SELL, symbol, volume, entry_price, exit_price)
-                
-                if profit is not None:
-                    return abs(profit)
-            
-            return None
-        except Exception as e:
-            return None
-    
+            multiples = math.floor(round(value / step, 10))
+            return round(multiples * step, 10)
+        except Exception:
+            return value
+
+    # ================================================================
+    # HELPER: round a volume UP to the nearest valid volume step
+    # ================================================================
+    def ceil_to_step(value, step):
+        if step <= 0:
+            return value
+        try:
+            multiples = math.ceil(round(value / step, 10))
+            return round(multiples * step, 10)
+        except Exception:
+            return value
+
     for inv_folder in investor_folders:
         current_inv_id = inv_folder.name
-        print(f"\n [{current_inv_id}] 🔍 Checking for orders that need duplication...")
-        
-        # Load account management
-        account_mgmt_path = inv_folder / "accountmanagement.json"
-        if not account_mgmt_path.exists():
-            print(f"  └─  No accountmanagement.json found")
-            continue
-        
-        try:
-            with open(account_mgmt_path, 'r', encoding='utf-8') as f:
-                account_data = json.load(f)
-            default_risk_map = account_data.get('account_balance_default_risk_management', {})
-        except Exception as e:
-            print(f"  └─  Could not load accountmanagement.json: {e}")
-            continue
-        
-        # Get account balance
-        account_info = mt5.account_info()
-        if not account_info:
-            print(f"  └─  Could not fetch account balance")
-            continue
-        
-        account_balance = account_info.balance
-        print(f"  └─ 💵 Account balance: ${account_balance:,.2f}")
-        
-        # Get target risk
-        target_risk = None
-        for range_str, risk_value in default_risk_map.items():
-            try:
-                range_part = range_str.split('_')[0] if '_' in range_str else range_str
-                if '-' in range_part:
-                    min_val, max_val = map(float, range_part.split('-'))
-                    if min_val <= account_balance <= max_val:
-                        target_risk = float(risk_value)
-                        print(f"  └─ 🎯 Target risk: ${target_risk:.2f}")
-                        break
-            except:
-                continue
-        
-        if target_risk is None:
-            print(f"  └─  No target risk found for balance ${account_balance:,.2f}")
-            continue
-        
-        # Get broker config
+        print(f"\n [{current_inv_id}] 🔍 Scanning orders for chunking...")
+
+        # --- Get broker prefix (used to find the correct *_volume field) ---
         broker_cfg = usersdictionary.get(current_inv_id)
         if not broker_cfg:
             print(f"  └─  No broker config found")
             continue
-        
+
         broker_prefix = broker_cfg.get('BROKER_NAME', '').lower()
         if not broker_prefix:
             server = broker_cfg.get('SERVER', '')
             broker_prefix = server.split('-')[0].split('.')[0].lower() if server else 'broker'
-        
+
         print(f"  └─ 🏷️  Broker prefix: '{broker_prefix}'")
-        
-        # Find order files
+        volume_field = f"{broker_prefix}_volume"
+
+        # --- Find all pending order files ---
         order_files = list(inv_folder.rglob("*/pending_orders/limit_orders.json"))
         if not order_files:
             print(f"  └─ 🔘 No order files found")
             continue
-        
+
         for file_path in order_files:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     orders = json.load(f)
-                
+
                 if not orders:
                     continue
-                
+
                 signals_path = file_path.parent / "limit_orders.json"
                 if signals_path.exists():
                     with open(signals_path, 'r', encoding='utf-8') as f:
                         existing_signals = json.load(f)
                 else:
                     existing_signals = []
-                
+
                 orders_modified = False
                 new_signals = []
-                file_duplicates = 0
-                file_risk = 0.0
-                
+                file_chunked = 0
+                file_unchanged = 0
+                file_chunks = 0
+                file_volume = 0.0
+
                 for idx, order in enumerate(orders):
-                    # Skip if already duplicated
-                    if order.get("duplication_complete", False):
-                        continue
-                    
-                    # Skip split orders
+                    # ---- Skip split orders (handled elsewhere) ----
                     if order.get("split_order", False):
                         continue
-                    
+
+                    # ---- Idempotency: already-chunked orders are skipped ----
+                    if order.get("chunked_order", False) is True:
+                        continue
+
                     symbol = order.get("symbol", "")
                     if not symbol:
                         continue
-                    
-                    entry_price = order.get("entry")
-                    exit_price = order.get("exit")
-                    if not entry_price or not exit_price:
-                        continue
-                    
-                    order_type = str(order.get('order_type', '')).upper()
-                    
-                    # Get current volume and risk
-                    current_volume = order.get(f"{broker_prefix}_volume", 0)
-                    current_risk = order.get("risk_in_usd", 0)
-                    
-                    # If risk missing, calculate it
-                    if current_risk == 0 or current_risk is None:
-                        current_risk = calculate_risk_mt5(symbol, order_type, entry_price, exit_price, current_volume)
-                        if current_risk is None:
-                            print(f"    └─  Could not calculate risk for {symbol}")
-                            continue
-                    
-                    # ============================================
-                    # CHECK IF ORDER RISK ALREADY MEETS OR EXCEEDS TARGET
-                    # ============================================
-                    if current_risk >= target_risk:
-                        print(f"    └─ ✅ Order {idx+1}: Risk ${current_risk:.2f} already meets target ${target_risk:.2f}")
-                        print(f"       └─ Marking as complete (no duplication needed)")
-                        order["duplication_complete"] = True
-                        order["total_duplicates"] = 1
-                        order["total_risk_after_duplication"] = current_risk
-                        order["duplication_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        order["duplication_status"] = "risk_already_met"
+
+                    # ---- Read the order's volume via broker prefix ----
+                    order_volume = order.get(volume_field, None)
+                    if order_volume is None or order_volume <= 0:
+                        # No volume → mark as not chunked and skip
+                        order["chunked_order"] = False
                         orders[idx] = order
                         orders_modified = True
+                        file_unchanged += 1
                         continue
-                    
-                    # ============================================
-                    # CHECK IF ORDER IS AT MAX VOLUME
-                    # ============================================
-                    # Get symbol info
+
+                    try:
+                        order_volume = float(order_volume)
+                    except (ValueError, TypeError):
+                        order["chunked_order"] = False
+                        orders[idx] = order
+                        orders_modified = True
+                        file_unchanged += 1
+                        continue
+
+                    # ---- Look up symbol limits ----
                     symbol_info = mt5.symbol_info(symbol)
                     if not symbol_info:
-                        print(f"    └─  Could not get symbol info for {symbol}")
+                        print(f"    └─  Could not get symbol info for {symbol} - marking chunked_order: false")
+                        order["chunked_order"] = False
+                        orders[idx] = order
+                        orders_modified = True
+                        file_unchanged += 1
                         continue
-                    
+
                     max_volume = symbol_info.volume_max
                     min_volume = symbol_info.volume_min
-                    volume_step = symbol_info.volume_step
-                    
-                    if current_volume < max_volume * 0.999:
-                        print(f"    └─ ℹ️  Order {idx+1}: Volume {current_volume} < max {max_volume}, no duplication needed")
-                        order["duplication_complete"] = True
-                        order["duplication_status"] = "not_at_max_volume"
-                        orders[idx] = order
+                    volume_step = symbol_info.volume_step or 0.01
+
+                    # ============================================================
+                    # CASE 1: Volume is within the allowed maximum → leave alone
+                    # ============================================================
+                    if order_volume <= max_volume + 1e-9:
+                        if "chunked_order" not in order:
+                            print(f"    └─ ✅ Order {idx+1} ({symbol}): volume {order_volume} ≤ max {max_volume} "
+                                  f"→ chunked_order: false")
+                            order["chunked_order"] = False
+                            orders[idx] = order
+                            orders_modified = True
+                        file_unchanged += 1
                         continue
-                    
-                    # ============================================
-                    # ORDER NEEDS DUPLICATION
-                    # ============================================
-                    print(f"\n    └─ 📊 ORDER NEEDS DUPLICATION: {symbol}")
-                    print(f"       Current risk: ${current_risk:.2f} at volume {current_volume}")
-                    print(f"       Target risk: ${target_risk:.2f}")
-                    
-                    # Calculate how many orders needed
-                    # Each duplicate has the SAME risk as the original
-                    needed_orders = math.ceil(target_risk / current_risk)
-                    
-                    # We already have 1 order (the original)
-                    needed_duplicates = needed_orders - 1
-                    
-                    print(f"       📊 Initial Calculation:")
-                    print(f"          - Risk per order: ${current_risk:.2f}")
-                    print(f"          - Target risk: ${target_risk:.2f}")
-                    print(f"          - Total orders needed: {needed_orders}")
-                    print(f"          - New duplicates to create: {needed_duplicates}")
-                    
-                    # Calculate total risk with all orders at full volume
-                    total_risk_full = current_risk * needed_orders
-                    print(f"          - Total risk (all full volume): ${total_risk_full:.2f}")
-                    
-                    # Adjust the last order to exactly match target if needed
-                    risk_excess = total_risk_full - target_risk
-                    adjusted_volume = current_volume
-                    last_order_adjusted = False
-                    
-                    if risk_excess > 0.001:  # Small tolerance for floating point
-                        # We need to reduce risk by the excess amount
-                        # Calculate the risk per unit of volume
-                        risk_per_unit = current_risk / current_volume
-                        
-                        # Calculate how much volume to remove from the LAST order
-                        volume_to_remove = risk_excess / risk_per_unit
-                        
-                        # Round down to nearest volume step
-                        volume_to_remove = math.floor(volume_to_remove / volume_step) * volume_step
-                        
-                        # Adjust the LAST order's volume
-                        adjusted_volume = current_volume - volume_to_remove
-                        
-                        # Ensure we don't go below minimum volume
-                        if adjusted_volume < min_volume:
-                            adjusted_volume = min_volume
-                            # If we can't reduce enough, we need to remove the last duplicate
-                            print(f"          ⚠️ Cannot reduce volume enough, will remove last duplicate")
-                            # Recalculate: use one less order
-                            needed_orders = needed_orders - 1
-                            needed_duplicates = needed_orders - 1
-                            total_risk_full = current_risk * needed_orders
-                            risk_excess = total_risk_full - target_risk
-                            
-                            if risk_excess > 0.001:
-                                # Still exceeds, adjust the last order's volume
-                                risk_per_unit = current_risk / current_volume
-                                volume_to_remove = risk_excess / risk_per_unit
-                                volume_to_remove = math.floor(volume_to_remove / volume_step) * volume_step
-                                adjusted_volume = current_volume - volume_to_remove
-                                if adjusted_volume < min_volume:
-                                    adjusted_volume = min_volume
-                                last_order_adjusted = True
+
+                    # ============================================================
+                    # CASE 2: Volume EXCEEDS max → CHUNK IT
+                    # ============================================================
+                    print(f"\n    └─ 📦 CHUNKING ORDER {idx+1}: {symbol}")
+                    print(f"       Volume: {order_volume} > max: {max_volume}")
+                    print(f"       Step: {volume_step}, Min: {min_volume}")
+
+                    # How many chunks do we need?
+                    needed_chunks = math.ceil(round(order_volume / max_volume, 10))
+                    print(f"       Needed chunks (ceil): {needed_chunks}")
+
+                    # ---- Build the chunk volumes: large first, remainder last ----
+                    chunk_volumes = []
+                    remaining = order_volume
+
+                    for chunk_i in range(needed_chunks):
+                        if chunk_i < needed_chunks - 1:
+                            # Large chunk = full max volume
+                            chunk_volumes.append(max_volume)
+                            remaining -= max_volume
                         else:
-                            last_order_adjusted = True
-                    
-                    # Calculate final total risk with adjusted volume
-                    if not last_order_adjusted:
-                        # All orders have full volume
-                        final_total_risk = current_risk * needed_orders
-                        print(f"          - Final total risk (all full): ${final_total_risk:.2f}")
-                    else:
-                        # Last order has reduced volume
-                        last_order_risk = (adjusted_volume / current_volume) * current_risk
-                        final_total_risk = (current_risk * (needed_orders - 1)) + last_order_risk
-                        print(f"          - Adjusted last volume: {adjusted_volume} (was {current_volume})")
-                        print(f"          - Last order risk: ${last_order_risk:.2f}")
-                        print(f"          - Final total risk: ${final_total_risk:.2f}")
-                    
-                    # Mark original as duplicated
-                    order["duplication_complete"] = True
-                    order["total_duplicates"] = needed_orders
-                    order["total_risk_after_duplication"] = final_total_risk
-                    order["duplication_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    order["duplication_status"] = "duplicated"
+                            # Last chunk = whatever remains (rounded to step, clamped to min)
+                            last_vol = floor_to_step(remaining, volume_step)
+
+                            # If the floored remainder is below min, try to ceil it
+                            if last_vol < min_volume:
+                                last_vol = ceil_to_step(remaining, volume_step)
+
+                            # If ceil also lands below min, clamp to min
+                            if last_vol < min_volume:
+                                last_vol = min_volume
+
+                            # Safety: never let the last chunk exceed max
+                            if last_vol > max_volume:
+                                # Split the excess into an extra max chunk
+                                extra = last_vol - max_volume
+                                extra = floor_to_step(extra, volume_step)
+                                if extra >= min_volume:
+                                    chunk_volumes.append(max_volume)
+                                    last_vol = extra
+
+                            chunk_volumes.append(round(last_vol, 10))
+
+                    # ---- Sanity check: totals should match original volume (within step) ----
+                    total_chunked = sum(chunk_volumes)
+                    print(f"       Chunk volumes: {chunk_volumes}")
+                    print(f"       Total chunked volume: {total_chunked} (original: {order_volume})")
+
+                    # ---- Mark original order as chunked ----
+                    order["chunked_order"] = True
+                    order["chunk_count"] = len(chunk_volumes)
+                    order["chunk_volumes"] = chunk_volumes
+                    order["chunked_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    order["original_volume_before_chunk"] = order_volume
                     orders[idx] = order
-                    
-                    # Create duplicate orders
-                    for i in range(1, needed_orders + 1):
-                        dup_order = order.copy()
-                        dup_order["duplicate_number"] = i
-                        dup_order["total_duplicates"] = needed_orders
-                        dup_order["is_duplicate"] = True
-                        dup_order["split_order"] = False
-                        dup_order["split_number"] = None
-                        dup_order["total_splits"] = None
-                        dup_order["parent_volume"] = current_volume
-                        
-                        # If this is the last order and we adjusted volume, use adjusted volume
-                        if i == needed_orders and last_order_adjusted:
-                            dup_order[f"{broker_prefix}_volume"] = adjusted_volume
-                            # Recalculate risk for this adjusted volume
-                            adjusted_risk = calculate_risk_mt5(symbol, order_type, entry_price, exit_price, adjusted_volume)
-                            if adjusted_risk is not None:
-                                dup_order["risk_in_usd"] = adjusted_risk
-                            else:
-                                dup_order["risk_in_usd"] = (adjusted_volume / current_volume) * current_risk
-                            dup_order["volume_adjusted"] = True
-                            dup_order["original_volume"] = current_volume
-                        else:
-                            dup_order[f"{broker_prefix}_volume"] = current_volume
-                            dup_order["risk_in_usd"] = current_risk
-                            dup_order["volume_adjusted"] = False
-                        
-                        dup_order["duplication_complete"] = True
-                        dup_order["duplication_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        dup_order["duplication_status"] = "duplicated"
-                        
-                        # If this is the first duplicate, it represents the original
+
+                    # ---- Create the chunk signals ----
+                    for i, chunk_vol in enumerate(chunk_volumes, start=1):
+                        chunk_order = order.copy()
+
+                        # Reset per-order fields for the chunk record
+                        chunk_order[volume_field] = chunk_vol
+                        chunk_order["chunked_order"] = True
+                        chunk_order["chunk_number"] = i
+                        chunk_order["total_chunks"] = len(chunk_volumes)
+                        chunk_order["is_chunk"] = True
+                        chunk_order["parent_volume"] = order_volume
+                        chunk_order["chunk_volume"] = chunk_vol
+                        chunk_order["chunked_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                        # The first piece represents the original order
                         if i == 1:
-                            dup_order["is_original"] = True
+                            chunk_order["is_original"] = True
                         else:
-                            dup_order["is_original"] = False
-                        
-                        new_signals.append(dup_order)
-                    
-                    # Update counts
-                    file_duplicates += needed_duplicates
-                    file_risk += final_total_risk
+                            chunk_order["is_original"] = False
+
+                        # Strip old duplication metadata (if any) — this is a fresh chunk
+                        for stale_key in (
+                            "duplication_complete",
+                            "total_duplicates",
+                            "total_risk_after_duplication",
+                            "duplication_timestamp",
+                            "duplication_status",
+                            "duplicate_number",
+                            "is_duplicate",
+                        ):
+                            chunk_order.pop(stale_key, None)
+
+                        new_signals.append(chunk_order)
+
+                    file_chunked += 1
+                    file_chunks += len(chunk_volumes)
+                    file_volume += total_chunked
                     orders_modified = True
-                    
-                    print(f"       ✅ Created {needed_orders} total orders ({needed_duplicates} new duplicates)")
-                    if last_order_adjusted:
-                        print(f"          ⚠️ Last order volume adjusted to {adjusted_volume} to match target exactly")
-                    print(f"       Total risk: ${final_total_risk:.2f}")
-                
-                # Save updated orders
+
+                    print(f"       ✅ Chunked 1 order → {len(chunk_volumes)} chunks")
+                    print(f"       🔖 Original + all chunks flagged chunked_order: true")
+
+                # ---- Save updated source file ----
                 if orders_modified:
                     with open(file_path, 'w', encoding='utf-8') as f:
                         json.dump(orders, f, indent=4)
-                    
                     total_files_updated += 1
                     any_orders_processed = True
-                
-                # Save signals
+
+                # ---- Append chunk signals to the signal queue ----
                 if new_signals:
                     combined_signals = existing_signals + new_signals
                     with open(signals_path, 'w', encoding='utf-8') as f:
                         json.dump(combined_signals, f, indent=4)
-                    
-                    total_duplicates_created += file_duplicates
-                    total_risk_achieved += file_risk
-                    
+
+                    total_orders_chunked += file_chunked
+                    total_orders_unchanged += file_unchanged
+                    total_chunks_created += file_chunks
+                    total_volume_chunked += file_volume
+
                     print(f"\n    └─ 📈 Summary for {file_path.name}:")
-                    print(f"       Duplicates created: {file_duplicates}")
-                    print(f"       Total risk achieved: ${file_risk:.2f}")
-                    print(f"       Signals saved to: {signals_path}")
-                
+                    print(f"       Orders chunked:       {file_chunked}")
+                    print(f"       Orders unchanged:     {file_unchanged}")
+                    print(f"       Total chunks created: {file_chunks}")
+                    print(f"       Total volume chunked: {file_volume}")
+                    print(f"       Signals saved to:     {signals_path}")
+                elif file_unchanged > 0:
+                    total_orders_unchanged += file_unchanged
+                    print(f"\n    └─ 📈 Summary for {file_path.name}:")
+                    print(f"       Orders unchanged: {file_unchanged} (all marked chunked_order: false)")
+
             except Exception as e:
                 print(f"    └─  Error processing {file_path}: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
-    
-    print(f"\n{'='*10} DUPLICATION COMPLETE {'='*10}")
-    print(f" Total Files Updated:     {total_files_updated}")
-    print(f" Total Duplicates Created: {total_duplicates_created}")
-    print(f" Total Risk Achieved:     ${total_risk_achieved:,.2f}")
-    
-    if total_duplicates_created > 0:
-        print(f" Average Risk per Order: ${total_risk_achieved / (total_duplicates_created + 1):.2f}")
-    
+
+    print(f"\n{'='*10} CHUNKING COMPLETE {'='*10}")
+    print(f" Total Files Updated:        {total_files_updated}")
+    print(f" Total Orders Chunked:       {total_orders_chunked}")
+    print(f" Total Orders Unchanged:     {total_orders_unchanged}")
+    print(f" Total Chunks Created:       {total_chunks_created}")
+    print(f" Total Volume Chunked:       {total_volume_chunked}")
+
+    if total_orders_chunked > 0:
+        print(f" Avg chunks per chunked order: {total_chunks_created / total_orders_chunked:.2f}")
+
     return any_orders_processed
- 
+
 def place_usd_orders(inv_id=None):
     
     # --- SUFFIX DICTIONARY FOR RETRY LOGIC ---
@@ -25314,7 +27510,8 @@ def place_usd_orders(inv_id=None):
         "demo",  # Demo account
         ".demo"  # Dot demo
     ]
-    
+    GRID_RUN_LEDGER = {}
+    GRID_RUN_TARGETS = {}
     # --- SUB-FUNCTION 1: LOAD PROXIMITY RISK SETTING FROM ACCOUNTMANAGEMENT.JSON ---
     def get_proximity_risk_setting(investor_root):
         """
@@ -26789,6 +28986,280 @@ def place_usd_orders(inv_id=None):
             print(f"     Error reading opposite_order_restriction: {e}")
             return False
     
+    # --- SUB-FUNCTION: LOAD TRAILING AMOUNT DISTANCE LIMIT SETTING ---
+    def get_trailing_amount_distance_limit(investor_root):
+        """
+        Load trailing_amount_distance_limit from accountmanagement.json.
+        Returns the float limit, or None if not configured / invalid / zero.
+
+        IMPORTANT: A value of 0 (or "0") means DISABLED — no trailing checks
+        are performed at all. This is treated identically to a missing value.
+        """
+        acc_mgmt_path = investor_root / "accountmanagement.json"
+
+        if not acc_mgmt_path.exists():
+            print(f"    ℹ️  No accountmanagement.json found - trailing amount distance check DISABLED")
+            return None
+
+        try:
+            with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+
+            settings = config.get("settings", {})
+            grid_setup = settings.get("grid_prices_setup", {})
+            raw_limit = grid_setup.get("trailing_amount_distance_limit", None)
+
+            if raw_limit is None:
+                print(f"    ℹ️  trailing_amount_distance_limit not configured - DISABLED")
+                return None
+
+            # Coerce to float
+            try:
+                if isinstance(raw_limit, bool):
+                    raise ValueError("bool not allowed")
+                if isinstance(raw_limit, (int, float)):
+                    limit = float(raw_limit)
+                elif isinstance(raw_limit, str):
+                    cleaned = raw_limit.strip()
+                    if cleaned == "":
+                        raise ValueError("empty string")
+                    limit = float(cleaned)
+                else:
+                    raise ValueError(f"unsupported type {type(raw_limit)}")
+            except (ValueError, TypeError) as e:
+                print(f"    ⚠️  trailing_amount_distance_limit invalid ({raw_limit!r}): {e} - DISABLED")
+                return None
+
+            # ========== ZERO MEANS DISABLED ==========
+            # A value of 0 (or 0.0) means: nothing to look out for — skip all
+            # trailing distance checks and place every order normally.
+            # =========================================
+            if limit == 0:
+                print(f"    ✅ trailing_amount_distance_limit = 0 → TRAILING CHECK DISABLED")
+                print(f"       - No proximity-to-price filter will be applied")
+                print(f"       - All orders will be placed regardless of distance to market")
+                return None
+
+            if limit < 0:
+                print(f"    ⚠️  trailing_amount_distance_limit < 0 ({limit}) - DISABLED")
+                return None
+
+            print(f"    ✅ Trailing amount distance check ENABLED: {limit} (account currency)")
+            print(f"       - Pending orders sitting closer than this to current price will be CANCELLED")
+            print(f"       - Incoming orders closer than this will be SKIPPED")
+            return limit
+
+        except Exception as e:
+            print(f"    ⚠️  Error reading trailing_amount_distance_limit: {e}")
+            return None
+
+    # --- SUB-FUNCTION: COMPUTE MONEY DISTANCE BETWEEN TWO PRICES AT MIN VOLUME ---
+    def compute_money_distance(symbol_info, price_a, price_b, volume):
+        """
+        Return the profit/loss value (account currency) between two prices
+        for the given volume, using the symbol's tick size / tick value.
+        Mirrors trailing_amount_distance_limit() behavior.
+        """
+        try:
+            tick_size = symbol_info.trade_tick_size
+            tick_value = symbol_info.trade_tick_value
+            if not tick_size or tick_size <= 0:
+                return None
+            if not tick_value or tick_value <= 0:
+                return None
+            ticks = abs(price_a - price_b) / tick_size
+            return ticks * tick_value * volume
+        except Exception:
+            return None
+
+    # --- SUB-FUNCTION: CANCEL ALL PENDING ORDERS SITTING TOO CLOSE TO CURRENT PRICE ---
+    def cancel_pending_orders_too_close_to_price(investor_root, trailing_limit):
+        """
+        Scan all pending orders on the account. For each symbol, determine the
+        closest BUY-side and closest SELL-side order to the current price and
+        cancel it if its money-distance (at broker min volume) is below
+        `trailing_limit`.
+
+        Also handles the case where MULTIPLE orders on the same side are within
+        the limit — cancels ALL of them (not just the closest), since any of
+        them could be "hunted".
+
+        Returns the number of orders cancelled.
+        """
+        if trailing_limit is None:
+            return 0
+
+        pending_orders = mt5.orders_get() or []
+        if not pending_orders:
+            return 0
+
+        # Filter to pending order types only
+        BUY_ORDER_TYPES = {
+            mt5.ORDER_TYPE_BUY_LIMIT,
+            mt5.ORDER_TYPE_BUY_STOP,
+            mt5.ORDER_TYPE_BUY_STOP_LIMIT,
+        }
+        SELL_ORDER_TYPES = {
+            mt5.ORDER_TYPE_SELL_LIMIT,
+            mt5.ORDER_TYPE_SELL_STOP,
+            mt5.ORDER_TYPE_SELL_STOP_LIMIT,
+        }
+
+        pending_orders = [o for o in pending_orders if o.type in (BUY_ORDER_TYPES | SELL_ORDER_TYPES)]
+        if not pending_orders:
+            return 0
+
+        # Group by symbol
+        orders_by_symbol = {}
+        for order in pending_orders:
+            orders_by_symbol.setdefault(order.symbol, []).append(order)
+
+        cancelled_count = 0
+
+        for symbol, symbol_orders in orders_by_symbol.items():
+            if not mt5.symbol_select(symbol, True):
+                continue
+
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                continue
+
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                continue
+
+            current_bid = tick.bid
+            current_ask = tick.ask
+            digits = symbol_info.digits
+            min_volume = symbol_info.volume_min
+
+            buy_orders = [o for o in symbol_orders if o.type in BUY_ORDER_TYPES]
+            sell_orders = [o for o in symbol_orders if o.type in SELL_ORDER_TYPES]
+
+            # ---- BUY side: reference is current ASK ----
+            for order in buy_orders:
+                md = compute_money_distance(symbol_info, order.price_open, current_ask, min_volume)
+                if md is None:
+                    continue
+                if md < trailing_limit:
+                    print(f"        🗑️ [PRE-PLACE PURGE] BUY #{order.ticket} {symbol} @ {order.price_open:.{digits}f}")
+                    print(f"           - Money distance @ min vol ({min_volume}): {md:.4f} < {trailing_limit} → CANCELLING")
+                    cancel_request = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": order.ticket
+                    }
+                    result = mt5.order_send(cancel_request)
+                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        cancelled_count += 1
+                        print(f"           ✅ Cancelled")
+
+                        # Also remove from limit_orders.json if present
+                        signals_files = list(investor_root.rglob("limit_orders.json"))
+                        for sf in signals_files:
+                            try:
+                                with open(sf, 'r', encoding='utf-8') as f:
+                                    data = json.load(f)
+                                filtered = []
+                                removed = 0
+                                for sig in data:
+                                    if sig.get('ticket') == order.ticket:
+                                        removed += 1
+                                        continue
+                                    filtered.append(sig)
+                                if removed > 0:
+                                    with open(sf, 'w', encoding='utf-8') as f:
+                                        json.dump(filtered, f, indent=4)
+                                    print(f"           🗑️ Also removed {removed} signal(s) from {sf.name}")
+                            except Exception:
+                                pass
+                    else:
+                        err = result.comment if result else "no response"
+                        print(f"           Failed to cancel: {err}")
+
+            # ---- SELL side: reference is current BID ----
+            for order in sell_orders:
+                md = compute_money_distance(symbol_info, order.price_open, current_bid, min_volume)
+                if md is None:
+                    continue
+                if md < trailing_limit:
+                    print(f"        🗑️ [PRE-PLACE PURGE] SELL #{order.ticket} {symbol} @ {order.price_open:.{digits}f}")
+                    print(f"           - Money distance @ min vol ({min_volume}): {md:.4f} < {trailing_limit} → CANCELLING")
+                    cancel_request = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": order.ticket
+                    }
+                    result = mt5.order_send(cancel_request)
+                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        cancelled_count += 1
+                        print(f"           ✅ Cancelled")
+
+                        signals_files = list(investor_root.rglob("limit_orders.json"))
+                        for sf in signals_files:
+                            try:
+                                with open(sf, 'r', encoding='utf-8') as f:
+                                    data = json.load(f)
+                                filtered = []
+                                removed = 0
+                                for sig in data:
+                                    if sig.get('ticket') == order.ticket:
+                                        removed += 1
+                                        continue
+                                    filtered.append(sig)
+                                if removed > 0:
+                                    with open(sf, 'w', encoding='utf-8') as f:
+                                        json.dump(filtered, f, indent=4)
+                                    print(f"           🗑️ Also removed {removed} signal(s) from {sf.name}")
+                            except Exception:
+                                pass
+                    else:
+                        err = result.comment if result else "no response"
+                        print(f"           Failed to cancel: {err}")
+
+        if cancelled_count > 0:
+            print(f"    🧹 Pre-place trailing purge: Cancelled {cancelled_count} order(s) too close to price")
+        else:
+            print(f"    ℹ️ Pre-place trailing purge: No orders sitting too close to price")
+
+        return cancelled_count
+
+    # --- SUB-FUNCTION: CHECK IF AN INCOMING ORDER IS TOO CLOSE TO CURRENT PRICE ---
+    def is_incoming_order_too_close_to_price(order_data, trailing_limit, symbol_info):
+        """
+        Return (is_too_close, money_distance) for the given order.
+        Uses the order's entry vs. current market price (ASK for buy, BID for sell)
+        at broker min volume.
+        """
+        if trailing_limit is None:
+            return False, None
+
+        try:
+            entry_price = float(order_data.get('entry', 0))
+            order_type = order_data.get('order_type', '').lower()
+            symbol = order_data.get('symbol', '')
+
+            is_buy = 'buy' in order_type
+            is_sell = 'sell' in order_type
+            if not is_buy and not is_sell:
+                return False, None
+
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                return False, None
+
+            # BUY-side (buy_limit/buy_stop) → ref = ASK
+            # SELL-side (sell_limit/sell_stop) → ref = BID
+            ref_price = tick.ask if is_buy else tick.bid
+
+            min_volume = symbol_info.volume_min
+            md = compute_money_distance(symbol_info, entry_price, ref_price, min_volume)
+            if md is None:
+                return False, None
+
+            return (md < trailing_limit), md
+        except Exception:
+            return False, None
+
+
     # --- SUB-FUNCTION: CHECK PROXIMITY RISK (WITH OPPOSITE DIRECTION OPTION) ---
     def check_proximity_risk(order, existing_positions, check_opposite=False):
         """
@@ -26923,20 +29394,22 @@ def place_usd_orders(inv_id=None):
         Build compact comment string with metadata encoded.
 
         Format:
-            GM{gm}GC{gc}H{h}R{r}|{rr_value}
+            GM{gm}GC{gc}MH{mh}H{h}R{r}|{rr_value}
 
         Fields:
-            GM = grid main   (grid_m)    → 1 if closest-to-price grid main, else 0
-            GC = grid child  (grid_c)    → 1 if child grid level, else 0
-            H  = hedge order (is_hedge)  → 1 if hedge, else 0
-            R  = regular order           → 1 if NOT hedge AND NOT grid, else 0
-            rr_value                     → risk/reward string (e.g. "1:8.0", "1:1")
+            GM = grid main    (grid_m)        → 1 if closest-to-price grid main, else 0
+            GC = grid child   (grid_c)        → 1 if child grid level, else 0
+            MH = grid main helper (grid_mh)   → 1 if helper of the main on its side, else 0
+            H  = hedge order  (is_hedge)      → 1 if hedge, else 0
+            R  = regular order                → 1 if NOT hedge AND NOT grid, else 0
+            rr_value                          → risk/reward string (e.g. "1:8.0", "1:1")
 
         Examples:
-            GM1GC0H0R0|1:8.0   (grid main)
-            GM0GC1H0R0|1:1     (grid child)
-            GM0GC0H1R0|1:1     (hedge order)
-            GM0GC0H0R1|1:2     (regular order)
+            GM1GC0MH0H0R0|1:8.0   (grid main)
+            GM0GC1MH1H0R0|1:1     (grid main helper)
+            GM0GC1MH0H0R0|1:1     (grid child, not a helper)
+            GM0GC0MH0H1R0|1:1     (hedge order)
+            GM0GC0MH0H0R1|1:2     (regular order)
 
         The strategy name is NOT included (removed by design).
 
@@ -26945,6 +29418,7 @@ def place_usd_orders(inv_id=None):
         # --- Extract metadata with defaults ---
         grid_m = bool(order_data.get('grid_m', False))
         grid_c = bool(order_data.get('grid_c', False))
+        grid_mh = bool(order_data.get('grid_mh', False))
         is_hedge = bool(order_data.get('is_hedge_order', False))
         is_grid = bool(order_data.get('is_grid_order', False))
 
@@ -26956,12 +29430,13 @@ def place_usd_orders(inv_id=None):
         rr_value = str(risk_reward) if risk_reward not in (None, '') else '?'
 
         # --- Build compact flag block ---
-        gm_flag = '1' if grid_m else '0'
-        gc_flag = '1' if grid_c else '0'
-        h_flag  = '1' if is_hedge else '0'
-        r_flag  = '1' if is_regular else '0'
+        gm_flag  = '1' if grid_m else '0'
+        gc_flag  = '1' if grid_c else '0'
+        mh_flag  = '1' if grid_mh else '0'
+        h_flag   = '1' if is_hedge else '0'
+        r_flag   = '1' if is_regular else '0'
 
-        flags = f"GM{gm_flag}GC{gc_flag}H{h_flag}R{r_flag}"
+        flags = f"GM{gm_flag}GC{gc_flag}MH{mh_flag}H{h_flag}R{r_flag}"
 
         # --- Final comment: flags | rr_value ---
         comment = f"{flags}|{rr_value}"
@@ -26974,15 +29449,42 @@ def place_usd_orders(inv_id=None):
 
     def execute_order(order_data, investor_root, per_order_cache, existing_positions, 
                   original_signal, skip_proximity_check, switch_invalid_to_instant,
-                  authorized_magic_number, opposite_restriction_enabled=False):
+                  authorized_magic_number, opposite_restriction_enabled=False,
+                  skip_risk_management=False):
         """
         Execute a single order based on its order_type.
         Uses the authorized magic number (LOGIN_ID + USER_ID) for ALL order placements.
+        
+        skip_risk_management: If True, bypasses the per-entry risk management check.
+                              Used for grid orders to enforce explicit sequencing.
+
+        POSITION-ANCHORED BYPASS:
+        If the incoming order carries 'position_anchored' = True, then BOTH the
+        per-entry risk management check AND the proximity-to-existing-position
+        check are SKIPPED for this order. This is intentional — the order was
+        deliberately built to interlock tightly with an existing losing position,
+        so its tight distance to that position is the whole point. Rejecting it
+        on proximity grounds would defeat the interlock.
+
+        GRID PRIORITY REPLACEMENT (SYMBOL-INDEPENDENT, LEDGER-AWARE):
+        ------------------------------------------------------------
+        When the incoming order is a GRID order (grid_m / grid_mh / grid_c):
+            - The NEW grid order is ALWAYS the priority.
+            - Before placing it, we find EXISTING grid orders in MT5 with the
+              SAME grid type + SAME direction + SAME symbol, and DELETE them.
+            - We NEVER delete an order that was placed in THIS RUN — those are
+              tracked in GRID_RUN_LEDGER and are protected.
+            - Deletion count = the number of NEW incoming grid orders of this
+              same (symbol, type, direction) that still need to be placed.
+            - After placing the new order, its ticket is added to the ledger.
+            - This is done ONE AT A TIME per grid order in the forced sequence
+              built by build_grid_sequence() (sell grid_m → buy grid_m →
+              sell/buy grid_mh interleaved → remaining interleaved).
+            - No margin validation. No entry-price matching. Just delete-then-place.
         """
         
         # --- SUB-FUNCTION: GET SUPPORTED FILLING MODES ---
         def get_supported_filling_modes(symbol_info, is_pending_order=False):
-            # ... (same as before, no changes needed)
             if is_pending_order:
                 return [mt5.ORDER_FILLING_RETURN]
             
@@ -27034,7 +29536,6 @@ def place_usd_orders(inv_id=None):
                     request["action"] = mt5.TRADE_ACTION_PENDING
                 else:
                     request["action"] = mt5.TRADE_ACTION_DEAL
-                # ADD THIS DEBUG LINE
                 print(f"        💬 Sending order with comment: '{request.get('comment', '')}' (len={len(request.get('comment', ''))})")
                 
                 result = mt5.order_send(request)
@@ -27050,14 +29551,158 @@ def place_usd_orders(inv_id=None):
                     return result, filling_mode, f"Order failed: {result.comment} (code: {result.retcode})"
             
             return None, None, "All filling modes failed"
-        
+
+        # ============================================================
+        # --- SUB-FUNCTION: GRID PRIORITY REPLACEMENT (LEDGER-AWARE) ---
+        # ============================================================
+        def _replace_existing_grid_orders(symbol, incoming_grid_type, incoming_direction,
+                                          max_to_delete=1):
+            """
+            Delete up to `max_to_delete` existing MT5 pending grid orders of
+            the SAME grid type + SAME direction + SAME symbol as the incoming.
+
+            SAFETY: Any ticket that appears in GRID_RUN_LEDGER is SKIPPED — this
+            guarantees newly placed grids from THIS RUN are never deleted.
+
+            Detection uses the MT5 order's COMMENT (GM/GC/MH flags parsed from
+            build_compact_comment format: 'GM{gm}GC{gc}MH{mh}H{h}R{r}|{rr}').
+
+            Returns the number of deleted orders.
+            """
+            deleted = 0
+
+            target_flag = None
+            if incoming_grid_type == 'grid_m':
+                target_flag = 'GM1'
+            elif incoming_grid_type == 'grid_mh':
+                target_flag = 'MH1'
+            elif incoming_grid_type == 'grid_c':
+                target_flag = 'GC1'
+
+            if target_flag is None:
+                return 0
+
+            ledger_key = (symbol, incoming_grid_type, incoming_direction)
+            protected_tickets = GRID_RUN_LEDGER.get(ledger_key, set())
+
+            try:
+                pending_all = mt5.orders_get() or []
+            except Exception as e:
+                print(f"        ⚠️ Could not query MT5 pending orders for grid replacement: {e}")
+                return 0
+
+            for mo in pending_all:
+                if deleted >= max_to_delete:
+                    break
+
+                if mo.symbol != symbol:
+                    continue
+
+                if mo.ticket in protected_tickets:
+                    print(f"        🛡️ [GRID PRIORITY] Skipping #{mo.ticket} "
+                          f"(placed in this run — protected)")
+                    continue
+
+                if incoming_direction == 'buy':
+                    if mo.type not in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP,
+                                       mt5.ORDER_TYPE_BUY_STOP_LIMIT):
+                        continue
+                elif incoming_direction == 'sell':
+                    if mo.type not in (mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP,
+                                       mt5.ORDER_TYPE_SELL_STOP_LIMIT):
+                        continue
+                else:
+                    continue
+
+                comment = getattr(mo, 'comment', '') or ''
+                if not comment:
+                    continue
+
+                flag_part = comment.split('|')[0].upper() if '|' in comment else comment.upper()
+
+                if target_flag not in flag_part:
+                    continue
+
+                idx = flag_part.find(target_flag)
+                if idx < 0:
+                    continue
+                after_idx = idx + len(target_flag)
+                if after_idx < len(flag_part) and flag_part[after_idx].isdigit():
+                    continue
+
+                print(f"        🗑️ [GRID PRIORITY] Deleting existing "
+                      f"{incoming_grid_type.upper()} {incoming_direction.upper()} "
+                      f"{symbol} ticket #{mo.ticket} (entry={mo.price_open}, "
+                      f"comment='{comment}')")
+                try:
+                    cancel_request = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": mo.ticket
+                    }
+                    cancel_result = mt5.order_send(cancel_request)
+                    if cancel_result is not None and cancel_result.retcode == mt5.TRADE_RETCODE_DONE:
+                        deleted += 1
+                        print(f"           ✅ Deleted #{mo.ticket}")
+
+                        try:
+                            signals_files = list(investor_root.rglob("limit_orders.json"))
+                            for sf in signals_files:
+                                try:
+                                    with open(sf, 'r', encoding='utf-8') as f:
+                                        data = json.load(f)
+                                    filtered = []
+                                    removed = 0
+                                    for sig in data:
+                                        if sig.get('ticket') == mo.ticket:
+                                            removed += 1
+                                            continue
+                                        filtered.append(sig)
+                                    if removed > 0:
+                                        with open(sf, 'w', encoding='utf-8') as f:
+                                            json.dump(filtered, f, indent=4)
+                                        print(f"           🗑️ Also removed {removed} stale signal(s) from {sf.name}")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    else:
+                        err = cancel_result.comment if cancel_result else "No response"
+                        print(f"           Failed to delete #{mo.ticket}: {err}")
+                except Exception as e:
+                    print(f"           Exception deleting #{mo.ticket}: {e}")
+
+            if deleted == 0:
+                print(f"        ℹ️ [GRID PRIORITY] No eligible existing "
+                      f"{incoming_grid_type.upper()} {incoming_direction.upper()} "
+                      f"{symbol} grid order found to replace "
+                      f"(protected this run: {len(protected_tickets)})")
+            else:
+                print(f"        ✅ [GRID PRIORITY] Deleted {deleted} existing grid(s) "
+                      f"for {symbol} {incoming_grid_type} {incoming_direction}")
+
+            return deleted
+        # ============================================================
+        # --- END GRID PRIORITY REPLACEMENT SUB-FUNCTION ---
+        # ============================================================
+
         # --- MAIN EXECUTION ---
         symbol = order_data.get('symbol')
         order_type = order_data.get('order_type', '').lower()
         entry_price = float(order_data.get('entry', 0))
 
+        # ========== POSITION-ANCHORED BYPASS DETECTION ==========
+        # When the incoming order carries position_anchored=True, we must
+        # bypass BOTH the per-entry risk management check AND the
+        # proximity-to-existing-position check. The interlock is intentional.
+        is_position_anchored = bool(order_data.get('position_anchored', False))
+        if is_position_anchored:
+            print(f"        📌 POSITION-ANCHORED ORDER DETECTED — "
+                  f"will BYPASS risk management + proximity checks "
+                  f"(deliberate interlock with existing position)")
+            skip_risk_management = True
+        # ========== END POSITION-ANCHORED BYPASS DETECTION ==========
+
         # --- EXTRACT STOP LOSS (SL) ---
-        # Check multiple possible field names for stop loss
         _sl_value = (
             order_data.get('exit') or
             order_data.get('sl') or
@@ -27068,7 +29713,6 @@ def place_usd_orders(inv_id=None):
         exit_price = float(_sl_value) if _sl_value else 0
 
         # --- EXTRACT TAKE PROFIT (TP) ---
-        # Check multiple possible field names for take profit
         _tp_value = (
             order_data.get('tp') or
             order_data.get('take_profit') or
@@ -27080,7 +29724,6 @@ def place_usd_orders(inv_id=None):
 
         volume = get_volume_from_signal(order_data)
         
-        # SKIP ORDER IF NO VOLUME FOUND
         if volume is None:
             error_msg = "No volume field found in signal - cannot place order"
             print(f"         {error_msg}")
@@ -27093,23 +29736,73 @@ def place_usd_orders(inv_id=None):
             
             return False, None, error_msg, None
         
-        # CRITICAL: USE AUTHORIZED MAGIC NUMBER (LOGIN_ID + USER_ID)
         magic_number = authorized_magic_number
 
-        # ========== NEW: CHECK TICKET FIELD FOR ACTIVE ORDERS ==========
-        # Check if order has a ticket field and if that ticket exists in MT5
+        # ========== DETERMINE INCOMING GRID TYPE + DIRECTION ==========
+        incoming_direction = 'buy' if 'buy' in order_type else ('sell' if 'sell' in order_type else None)
+        is_hedge = order_data.get('is_hedge_order', False)
+
+        if is_hedge:
+            incoming_grid_type = 'hedge'
+        elif order_data.get('grid_m', False) is True:
+            incoming_grid_type = 'grid_m'
+        elif order_data.get('grid_mh', False) is True:
+            incoming_grid_type = 'grid_mh'
+        elif order_data.get('grid_c', False) is True:
+            incoming_grid_type = 'grid_c'
+        elif order_data.get('is_grid_order', False) is True:
+            incoming_grid_type = 'grid_c'
+        else:
+            incoming_grid_type = 'regular'
+        # ========== END DETERMINATION ==========
+
+        # ========== GRID PRIORITY REPLACEMENT (LEDGER-AWARE) ==========
+        if incoming_grid_type in ('grid_m', 'grid_mh', 'grid_c') and incoming_direction is not None:
+            try:
+                ledger_key = (symbol, incoming_grid_type, incoming_direction)
+                target_count = GRID_RUN_TARGETS.get(ledger_key, 1)
+                placed_count = len(GRID_RUN_LEDGER.get(ledger_key, set()))
+                max_to_delete = max(0, target_count - placed_count)
+
+                if max_to_delete > 0:
+                    print(f"        🎯 [GRID PRIORITY] {symbol} {incoming_grid_type} "
+                          f"{incoming_direction}: target={target_count}, "
+                          f"placed={placed_count}, will delete up to {max_to_delete} old grid(s)")
+                    _replace_existing_grid_orders(
+                        symbol, incoming_grid_type, incoming_direction,
+                        max_to_delete=max_to_delete
+                    )
+                else:
+                    print(f"        ✅ [GRID PRIORITY] {symbol} {incoming_grid_type} "
+                          f"{incoming_direction}: all new grids placed "
+                          f"(target={target_count}), no old grids to delete")
+            except Exception as e:
+                print(f"        ⚠️ Grid priority replacement error: {e} — proceeding with placement")
+        # ========== END GRID PRIORITY REPLACEMENT ==========
+
+        # ========== TRAILING AMOUNT DISTANCE — PRE-PLACE PURGE ==========
+        trailing_limit = get_trailing_amount_distance_limit(investor_root)
+
+        if trailing_limit is not None:
+            try:
+                cancelled_pre = cancel_pending_orders_too_close_to_price(investor_root, trailing_limit)
+                if cancelled_pre > 0:
+                    print(f"        🧹 Pre-place purge removed {cancelled_pre} huntable order(s)")
+            except Exception as e:
+                print(f"        ⚠️ Pre-place trailing purge error: {e}")
+        # ========== END PRE-PLACE PURGE ==========
+
+        # ========== CHECK TICKET FIELD FOR ACTIVE ORDERS ==========
         existing_ticket = order_data.get('ticket', None)
         if existing_ticket is not None:
             try:
                 existing_ticket = int(existing_ticket)
                 print(f"        🎫 Order has existing ticket field: {existing_ticket}")
                 
-                # Check if this ticket is active in MT5
                 if is_ticket_active_in_mt5(existing_ticket):
                     error_msg = f"Ticket {existing_ticket} already exists as active order/position - skipping duplicate"
                     print(f"        ⏭️ {error_msg}")
                     
-                    # Remove signal from limit_orders.json to prevent reprocessing
                     signals_path = order_data.get('signals_path', '')
                     if signals_path:
                         signals_file = Path(signals_path)
@@ -27125,8 +29818,214 @@ def place_usd_orders(inv_id=None):
         else:
             print(f"        ℹ️ No ticket field in order - will place as new order")
         # ========== END TICKET CHECK ==========
+
+        # ========== CHUNK-BASED ENTRY DEDUPLICATION ==========
+        def get_incoming_grid_type_local(od):
+            if od.get('is_hedge_order', False) is True:
+                return 'hedge'
+            if od.get('grid_m', False) is True:
+                return 'grid_m'
+            if od.get('grid_mh', False) is True:
+                return 'grid_mh'
+            if od.get('grid_c', False) is True:
+                return 'grid_c'
+            if od.get('is_grid_order', False) is True:
+                return 'grid_c'
+            if (not od.get('is_hedge_order', False)
+                    and not od.get('is_grid_order', False)):
+                return 'regular'
+            return 'unknown'
+
+        def parse_grid_type_from_comment_local(comment):
+            if not comment:
+                return 'unknown'
+            try:
+                import re
+                flag_part = comment.split('|')[0] if '|' in comment else comment
+                flag_upper = flag_part.upper()
+                if re.search(r'(?<![A-Z])GM1(?!\d)', flag_upper):
+                    return 'grid_m'
+                if re.search(r'(?<![A-Z])MH1(?!\d)', flag_upper):
+                    return 'grid_mh'
+                if re.search(r'(?<![A-Z])GC1(?!\d)', flag_upper):
+                    return 'grid_c'
+                if re.search(r'(?<![A-Z])H1(?!\d)', flag_upper):
+                    return 'hedge'
+                if re.search(r'(?<![A-Z])R1(?!\d)', flag_upper):
+                    return 'regular'
+            except Exception:
+                pass
+            return 'unknown'
+
+        def delete_mt5_order_or_position_local(mt5_item, kind):
+            try:
+                if kind == 'pending_order':
+                    cancel_request = {
+                        "action": mt5.TRADE_ACTION_REMOVE,
+                        "order": mt5_item.ticket
+                    }
+                    result = mt5.order_send(cancel_request)
+                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        print(f"           ✅ Cancelled stale pending order #{mt5_item.ticket}")
+                        return True
+                    else:
+                        err = result.comment if result else "No response"
+                        print(f"           Failed to cancel order #{mt5_item.ticket}: {err}")
+                        return False
+                elif kind == 'position':
+                    tick_info = mt5.symbol_info_tick(mt5_item.symbol)
+                    if not tick_info:
+                        print(f"           Cannot get tick for {mt5_item.symbol}")
+                        return False
+                    is_pos_buy = (mt5_item.type == mt5.ORDER_TYPE_BUY)
+                    if is_pos_buy:
+                        close_type = mt5.ORDER_TYPE_SELL
+                        close_price = tick_info.bid
+                    else:
+                        close_type = mt5.ORDER_TYPE_BUY
+                        close_price = tick_info.ask
+                    close_request = {
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": mt5_item.symbol,
+                        "volume": mt5_item.volume,
+                        "type": close_type,
+                        "position": mt5_item.ticket,
+                        "price": close_price,
+                        "deviation": 20,
+                        "magic": getattr(mt5_item, 'magic', 0),
+                        "comment": "grid_priority_replace"[:31],
+                        "type_time": mt5.ORDER_TIME_GTC,
+                        "type_filling": mt5.ORDER_FILLING_IOC,
+                    }
+                    result = mt5.order_send(close_request)
+                    if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                        print(f"           ✅ Closed stale position #{mt5_item.ticket}")
+                        return True
+                    else:
+                        err = result.comment if result else "No response"
+                        print(f"           Failed to close position #{mt5_item.ticket}: {err}")
+                        return False
+            except Exception as e:
+                print(f"           Exception deleting {kind} #{getattr(mt5_item, 'ticket', '?')}: {e}")
+                return False
+
+        is_chunked_order = order_data.get('chunked_order', False) is True
+        incoming_grid_type_local = get_incoming_grid_type_local(order_data)
+
+        if incoming_direction is not None:
+            try:
+                entry_price_for_match = float(entry_price)
+
+                existing_same_entry = None
+                existing_same_entry_kind = None
+                existing_same_entry_comment = ""
+
+                mt5_pending_all = mt5.orders_get() or []
+                for mo in mt5_pending_all:
+                    if mo.symbol != symbol:
+                        continue
+                    if mo.type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP,
+                                mt5.ORDER_TYPE_BUY_STOP_LIMIT):
+                        mo_dir = 'buy'
+                    elif mo.type in (mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP,
+                                    mt5.ORDER_TYPE_SELL_STOP_LIMIT):
+                        mo_dir = 'sell'
+                    else:
+                        continue
+                    if mo_dir != incoming_direction:
+                        continue
+                    try:
+                        if abs(float(mo.price_open) - entry_price_for_match) < 1e-6:
+                            existing_same_entry = mo
+                            existing_same_entry_kind = 'pending_order'
+                            existing_same_entry_comment = getattr(mo, 'comment', '') or ''
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+                if existing_same_entry is None:
+                    mt5_positions_all = mt5.positions_get() or []
+                    for mp in mt5_positions_all:
+                        if mp.symbol != symbol:
+                            continue
+                        if mp.type == mt5.ORDER_TYPE_BUY:
+                            mp_dir = 'buy'
+                        elif mp.type == mt5.ORDER_TYPE_SELL:
+                            mp_dir = 'sell'
+                        else:
+                            continue
+                        if mp_dir != incoming_direction:
+                            continue
+                        try:
+                            if abs(float(mp.price_open) - entry_price_for_match) < 1e-6:
+                                existing_same_entry = mp
+                                existing_same_entry_kind = 'position'
+                                existing_same_entry_comment = getattr(mp, 'comment', '') or ''
+                                break
+                        except (ValueError, TypeError):
+                            continue
+
+                if existing_same_entry is not None:
+                    existing_grid_type = parse_grid_type_from_comment_local(existing_same_entry_comment)
+
+                    print(f"        🔍 Same-entry collision at {incoming_direction.upper()} {symbol} @ {entry_price_for_match}")
+                    print(f"           Existing: {existing_same_entry_kind} #{existing_same_entry.ticket} "
+                          f"[{existing_grid_type}] comment='{existing_same_entry_comment}'")
+                    print(f"           Incoming: [{incoming_grid_type_local}]")
+
+                    if incoming_grid_type_local != existing_grid_type:
+                        print(f"        ⚖️ GRID INTEGRITY MISMATCH ({existing_grid_type} ≠ {incoming_grid_type_local})")
+                        print(f"           Deleting existing {existing_same_entry_kind} #{existing_same_entry.ticket} "
+                              f"[{existing_grid_type}] to place incoming [{incoming_grid_type_local}]...")
+
+                        if delete_mt5_order_or_position_local(existing_same_entry, existing_same_entry_kind):
+                            print(f"        ✅ Existing {existing_same_entry_kind} #{existing_same_entry.ticket} removed. "
+                                  f"Proceeding to place incoming [{incoming_grid_type_local}].")
+                        else:
+                            error_msg = (f"Failed to delete stale {existing_same_entry_kind} "
+                                         f"#{existing_same_entry.ticket} [{existing_grid_type}] - "
+                                         f"cannot place incoming [{incoming_grid_type_local}]")
+                            print(f"        ❌ {error_msg}")
+                            return False, None, error_msg, None
+                    else:
+                        if is_chunked_order:
+                            print(f"        📦 CHUNK ENTRY (same grid type '{incoming_grid_type_local}'): "
+                                  f"Existing #{existing_same_entry.ticket} at entry {entry_price_for_match}. "
+                                  f"chunked_order=True → proceeding to normal risk management.")
+                        else:
+                            error_msg = (
+                                f"Entry {incoming_direction.upper()} {symbol} @ {entry_price_for_match} "
+                                f"already exists as {existing_same_entry_kind} "
+                                f"#{existing_same_entry.ticket} [{existing_grid_type}] and incoming "
+                                f"[{incoming_grid_type_local}] is the SAME grid type and NOT chunked "
+                                f"(chunked_order=False) - skipping duplicate"
+                            )
+                            print(f"        ⏭️ {error_msg}")
+
+                            signals_path = order_data.get('signals_path', '')
+                            if signals_path:
+                                signals_file = Path(signals_path)
+                                if signals_file.exists():
+                                    remove_signal_from_limit_orders(signals_file, order_data)
+                                    print(f"        🗑️ Removed duplicate signal from limit_orders.json")
+
+                            return False, None, error_msg, None
+                else:
+                    if is_chunked_order:
+                        print(f"        📦 CHUNK ENTRY: No existing order/position at entry "
+                              f"{entry_price_for_match} ({incoming_direction.upper()}). "
+                              f"chunked_order=True → placing as first chunk of this entry.")
+                    else:
+                        print(f"        ✅ No existing order/position at entry "
+                              f"{entry_price_for_match} ({incoming_direction.upper()}) - "
+                              f"placing as new entry.")
+            except Exception as e:
+                print(f"        ⚠️ Chunk-dedup/grid-integrity check error: {e} - proceeding with normal placement")
+        else:
+            print(f"        ℹ️ Could not determine direction from order_type '{order_type}' - "
+                  f"skipping chunk-dedup check")
+        # ========== END CHUNK-BASED ENTRY DEDUPLICATION ==========
         
-        # Fallback only if authorized_magic_number is None (should never happen)
         if magic_number is None:
             magic_number = int(order_data.get('magic', int(investor_root.name) if investor_root.name.isdigit() else 123456))
             print(f"        ⚠️ WARNING: Using fallback magic number {magic_number} (authorized not available)")
@@ -27137,7 +30036,6 @@ def place_usd_orders(inv_id=None):
         signals_path = order_data.get('signals_path', '')
         is_hedge = order_data.get('is_hedge_order', False)
         
-        # Get symbol info - use exact symbol name
         if not mt5.symbol_select(symbol, True):
             error_msg = f"Failed to select symbol {symbol}"
             print(f"         {error_msg}")
@@ -27159,7 +30057,6 @@ def place_usd_orders(inv_id=None):
             
             return False, None, error_msg, None
         
-        # Get current market prices for reference
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
             error_msg = f"Cannot get tick for {symbol}"
@@ -27175,19 +30072,46 @@ def place_usd_orders(inv_id=None):
         current_bid = tick.bid
         
         print(f"        📊 {order_type.upper()} order: Entry={entry_price}, Current ASK={current_ask}, Current BID={current_bid}")
+
+        # ========== TRAILING AMOUNT DISTANCE — SKIP INCOMING IF TOO CLOSE ==========
+        # Position-anchored orders are exempt from this check too — they are
+        # deliberately tight against an existing position.
+        if trailing_limit is not None and order_type not in ('instant_buy', 'instant_sell') and not is_position_anchored:
+            try:
+                is_too_close, md_value = is_incoming_order_too_close_to_price(
+                    order_data, trailing_limit, symbol_info
+                )
+                if is_too_close:
+                    direction_str = "BUY" if 'buy' in order_type else "SELL"
+                    error_msg = (
+                        f"Incoming {direction_str} {symbol} @ {entry_price} is too close to market "
+                        f"(money distance @ min vol: {md_value:.4f} < limit {trailing_limit}) - SKIPPED"
+                    )
+                    print(f"        ⏭️ TRAILING SKIP: {error_msg}")
+
+                    signals_path = order_data.get('signals_path', '')
+                    if signals_path:
+                        signals_file = Path(signals_path)
+                        if signals_file.exists():
+                            remove_signal_from_limit_orders(signals_file, order_data)
+                            print(f"        🗑️ Removed too-close signal from limit_orders.json")
+
+                    return False, None, error_msg, None
+            except Exception as e:
+                print(f"        ⚠️ Trailing-distance skip check error: {e} - proceeding with placement")
+        elif is_position_anchored:
+            print(f"        📌 Position-anchored order → skipping trailing-distance market-proximity check")
+        # ========== END SKIP INCOMING IF TOO CLOSE ==========
         
-        # Round values to symbol digits
         entry_price = round(entry_price, symbol_info.digits)
         exit_price = round(exit_price, symbol_info.digits) if exit_price else 0
         target_price = round(target_price, symbol_info.digits) if target_price else 0
 
-        # Clamp volume to symbol's min/max limits
         volume = max(symbol_info.volume_min, min(symbol_info.volume_max, volume))
         
         print(f"        📊 Final volume: {volume} (min: {symbol_info.volume_min}, max: {symbol_info.volume_max})")
         print(f"        🔑 Using Magic Number: {magic_number} (Authorized)")
         
-        # Get MT5 order type constant
         mt5_order_type = get_mt5_order_type(order_type)
         if mt5_order_type is None:
             error_msg = f"Invalid order type: {order_type}"
@@ -27199,41 +30123,47 @@ def place_usd_orders(inv_id=None):
             
             return False, None, error_msg, None
         
-        # Generate cache key (includes exact symbol with suffix)
         cache_key = f"{symbol}_{mt5_order_type}_{entry_price}_{volume}_{magic_number}"
         
-        # Check per-order cache
         if cache_key in per_order_cache:
             error_msg = "Already placed in this run"
             print(f"        ⏭️  SKIP - {error_msg}")
             return False, None, error_msg, cache_key
         
         # ========== RISK MANAGEMENT CHECK ==========
-        current_pending = mt5.orders_get() or []
-        
-        risk_allowed, risk_info = risk_management_for_duplicates(
-            investor_root, order_data, current_pending, cancel_exceeding=True
-        )
-        
-        if not risk_allowed:
-            error_msg = f"Risk management rejected: {risk_info.get('reason', 'Unknown reason')}"
-            print(f"         {error_msg}")
+        if skip_risk_management:
+            if is_position_anchored:
+                print(f"        📌 Risk management SKIPPED (position-anchored interlock)")
+            else:
+                print(f"        ⏭️  Risk management SKIPPED (grid order explicit sequencing)")
+        else:
+            current_pending = mt5.orders_get() or []
             
-            if timeframe and current_candle_time:
-                remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), 
-                                        timeframe, current_candle_time)
+            risk_allowed, risk_info = risk_management_for_duplicates(
+                investor_root, order_data, current_pending, cancel_exceeding=True
+            )
             
-            return False, None, error_msg, cache_key
-        elif risk_info.get('cancelled_count', 0) > 0:
-            print(f"        ✅ Cleaned up {risk_info['cancelled_count']} exceeding orders")
+            if not risk_allowed:
+                error_msg = f"Risk management rejected: {risk_info.get('reason', 'Unknown reason')}"
+                print(f"         {error_msg}")
+                
+                if timeframe and current_candle_time:
+                    remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), 
+                                            timeframe, current_candle_time)
+                
+                return False, None, error_msg, cache_key
+            elif risk_info.get('cancelled_count', 0) > 0:
+                print(f"        ✅ Cleaned up {risk_info['cancelled_count']} exceeding orders")
         
         # Check proximity risk
-        if is_hedge:
+        if is_position_anchored:
+            print(f"        📌 PROXIMITY RISK CHECK SKIPPED — position-anchored order "
+                  f"(deliberate interlock; distance to existing position is the intent)")
+        elif is_hedge:
             print(f"        🛡️ HEDGE ORDER: Skipping proximity risk check")
         elif skip_proximity_check:
             print(f"        ℹ️  Proximity risk check DISABLED - placing order regardless of position proximity")
         else:
-            # First check SAME direction (always performed)
             is_risk_same, risk_position_same, risk_amount_same, risk_threshold_same, check_type_same = check_proximity_risk(
                 order_data, existing_positions, check_opposite=False
             )
@@ -27246,9 +30176,7 @@ def place_usd_orders(inv_id=None):
                     print(f"        🗑️ Removing candle time record due to proximity risk...")
                     remove_candle_time_record(investor_root, order_data.get('original_symbol', symbol), timeframe, current_candle_time)
                 
-                return False, None, error_msg, cache_key
-            
-            # Then check OPPOSITE direction ONLY if opposite_restriction is enabled
+                return False, None, error_msg, cache_key            
             if opposite_restriction_enabled:
                 is_risk_opposite, risk_position_opposite, risk_amount_opposite, risk_threshold_opposite, check_type_opposite = check_proximity_risk(
                     order_data, existing_positions, check_opposite=True
@@ -27272,7 +30200,6 @@ def place_usd_orders(inv_id=None):
         if order_type in ['instant_buy', 'instant_sell']:
             price = current_ask if order_type == 'instant_buy' else current_bid
             
-            # Build compact comment with metadata
             compact_comment = build_compact_comment(strategy_name, order_data)
 
             request_template = {
@@ -27292,7 +30219,6 @@ def place_usd_orders(inv_id=None):
                 request_template["tp"] = target_price
                 
         else:
-            # Build compact comment with metadata
             compact_comment = build_compact_comment(strategy_name, order_data)
             
             request_template = {
@@ -27336,17 +30262,35 @@ def place_usd_orders(inv_id=None):
             
             return False, None, error_msg, cache_key
         
+        # ============================================================
+        # REGISTER NEWLY PLACED GRID IN THE RUN LEDGER
+        # ============================================================
+        try:
+            if (incoming_grid_type in ('grid_m', 'grid_mh', 'grid_c')
+                    and incoming_direction is not None
+                    and result is not None
+                    and getattr(result, 'order', None)):
+                ledger_key = (symbol, incoming_grid_type, incoming_direction)
+                GRID_RUN_LEDGER.setdefault(ledger_key, set()).add(result.order)
+                print(f"        📒 [GRID LEDGER] Registered #{result.order} "
+                      f"as {incoming_grid_type} {incoming_direction} {symbol} "
+                      f"(run total now: {len(GRID_RUN_LEDGER[ledger_key])})")
+        except Exception as e:
+            print(f"        ⚠️ Could not register grid ticket in ledger: {e}")
+        # ============================================================
+        # END LEDGER REGISTRATION
+        # ============================================================
+
         # Create detailed trade record
         trade_record = {}
         
         for key, value in order_data.items():
             if not key.startswith('_'):
                 trade_record[key] = value
-        # ADD THIS SECTION - Preserve grid order metadata explicitly
         trade_record['is_hedge_order'] = order_data.get('is_hedge_order', False)
         trade_record['is_grid_order'] = order_data.get('is_grid_order', False)
         trade_record['grid_side'] = order_data.get('grid_side', '')
-        trade_record['grid_levels'] = order_data.get('grid_levels', 0)
+        trade_record['each_direction_levels_count'] = order_data.get('each_direction_levels_count', 0)
         trade_record['grid_multiplier'] = order_data.get('grid_multiplier', 0)
         trade_record['risk_reward'] = order_data.get('risk_reward', order_data.get('rr', None))
         
@@ -27355,7 +30299,7 @@ def place_usd_orders(inv_id=None):
         
         trade_record.update({
             'ticket': result.order,
-            'magic': magic_number,  # Record the authorized magic number used
+            'magic': magic_number,
             'placed_timestamp': datetime.now().isoformat(),
             'status': 'pending',
             'mt5_retcode': result.retcode,
@@ -27377,7 +30321,6 @@ def place_usd_orders(inv_id=None):
         print(f"        📝 Order placed - MT5 comment: '{compact_comment}'")
         
         # ========== REMOVE SUCCESSFUL SIGNAL FROM LIMIT_ORDERS.JSON ==========
-        # After successful placement, remove ONLY the placed signal from limit_orders.json
         signals_path = order_data.get('signals_path', '')
         if signals_path and result.order:
             try:
@@ -27388,10 +30331,8 @@ def place_usd_orders(inv_id=None):
                     
                     original_count = len(signals)
                     
-                    # Filter out the placed signal
                     filtered_signals = []
                     for signal in signals:
-                        # Match by symbol, order_type, entry, and current_candle_time
                         if not ((signal.get('symbol') == order_data.get('original_symbol', symbol) or
                                 signal.get('symbol') == symbol) and
                             signal.get('order_type') == order_type and
@@ -27404,7 +30345,6 @@ def place_usd_orders(inv_id=None):
                             json.dump(filtered_signals, f, indent=4)
                         print(f"        🗑️ Removed {original_count - len(filtered_signals)} placed signal(s) from {signals_file.name} ({len(filtered_signals)} remaining)")
                     else:
-                        # If no match found, clear the whole file as fallback
                         with open(signals_file, 'w', encoding='utf-8') as f:
                             json.dump([], f, indent=4)
                         print(f"        🗑️ CLEARED {signals_file.name} (no matching signal found, cleared all)")
@@ -27413,7 +30353,22 @@ def place_usd_orders(inv_id=None):
         # ========== END REMOVE SUCCESSFUL SIGNAL ==========
         
         hedge_msg = " 🛡️[HEDGE]" if is_hedge else ""
-        print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Magic: {magic_number}]{hedge_msg}")
+        pos_anchor_msg = " 📌[POS-ANCHORED]" if is_position_anchored else ""
+        print(f"        ✅ SUCCESS: {order_type.upper()} {symbol} @ {request_template['price'] if 'price' in request_template else entry_price} (Ticket: {result.order}) [Magic: {magic_number}]{hedge_msg}{pos_anchor_msg}")
+
+        # ========== TRAILING AMOUNT DISTANCE — POST-PLACE PURGE ==========
+        if trailing_limit is not None:
+            try:
+                print(f"        🔁 Post-place trailing re-check (limit={trailing_limit})...")
+                cancelled_post = cancel_pending_orders_too_close_to_price(investor_root, trailing_limit)
+                if cancelled_post > 0:
+                    print(f"        🧹 Post-place purge removed {cancelled_post} huntable order(s)")
+                else:
+                    print(f"        ℹ️ Post-place purge: no orders sitting too close")
+            except Exception as e:
+                print(f"        ⚠️ Post-place trailing purge error: {e}")
+        # ========== END POST-PLACE PURGE ==========
+
         return True, result, None, cache_key
 
     def process_hedge_orders(hedge_signals, investor_root, per_order_cache, existing_positions, 
@@ -27481,13 +30436,31 @@ def place_usd_orders(inv_id=None):
         """
         Process regular (non-hedge) orders with strict uniqueness rules.
         Uses authorized magic number for all placements.
+        
+        GRID ORDER SEQUENCING:
+        When grid orders are present, they are placed in this exact forced sequence:
+            1. sell grid_m   (closest-to-price sell grid main)
+            2. buy  grid_m   (closest-to-price buy grid main)
+            3. sell grid_mh  (sell grid main helper)
+            4. buy  grid_mh  (buy grid main helper)
+            5. sell grid_mh  (next sell grid main helper)
+            6. buy  grid_mh  (next buy grid main helper)
+            7. remaining grid orders INTERLEAVED: one sell, one buy, one sell, one buy...
+               (both sides exhausted together, never completing one side before the other)
+
+        GRID RUN TARGETS:
+        Before placing any grid orders, this function populates the run-scoped
+        GRID_RUN_TARGETS dictionary, which records how many new grid signals of
+        each (symbol, grid_type, direction) exist in this run. This drives the
+        ledger-aware delete-then-place logic inside execute_order() so that:
+            - exactly N old grids are removed for N new grids,
+            - newly placed grids (in GRID_RUN_LEDGER) are never deleted.
         """
         if not regular_signals_by_key:
             return stats
         
         # --- CANCEL OLDER ORDERS SUB-FUNCTION ---
         def cancel_older_orders_for_group(symbol, order_type, placed_ticket):
-            # ... (same as before, no changes needed)
             try:
                 all_pending = mt5.orders_get(symbol=symbol)
                 
@@ -27534,8 +30507,6 @@ def place_usd_orders(inv_id=None):
                     if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
                         cancelled_count += 1
                         print(f"         ✅ Successfully cancelled older order #{order.ticket}")
-                        
-                        print(f"         Order #{order.ticket} cancelled - reason: replaced by newer order #{placed_ticket}")
                     else:
                         error_msg = f"Unknown error ({result.retcode})" if result else "No response"
                         if result and result.comment:
@@ -27582,32 +30553,193 @@ def place_usd_orders(inv_id=None):
             print(f"    🔑 Using authorized Magic Number: {authorized_magic_number}")
             enable_fallback = False
         
+        # ============================================================
+        # --- HELPER: BUILD GRID ORDER SEQUENCE (interleaved) ---
+        # ============================================================
+        def build_grid_sequence(grid_signals):
+            """
+            Build the forced grid order placement sequence:
+                1. sell grid_m (closest to price, highest entry)
+                2. buy  grid_m (closest to price, lowest entry)
+                3-6+. sell/buy grid_mh interleaved
+                7+. remaining grid orders INTERLEAVED: one sell, one buy, one sell, one buy...
+            Returns list of signal wrappers in exact placement order.
+            """
+            def is_grid_m(sig):
+                return sig['data'].get('grid_m', False) is True
+            
+            def is_grid_mh(sig):
+                return sig['data'].get('grid_mh', False) is True
+            
+            def is_buy_signal(sig):
+                return 'buy' in sig['data'].get('order_type', '').lower()
+            
+            def is_sell_signal(sig):
+                return 'sell' in sig['data'].get('order_type', '').lower()
+            
+            def entry_price(sig):
+                try:
+                    return float(sig['data'].get('entry', 0))
+                except (ValueError, TypeError):
+                    return 0.0
+            
+            ordered = []
+            
+            # --- Step 1: sell grid_m (highest entry = closest to current price from above) ---
+            sell_grid_m = [s for s in grid_signals if is_grid_m(s) and is_sell_signal(s)]
+            sell_grid_m.sort(key=entry_price, reverse=True)
+            if sell_grid_m:
+                ordered.append(sell_grid_m[0])
+                print(f"       1️⃣ sell grid_m: {sell_grid_m[0]['data'].get('symbol')} @ {sell_grid_m[0]['data'].get('entry')}")
+            
+            # --- Step 2: buy grid_m (lowest entry = closest to current price from below) ---
+            buy_grid_m = [s for s in grid_signals if is_grid_m(s) and is_buy_signal(s)]
+            buy_grid_m.sort(key=entry_price)
+            if buy_grid_m:
+                ordered.append(buy_grid_m[0])
+                print(f"       2️⃣ buy grid_m: {buy_grid_m[0]['data'].get('symbol')} @ {buy_grid_m[0]['data'].get('entry')}")
+            
+            # --- Steps 3-6: sell grid_mh and buy grid_mh (interleaved) ---
+            sell_grid_mh = [s for s in grid_signals if is_grid_mh(s) and is_sell_signal(s)]
+            buy_grid_mh = [s for s in grid_signals if is_grid_mh(s) and is_buy_signal(s)]
+            
+            sell_grid_mh.sort(key=entry_price, reverse=True)
+            buy_grid_mh.sort(key=entry_price)
+            
+            max_mh = max(len(sell_grid_mh), len(buy_grid_mh))
+            for i in range(max_mh):
+                if i < len(sell_grid_mh):
+                    ordered.append(sell_grid_mh[i])
+                    print(f"       {3+i*2}️⃣ sell grid_mh: {sell_grid_mh[i]['data'].get('symbol')} @ {sell_grid_mh[i]['data'].get('entry')}")
+                if i < len(buy_grid_mh):
+                    ordered.append(buy_grid_mh[i])
+                    print(f"       {4+i*2}️⃣ buy grid_mh: {buy_grid_mh[i]['data'].get('symbol')} @ {buy_grid_mh[i]['data'].get('entry')}")
+            
+            # --- Steps 7+: remaining grid orders INTERLEAVED (sell, buy, sell, buy, ...) ---
+            placed_ids = {id(s) for s in ordered}
+            sell_remaining = [s for s in grid_signals if is_sell_signal(s) and id(s) not in placed_ids]
+            buy_remaining = [s for s in grid_signals if is_buy_signal(s) and id(s) not in placed_ids]
+            
+            # Sort remaining sells by entry descending, buys by entry ascending
+            sell_remaining.sort(key=entry_price, reverse=True)
+            buy_remaining.sort(key=entry_price)
+            
+            # Interleave remaining: one sell, one buy, one sell, one buy...
+            max_remaining = max(len(sell_remaining), len(buy_remaining))
+            for i in range(max_remaining):
+                if i < len(sell_remaining):
+                    ordered.append(sell_remaining[i])
+                    print(f"       7️⃣+ sell remaining grid: {sell_remaining[i]['data'].get('symbol')} @ {sell_remaining[i]['data'].get('entry')}")
+                if i < len(buy_remaining):
+                    ordered.append(buy_remaining[i])
+                    print(f"       7️⃣+ buy remaining grid: {buy_remaining[i]['data'].get('symbol')} @ {buy_remaining[i]['data'].get('entry')}")
+            
+            return ordered
+        
+        # ============================================================
+        # --- HELPER: POPULATE GRID RUN TARGETS ---
+        # Counts how many NEW grid signals of each (symbol, type, direction)
+        # exist in `ordered_signals`. This drives how many OLD grids are
+        # deleted per type in execute_order().
+        # ============================================================
+        def populate_grid_run_targets(ordered_signals):
+            for _sig in ordered_signals:
+                _od = _sig['data']
+                if not _od.get('is_grid_order', False):
+                    continue
+                _sym = _od.get('symbol', '')
+                _ot = _od.get('order_type', '').lower()
+                _dir = 'buy' if 'buy' in _ot else ('sell' if 'sell' in _ot else None)
+                if _dir is None:
+                    continue
+                if _od.get('grid_m', False) is True:
+                    _gtype = 'grid_m'
+                elif _od.get('grid_mh', False) is True:
+                    _gtype = 'grid_mh'
+                elif _od.get('grid_c', False) is True:
+                    _gtype = 'grid_c'
+                elif _od.get('is_grid_order', False) is True:
+                    _gtype = 'grid_c'
+                else:
+                    continue
+                _key = (_sym, _gtype, _dir)
+                GRID_RUN_TARGETS[_key] = GRID_RUN_TARGETS.get(_key, 0) + 1
+
+            print(f"  📒 GRID RUN TARGETS (planned new grids per key):")
+            if GRID_RUN_TARGETS:
+                for _key, _cnt in GRID_RUN_TARGETS.items():
+                    print(f"     {_key} → {_cnt}")
+            else:
+                print(f"     (none — no grid orders in this run)")
+        
+        # ============================================================
         # --- IF FALLBACK LOGIC IS DISABLED ---
+        # ============================================================
         if not enable_fallback:
             print(f"\n  🚀 Placing ALL regular orders unconditionally (fallback logic OFF)")
             
+            # Collect all regular signals
             all_regular_signals = []
             for key, symbol_signals in regular_signals_by_key.items():
                 all_regular_signals.extend(symbol_signals)
             
             print(f"     📊 Total regular signals to place: {len(all_regular_signals)}")
             
-            for idx, signal_wrapper in enumerate(all_regular_signals):
+            # ============================================================
+            # GRID ORDER SEQUENCING DETECTION
+            # ============================================================
+            grid_signals = [s for s in all_regular_signals if s['data'].get('is_grid_order', False)]
+            non_grid_signals = [s for s in all_regular_signals if not s['data'].get('is_grid_order', False)]
+            
+            has_grid_orders = len(grid_signals) > 0
+            
+            # Build the ordered placement list
+            ordered_signals = []
+            
+            if has_grid_orders:
+                print(f"\n  📐 GRID ORDER SEQUENCING DETECTED: {len(grid_signals)} grid order(s)")
+                print(f"     🔒 Grid orders will be placed in FORCED sequence (not grouped by symbol/type)")
+                print(f"     📌 Sequence: sell grid_m → buy grid_m → (sell/buy grid_mh interleaved) → (remaining sell/buy interleaved)")
+                
+                ordered_signals = build_grid_sequence(grid_signals)
+
+                # ============================================================
+                # POPULATE GRID RUN TARGETS (fallback-disabled branch)
+                # ============================================================
+                populate_grid_run_targets(ordered_signals)
+                
+                # Append any non-grid signals AFTER grid orders
+                if non_grid_signals:
+                    print(f"\n     📊 Appending {len(non_grid_signals)} non-grid signal(s) after grid sequence")
+                    ordered_signals.extend(non_grid_signals)
+            else:
+                # No grid orders — use the original flat order
+                print(f"     ℹ️ No grid orders detected - placing in original order")
+                ordered_signals = all_regular_signals
+            
+            # ============================================================
+            # PLACE ORDERS IN THE DETERMINED SEQUENCE
+            # ============================================================
+            for idx, signal_wrapper in enumerate(ordered_signals):
                 order_data = signal_wrapper['data']
                 original_signal = signal_wrapper.get('original_signal', {})
                 signals_path = signal_wrapper.get('path')
                 symbol = order_data.get('symbol', '')
                 order_type = order_data.get('order_type', '')
+                is_grid = order_data.get('is_grid_order', False)
                 
-                print(f"\n      📊 [{idx+1}/{len(all_regular_signals)}] Placing {order_type} for {symbol}...")
+                grid_tag = " 📐[GRID]" if is_grid else ""
+                print(f"\n      📊 [{idx+1}/{len(ordered_signals)}] Placing {order_type} for {symbol}{grid_tag}...")
                 
                 # Set the magic number in the order data
                 order_data['magic'] = authorized_magic_number
                 
+                # Grid orders bypass per-entry risk management to enforce sequencing
                 success, result, error, cache_key = execute_order(
                     order_data, investor_root, per_order_cache, existing_positions,
                     original_signal, skip_proximity_check, switch_invalid_to_instant,
-                    authorized_magic_number, opposite_restriction_enabled  # Add this
+                    authorized_magic_number, opposite_restriction_enabled,
+                    skip_risk_management=is_grid
                 )
                 
                 if success:
@@ -27629,9 +30761,148 @@ def place_usd_orders(inv_id=None):
             stats['older_orders_cancelled'] = 0
             return stats
         
+        # ============================================================
         # --- FALLBACK LOGIC IS ENABLED ---
+        # ============================================================
         print(f"\n  🔄 FALLBACK LOGIC ENABLED - applying latest-first ordering with fallback and old order cleanup")
         
+        # Check if grid orders exist — if so, grid sequencing takes priority over fallback grouping
+        all_regular_signals_flat = []
+        for key, symbol_signals in regular_signals_by_key.items():
+            all_regular_signals_flat.extend(symbol_signals)
+        
+        grid_signals = [s for s in all_regular_signals_flat if s['data'].get('is_grid_order', False)]
+        
+        if grid_signals:
+            print(f"\n  📐 GRID ORDERS DETECTED ({len(grid_signals)}) - FORCING grid sequence even with fallback ENABLED")
+            print(f"     🔒 Grid orders will bypass fallback grouping and be placed in forced sequence")
+            
+            # Non-grid signals still use fallback logic
+            non_grid_signals = [s for s in all_regular_signals_flat if not s['data'].get('is_grid_order', False)]
+            
+            ordered_signals = build_grid_sequence(grid_signals)
+
+            # ============================================================
+            # POPULATE GRID RUN TARGETS (fallback-enabled grid branch)
+            # ============================================================
+            populate_grid_run_targets(ordered_signals)
+            
+            # Place grid orders in forced sequence
+            print(f"\n  📐 PLACING {len(ordered_signals)} GRID ORDER(S) IN FORCED SEQUENCE")
+            for idx, signal_wrapper in enumerate(ordered_signals):
+                order_data = signal_wrapper['data']
+                original_signal = signal_wrapper.get('original_signal', {})
+                signals_path = signal_wrapper.get('path')
+                symbol = order_data.get('symbol', '')
+                order_type = order_data.get('order_type', '')
+                
+                print(f"\n      📐 [{idx+1}/{len(ordered_signals)}] Placing grid order: {order_type} {symbol}...")
+                
+                order_data['magic'] = authorized_magic_number
+                
+                success, result, error, cache_key = execute_order(
+                    order_data, investor_root, per_order_cache, existing_positions,
+                    original_signal, skip_proximity_check, switch_invalid_to_instant,
+                    authorized_magic_number, opposite_restriction_enabled,
+                    skip_risk_management=True
+                )
+                
+                if success:
+                    print(f"      ✅ SUCCESS: {order_type} order placed for {symbol} [Magic: {authorized_magic_number}]")
+                    stats['orders_placed'] += 1
+                    per_order_cache.add(cache_key)
+                    stats['authorized_keys'].add(cache_key)
+                else:
+                    print(f"       FAILED: {error}")
+                    stats['orders_failed'] += 1
+                    
+                    if signals_path:
+                        signals_file = Path(signals_path)
+                        if signals_file.exists():
+                            remove_signal_from_limit_orders(signals_file, order_data)
+                            stats['records_removed'] += 1
+            
+            # Process non-grid signals with fallback logic
+            if non_grid_signals:
+                print(f"\n  📊 PROCESSING {len(non_grid_signals)} NON-GRID SIGNAL(S) WITH FALLBACK LOGIC")
+                non_grid_by_key = {}
+                for s in non_grid_signals:
+                    od = s['data']
+                    key = f"{od.get('symbol', '')}_{od.get('order_type', '').lower()}"
+                    if key not in non_grid_by_key:
+                        non_grid_by_key[key] = []
+                    non_grid_by_key[key].append(s)
+                
+                fallback_used_count = 0
+                older_orders_cancelled_count = 0
+                
+                for key, symbol_signals in non_grid_by_key.items():
+                    sorted_signals = sorted(symbol_signals, 
+                                        key=lambda x: x['data'].get('current_candle_time', ''), 
+                                        reverse=True)
+                    
+                    symbol = sorted_signals[0]['data'].get('symbol', '')
+                    order_type = sorted_signals[0]['data'].get('order_type', '')
+                    
+                    print(f"\n    🎯 Processing non-grid group: {key} ({len(sorted_signals)} signals)")
+                    placed_ticket = None
+                    
+                    for idx, signal_wrapper in enumerate(sorted_signals):
+                        order_data = signal_wrapper['data']
+                        original_signal = signal_wrapper.get('original_signal', {})
+                        signals_path = signal_wrapper.get('path')
+                        
+                        is_fallback = idx > 0
+                        order_label = "FALLBACK" if is_fallback else "PRIMARY"
+                        
+                        print(f"\n      🔄 [{order_label}] Attempting to place {order_type} for {symbol}...")
+                        
+                        order_data['magic'] = authorized_magic_number
+                        
+                        success, result, error, cache_key = execute_order(
+                            order_data, investor_root, per_order_cache, existing_positions,
+                            original_signal, skip_proximity_check, switch_invalid_to_instant,
+                            authorized_magic_number, opposite_restriction_enabled
+                        )
+                                        
+                        if success:
+                            placed_ticket = result.order
+                            print(f"      ✅ [{order_label}] SUCCESS: {order_type} order placed for {symbol} (Ticket: {placed_ticket}) [Magic: {authorized_magic_number}]")
+                            stats['orders_placed'] += 1
+                            per_order_cache.add(cache_key)
+                            stats['authorized_keys'].add(cache_key)
+                            
+                            if is_fallback:
+                                fallback_used_count += 1
+                                print(f"      🔄 FALLBACK SUCCESSFUL: Used fallback signal for {symbol} {order_type}")
+                            
+                            print(f"\n      🧹 CLEANUP: Cancelling older orders for {symbol} {order_type}...")
+                            cancelled = cancel_older_orders_for_group(symbol, order_type, placed_ticket)
+                            older_orders_cancelled_count += cancelled
+                            break
+                            
+                        else:
+                            print(f"       [{order_label}] FAILED: {error}")
+                            
+                            if signals_path:
+                                signals_file = Path(signals_path)
+                                if signals_file.exists():
+                                    remove_signal_from_limit_orders(signals_file, order_data)
+                                    stats['records_removed'] += 1
+                            
+                            if idx == len(sorted_signals) - 1:
+                                print(f"       All attempts failed for {symbol} {order_type}")
+                                stats['orders_failed'] += 1
+                
+                stats['fallback_used'] = fallback_used_count
+                stats['older_orders_cancelled'] = older_orders_cancelled_count
+                
+                if older_orders_cancelled_count > 0:
+                    print(f"\n  🧹 CLEANUP SUMMARY: Cancelled {older_orders_cancelled_count} older order(s) across non-grid groups")
+            
+            return stats
+        
+        # --- ORIGINAL FALLBACK LOGIC (no grid orders) ---
         fallback_used_count = 0
         older_orders_cancelled_count = 0
         
@@ -27660,13 +30931,12 @@ def place_usd_orders(inv_id=None):
                 
                 print(f"\n      🔄 [{order_label}] Attempting to place {order_type} for {symbol}...")
                 
-                # Set the magic number in the order data
                 order_data['magic'] = authorized_magic_number
                 
                 success, result, error, cache_key = execute_order(
                     order_data, investor_root, per_order_cache, existing_positions,
                     original_signal, skip_proximity_check, switch_invalid_to_instant,
-                    authorized_magic_number, opposite_restriction_enabled  # Add this
+                    authorized_magic_number, opposite_restriction_enabled
                 )
                                 
                 if success:
@@ -27705,7 +30975,7 @@ def place_usd_orders(inv_id=None):
             print(f"\n  🧹 CLEANUP SUMMARY: Cancelled {older_orders_cancelled_count} older order(s) across all groups")
         
         return stats
-
+    
     # --- MAIN EXECUTION FLOW ---
     def main():
         print("\n" + "="*80)
@@ -27800,12 +31070,31 @@ def place_usd_orders(inv_id=None):
             
             if skip_proximity_check:
                 global_stats['total_proximity_check_disabled'] += 1
-            
             # ============================================================
             # STEP 3: Load invalid order conversion setting
             # ============================================================
             switch_invalid_to_instant = get_switch_invalid_setting(investor_root)
             
+            # ============================================================
+            # STEP 3B: TRAILING AMOUNT DISTANCE — pre-run global purge
+            # Cancel every pending order (including grid) that is currently
+            # sitting within the trailing distance limit of market price.
+            # ============================================================
+            _trailing_limit_for_run = get_trailing_amount_distance_limit(investor_root)
+            if _trailing_limit_for_run is not None:
+                print(f"\n  🧹 PRE-RUN TRAILING PURGE (limit={_trailing_limit_for_run})...")
+                try:
+                    _pre_run_cancelled = cancel_pending_orders_too_close_to_price(
+                        investor_root, _trailing_limit_for_run
+                    )
+                    if _pre_run_cancelled > 0:
+                        global_stats['total_orders_cancelled_proximity'] = \
+                            global_stats.get('total_orders_cancelled_proximity', 0) + _pre_run_cancelled
+                        print(f"  ✅ Pre-run trailing purge: cancelled {_pre_run_cancelled} huntable order(s)")
+                    else:
+                        print(f"  ℹ️ Pre-run trailing purge: nothing to cancel")
+                except Exception as e:
+                    print(f"  ⚠️ Pre-run trailing purge error: {e}")
             
             # ============================================================
             # STEP 6: SCAN AND CLEANUP EXISTING PENDING ORDERS
@@ -30487,19 +33776,19 @@ def trades_analytics(inv_id=None):
     return stats
 
 #  accounts 
-def process_single_investor(inv_folder):
+def process_single_investor_(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
     """
     global restricted_timerange_alert
-    
+
     inv_id = inv_folder.name
     print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
-    move_fetched_investors()
+
     account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
+        "inv_id": inv_id,
+        "success": False,
         "price_collection_stats": {},
         "candle_fetch_stats": {},
         "crosser_analysis_stats": {},
@@ -30535,18 +33824,25 @@ def process_single_investor(inv_folder):
         "execution_skipped": False,
         "skip_reason": None,
         "account_type": "UNKNOWN",
-        "account_mode": "UNKNOWN",  
+        "account_mode": "UNKNOWN",
         "is_real_account": False,
-        "grid_strategy_enabled": False,           # Track if grid strategy was enabled
-        "ohlc_strategy_enabled": False            # Track if OHLC strategy was enabled
+        "grid_strategy_enabled": False,
+        "ohlc_strategy_enabled": False
     }
-    
+
+    # ✅ FIX: ensure usersdictionary is loaded in THIS process before use
+    get_usersdictionary()
+
+    # ✅ FIX: removed top-of-function move_fetched_investors() — orchestrator
+    # now calls it once per cycle instead of once per worker.
+
     # 1. Extract structural demo permission policies from investor JSON log
-    allow_demo_processing = True 
+    allow_demo_processing = True
     try:
         if Path(INVESTOR_USERS).exists():
-            with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:                investor_registry = json.load(f)
-            
+            with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
+                investor_registry = json.load(f)
+
             user_meta = investor_registry.get(str(inv_id))
             if user_meta:
                 demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
@@ -30558,7 +33854,7 @@ def process_single_investor(inv_folder):
     except Exception as json_err:
         print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
 
-    broker_cfg = usersdictionary.get(inv_id)
+    broker_cfg = get_usersdictionary().get(inv_id)
     if not broker_cfg:
         print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
         return account_stats
@@ -30566,56 +33862,54 @@ def process_single_investor(inv_folder):
     # =====================================================================
     # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
     # =====================================================================
-    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
+    mode_label = "UNKNOWN_BEFORE_INITIALIZATION"
     fetched_json_path = Path(FETCHED_INVESTORS)
     inv_str_id = str(inv_id)
-    
+
     try:
         investors_data = {}
         if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
             with open(fetched_json_path, 'r', encoding='utf-8') as f_inv:
                 investors_data = json.load(f_inv)
-        
+
         if inv_str_id not in investors_data:
             investors_data[inv_str_id] = {}
-            
+
         print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
     except Exception as io_err:
         print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
-    
-    # Always fire tracking file-movement tasks regardless of connection state
-    #move_fetched_investors()
 
     # =====================================================================
     # DIRECT MT5 INITIALIZATION WITH CREDENTIALS
     # =====================================================================
-    delay = random.uniform(0.2, 1.5)
-    time.sleep(delay) 
-    
+    # ✅ FIX: removed random.uniform(0.2, 1.5) sleep — pure dead time
+
     login_id = int(broker_cfg['LOGIN_ID'])
     broker_password_str = broker_cfg["broker_password"]
     server_str = broker_cfg["SERVER"]
-    
+
     configured_path = broker_cfg.get("Terminal_path", "")
     init_successful = False
-    
+
     # Attempt 1: Try to initialize with terminal path if provided
     if configured_path:
         terminal_path = os.path.abspath(configured_path)
         if os.path.exists(terminal_path):
             print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
-            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
+            # ✅ FIX: lowered timeout from 60000 to 10000
+            if mt5.initialize(path=terminal_path, timeout=10000, portable=True):
                 init_successful = True
                 print(f"✅ MT5 initialized successfully with terminal path")
             else:
                 print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
         else:
             print(f"⚠️ Terminal path does not exist: {terminal_path}")
-    
+
     # Attempt 2: Fallback to default initialization without path
     if not init_successful:
         print(f"🔗 Attempting default MT5 initialization...")
-        if mt5.initialize(timeout=30000):
+        # ✅ FIX: lowered timeout from 30000 to 10000
+        if mt5.initialize(timeout=10000):
             init_successful = True
             print(f"✅ MT5 initialized successfully with default settings")
         else:
@@ -30632,27 +33926,28 @@ def process_single_investor(inv_folder):
     # =====================================================================
     try:
         print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-        
-        # Shutdown any existing connection first to ensure clean state
-        mt5.shutdown()
-        time.sleep(1)
-        
-        # Re-initialize and login
-        if configured_path and os.path.exists(os.path.abspath(configured_path)):
-            if mt5.initialize(path=os.path.abspath(configured_path), timeout=60000, portable=True):
-                print(f"✅ Re-initialized with terminal path for login")
-            else:
-                print(f"⚠️ Re-initialization with path failed, trying default...")
-                mt5.initialize(timeout=30000)
-        else:
-            mt5.initialize(timeout=30000)
-        
-        
+
+        # ✅ FIX: replaced shutdown/sleep/re-init block with a proper mt5.login() call.
+        # mt5.initialize() only attaches to the terminal; it does NOT log in.
+        # mt5.login() switches the account on the already-attached terminal — fast.
+        logged_in = mt5.login(
+            login=login_id,
+            password=broker_password_str,
+            server=server_str,
+            timeout=10000,
+        )
+
+        if not logged_in:
+            print(f"[FAIL] MT5 login failed for {login_id}: {mt5.last_error()}")
+            mt5.shutdown()
+            account_stats["skip_reason"] = "MT5 Login Failure"
+            return account_stats
+
         print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-        
+
         # Verify account info
         acc = mt5.account_info()
-        
+
         if acc is None:
             print(f"[FAIL] Could not retrieve account information after login")
             print(f"       Error: {mt5.last_error()}")
@@ -30693,7 +33988,7 @@ def process_single_investor(inv_folder):
         account_stats["account_type"] = type_label
         account_stats["account_mode"] = mode_label
         account_stats["is_real_account"] = is_real
-        
+
         print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
         print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
         print(f"[{inv_id}] Account Leverage: {acc.leverage}")
@@ -30781,21 +34076,21 @@ def process_single_investor(inv_folder):
             print(f"⚠️ [{inv_id}] Error reading config: {config_err} - Conditional functions will be SKIPPED")
             account_stats["grid_strategy_enabled"] = False
             account_stats["ohlc_strategy_enabled"] = False
-                
+
         # =====================================================================
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
         #trades_analytics(inv_id=inv_id)
         #check_and_record_unauthorized_actions(inv_id=inv_id)
         symbols_dynamic_grid_prices(inv_id=inv_id)
-        #convert_grid_prices_to_limit_orders(inv_id=inv_id)
         #recent_highest_balance_target(inv_id=inv_id)
         #martingale_system(inv_id=inv_id)
         #place_usd_orders(inv_id=inv_id)
-        #trailing_amount_distance_limit(inv_id=inv_id)
-        
+        #chunk_orders_with_volume_beyond_max(inv_id=inv_id)
+        #
+
         mt5.shutdown()
-        
+
     except Exception as e:
         print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
         import traceback
@@ -30804,22 +34099,22 @@ def process_single_investor(inv_folder):
             mt5.shutdown()
         except:
             pass
-    
+
     return account_stats
 
-def process_single_investor_(inv_folder):
+def process_single_investor(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
     """
     global restricted_timerange_alert
-    
+
     inv_id = inv_folder.name
     print(f"\n[START] ⚙️ Registering and handling Investor ID: {inv_id}")
-    
+
     account_stats = {
-        "inv_id": inv_id, 
-        "success": False, 
+        "inv_id": inv_id,
+        "success": False,
         "price_collection_stats": {},
         "candle_fetch_stats": {},
         "crosser_analysis_stats": {},
@@ -30855,18 +34150,22 @@ def process_single_investor_(inv_folder):
         "execution_skipped": False,
         "skip_reason": None,
         "account_type": "UNKNOWN",
-        "account_mode": "UNKNOWN",  
+        "account_mode": "UNKNOWN",
         "is_real_account": False,
         "grid_strategy_enabled": False,
         "ohlc_strategy_enabled": False
     }
-    
+
+    # ✅ FIX: ensure usersdictionary is loaded in THIS process before use
+    get_usersdictionary()
+
     # 1. Extract structural demo permission policies from investor JSON log
-    allow_demo_processing = True 
+    allow_demo_processing = True
     try:
         if Path(INVESTOR_USERS).exists():
-            with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:                investor_registry = json.load(f)
-            
+            with open(INVESTOR_USERS, 'r', encoding='utf-8') as f:
+                investor_registry = json.load(f)
+
             user_meta = investor_registry.get(str(inv_id))
             if user_meta:
                 demo_rule = user_meta.get("DEMO_ACCOUNT", "1")
@@ -30878,7 +34177,7 @@ def process_single_investor_(inv_folder):
     except Exception as json_err:
         print(f"[ERROR] Failed to safely parse investor configuration file: {str(json_err)}")
 
-    broker_cfg = usersdictionary.get(inv_id)
+    broker_cfg = get_usersdictionary().get(inv_id)
     if not broker_cfg:
         print(f"[ERROR] No broker configuration found for Investor: {inv_id}")
         move_fetched_investors()
@@ -30887,56 +34186,57 @@ def process_single_investor_(inv_folder):
     # =====================================================================
     # UNRESTRICTED SYSTEM TRACKING SYNCHRONIZATION
     # =====================================================================
-    mode_label = "UNKNOWN_BEFORE_INITIALIZATION" 
+    mode_label = "UNKNOWN_BEFORE_INITIALIZATION"
     fetched_json_path = Path(FETCHED_INVESTORS)
     inv_str_id = str(inv_id)
-    
+
     try:
         investors_data = {}
         if fetched_json_path.exists() and fetched_json_path.stat().st_size > 0:
             with open(fetched_json_path, 'r', encoding='utf-8') as f_inv:
                 investors_data = json.load(f_inv)
-        
+
         if inv_str_id not in investors_data:
             investors_data[inv_str_id] = {}
-            
+
         print(f"📝 [{inv_id}] Synchronized system data tracking JSON.")
     except Exception as io_err:
         print(f"[ERROR] Failed to verify tracking record entry: {str(io_err)}")
-    
-    # Always fire tracking file-movement tasks regardless of connection state
-    move_fetched_investors()
+
+    # ✅ FIX: removed unconditional move_fetched_investors() from here.
+    # It's called by the orchestrator once per cycle instead.
 
     # =====================================================================
     # DIRECT MT5 INITIALIZATION WITH CREDENTIALS
     # =====================================================================
-    delay = random.uniform(0.2, 1.5)
-    time.sleep(delay) 
-    
+    # ✅ FIX: removed random.uniform(0.2, 1.5) sleep — pure dead time.
+
     login_id = int(broker_cfg['LOGIN_ID'])
     broker_password_str = broker_cfg["broker_password"]
     server_str = broker_cfg["SERVER"]
-    
+
     configured_path = broker_cfg.get("Terminal_path", "")
     init_successful = False
-    
+
     # Attempt 1: Try to initialize with terminal path if provided
     if configured_path:
         terminal_path = os.path.abspath(configured_path)
         if os.path.exists(terminal_path):
             print(f"🔗 Initializing MT5 with terminal path: {terminal_path}")
-            if mt5.initialize(path=terminal_path, timeout=60000, portable=True):
+            # ✅ FIX: lowered timeout from 60000 to 10000
+            if mt5.initialize(path=terminal_path, timeout=10000, portable=True):
                 init_successful = True
                 print(f"✅ MT5 initialized successfully with terminal path")
             else:
                 print(f"⚠️ Failed to initialize with terminal path: {mt5.last_error()}")
         else:
             print(f"⚠️ Terminal path does not exist: {terminal_path}")
-    
+
     # Attempt 2: Fallback to default initialization without path
     if not init_successful:
         print(f"🔗 Attempting default MT5 initialization...")
-        if mt5.initialize(timeout=30000):
+        # ✅ FIX: lowered timeout from 30000 to 10000
+        if mt5.initialize(timeout=10000):
             init_successful = True
             print(f"✅ MT5 initialized successfully with default settings")
         else:
@@ -30953,26 +34253,28 @@ def process_single_investor_(inv_folder):
     # =====================================================================
     try:
         print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-        
-        # Shutdown any existing connection first to ensure clean state
-        mt5.shutdown()
-        time.sleep(1)
-        
-        # Re-initialize and login
-        if configured_path and os.path.exists(os.path.abspath(configured_path)):
-            if mt5.initialize(path=os.path.abspath(configured_path), timeout=60000, portable=True):
-                print(f"✅ Re-initialized with terminal path for login")
-            else:
-                print(f"⚠️ Re-initialization with path failed, trying default...")
-                mt5.initialize(timeout=30000)
-        else:
-            mt5.initialize(timeout=30000)
-        
+
+        # ✅ FIX: replaced shutdown/sleep/re-init block with a proper mt5.login() call.
+        # mt5.initialize() only attaches to the terminal; it does NOT log in.
+        # mt5.login() switches the account on the already-attached terminal — fast.
+        logged_in = mt5.login(
+            login=login_id,
+            password=broker_password_str,
+            server=server_str,
+            timeout=10000,
+        )
+
+        if not logged_in:
+            print(f"[FAIL] MT5 login failed for {login_id}: {mt5.last_error()}")
+            mt5.shutdown()
+            account_stats["skip_reason"] = "MT5 Login Failure"
+            return account_stats
+
         print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-        
+
         # Verify account info
         acc = mt5.account_info()
-        
+
         if acc is None:
             print(f"[FAIL] Could not retrieve account information after login")
             print(f"       Error: {mt5.last_error()}")
@@ -31000,7 +34302,7 @@ def process_single_investor_(inv_folder):
             type_label = "DEMO (MONETARY SO FOOTPRINT)"
         else:
             server_upper = acc.server.upper() if acc.server else ""
-            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELIVE", "SIMULATION"]):
+            if any(indicator in server_upper for indicator in ["DEMO", "STAGE", "TEST", "PRELINE", "PRELIVE", "SIMULATION"]):
                 is_real = False
                 type_label = "DEMO (SERVER STR MATCH)"
             else:
@@ -31013,7 +34315,7 @@ def process_single_investor_(inv_folder):
         account_stats["account_type"] = type_label
         account_stats["account_mode"] = mode_label
         account_stats["is_real_account"] = is_real
-        
+
         print(f"[{inv_id}] Server: '{acc.server}' | Mode Detected: '{mode_label.upper()}' ({type_label})")
         print(f"[{inv_id}] Account Balance: {acc.balance} {acc.currency}")
         print(f"[{inv_id}] Account Leverage: {acc.leverage}")
@@ -31045,18 +34347,18 @@ def process_single_investor_(inv_folder):
         # =====================================================================
         grid_strategy_enabled = False
         ohlc_strategy_enabled = False
-        
+
         try:
             inv_root = Path(INV_PATH) / inv_id
             acc_mgmt_path = inv_root / "accountmanagement.json"
-            
+
             if acc_mgmt_path.exists():
                 with open(acc_mgmt_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                
+
                 settings = config.get("settings", {})
                 grid_setup = settings.get("grid_prices_setup", {})
-                
+
                 # Read grid strategy setting from grid_prices_setup
                 grid_strategy_raw = grid_setup.get("symbols_grid_strategy", None)
                 if grid_strategy_raw is None:
@@ -31070,29 +34372,29 @@ def process_single_investor_(inv_folder):
                 else:
                     grid_strategy_enabled = False
                 account_stats["grid_strategy_enabled"] = grid_strategy_enabled
-                
-                # Read OHLC/directional bias strategy setting (unchanged location)
+
+                # Read OHLC/directional bias strategy setting
                 ohlc_strategy_enabled = settings.get("fetch_ohlc_data_and_directional_bias_for_investor", False)
                 account_stats["ohlc_strategy_enabled"] = ohlc_strategy_enabled
-                
+
                 # Print configuration status
                 print(f"\n{'='*10} 📋 CONFIGURATION STATUS FOR {inv_id} {'='*10}")
                 if ohlc_strategy_enabled:
                     print(f"✅ fetch_ohlc_data_and_directional_bias_for_investor = TRUE - OHLC/Directional functions will be executed")
                 else:
                     print(f"⚠️ fetch_ohlc_data_and_directional_bias_for_investor = FALSE - OHLC/Directional functions will be SKIPPED")
-                
+
                 if grid_strategy_enabled:
                     print(f"✅ symbols_grid_strategy = TRUE - Grid functions will be executed")
                 else:
                     print(f"⚠️ symbols_grid_strategy = FALSE - Grid functions will be SKIPPED")
                 print(f"{'='*55}\n")
-                
+
             else:
                 print(f"⚠️ [{inv_id}] accountmanagement.json not found - All conditional functions will be SKIPPED")
                 account_stats["grid_strategy_enabled"] = False
                 account_stats["ohlc_strategy_enabled"] = False
-                
+
         except Exception as config_err:
             print(f"⚠️ [{inv_id}] Error reading config: {config_err} - Conditional functions will be SKIPPED")
             account_stats["grid_strategy_enabled"] = False
@@ -31102,17 +34404,16 @@ def process_single_investor_(inv_folder):
         # MASTER CONDITIONAL ROUTING (TIME RANGE FILTER)
         # =====================================================================
         print(f"🔍 [{inv_id}] Evaluating system run constraints...")
-        
+
         # CALL RESTRICTED_TIMERANGE INSTEAD OF check_investor_restrictions
         timerange_stats = restricted_timerange(inv_id=inv_id)
-        
+
         # Extract both day and time restrictions from the global alert
         is_restricted_day = False
         is_restricted_time = False
-        
+
         if restricted_timerange_alert and restricted_timerange_alert.get('investor_id') == inv_id:
             if restricted_timerange_alert.get('is_triggered', False):
-                # Check if it's a day or time restriction
                 time_windows = restricted_timerange_alert.get('time_windows', {})
                 if inv_id in time_windows:
                     window_info = time_windows[inv_id]
@@ -31121,23 +34422,20 @@ def process_single_investor_(inv_folder):
                     else:
                         is_restricted_time = True
                 else:
-                    # Fallback: if in window but no details, treat as time restriction
                     is_restricted_time = True
-        
+
         # =====================================================================
         # CONDITION A: NO RESTRICTIONS - EXECUTE ALL ENGINES
         # =====================================================================
-        
         if not is_restricted_day and not is_restricted_time:
             print(f"✅ [{inv_id}] No restrictions active - Running full trading logic...")
-            
+
             # ================================================================
             # CHECK DAILY TARGET AND RECENT HIGHEST BALANCE
             # ================================================================
             recent_highest_stats = recent_highest_balance_target(inv_id=inv_id)
             recent_highest_hit = recent_highest_alert['is_triggered'] if recent_highest_alert else False
 
-            # Check recent highest balance alerts
             if recent_highest_hit:
                 if recent_highest_alert.get('action') == 'new_high':
                     print(f"  🚀 NEW RECORD BALANCE ACHIEVED IN {inv_id}'S ACCOUNT: ${recent_highest_alert['old_balance']:.2f} → ${recent_highest_alert['new_balance']:.2f} (+${recent_highest_alert['difference']:.2f})")
@@ -31145,62 +34443,49 @@ def process_single_investor_(inv_folder):
                     print(f"  💰 RECENT BALANCE TRACKING INITIALIZED FOR {inv_id}: ${recent_highest_alert['new_balance']:.2f}")
                 elif recent_highest_alert.get('action') == 'skipped_lower':
                     print(f"  📉 CURRENT BALANCE BELOW RECORD IN {inv_id}'S ACCOUNT: ${recent_highest_alert['new_balance']:.2f} (High: ${recent_highest_alert['old_balance']:.2f})")
-                delete_all_orders_and_positions(inv_id=inv_id) 
+                delete_all_orders_and_positions(inv_id=inv_id)
 
             # ================================================================
             # CHECK IF TRADING IS ALLOWED (BOTH CONDITIONS MUST BE FALSE)
             # ================================================================
             if not recent_highest_hit:
-                # ✅ BOTH are NOT hit → ALLOW trading
                 print(f"  ✅ Trading allowed for {inv_id}")
-                
+
                 # =================================================================
                 # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
                 # =================================================================
                 check_and_record_unauthorized_actions(inv_id=inv_id)
                 delete_unauthorized_symbol_files(inv_id=inv_id)
-                
+
                 # =================================================================
                 # OHLC/DIRECTIONAL BIAS FUNCTIONS - CONDITIONALLY EXECUTED
                 # =================================================================
                 if ohlc_strategy_enabled:
                     print(f"\n{'='*10} 🎯 EXECUTING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
-                    
-                    # directional bias execution - all these functions are conditionally executed together
                     additional_candles_for_orders_limitation(inv_id=inv_id)
                     fetch_ohlc_data_for_investor(inv_id=inv_id)
                     directional_bias(inv_id=inv_id)
                     additional_candles_for_orders_limitation(inv_id=inv_id)
                     create_position_hedge(inv_id=inv_id)
-                    
                     print(f"{'='*10} ✅ OHLC/DIRECTIONAL BIAS FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
                 else:
                     print(f"\n{'='*10} ⏭️ SKIPPING OHLC/DIRECTIONAL BIAS FUNCTIONS FOR {inv_id} {'='*10}")
                     print(f"Reason: fetch_ohlc_data_and_directional_bias_for_investor = FALSE in accountmanagement.json")
                     print(f"{'='*55}\n")
-                
+
                 # =================================================================
                 # GRID FUNCTIONS - CONDITIONALLY EXECUTED BASED ON symbols_grid_strategy
                 # =================================================================
                 if grid_strategy_enabled:
-                    trailing_amount_distance_limit(inv_id=inv_id)
+                    
                     symbols_dynamic_grid_prices(inv_id=inv_id)
-                    # grid execution #
-                    
-                    # grid single position and pending #
-                    convert_grid_prices_to_limit_orders(inv_id=inv_id)
-                    # grid single position and pending #
-                
-                    # grid single position and pending #
-                    manage_grid_levels_in_json(inv_id=inv_id)
-                    # single position and pending #
-                    
+                    manage_each_direction_levels_count_in_json(inv_id=inv_id)
                     print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
                 else:
                     print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
                     print(f"Reason: symbols_grid_strategy = FALSE in accountmanagement.json")
                     print(f"{'='*55}\n")
-                
+
                 # =================================================================
                 # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
                 # =================================================================
@@ -31208,28 +34493,26 @@ def process_single_investor_(inv_folder):
                 validate_strategy_authorized_orders(inv_id=inv_id)
                 backup_limit_orders(inv_id=inv_id)
                 populate_orders_missing_fields(inv_id=inv_id)
-                trailing_amount_distance_limit(inv_id=inv_id)
+                
                 calculate_investor_symbols_orders(inv_id=inv_id)
-                trailing_amount_distance_limit(inv_id=inv_id)
+                
                 live_usd_risk_and_scaling(inv_id=inv_id)
                 apply_default_prices(inv_id=inv_id)
                 martingale_system(inv_id=inv_id)
-                remove_existing_mt5orders_in_json(inv_id=inv_id)
-                trailing_amount_distance_limit(inv_id=inv_id)
-                #padding_stoploss_below_minimum_risk_to_maximum_risk(inv_id=inv_id)   
-                #maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id) 
+                #remove_existing_mt5orders_in_json(inv_id=inv_id)
+                
+                #padding_stoploss_below_minimum_risk_to_maximum_risk(inv_id=inv_id)
+                #maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id)
 
                 pending_orders_per_symbol_limitation(inv_id=inv_id)
-                duplicate_order_to_reach_default_risk(inv_id=inv_id)
+                chunk_orders_with_volume_beyond_max(inv_id=inv_id)
                 place_usd_orders(inv_id=inv_id)
-                trailing_amount_distance_limit(inv_id=inv_id)
+                
 
                 if grid_strategy_enabled:
-                    #grid affliate
                     manage_position_and_pending_orders(inv_id=inv_id)
-                    trailing_amount_distance_limit(inv_id=inv_id)
+                    
                     manage_single_position_and_pending(inv_id=inv_id)
-                    #grid affliate
                     print(f"{'='*10} ✅ GRID FUNCTIONS COMPLETED FOR {inv_id} {'='*10}\n")
                 else:
                     print(f"\n{'='*10} ⏭️ SKIPPING GRID FUNCTIONS FOR {inv_id} {'='*10}")
@@ -31238,14 +34521,14 @@ def process_single_investor_(inv_folder):
 
                 close_unauthorized_orders(inv_id=inv_id)
                 orders_reward_correction(inv_id=inv_id)
-                trailing_amount_distance_limit(inv_id=inv_id)
+                
                 check_pending_orders_risk(inv_id=inv_id)
                 #history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
                 apply_dynamic_breakeven(inv_id=inv_id)
-                trailing_amount_distance_limit(inv_id=inv_id)
+                
                 check_and_record_unauthorized_actions(inv_id=inv_id)
                 trades_analytics(inv_id=inv_id)
-                
+
                 account_stats["success"] = True
                 print(f"[SUCCESS] Finished full pipeline execution context for Investor: {inv_id} ({mode_label})")
 
@@ -31259,16 +34542,13 @@ def process_single_investor_(inv_folder):
                 print(f"   📅 Trading is NOT ALLOWED on {day_name}s")
             else:
                 print(f"   📅 Trading is NOT ALLOWED on this day (day-based restriction active)")
-            
+
             print(f"   ⏭️  Skipping all trading functions - cleanup only mode")
-            
-            # Only perform cleanup - delete all orders and positions
             delete_all_orders_and_positions(inv_id=inv_id)
-            
             print(f"   ✅ Cleanup complete for day-restricted investor {inv_id}")
             account_stats["success"] = True
             account_stats["restricted_timerange_purge"] = True
-        
+
         # =====================================================================
         # CONDITION C: TIME RESTRICTED - NO TRADING ALLOWED (CLEANUP ONLY)
         # =====================================================================
@@ -31280,18 +34560,15 @@ def process_single_investor_(inv_folder):
                 print(f"   🕐 Trading is NOT ALLOWED during {time_window}")
             else:
                 print(f"   🕐 Trading is NOT ALLOWED during this time window")
-            
+
             print(f"   ⏭️  Skipping all trading functions - cleanup only mode")
-            
-            # Only perform cleanup - delete all orders and positions
             delete_all_orders_and_positions(inv_id=inv_id)
-            
             print(f"   ✅ Cleanup complete for time-restricted investor {inv_id}")
             account_stats["success"] = True
             account_stats["restricted_timerange_purge"] = True
-        
+
         mt5.shutdown()
-        
+
     except Exception as e:
         print(f"[CRITICAL ERROR] Exception caught for {inv_id}: {str(e)}")
         import traceback
@@ -31300,20 +34577,19 @@ def process_single_investor_(inv_folder):
             mt5.shutdown()
         except:
             pass
-    
-    return account_stats
 
+    return account_stats
+    
 def main_once():
     """
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
-    on every cycle without any capacity limitations or restrictions.
+    on every cycle using a single long-lived worker pool.
     """
     # Parse command line arguments for control flags
-    run_as_loop = False 
-    loop_interval = 1  # Default 1 second between loops (matching original)
-    max_loops = None  # None means infinite
-    
-    # Check for command line arguments
+    run_as_loop = False
+    loop_interval = 1
+    max_loops = None
+
     for arg in sys.argv[1:]:
         if arg.startswith('--loop='):
             loop_value = arg.split('=')[1].lower()
@@ -31328,7 +34604,7 @@ def main_once():
                 max_loops = int(arg.split('=')[1])
             except ValueError:
                 print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
-    
+
     print("\n" + "="*60)
     print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
     print("="*60)
@@ -31340,98 +34616,128 @@ def main_once():
         else:
             print("  Max Loops: Infinite")
     print("="*60 + "\n")
-    
+
     loop_count = 0
-    
+
     try:
         move_fetched_investors()
     except Exception as err:
         print(f"[ERROR] Initial fetch failed: {err}")
-        
-    inv_base_path = Path(INV_PATH)
-    print(f"🚀 Initializing Unlimited Persistent Trading Engine Pool...")
-    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
-    while True:
-        loop_count += 1
-        
-        if run_as_loop:
-            print("\n" + "="*60)
-            print(f"LOOP #{loop_count} STARTED")
-            print("="*60)
-        
-        try:
-            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-            
-            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
-            if not all_investor_folders:
-                print(" └─ 🔘 No investor directories found during loop. Moving fetched investors...")
+    inv_base_path = Path(INV_PATH)
+    print(f"🚀 Initializing Persistent Trading Engine Pool...")
+
+    # ✅ FIX: compute pool size once, cap to CPU cores
+    cpu_cores = os.cpu_count() or 1
+    pool_size = max(1, min(cpu_cores, 4))
+
+    print(f"🖥️  Cores detected: {cpu_cores} | Persistent worker count: {pool_size}")
+
+    # ✅ FIX: create ONE pool outside the loop. Workers are spawned once,
+    # not once per cycle. This eliminates the 60s spawn/re-import delay.
+    pool = mp.Pool(processes=pool_size)
+    print(f"✅ Persistent pool ready ({pool_size} workers). First loop will start immediately.\n")
+
+    try:
+        while True:
+            loop_count += 1
+
+            if run_as_loop:
+                print("\n" + "="*60)
+                print(f"LOOP #{loop_count} STARTED")
+                print("="*60)
+
+            try:
+                # ✅ FIX: single call to move_fetched_investors per cycle (was per-worker)
                 try:
                     move_fetched_investors()
-                    all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-                except Exception as inner_err:
-                    print(f" [ERROR] Fallback shift error: {inner_err}")
-                
+                except Exception as mv_err:
+                    print(f"[WARN] move_fetched_investors failed: {mv_err}")
+
+                all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+
+                # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
                 if not all_investor_folders:
-                    print(" ⏳ Directory empty. Moving fetched investors...")
-                    move_fetched_investors()
-                    continue
+                    print(" └─ 🔘 No investor directories found during loop. Retrying after fetch...")
+                    try:
+                        move_fetched_investors()
+                        all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+                    except Exception as inner_err:
+                        print(f" [ERROR] Fallback shift error: {inner_err}")
 
-            # Display system info for awareness only (no limiting)
-            cpu_cores = os.cpu_count() or 1
-            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
-            
-            print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
+                    if not all_investor_folders:
+                        print(" ⏳ Directory empty. Sleeping before next check...")
+                        time.sleep(loop_interval)
+                        continue
 
-            # Process ALL investor folders - NO CAPACITY LIMITS
-            active_batch = all_investor_folders
+                available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+                print(f"\n🖥️  Hardware -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+                print(f"📊 Processing {len(all_investor_folders)} investor folder(s) via persistent pool...")
 
-            print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
-            
-            # Pool with ALL investors - no capacity checks
-            with mp.Pool(processes=len(active_batch)) as pool:
+                active_batch = all_investor_folders
+                print(f"--- Cycle Start: submitting {len(active_batch)} job(s) ---")
+
+                t0 = time.time()
+
+                # ✅ FIX: submit to the SAME long-lived pool
                 jobs = []
                 for folder in active_batch:
                     job = pool.apply_async(process_single_investor, args=(folder,))
                     jobs.append(job)
-                
-                # Force synchronization bar before closing the pool step block
-                results = [job.get() for job in jobs]
-                
-            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. Cooldown sleep ---")
-            
-        except Exception as e:
-            print(f"Critical Error in Orchestrator Loop: {e}")
-            time.sleep(5)
-        
-        # Check loop conditions
-        if not run_as_loop:
-            # Single execution - exit
-            print("Single execution completed. Exiting...")
-            break
-        
-        # Check max loops
-        if max_loops and loop_count >= max_loops:
-            print(f"Maximum loops ({max_loops}) reached. Exiting...")
-            break
-        
-        # Wait before next iteration
-        if run_as_loop and loop_interval > 0:
-            print(f"Waiting {loop_interval} seconds before next loop...")
-            time.sleep(loop_interval)
-        
+
+                # Collect results with a timeout guard so one hung worker
+                # can't freeze the whole orchestrator forever.
+                results = []
+                for job in jobs:
+                    try:
+                        results.append(job.get(timeout=600))
+                    except mp.TimeoutError:
+                        print("⚠️ A worker timed out after 600s; moving on.")
+                        results.append(None)
+                    except Exception as job_err:
+                        print(f"⚠️ Worker raised: {job_err}")
+                        results.append(None)
+
+                elapsed = time.time() - t0
+                print(f"--- Cycle Complete in {elapsed:.2f}s. Processed {len(active_batch)} investor(s). ---")
+
+            except Exception as e:
+                print(f"Critical Error in Orchestrator Loop: {e}")
+                time.sleep(5)
+
+            # Check loop conditions
+            if not run_as_loop:
+                print("Single execution completed. Exiting...")
+                break
+
+            if max_loops and loop_count >= max_loops:
+                print(f"Maximum loops ({max_loops}) reached. Exiting...")
+                break
+
+            if run_as_loop and loop_interval > 0:
+                print(f"Waiting {loop_interval} seconds before next loop...")
+                time.sleep(loop_interval)
+
+    finally:
+        # ✅ FIX: shut down the persistent pool once, on exit
+        print("Shutting down persistent pool...")
+        try:
+            pool.close()
+            pool.join()
+        except Exception as shutdown_err:
+            print(f"[WARN] Pool shutdown issue: {shutdown_err}")
+        print("Pool shut down cleanly.")
+     
 def main_loop():
     """
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
-    on every cycle without any capacity limitations or restrictions.
+    on every cycle using a single long-lived worker pool.
     """
     # Parse command line arguments for control flags
-    run_as_loop = True 
-    loop_interval = 1  # Default 1 second between loops (matching original)
-    max_loops = None  # None means infinite
-    
-    # Check for command line arguments
+    run_as_loop = True
+    loop_interval = 1
+    max_loops = None
+
     for arg in sys.argv[1:]:
         if arg.startswith('--loop='):
             loop_value = arg.split('=')[1].lower()
@@ -31446,7 +34752,7 @@ def main_loop():
                 max_loops = int(arg.split('=')[1])
             except ValueError:
                 print(f"Invalid max-loops value: {arg.split('=')[1]}. Running infinite loops.")
-    
+
     print("\n" + "="*60)
     print("         SYNAPSE TRADING ENGINE ORCHESTRATOR")
     print("="*60)
@@ -31458,87 +34764,118 @@ def main_loop():
         else:
             print("  Max Loops: Infinite")
     print("="*60 + "\n")
-    
+
     loop_count = 0
-    
+
     try:
         move_fetched_investors()
     except Exception as err:
         print(f"[ERROR] Initial fetch failed: {err}")
-        
-    inv_base_path = Path(INV_PATH)
-    print(f"🚀 Initializing Unlimited Persistent Trading Engine Pool...")
-    print(f"⚠️  NOTE: All capacity limits have been REMOVED - processing ALL investors regardless of system load")
 
-    while True:
-        loop_count += 1
-        
-        if run_as_loop:
-            print("\n" + "="*60)
-            print(f"LOOP #{loop_count} STARTED")
-            print("="*60)
-        
-        try:
-            all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-            
-            # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
-            if not all_investor_folders:
-                print(" └─ 🔘 No investor directories found during loop. Moving fetched investors...")
+    inv_base_path = Path(INV_PATH)
+    print(f"🚀 Initializing Persistent Trading Engine Pool...")
+
+    # ✅ FIX: compute pool size once, cap to CPU cores
+    cpu_cores = os.cpu_count() or 1
+    pool_size = max(1, min(cpu_cores, 4))
+
+    print(f"🖥️  Cores detected: {cpu_cores} | Persistent worker count: {pool_size}")
+
+    # ✅ FIX: create ONE pool outside the loop. Workers are spawned once,
+    # not once per cycle. This eliminates the 60s spawn/re-import delay.
+    pool = mp.Pool(processes=pool_size)
+    print(f"✅ Persistent pool ready ({pool_size} workers). First loop will start immediately.\n")
+
+    try:
+        while True:
+            loop_count += 1
+
+            if run_as_loop:
+                print("\n" + "="*60)
+                print(f"LOOP #{loop_count} STARTED")
+                print("="*60)
+
+            try:
+                # ✅ FIX: single call to move_fetched_investors per cycle (was per-worker)
                 try:
                     move_fetched_investors()
-                    all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
-                except Exception as inner_err:
-                    print(f" [ERROR] Fallback shift error: {inner_err}")
-                
+                except Exception as mv_err:
+                    print(f"[WARN] move_fetched_investors failed: {mv_err}")
+
+                all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+
+                # --- MAIN LOOP EMPTY DIRECTORY GUARD ---
                 if not all_investor_folders:
-                    print(" ⏳ Directory empty. Moving fetched investors...")
-                    move_fetched_investors()
-                    continue
+                    print(" └─ 🔘 No investor directories found during loop. Retrying after fetch...")
+                    try:
+                        move_fetched_investors()
+                        all_investor_folders = [f for f in inv_base_path.iterdir() if f.is_dir()]
+                    except Exception as inner_err:
+                        print(f" [ERROR] Fallback shift error: {inner_err}")
 
-            # Display system info for awareness only (no limiting)
-            cpu_cores = os.cpu_count() or 1
-            available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
-            
-            print(f"\n🖥️  Hardware Profile -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
-            print(f"📊 Processing ALL {len(all_investor_folders)} investor folders without capacity restrictions...")
+                    if not all_investor_folders:
+                        print(" ⏳ Directory empty. Sleeping before next check...")
+                        time.sleep(loop_interval)
+                        continue
 
-            # Process ALL investor folders - NO CAPACITY LIMITS
-            active_batch = all_investor_folders
+                available_ram_mb = psutil.virtual_memory().available / (1024 * 1024)
+                print(f"\n🖥️  Hardware -> Cores: {cpu_cores} | Free RAM: {available_ram_mb:.1f}MB")
+                print(f"📊 Processing {len(all_investor_folders)} investor folder(s) via persistent pool...")
 
-            print(f"\n--- Cycle Start: Spinning up context pool for {len(active_batch)} workers ---")
-            
-            # Pool with ALL investors - no capacity checks
-            with mp.Pool(processes=len(active_batch)) as pool:
+                active_batch = all_investor_folders
+                print(f"--- Cycle Start: submitting {len(active_batch)} job(s) ---")
+
+                t0 = time.time()
+
+                # ✅ FIX: submit to the SAME long-lived pool
                 jobs = []
                 for folder in active_batch:
                     job = pool.apply_async(process_single_investor, args=(folder,))
                     jobs.append(job)
-                
-                # Force synchronization bar before closing the pool step block
-                results = [job.get() for job in jobs]
-                
-            print(f"--- Cycle Complete. Processed {len(active_batch)} investors. Cooldown sleep ---")
-            
-        except Exception as e:
-            print(f"Critical Error in Orchestrator Loop: {e}")
-            time.sleep(5)
-        
-        # Check loop conditions
-        if not run_as_loop:
-            # Single execution - exit
-            print("Single execution completed. Exiting...")
-            break
-        
-        # Check max loops
-        if max_loops and loop_count >= max_loops:
-            print(f"Maximum loops ({max_loops}) reached. Exiting...")
-            break
-        
-        # Wait before next iteration
-        if run_as_loop and loop_interval > 0:
-            print(f"Waiting {loop_interval} seconds before next loop...")
-            time.sleep(loop_interval)
 
+                # Collect results with a timeout guard so one hung worker
+                # can't freeze the whole orchestrator forever.
+                results = []
+                for job in jobs:
+                    try:
+                        results.append(job.get(timeout=600))
+                    except mp.TimeoutError:
+                        print("⚠️ A worker timed out after 600s; moving on.")
+                        results.append(None)
+                    except Exception as job_err:
+                        print(f"⚠️ Worker raised: {job_err}")
+                        results.append(None)
+
+                elapsed = time.time() - t0
+                print(f"--- Cycle Complete in {elapsed:.2f}s. Processed {len(active_batch)} investor(s). ---")
+
+            except Exception as e:
+                print(f"Critical Error in Orchestrator Loop: {e}")
+                time.sleep(5)
+
+            # Check loop conditions
+            if not run_as_loop:
+                print("Single execution completed. Exiting...")
+                break
+
+            if max_loops and loop_count >= max_loops:
+                print(f"Maximum loops ({max_loops}) reached. Exiting...")
+                break
+
+            if run_as_loop and loop_interval > 0:
+                print(f"Waiting {loop_interval} seconds before next loop...")
+                time.sleep(loop_interval)
+
+    finally:
+        # ✅ FIX: shut down the persistent pool once, on exit
+        print("Shutting down persistent pool...")
+        try:
+            pool.close()
+            pool.join()
+        except Exception as shutdown_err:
+            print(f"[WARN] Pool shutdown issue: {shutdown_err}")
+        print("Pool shut down cleanly.")
+  
 if __name__ == "__main__":
    main_once()
 
