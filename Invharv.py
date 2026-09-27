@@ -10064,37 +10064,51 @@ def symbols_dynamic_grid_prices(inv_id=None):
     TWO-PHASE MONEY-DISTANCE MODEL:
     ------------------------------
     PHASE 1 — FOUNDATION (anchor placement only):
-        The grid_m anchor is placed `first_grid_amount_distance_away_from_current_price`
-        (money) away from the live bid (sells) / live ask (buys). This is the
-        ONLY thing the first-grid setting controls. It defines WHERE the
-        grid_m sits relative to the current price.
+        NORMAL MODE (first_grids_stoploss_lock = false):
+            • SELL grid_m is `first_grid_amount_distance` (money) BELOW the live bid
+            • BUY  grid_m is `first_grid_amount_distance` (money) ABOVE the live ask
+            Broker min-stop distance is enforced; anchors widen if needed.
 
-    PHASE 2 — BUILDING (all ladder spacing + SL/TP):
-        From the grid_m onwards, EVERYTHING uses `grid_amount_distance` (money):
-            • grid_m's SL is `grid_m ± grid_amount_distance`
-            • grid_mh entries are `grid_m ± grid_amount_distance`
-            • grid_c entries continue stepping by `grid_amount_distance`
-            • Every level's SL is `level ± grid_amount_distance`
-            • TP = `level ± grid_amount_distance × risk_reward`
+        LOCK MODE (first_grids_stoploss_lock = true):
+            • `first_grid_amount_distance` is the TOTAL gap between the SELL
+              grid_m entry and the BUY grid_m entry.
+            • Each side is placed at half that distance from its reference
+              price (bid for sell, ask for buy). No widening. No per-side
+              min-stop enforcement.
+            • SELL grid_m SL = BUY  grid_m entry
+            • BUY  grid_m SL = SELL grid_m entry
 
-    Per side:
-        • SELL side (below bid):
-            The anchor is the first sell_stop whose entry is STRICTLY BELOW
-            the current bid. The anchor is grid_m (main). Every subsequent
-            sell is placed a fixed money-distance FURTHER below the previous
-            sell, so it is automatically below bid and therefore valid.
-            The first N follow the helper rule (grid_mh), the rest are grid_c.
+    THREE-TIER GATE (applied per symbol, in order):
 
-        • BUY side (above ask):
-            The anchor is the first buy_stop whose entry is STRICTLY ABOVE
-            the current ask. The anchor is grid_m (main). Every subsequent
-            buy is placed a fixed money-distance FURTHER above the previous
-            buy, so it is automatically above ask and therefore valid.
-            The first N follow the helper rule (grid_mh), the rest are grid_c.
+        TIER 1 — SL-locked pair + NO position
+        TIER 2 — SL-locked pair + position exists
+        TIER 3 — else block (last resort)
 
-    If `first_grid_amount_distance` is not set (or <= 0), the anchor falls
-    back to one `grid_amount_distance` away from price — matching the old
-    behaviour.
+    POSITION PROFIT-REWARD GATE (applies inside TIER 2 and TIER 3):
+
+        Config: generate_new_orders_if_position_profit_reward_is_at (e.g. "1:2")
+
+        The gate applies ONLY when the existing position is IN PROFIT
+        (profit > 0) or break-even:
+            • Compute the position's risk in USD from its SL.
+            • Read the position's current floating profit in USD.
+            • Compute current reward ratio = profit_usd / risk_usd.
+            • Parse the target from the config string (e.g. "1:2" → 2.0).
+            • ALLOW generation only if current_rr >= target_rr.
+            • Otherwise BLOCK generation for this symbol (skip).
+
+        If the position is IN LOSS (profit < 0), the gate is BYPASSED —
+        generation is allowed and the POSITION-ANCHORED INTERLOCK below
+        takes over, so the position's stop-loss is locked by the opposite
+        order rather than being left to run into a naked loss.
+
+    POSITION-ANCHORED INTERLOCK (applies when generation is allowed and
+    a live position exists on the symbol):
+        If the existing position is IN LOSS:
+            • Its SL price becomes the OPPOSITE side's grid_m entry.
+            • Its entry price becomes the OPPOSITE side's grid_m SL.
+        If the existing position is IN PROFIT (or break-even):
+            • No override — generate both sides normally.
 
     OUTPUT:
     -------
@@ -10170,12 +10184,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
     # CANDLE TIMEFRAME PARSING
     # ------------------------------------------------------------------
     TIMEFRAME_SECONDS = {
-        "1m":  60,
-        "5m":  300,
-        "15m": 900,
-        "30m": 1800,
-        "1h":  3600,
-        "4h":  14400,
+        "1m":  60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400,
     }
     TIMEFRAME_MT5_MAP = {
         "1m":  getattr(mt5, "TIMEFRAME_M1",  1),
@@ -10197,16 +10206,12 @@ def symbols_dynamic_grid_prices(inv_id=None):
     def get_current_candle_window(timeframe_seconds, server_offset_hours):
         now_utc_naive = datetime.utcnow()
         server_now_naive = now_utc_naive + timedelta(hours=server_offset_hours)
-
         epoch_seconds = int(server_now_naive.timestamp() if hasattr(server_now_naive, 'timestamp')
                             else _time.mktime(server_now_naive.timetuple()))
-
         candle_open_epoch = (epoch_seconds // timeframe_seconds) * timeframe_seconds
         candle_close_epoch = candle_open_epoch + timeframe_seconds
-
         open_dt = datetime.fromtimestamp(candle_open_epoch, tz=_timezone.utc).astimezone(LAGOS_TZ)
         close_dt = datetime.fromtimestamp(candle_close_epoch, tz=_timezone.utc).astimezone(LAGOS_TZ)
-
         return open_dt, close_dt
 
     # ------------------------------------------------------------------
@@ -10216,47 +10221,38 @@ def symbols_dynamic_grid_prices(inv_id=None):
         try:
             if not mt5.terminal_info():
                 return None
-
             now_utc_naive = datetime.utcnow()
             now_server_naive = now_utc_naive + timedelta(hours=server_offset_hours)
             start_server_naive = now_server_naive - timedelta(days=lookback_days)
-
             deals = mt5.history_deals_get(start_server_naive, now_server_naive)
             if not deals:
                 return None
-
             best = None
             for d in deals:
                 try:
                     profit = getattr(d, 'profit', None)
                     if profit is None:
                         continue
-
                     commission = getattr(d, 'commission', 0.0) or 0.0
                     swap = getattr(d, 'swap', 0.0) or 0.0
                     net = float(profit) + float(commission) + float(swap)
-
                     position_id = getattr(d, 'position_id', 0)
                     if not position_id:
                         continue
-
                     ts = getattr(d, 'time', None) or getattr(d, 'time_msc', None)
                     close_lagos = lagos_from_unix_timestamp(ts)
                     if close_lagos is None:
                         continue
-
                     candidate = {
                         'ticket': getattr(d, 'ticket', 0),
                         'symbol': getattr(d, 'symbol', ''),
                         'profit': net,
                         'close_time_lagos': close_lagos,
                     }
-
                     if best is None or candidate['close_time_lagos'] > best['close_time_lagos']:
                         best = candidate
                 except Exception:
                     continue
-
             return best
         except Exception as e:
             print(f"  ⚠️ Could not fetch recent trades: {e}")
@@ -10270,12 +10266,10 @@ def symbols_dynamic_grid_prices(inv_id=None):
               f"Profit was taken within the current candle window")
         print(f"     → Deleting ALL pending orders and closing ALL open positions")
         print(f"     → No new grid will be generated this cycle")
-
         deleted_orders = 0
         failed_orders = 0
         closed_positions = 0
         failed_positions = 0
-
         pending = mt5.orders_get() or []
         for order in pending:
             try:
@@ -10291,7 +10285,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             except Exception as e:
                 failed_orders += 1
                 print(f"       Exception cancelling #{order.ticket}: {e}")
-
         positions = mt5.positions_get() or []
         for pos in positions:
             try:
@@ -10300,11 +10293,9 @@ def symbols_dynamic_grid_prices(inv_id=None):
                     failed_positions += 1
                     print(f"       Cannot get tick for {pos.symbol} - skipping position #{pos.ticket}")
                     continue
-
                 is_buy = (pos.type == mt5.ORDER_TYPE_BUY)
                 close_type = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
                 close_price = tick.bid if is_buy else tick.ask
-
                 req = {
                     "action": mt5.TRADE_ACTION_DEAL,
                     "symbol": pos.symbol,
@@ -10329,11 +10320,9 @@ def symbols_dynamic_grid_prices(inv_id=None):
             except Exception as e:
                 failed_positions += 1
                 print(f"       Exception closing #{pos.ticket}: {e}")
-
         print(f"\n  🔥 PURGE SUMMARY: "
               f"orders cancelled={deleted_orders} (failed={failed_orders}), "
               f"positions closed={closed_positions} (failed={failed_positions})")
-
         return {
             "orders_cancelled": deleted_orders,
             "orders_failed": failed_orders,
@@ -10365,6 +10354,18 @@ def symbols_dynamic_grid_prices(inv_id=None):
             "grid_skipped": False,
         },
         "mt5_server_offset_hours": None,
+        "tier1_lock_no_pos_generate": 0,
+        "tier1_lock_no_pos_skip": 0,
+        "tier2_lock_pos_generate": 0,
+        "tier2_lock_pos_skip": 0,
+        "tier3_position_generate": 0,
+        "tier3_position_skip": 0,
+        "tier2_profit_gate_blocked": 0,
+        "tier3_profit_gate_blocked": 0,
+        "tier2_profit_gate_bypassed_in_loss": 0,
+        "tier3_profit_gate_bypassed_in_loss": 0,
+        "position_anchored_interlocks": 0,
+        "locked_orders_written": 0,
     }
 
     def clean(s):
@@ -10520,9 +10521,73 @@ def symbols_dynamic_grid_prices(inv_id=None):
             first_grid_distance_value = 0.0
             first_grid_distance_source = "disabled (not set or <= 0) → anchor falls back to one grid_amount_distance away from price"
         else:
-            first_grid_distance_source = "enabled (money gap from live bid/ask to grid_m anchor PLACEMENT only)"
+            first_grid_distance_source = "enabled"
 
-        apply_m_c_flags = (each_direction_levels_count > 1) and flag_same_direction
+        first_grids_stoploss_lock = _to_bool(grid_prices_setup.get("first_grids_stoploss_lock"))
+        if first_grids_stoploss_lock:
+            if first_grid_distance_value <= 0:
+                print(f"  ⚠️  'first_grids_stoploss_lock' is enabled but "
+                      f"'first_grid_amount_distance_away_from_current_price' is not set/<=0 "
+                      f"— disabling the lock (falling back to normal behaviour).")
+                first_grids_stoploss_lock = False
+                lock_source = "disabled (first_grid_amount_distance not set)"
+            else:
+                lock_source = "enabled (TOTAL gap between sell grid_m and buy grid_m; no widening)"
+        else:
+            lock_source = "disabled (normal independent anchor placement)"
+
+        generate_new_orders_if_stoploss_lock_order_and_no_position_exists = _to_bool(
+            grid_prices_setup.get("generate_new_orders_if_stoploss_lock_order_and_no_position_exists")
+        )
+        if generate_new_orders_if_stoploss_lock_order_and_no_position_exists:
+            gen_t1_source = ("TRUE: SL-locked pair exists, price between anchors, NO position → generate fresh")
+        else:
+            gen_t1_source = ("FALSE: SL-locked pair exists, price between anchors, NO position → fall through to TIER 3")
+
+        generate_new_orders_if_stoploss_lock_order_and_position_exists = _to_bool(
+            grid_prices_setup.get("generate_new_orders_if_stoploss_lock_order_and_position_exists")
+        )
+        if generate_new_orders_if_stoploss_lock_order_and_position_exists:
+            gen_t2_source = ("TRUE: SL-locked pair exists, price between anchors, position exists → generate fresh")
+        else:
+            gen_t2_source = ("FALSE: SL-locked pair exists, price between anchors, position exists → fall through to TIER 3")
+
+        generate_new_orders_if_position_exists = _to_bool(
+            grid_prices_setup.get("generate_new_orders_if_position_exists")
+        )
+        if generate_new_orders_if_position_exists:
+            gen_t3_source = ("TRUE: else-block with position exists → generate; with no position → generate normally")
+        else:
+            gen_t3_source = ("FALSE: else-block with position exists → SKIP; with no position → generate normally")
+
+        # === POSITION PROFIT-REWARD GATE ===
+        # Applies inside TIER 2 and TIER 3 whenever a live position exists
+        # AND that position is in PROFIT or break-even.
+        # When the position is IN LOSS the gate is BYPASSED — the position-
+        # anchored interlock will handle the position instead.
+        generate_new_orders_if_position_profit_reward_is_at_raw = grid_prices_setup.get(
+            "generate_new_orders_if_position_profit_reward_is_at"
+        )
+        if generate_new_orders_if_position_profit_reward_is_at_raw is None or str(generate_new_orders_if_position_profit_reward_is_at_raw).strip() == "":
+            generate_new_orders_if_position_profit_reward_is_at = None
+            gen_profit_source = "disabled (not configured) → no profit-reward gate"
+        else:
+            try:
+                generate_new_orders_if_position_profit_reward_is_at = _parse_risk_reward(
+                    generate_new_orders_if_position_profit_reward_is_at_raw,
+                    "generate_new_orders_if_position_profit_reward_is_at"
+                )
+                gen_profit_source = (
+                    f"enabled → IF position is in profit/break-even, "
+                    f"require reward ratio >= 1:{generate_new_orders_if_position_profit_reward_is_at} "
+                    f"(raw: {generate_new_orders_if_position_profit_reward_is_at_raw}); "
+                    f"if position is IN LOSS → gate bypassed (interlock handles it)"
+                )
+            except Exception as e:
+                generate_new_orders_if_position_profit_reward_is_at = None
+                gen_profit_source = f"disabled (parse error: {e}) → no profit-reward gate"
+
+        apply_m_c_flags = (each_direction_levels_count >= 1) and flag_same_direction
 
         print(f"  📋 DYNAMIC Grid Configuration (TWO-PHASE MONEY-DISTANCE MODEL):")
         print(f"    • Grid Levels: {each_direction_levels_count} (per side)")
@@ -10530,9 +10595,17 @@ def symbols_dynamic_grid_prices(inv_id=None):
         print(f"    • Grid Multiplier (legacy display only): {grid_multiplier} ({grid_multiplier_source})")
         print(f"    • Grid Amount Distance (money between ALL consecutive entries + SL/TP base): "
               f"{grid_amount_distance_value} {acct_cfg.get('currency', '')}".rstrip())
-        print(f"    • First Grid Amount Distance Away From Current Price "
-              f"(money gap from live bid/ask to grid_m ANCHOR placement only): "
+        print(f"    • First Grid Amount Distance Away From Current Price: "
               f"{first_grid_distance_value} ({first_grid_distance_source})")
+        print(f"    • First Grids Stoploss Lock: {first_grids_stoploss_lock} ({lock_source})")
+        print(f"    • [TIER 1] SL-lock + NO position → generate: "
+              f"{generate_new_orders_if_stoploss_lock_order_and_no_position_exists} ({gen_t1_source})")
+        print(f"    • [TIER 2] SL-lock + position    → generate: "
+              f"{generate_new_orders_if_stoploss_lock_order_and_position_exists} ({gen_t2_source})")
+        print(f"    • [TIER 3] else block (position gate): "
+              f"{generate_new_orders_if_position_exists} ({gen_t3_source})")
+        print(f"    • [PROFIT GATE] Position profit-reward required: "
+              f"{generate_new_orders_if_position_profit_reward_is_at} ({gen_profit_source})")
         print(f"    • Bid Prices Order Type: {bid_order_type}")
         print(f"    • Ask Prices Order Type: {ask_order_type}")
         print(f"    • Flag Same Direction Grids With M And C: {flag_same_direction}")
@@ -10565,7 +10638,17 @@ def symbols_dynamic_grid_prices(inv_id=None):
             "enable_single_position_and_pending": enable_single_position,
             "skip_orders_close_to_position": skip_orders_close_to_position,
             "first_grid_amount_distance_away_from_current_price": first_grid_distance_value,
-            "first_grid_amount_distance_away_from_current_price_source": first_grid_distance_source
+            "first_grid_amount_distance_away_from_current_price_source": first_grid_distance_source,
+            "first_grids_stoploss_lock": first_grids_stoploss_lock,
+            "first_grids_stoploss_lock_source": lock_source,
+            "generate_new_orders_if_stoploss_lock_order_and_no_position_exists": generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+            "generate_new_orders_if_stoploss_lock_order_and_no_position_exists_source": gen_t1_source,
+            "generate_new_orders_if_stoploss_lock_order_and_position_exists": generate_new_orders_if_stoploss_lock_order_and_position_exists,
+            "generate_new_orders_if_stoploss_lock_order_and_position_exists_source": gen_t2_source,
+            "generate_new_orders_if_position_exists": generate_new_orders_if_position_exists,
+            "generate_new_orders_if_position_exists_source": gen_t3_source,
+            "generate_new_orders_if_position_profit_reward_is_at": generate_new_orders_if_position_profit_reward_is_at,
+            "generate_new_orders_if_position_profit_reward_is_at_source": gen_profit_source,
         }
 
         return (each_direction_levels_count, grid_multiplier, bid_order_type, ask_order_type,
@@ -10573,7 +10656,11 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 flag_same_direction, apply_m_c_flags, manage_each_direction_levels_count,
                 enable_single_position, skip_orders_close_to_position,
                 candle_tf_key, candle_tf_seconds, first_grid_distance_value,
-                grid_amount_distance_value)
+                grid_amount_distance_value, first_grids_stoploss_lock,
+                generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                generate_new_orders_if_position_exists,
+                generate_new_orders_if_position_profit_reward_is_at)
 
     def fetch_current_prices(symbol, resolution_cache):
         try:
@@ -10581,14 +10668,12 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 res = resolution_cache[symbol]
                 normalized_symbol = res['broker_sym']
                 symbol_info = res['info']
-
                 if symbol_info is None:
                     return False, None, None, None, None, None, None, f"Symbol '{symbol}' previously failed to resolve"
             else:
                 normalized_symbol = get_normalized_symbol(symbol)
                 symbol_info = mt5.symbol_info(normalized_symbol)
                 resolution_cache[symbol] = {'broker_sym': normalized_symbol, 'info': symbol_info}
-
                 if symbol_info:
                     if normalized_symbol != symbol:
                         print(f"    └─ ✅ {symbol} -> {normalized_symbol} (Mapped & Cached)")
@@ -10599,26 +10684,19 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 else:
                     print(f"    └─  MT5: '{normalized_symbol}' (from '{symbol}') not found in MarketWatch")
                     return False, None, None, None, None, None, None, f"Symbol '{normalized_symbol}' not found in MarketWatch"
-
             if not symbol_info:
                 return False, None, None, None, None, None, None, f"Symbol info not available for {normalized_symbol}"
-
             if not mt5.symbol_select(normalized_symbol, True):
                 return False, normalized_symbol, None, None, None, None, None, f"Failed to select symbol: {normalized_symbol}"
-
             tick = mt5.symbol_info_tick(normalized_symbol)
             if not tick:
                 return False, normalized_symbol, None, None, None, None, None, "Tick data not available"
-
             current_bid = tick.bid
             current_ask = tick.ask
             current_price = (current_bid + current_ask) / 2
-
             digits = symbol_info.digits
             print(f"✅ {normalized_symbol} (Bid: {current_bid:.{digits}f}, Ask: {current_ask:.{digits}f})")
-
             return True, normalized_symbol, current_bid, current_ask, current_price, tick, symbol_info, None
-
         except Exception as e:
             return False, None, None, None, None, None, None, str(e)
 
@@ -10626,17 +10704,54 @@ def symbols_dynamic_grid_prices(inv_id=None):
         try:
             volume_min = symbol_info.volume_min
             volume_step = symbol_info.volume_step
-
             print(f"        📊 Live volume information:")
             print(f"          • Minimum volume: {volume_min}")
             print(f"          • Volume step: {volume_step}")
             print(f"          • Maximum volume: {symbol_info.volume_max}")
-
             return volume_min, volume_step
-
         except Exception as e:
             print(f"        ⚠️  Could not get minimum volume: {e}")
             return 0.01, 0.01
+
+    def get_min_stop_distance_price(symbol_info):
+        try:
+            point = getattr(symbol_info, 'point', 0) or 0
+            if point <= 0:
+                return 0.0
+            stops_level = getattr(symbol_info, 'trade_stops_level', 0) or 0
+            freeze_level = getattr(symbol_info, 'trade_freeze_level', 0) or 0
+            min_points = max(int(stops_level), int(freeze_level))
+            if min_points <= 0:
+                return 0.0
+            return (min_points + 1) * point
+        except Exception:
+            return 0.0
+
+    def price_distance_to_usd(symbol_info, price_distance, volume, account_currency):
+        try:
+            tick_size = symbol_info.trade_tick_size
+            tick_value = symbol_info.trade_tick_value
+            if not tick_size or tick_size <= 0:
+                return None
+            if not tick_value or tick_value <= 0:
+                return None
+            if not volume or volume <= 0:
+                return None
+            amount_in_acct_ccy = (price_distance / tick_size) * tick_value * volume
+            if account_currency and account_currency != 'USD':
+                usd_symbol = f"{account_currency}USD"
+                if mt5.symbol_select(usd_symbol, True):
+                    usd_tick = mt5.symbol_info_tick(usd_symbol)
+                    if usd_tick and usd_tick.bid:
+                        return amount_in_acct_ccy * usd_tick.bid
+                usd_symbol = f"USD{account_currency}"
+                if mt5.symbol_select(usd_symbol, True):
+                    usd_tick = mt5.symbol_info_tick(usd_symbol)
+                    if usd_tick and usd_tick.ask > 0:
+                        return amount_in_acct_ccy * (1.0 / usd_tick.ask)
+            return amount_in_acct_ccy
+        except Exception:
+            return None
 
     def calculate_risk_in_usd(symbol_info, entry_price, exit_price, volume, account_currency):
         try:
@@ -10644,7 +10759,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             tick_size = symbol_info.trade_tick_size
             tick_value = symbol_info.trade_tick_value
             risk_in_account_currency = (risk_distance_points / tick_size) * tick_value * volume
-
             if account_currency != 'USD':
                 usd_symbol = f"{account_currency}USD"
                 if mt5.symbol_select(usd_symbol, True):
@@ -10667,9 +10781,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         risk_in_usd = risk_in_account_currency
             else:
                 risk_in_usd = risk_in_account_currency
-
             return risk_in_usd
-
         except Exception as e:
             print(f"        ⚠️  Could not calculate risk in USD: {e}")
             return 0.0
@@ -10690,7 +10802,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             return None
 
     def price_distance_to_money(symbol_info, price_distance, volume):
-        """Inverse of money_distance_to_price_distance — for verification."""
         try:
             tick_size = symbol_info.trade_tick_size
             tick_value = symbol_info.trade_tick_value
@@ -10706,13 +10817,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             return None
 
     def is_valid_entry_for_order_type(order_type, entry, current_bid, current_ask):
-        """
-        Return True if `entry` is on the valid side of the live price for
-        the given `order_type`:
-            • sell_stop / sell_limit  →  entry < current_bid
-            • buy_stop  / buy_limit   →  entry > current_ask
-        Unknown order types are rejected (return False) to be safe.
-        """
         if entry is None or current_bid is None or current_ask is None:
             return False
         ot = str(order_type or "").strip().lower()
@@ -10723,34 +10827,181 @@ def symbols_dynamic_grid_prices(inv_id=None):
         return False
 
     # ------------------------------------------------------------------
+    # EXISTING SL-LOCK DETECTION
+    # ------------------------------------------------------------------
+    def find_existing_sl_locked_pair_for_symbol(symbol_name):
+        try:
+            all_orders = mt5.orders_get(symbol=symbol_name) or []
+        except Exception:
+            return None
+
+        if not all_orders:
+            return None
+
+        sell_stops = []
+        buy_stops = []
+        for o in all_orders:
+            try:
+                if o.type == mt5.ORDER_TYPE_SELL_STOP:
+                    sell_stops.append(o)
+                elif o.type == mt5.ORDER_TYPE_BUY_STOP:
+                    buy_stops.append(o)
+            except Exception:
+                continue
+
+        si = mt5.symbol_info(symbol_name)
+        tol = (si.point * 2) if si and si.point else 1e-6
+
+        for s in sell_stops:
+            for b in buy_stops:
+                try:
+                    s_entry = getattr(s, 'price_open', None)
+                    b_entry = getattr(b, 'price_open', None)
+                    s_sl = getattr(s, 'sl', None)
+                    b_sl = getattr(b, 'sl', None)
+
+                    if s_entry is None or b_entry is None or s_sl is None or b_sl is None:
+                        continue
+
+                    if abs(s_sl - b_entry) <= tol and abs(b_sl - s_entry) <= tol:
+                        return {
+                            "sell_ticket": getattr(s, 'ticket', None),
+                            "buy_ticket": getattr(b, 'ticket', None),
+                            "sell_entry": s_entry,
+                            "buy_entry": b_entry,
+                            "sell_sl": s_sl,
+                            "buy_sl": b_sl,
+                        }
+                except Exception:
+                    continue
+
+        return None
+
+    # ------------------------------------------------------------------
+    # EXISTING POSITION DETECTION
+    # ------------------------------------------------------------------
+    def find_live_positions_for_symbol(symbol_name):
+        try:
+            positions = mt5.positions_get(symbol=symbol_name) or []
+            return list(positions)
+        except Exception:
+            return []
+
+    def pick_latest_position(positions):
+        """
+        Return the most recent (highest-ticket) position from a list, or None.
+        """
+        if not positions:
+            return None
+        try:
+            return max(positions, key=lambda p: getattr(p, 'ticket', 0))
+        except Exception:
+            return positions[0]
+
+    def evaluate_position_profit_gate(symbol_info, position, account_currency, target_rr):
+        """
+        Compute the existing position's current reward ratio and decide whether
+        the profit gate allows generation.
+
+        IMPORTANT:
+            • The gate ONLY applies when the position is in PROFIT or break-even.
+            • When the position is IN LOSS, the gate is BYPASSED — the
+              position-anchored interlock will handle the position instead,
+              so we never let the position run into a naked stop-out.
+
+        Returns a dict:
+            {
+                "target_rr":        float,      # e.g. 2.0 for "1:2"
+                "current_rr":       float|None, # profit_usd / risk_usd
+                "profit_usd":       float,      # current floating profit in USD
+                "risk_usd":         float|None, # position risk in USD from SL
+                "has_sl":           bool,
+                "in_profit":        bool,
+                "in_loss":          bool,
+                "gate_applied":     bool,       # whether the gate was actually applied
+                "gate_passed":      bool,       # final decision
+            }
+        """
+        result = {
+            "target_rr": target_rr,
+            "current_rr": None,
+            "profit_usd": 0.0,
+            "risk_usd": None,
+            "has_sl": False,
+            "in_profit": False,
+            "in_loss": False,
+            "gate_applied": False,
+            "gate_passed": True,  # default allow
+        }
+
+        try:
+            pos_profit = float(getattr(position, 'profit', 0.0) or 0.0)
+            result["profit_usd"] = pos_profit
+            result["in_profit"] = pos_profit > 0
+            result["in_loss"] = pos_profit < 0
+        except Exception:
+            return result
+
+        # === POSITION IN LOSS → gate BYPASSED, allow generation ===
+        if result["in_loss"]:
+            result["gate_applied"] = False
+            result["gate_passed"] = True
+            return result
+
+        # === POSITION IN PROFIT OR BREAK-EVEN → gate APPLIES ===
+        result["gate_applied"] = True
+
+        pos_sl = float(getattr(position, 'sl', 0.0) or 0.0)
+        pos_entry = float(getattr(position, 'price_open', 0.0) or 0.0)
+        pos_volume = float(getattr(position, 'volume', 0.0) or 0.0)
+
+        if pos_sl <= 0:
+            result["has_sl"] = False
+            # No SL → can't compute risk → cannot evaluate reward ratio.
+            # Conservative: block generation (position is profitable but not
+            # anchored by a risk, so we require an explicit gate pass).
+            result["gate_passed"] = False
+            return result
+
+        result["has_sl"] = True
+
+        # Compute risk in USD via the same helper used for grid levels
+        try:
+            risk_usd = calculate_risk_in_usd(
+                symbol_info, pos_entry, pos_sl, pos_volume, account_currency
+            )
+            result["risk_usd"] = risk_usd
+        except Exception:
+            result["risk_usd"] = None
+
+        if not result["risk_usd"] or result["risk_usd"] <= 0:
+            result["gate_passed"] = False
+            return result
+
+        # Current reward ratio
+        try:
+            result["current_rr"] = pos_profit / result["risk_usd"]
+        except Exception:
+            result["current_rr"] = None
+
+        # Gate passes iff current_rr >= target_rr
+        if result["current_rr"] is not None and result["current_rr"] >= target_rr:
+            result["gate_passed"] = True
+        else:
+            result["gate_passed"] = False
+
+        return result
+
+    # ------------------------------------------------------------------
     # ANCHOR-FIRST LADDER GENERATORS (per side)
     # ------------------------------------------------------------------
-    #
-    # Two-phase money model:
-    #   PHASE 1 (foundation): `first_grid_money_distance` controls ONLY the
-    #     distance from live price to the grid_m anchor entry.
-    #   PHASE 2 (building):    `grid_money_step` controls EVERYTHING else —
-    #     consecutive entry spacing, SL distance, and TP distance (via RR).
-    #
-    # The first-grid gap is INDEPENDENT of the grid step. It is only
-    # widened in the pathological case where the rounded anchor would land
-    # on/above (sells) or on/below (buys) the live price.
-    #
     def generate_validated_sell_ladder(
         current_bid, num_levels,
         first_grid_money_distance, grid_money_step,
         symbol_info, min_volume, digits,
+        min_stop_price_distance=0.0,
+        lock_mode=False,
     ):
-        """
-        Build a SELL ladder below the bid.
-
-        PHASE 1: anchor entry is placed `first_grid_money_distance` (money)
-                 below the live bid.
-        PHASE 2: every consecutive entry is `grid_money_step` (money)
-                 further below the previous one.
-
-        Returns (levels, price_step, first_price_distance).
-        """
         step_price_distance = money_distance_to_price_distance(
             symbol_info, grid_money_step, min_volume
         )
@@ -10759,59 +11010,63 @@ def symbols_dynamic_grid_prices(inv_id=None):
                   f"({grid_money_step}) to price distance at min_volume={min_volume}")
             return None, None, None
 
-        # ---- PHASE 1: convert the anchor placement money distance ----
         if first_grid_money_distance and first_grid_money_distance > 0:
             first_price_distance = money_distance_to_price_distance(
                 symbol_info, first_grid_money_distance, min_volume
             )
             if first_price_distance is None or first_price_distance <= 0:
-                print(f"        ⚠️  [SELL] Could not convert first_grid_amount_distance "
-                      f"({first_grid_money_distance}) to price distance at min_volume={min_volume} "
-                      f"— falling back to one grid step")
                 first_price_distance = step_price_distance
+                print(f"        ⚠️  [SELL] Could not convert first_grid_amount_distance "
+                      f"({first_grid_money_distance}) — falling back to one grid step")
             else:
                 check_money = price_distance_to_money(symbol_info, first_price_distance, min_volume)
-                print(f"        💵 [SELL] PHASE 1 anchor placement: first_grid_amount_distance "
+                print(f"        💵 [SELL] PHASE 1 anchor gap: first_grid_amount_distance "
                       f"{first_grid_money_distance} (money) → price gap "
                       f"{first_price_distance:.{digits}f} "
-                      f"[= {check_money:.4f} money at min_vol {min_volume}] "
-                      f"(grid step = {step_price_distance:.{digits}f})")
+                      f"[= {check_money:.4f} money at min_vol {min_volume}]")
         else:
             first_price_distance = step_price_distance
             print(f"        ℹ️  [SELL] first_grid_amount_distance not set/<=0 "
                   f"— anchor falls back to one grid step ({step_price_distance:.{digits}f})")
 
-        # ---- Find the anchor: first sell strictly below bid ----
-        safety = 0
-        MAX_SAFETY = 1000
-        while safety < MAX_SAFETY:
-            anchor_candidate = round(current_bid - first_price_distance, digits)
-            if anchor_candidate < current_bid:
-                break
-            first_price_distance += step_price_distance
-            safety += 1
+        if lock_mode:
+            anchor = round(current_bid - first_price_distance, digits)
+            print(f"        🔒 [SELL] LOCK MODE — placing anchor at exactly "
+                  f"{first_price_distance:.{digits}f} below bid (no widening)")
+            if anchor >= current_bid:
+                print(f"        ⚠️  [SELL] anchor {anchor:.{digits}f} >= bid {current_bid:.{digits}f} "
+                      f"— placing anyway (lock contract)")
+        else:
+            if min_stop_price_distance > 0 and first_price_distance < min_stop_price_distance:
+                print(f"        🔧 [SELL] anchor gap {first_price_distance:.{digits}f} < broker min stop "
+                      f"{min_stop_price_distance:.{digits}f} — raising to broker min first")
+                first_price_distance = min_stop_price_distance
 
-        if safety >= MAX_SAFETY:
-            print(f"        ⚠️  [SELL] Could not find a valid anchor after "
-                  f"{MAX_SAFETY} widening attempts — aborting SELL side.")
-            return None, None, None
+            safety = 0
+            MAX_SAFETY = 1000
+            while safety < MAX_SAFETY:
+                anchor_candidate = round(current_bid - first_price_distance, digits)
+                gap = current_bid - anchor_candidate
+                if anchor_candidate < current_bid and gap >= min_stop_price_distance:
+                    break
+                first_price_distance += step_price_distance
+                safety += 1
+            if safety >= MAX_SAFETY:
+                print(f"        ⚠️  [SELL] Could not find a valid anchor after "
+                      f"{MAX_SAFETY} widening attempts — aborting SELL side.")
+                return None, None, None
+            if safety > 0:
+                print(f"        🔧 [SELL] Anchor gap auto-widened by {safety} step(s)")
+            anchor = round(current_bid - first_price_distance, digits)
 
-        if safety > 0:
-            print(f"        🔧 [SELL] Anchor gap auto-widened by {safety} step(s) "
-                  f"to satisfy level < bid")
-
-        # ---- PHASE 2: build ladder from the anchor DOWNWARD ----
-        anchor = round(current_bid - first_price_distance, digits)
         levels = [anchor]
         for _ in range(1, num_levels):
             next_level = round(levels[-1] - step_price_distance, digits)
             levels.append(next_level)
 
         print(f"        📐 [SELL] anchor(grid_m entry)={anchor:.{digits}f} "
-              f"(gap from bid = {current_bid - anchor:.{digits}f} price = "
-              f"{first_grid_money_distance if first_grid_money_distance > 0 else grid_money_step} money), "
-              f"then every entry steps by {step_price_distance:.{digits}f} price = "
-              f"{grid_money_step} money")
+              f"(gap from bid = {current_bid - anchor:.{digits}f} price), "
+              f"then every entry steps by {step_price_distance:.{digits}f} price")
 
         return levels, step_price_distance, first_price_distance
 
@@ -10819,17 +11074,9 @@ def symbols_dynamic_grid_prices(inv_id=None):
         current_ask, num_levels,
         first_grid_money_distance, grid_money_step,
         symbol_info, min_volume, digits,
+        min_stop_price_distance=0.0,
+        lock_mode=False,
     ):
-        """
-        Build a BUY ladder above the ask.
-
-        PHASE 1: anchor entry is placed `first_grid_money_distance` (money)
-                 above the live ask.
-        PHASE 2: every consecutive entry is `grid_money_step` (money)
-                 further above the previous one.
-
-        Returns (levels, price_step, first_price_distance).
-        """
         step_price_distance = money_distance_to_price_distance(
             symbol_info, grid_money_step, min_volume
         )
@@ -10838,69 +11085,73 @@ def symbols_dynamic_grid_prices(inv_id=None):
                   f"({grid_money_step}) to price distance at min_volume={min_volume}")
             return None, None, None
 
-        # ---- PHASE 1: convert the anchor placement money distance ----
         if first_grid_money_distance and first_grid_money_distance > 0:
             first_price_distance = money_distance_to_price_distance(
                 symbol_info, first_grid_money_distance, min_volume
             )
             if first_price_distance is None or first_price_distance <= 0:
-                print(f"        ⚠️  [BUY] Could not convert first_grid_amount_distance "
-                      f"({first_grid_money_distance}) to price distance at min_volume={min_volume} "
-                      f"— falling back to one grid step")
                 first_price_distance = step_price_distance
+                print(f"        ⚠️  [BUY] Could not convert first_grid_amount_distance "
+                      f"({first_grid_money_distance}) — falling back to one grid step")
             else:
                 check_money = price_distance_to_money(symbol_info, first_price_distance, min_volume)
-                print(f"        💵 [BUY] PHASE 1 anchor placement: first_grid_amount_distance "
+                print(f"        💵 [BUY] PHASE 1 anchor gap: first_grid_amount_distance "
                       f"{first_grid_money_distance} (money) → price gap "
                       f"{first_price_distance:.{digits}f} "
-                      f"[= {check_money:.4f} money at min_vol {min_volume}] "
-                      f"(grid step = {step_price_distance:.{digits}f})")
+                      f"[= {check_money:.4f} money at min_vol {min_volume}]")
         else:
             first_price_distance = step_price_distance
             print(f"        ℹ️  [BUY] first_grid_amount_distance not set/<=0 "
                   f"— anchor falls back to one grid step ({step_price_distance:.{digits}f})")
 
-        # ---- Find the anchor: first buy strictly above ask ----
-        safety = 0
-        MAX_SAFETY = 1000
-        while safety < MAX_SAFETY:
-            anchor_candidate = round(current_ask + first_price_distance, digits)
-            if anchor_candidate > current_ask:
-                break
-            first_price_distance += step_price_distance
-            safety += 1
+        if lock_mode:
+            anchor = round(current_ask + first_price_distance, digits)
+            print(f"        🔒 [BUY] LOCK MODE — placing anchor at exactly "
+                  f"{first_price_distance:.{digits}f} above ask (no widening)")
+            if anchor <= current_ask:
+                print(f"        ⚠️  [BUY] anchor {anchor:.{digits}f} <= ask {current_ask:.{digits}f} "
+                      f"— placing anyway (lock contract)")
+        else:
+            if min_stop_price_distance > 0 and first_price_distance < min_stop_price_distance:
+                print(f"        🔧 [BUY] anchor gap {first_price_distance:.{digits}f} < broker min stop "
+                      f"{min_stop_price_distance:.{digits}f} — raising to broker min first")
+                first_price_distance = min_stop_price_distance
 
-        if safety >= MAX_SAFETY:
-            print(f"        ⚠️  [BUY] Could not find a valid anchor after "
-                  f"{MAX_SAFETY} widening attempts — aborting BUY side.")
-            return None, None, None
+            safety = 0
+            MAX_SAFETY = 1000
+            while safety < MAX_SAFETY:
+                anchor_candidate = round(current_ask + first_price_distance, digits)
+                gap = anchor_candidate - current_ask
+                if anchor_candidate > current_ask and gap >= min_stop_price_distance:
+                    break
+                first_price_distance += step_price_distance
+                safety += 1
+            if safety >= MAX_SAFETY:
+                print(f"        ⚠️  [BUY] Could not find a valid anchor after "
+                      f"{MAX_SAFETY} widening attempts — aborting BUY side.")
+                return None, None, None
+            if safety > 0:
+                print(f"        🔧 [BUY] Anchor gap auto-widened by {safety} step(s)")
+            anchor = round(current_ask + first_price_distance, digits)
 
-        if safety > 0:
-            print(f"        🔧 [BUY] Anchor gap auto-widened by {safety} step(s) "
-                  f"to satisfy level > ask")
-
-        # ---- PHASE 2: build ladder from the anchor UPWARD ----
-        anchor = round(current_ask + first_price_distance, digits)
         levels = [anchor]
         for _ in range(1, num_levels):
             next_level = round(levels[-1] + step_price_distance, digits)
             levels.append(next_level)
 
         print(f"        📐 [BUY] anchor(grid_m entry)={anchor:.{digits}f} "
-              f"(gap from ask = {anchor - current_ask:.{digits}f} price = "
-              f"{first_grid_money_distance if first_grid_money_distance > 0 else grid_money_step} money), "
-              f"then every entry steps by {step_price_distance:.{digits}f} price = "
-              f"{grid_money_step} money")
+              f"(gap from ask = {anchor - current_ask:.{digits}f} price), "
+              f"then every entry steps by {step_price_distance:.{digits}f} price")
 
         return levels, step_price_distance, first_price_distance
 
     def build_level(entry, order_type, sl, tp, rr_label, min_volume, symbol_info, account_currency, digits,
-                    is_main=False, is_helper=False, apply_m_c_flags=False):
+                    is_main=False, is_helper=False, apply_m_c_flags=False,
+                    sl_locked=False, sl_lock_partner_entry=None,
+                    position_anchored=False):
         sl_r = round(sl, digits)
         tp_r = round(tp, digits)
-
         risk = calculate_risk_in_usd(symbol_info, entry, sl_r, min_volume, account_currency)
-
         level_dict = {
             "entry": entry,
             "exit": sl_r,
@@ -10910,7 +11161,12 @@ def symbols_dynamic_grid_prices(inv_id=None):
             "order_type": order_type,
             "risk_reward": rr_label
         }
-
+        if sl_locked:
+            level_dict["sl_locked"] = True
+            if sl_lock_partner_entry is not None:
+                level_dict["sl_lock_partner_entry"] = round(sl_lock_partner_entry, digits)
+        if position_anchored:
+            level_dict["position_anchored"] = True
         if apply_m_c_flags:
             level_dict["grid_m"] = bool(is_main)
             level_dict["grid_c"] = not bool(is_main)
@@ -10918,7 +11174,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             if is_main:
                 level_dict["grid_c"] = False
                 level_dict["grid_mh"] = False
-
         return level_dict
 
     def create_ladder_orders(
@@ -10929,25 +11184,28 @@ def symbols_dynamic_grid_prices(inv_id=None):
         symbol_info, account_currency,
         grid_step_price_distance,
         apply_m_c_flags,
+        first_grids_stoploss_lock=False,
+        first_grid_money_distance=0.0,
+        position_anchor=None,
     ):
         """
-        Build order dicts from already-validated bid/ask price ladders.
-
-        Ladder layout (anchor is the CLOSEST level to price):
-
-            index 0  →  grid_m       (main)
-            index 1..helpers_needed  →  grid_mh (helpers)
-            rest                     →  grid_c (children)
-
-        IMPORTANT — SL / TP semantics:
-            • EVERY level (including grid_m) uses `grid_step_price_distance`
-              as its SL distance and as the base for TP distance.
-            • `first_grid_amount_distance` has already done its job — it
-              placed the anchor. It does NOT participate in SL/TP.
+        position_anchor (optional): dict with keys:
+            is_buy       : bool — direction of the existing position
+            entry        : float — position's open price
+            sl           : float — position's stop loss price
+        When provided AND the position is in loss, the OPPOSITE side's
+        grid_m is overridden: its entry becomes pos.sl and its SL becomes
+        pos.entry, effectively interlocking the new order with the existing
+        losing position.
         """
         print(f"\n      📊 Building order structure from validated ladders:")
         print(f"      📊 Grid step (price @ min vol {min_volume}): {grid_step_price_distance:.{digits}f}")
         print(f"      📊 Apply M/C flags: {apply_m_c_flags}")
+        if position_anchor:
+            print(f"      📌 Position anchor supplied: "
+                  f"is_buy={position_anchor['is_buy']}, "
+                  f"entry={position_anchor['entry']:.{digits}f}, "
+                  f"sl={position_anchor['sl']:.{digits}f}")
 
         helpers_needed = int(risk_reward_value) // 2 if apply_m_c_flags else 0
         print(f"      📊 helpers_needed = int(main_rr) // 2 = int({risk_reward_value}) // 2 = {helpers_needed}")
@@ -10957,12 +11215,83 @@ def symbols_dynamic_grid_prices(inv_id=None):
         tp_price_dist_for_m = grid_step_price_distance * risk_reward_value
         tp_price_dist_for_mh = grid_step_price_distance * all_grid_m_helpers_rr_value
 
-        # ============== SELL side (bid) ==============
+        lock_active = False
+        lock_reason = "lock disabled by config"
+        sell_m_entry = bid_levels[0] if bid_levels else None
+        buy_m_entry = ask_levels[0] if ask_levels else None
+
+        # Position-anchored override: determine target side
+        pos_anchor_active = False
+        pos_anchor_side = None   # "sell" or "buy"
+        pos_anchor_entry = None  # what the opposite side's entry becomes
+        pos_anchor_sl = None     # what the opposite side's SL becomes
+
+        if position_anchor is not None:
+            pos_is_buy = position_anchor.get("is_buy", False)
+            pos_entry = position_anchor.get("entry")
+            pos_sl = position_anchor.get("sl")
+            if pos_entry is not None and pos_sl is not None and pos_sl > 0:
+                # Opposite side of the existing position
+                pos_anchor_side = "sell" if pos_is_buy else "buy"
+                pos_anchor_entry = pos_sl        # position SL becomes opposite entry
+                pos_anchor_sl = pos_entry        # position entry becomes opposite SL
+                pos_anchor_active = True
+                print(f"      📌 POSITION-ANCHORED INTERLOCK: opposite side = {pos_anchor_side.upper()}")
+                print(f"         → entry becomes pos.sl = {pos_anchor_entry:.{digits}f}")
+                print(f"         → SL    becomes pos.entry = {pos_anchor_sl:.{digits}f}")
+
+        # If the position anchor overrides one side, adjust that side's grid_m
+        # BEFORE the lock check.
+        if pos_anchor_active:
+            if pos_anchor_side == "sell" and sell_m_entry is not None:
+                sell_m_entry = pos_anchor_entry
+                if bid_levels:
+                    bid_levels = [sell_m_entry] + list(bid_levels[1:])
+            elif pos_anchor_side == "buy" and buy_m_entry is not None:
+                buy_m_entry = pos_anchor_entry
+                if ask_levels:
+                    ask_levels = [buy_m_entry] + list(ask_levels[1:])
+
+        if first_grids_stoploss_lock:
+            if sell_m_entry is None or buy_m_entry is None:
+                lock_reason = "lock requested but one side has no anchor — cannot lock"
+            elif not (sell_m_entry < buy_m_entry):
+                lock_reason = "lock requested but sell_m >= buy_m (price not between anchors) — cannot lock"
+            else:
+                lock_active = True
+                actual_gap_price = buy_m_entry - sell_m_entry
+                actual_gap_money = price_distance_to_money(
+                    symbol_info, actual_gap_price, min_volume
+                )
+                gap_money_str = f"{actual_gap_money:.4f}" if actual_gap_money is not None else "n/a"
+                lock_reason = (f"LOCK ACTIVE — sell_m={sell_m_entry:.{digits}f}, "
+                               f"buy_m={buy_m_entry:.{digits}f}, "
+                               f"gap = {actual_gap_price:.{digits}f} price = "
+                               f"{gap_money_str} money "
+                               f"(target {first_grid_money_distance})")
+
+        print(f"      🔒 First-grids stoploss lock: {lock_active} ({lock_reason})")
+
+        # ---------------- SELL side ----------------
         grid_bid_levels = []
         for idx, level_price in enumerate(bid_levels):
-            sl = level_price + sl_price_dist
             is_main = (idx == 0) and apply_m_c_flags
             is_helper = (0 < idx <= helpers_needed) and apply_m_c_flags
+            sl = level_price + sl_price_dist
+            sl_locked_here = False
+            sl_lock_partner = None
+            pos_anchored_here = False
+
+            if idx == 0 and pos_anchor_active and pos_anchor_side == "sell":
+                # Override: entry already set above; SL is pos entry
+                sl = pos_anchor_sl
+                pos_anchored_here = True
+                print(f"        📌 [SELL grid_m] OVERRIDDEN: entry={level_price:.{digits}f}, "
+                      f"SL={sl:.{digits}f} (pos anchor)")
+            elif idx == 0 and lock_active and buy_m_entry is not None:
+                sl = buy_m_entry
+                sl_locked_here = True
+                sl_lock_partner = buy_m_entry
 
             if is_main:
                 tp = level_price - tp_price_dist_for_m
@@ -10978,16 +11307,32 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 level_price, ask_order_type, sl, tp, rr_label,
                 min_volume, symbol_info, account_currency, digits,
                 is_main=is_main, is_helper=is_helper,
-                apply_m_c_flags=apply_m_c_flags
+                apply_m_c_flags=apply_m_c_flags,
+                sl_locked=sl_locked_here,
+                sl_lock_partner_entry=sl_lock_partner,
+                position_anchored=pos_anchored_here,
             )
             grid_bid_levels.append(lvl)
 
-        # ============== BUY side (ask) ==============
+        # ---------------- BUY side ----------------
         grid_ask_levels = []
         for idx, level_price in enumerate(ask_levels):
-            sl = level_price - sl_price_dist
             is_main = (idx == 0) and apply_m_c_flags
             is_helper = (0 < idx <= helpers_needed) and apply_m_c_flags
+            sl = level_price - sl_price_dist
+            sl_locked_here = False
+            sl_lock_partner = None
+            pos_anchored_here = False
+
+            if idx == 0 and pos_anchor_active and pos_anchor_side == "buy":
+                sl = pos_anchor_sl
+                pos_anchored_here = True
+                print(f"        📌 [BUY grid_m] OVERRIDDEN: entry={level_price:.{digits}f}, "
+                      f"SL={sl:.{digits}f} (pos anchor)")
+            elif idx == 0 and lock_active and sell_m_entry is not None:
+                sl = sell_m_entry
+                sl_locked_here = True
+                sl_lock_partner = sell_m_entry
 
             if is_main:
                 tp = level_price + tp_price_dist_for_m
@@ -11003,7 +11348,10 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 level_price, bid_order_type, sl, tp, rr_label,
                 min_volume, symbol_info, account_currency, digits,
                 is_main=is_main, is_helper=is_helper,
-                apply_m_c_flags=apply_m_c_flags
+                apply_m_c_flags=apply_m_c_flags,
+                sl_locked=sl_locked_here,
+                sl_lock_partner_entry=sl_lock_partner,
+                position_anchored=pos_anchored_here,
             )
             grid_ask_levels.append(lvl)
 
@@ -11012,17 +11360,22 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 main = grid_bid_levels[0]
                 bid_helper_count = sum(1 for lvl in grid_bid_levels if lvl.get("grid_mh", False))
                 bid_child_count = len(grid_bid_levels) - 1 - bid_helper_count
+                lock_note = " [SL LOCKED]" if main.get("sl_locked") else ""
+                pos_note = " [POS-ANCHORED]" if main.get("position_anchored") else ""
                 print(f"        • SELL main (grid_m): entry={main['entry']:.{digits}f} "
-                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} ({main['risk_reward']})")
+                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} "
+                      f"({main['risk_reward']}){lock_note}{pos_note}")
                 print(f"        • {bid_helper_count} SELL helper(s) (grid_mh): 1:{all_grid_m_helpers_rr_value}")
                 print(f"        • {bid_child_count} SELL child level(s) (grid_c): 1:{all_grid_c_rr_value}")
-
             if grid_ask_levels:
                 main = grid_ask_levels[0]
                 ask_helper_count = sum(1 for lvl in grid_ask_levels if lvl.get("grid_mh", False))
                 ask_child_count = len(grid_ask_levels) - 1 - ask_helper_count
+                lock_note = " [SL LOCKED]" if main.get("sl_locked") else ""
+                pos_note = " [POS-ANCHORED]" if main.get("position_anchored") else ""
                 print(f"        • BUY main (grid_m): entry={main['entry']:.{digits}f} "
-                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} ({main['risk_reward']})")
+                      f"SL={main['exit']:.{digits}f} TP={main['tp']:.{digits}f} "
+                      f"({main['risk_reward']}){lock_note}{pos_note}")
                 print(f"        • {ask_helper_count} BUY helper(s) (grid_mh): 1:{all_grid_m_helpers_rr_value}")
                 print(f"        • {ask_child_count} BUY child level(s) (grid_c): 1:{all_grid_c_rr_value}")
 
@@ -11030,7 +11383,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             max_entry_bid = max(level["entry"] for level in grid_bid_levels)
             for level in grid_bid_levels:
                 level["selected_bid"] = (level["entry"] == max_entry_bid)
-
         if grid_ask_levels:
             min_entry_ask = min(level["entry"] for level in grid_ask_levels)
             for level in grid_ask_levels:
@@ -11038,18 +11390,47 @@ def symbols_dynamic_grid_prices(inv_id=None):
 
         print(f"        • Grid sell levels: {len(grid_bid_levels)}")
         print(f"        • Grid buy levels: {len(grid_ask_levels)}")
-
         return grid_bid_levels, grid_ask_levels
 
     def build_flat_record(level, symbol, category_name, digits, current_prices,
-                          grid_side, grid_config, generated_at, strategy_name):
-        """
-        Build a single flat order record in the exact schema the martingale
-        reads.
-        """
+                          grid_side, grid_config, generated_at, strategy_name,
+                          symbol_info, min_volume, account_currency):
         is_main = bool(level.get("grid_m", False))
         is_child = bool(level.get("grid_c", False))
         is_helper = bool(level.get("grid_mh", False))
+        is_sl_locked = bool(level.get("sl_locked", False))
+        is_pos_anchored = bool(level.get("position_anchored", False))
+
+        entry = level.get("entry")
+        order_type_str = str(level.get("order_type", "")).strip().lower()
+        is_buy_side = "buy" in order_type_str
+
+        current_bid = current_prices.get("bid")
+        current_ask = current_prices.get("ask")
+
+        if is_buy_side:
+            reference_price = current_ask
+            reference_key = "current_ask"
+            distance_key = "distance_from_ask"
+        else:
+            reference_price = current_bid
+            reference_key = "current_bid"
+            distance_key = "distance_from_bid"
+
+        distance_price = None
+        distance_usd = None
+        if entry is not None and reference_price is not None:
+            distance_price = abs(entry - reference_price)
+            distance_usd = price_distance_to_usd(
+                symbol_info, distance_price, min_volume, account_currency
+            )
+
+        min_stop_price = get_min_stop_distance_price(symbol_info)
+        min_stop_usd = None
+        if min_stop_price > 0:
+            min_stop_usd = price_distance_to_usd(
+                symbol_info, min_stop_price, min_volume, account_currency
+            )
 
         flat = {
             "symbol": symbol,
@@ -11057,7 +11438,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
             "category": category_name,
             "risk_reward": level.get("risk_reward"),
             "order_type": level.get("order_type"),
-            "entry": level.get("entry"),
+            "entry": entry,
             "exit": level.get("exit"),
             "tp": level.get("tp"),
             "volume": level.get("volume"),
@@ -11072,15 +11453,33 @@ def symbols_dynamic_grid_prices(inv_id=None):
             "strategy": strategy_name,
             "generated_at": generated_at,
             "digits": digits,
-            "current_bid": current_prices.get("bid"),
-            "current_ask": current_prices.get("ask"),
+            "current_bid": current_bid,
+            "current_ask": current_ask,
+            reference_key: reference_price,
+            distance_key: round(distance_usd, 4) if distance_usd is not None else None,
+            "distance_price": round(distance_price, digits) if distance_price is not None else None,
+            "min_stop_distance_price": round(min_stop_price, digits) if min_stop_price > 0 else None,
+            "min_stop_distance_usd": round(min_stop_usd, 4) if min_stop_usd is not None else None,
         }
+
+        if is_sl_locked:
+            flat["sl_locked"] = True
+            if level.get("sl_lock_partner_entry") is not None:
+                flat["sl_lock_partner_entry"] = level.get("sl_lock_partner_entry")
+
+        if is_pos_anchored:
+            flat["position_anchored"] = True
 
         return {k: v for k, v in flat.items() if v is not None}
 
     def save_symbols_prices_snapshot(prices_dir, all_symbols_price_data, acc_info,
                                      grid_config, candle_tf_key, candle_tf_seconds,
-                                     first_grid_distance_value, grid_amount_distance_value):
+                                     first_grid_distance_value, grid_amount_distance_value,
+                                     first_grids_stoploss_lock,
+                                     generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                                     generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                                     generate_new_orders_if_position_exists,
+                                     generate_new_orders_if_position_profit_reward_is_at):
         symbols_file = prices_dir / "symbols_prices.json"
         snapshot = {
             "account_login": acc_info.login,
@@ -11094,6 +11493,11 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 "multiplier": grid_config.get("multiplier"),
                 "grid_amount_distance": grid_amount_distance_value,
                 "first_grid_amount_distance_away_from_current_price": first_grid_distance_value,
+                "first_grids_stoploss_lock": first_grids_stoploss_lock,
+                "generate_new_orders_if_stoploss_lock_order_and_no_position_exists": generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                "generate_new_orders_if_stoploss_lock_order_and_position_exists": generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                "generate_new_orders_if_position_exists": generate_new_orders_if_position_exists,
+                "generate_new_orders_if_position_profit_reward_is_at": generate_new_orders_if_position_profit_reward_is_at,
                 "bid_order_type": grid_config.get("bid_order_type"),
                 "ask_order_type": grid_config.get("ask_order_type"),
                 "closest_level_risk_reward": grid_config.get("risk_reward"),
@@ -11116,27 +11520,54 @@ def symbols_dynamic_grid_prices(inv_id=None):
                               manage_each_direction_levels_count, flag_same_direction, apply_m_c_flags,
                               enable_single_position, skip_orders_close_to_position,
                               candle_tf_key, candle_tf_seconds, first_grid_distance_value,
-                              grid_amount_distance_value, flat_orders_written):
+                              grid_amount_distance_value, flat_orders_written,
+                              first_grids_stoploss_lock, locked_orders_count,
+                              generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                              generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                              generate_new_orders_if_position_exists,
+                              generate_new_orders_if_position_profit_reward_is_at,
+                              tier1_gen, tier1_skip,
+                              tier2_gen, tier2_skip,
+                              tier3_gen, tier3_skip,
+                              tier2_profit_gate_blocked,
+                              tier3_profit_gate_blocked,
+                              tier2_profit_gate_bypassed_in_loss,
+                              tier3_profit_gate_bypassed_in_loss,
+                              pos_anchored_interlocks):
         print(f"\n  📊  INVESTOR SUMMARY: {user_brokerid}")
         print(f"    • Grid Configuration: {each_direction_levels_count} levels, "
               f"grid_amount_distance={grid_amount_distance_value}")
         print(f"    • Manage Grid Levels Count: {manage_each_direction_levels_count}")
         print(f"    • Flag Same Direction M/C: {flag_same_direction} | Apply M/C Flags: {apply_m_c_flags}")
         print(f"    • Candle Timeframe Grid Circle: {candle_tf_key} ({candle_tf_seconds}s)")
-        print(f"    • First Grid Amount Distance Away From Current Price "
-              f"(money gap from live bid/ask to grid_m ANCHOR placement only): {first_grid_distance_value}")
-        print(f"    • Grid Amount Distance (money between entries + SL/TP base): {grid_amount_distance_value}")
+        print(f"    • First Grid Amount Distance Away From Current Price: {first_grid_distance_value}")
+        print(f"    • First Grids Stoploss Lock (config): {first_grids_stoploss_lock}")
+        print(f"    • [TIER 1] SL-lock + NO position → generate: {generate_new_orders_if_stoploss_lock_order_and_no_position_exists}")
+        print(f"    • [TIER 2] SL-lock + position    → generate: {generate_new_orders_if_stoploss_lock_order_and_position_exists}")
+        print(f"    • [TIER 3] else block (position) → generate: {generate_new_orders_if_position_exists}")
+        print(f"    • [PROFIT GATE] Position profit reward required: {generate_new_orders_if_position_profit_reward_is_at}")
+        print(f"      ↳ applies only when position is in profit/break-even; loss → bypassed")
+        print(f"    • Locked grid_m orders written this cycle: {locked_orders_count}")
+        print(f"    • Position-anchored interlocks created this cycle: {pos_anchored_interlocks}")
+        print(f"    • [Tier 1] GENERATED: {tier1_gen} | SKIPPED: {tier1_skip}")
+        print(f"    • [Tier 2] GENERATED: {tier2_gen} | SKIPPED: {tier2_skip} | "
+              f"PROFIT-GATE-BLOCKED: {tier2_profit_gate_blocked} | "
+              f"PROFIT-GATE-BYPASSED (in loss): {tier2_profit_gate_bypassed_in_loss}")
+        print(f"    • [Tier 3] GENERATED: {tier3_gen} | SKIPPED: {tier3_skip} | "
+              f"PROFIT-GATE-BLOCKED: {tier3_profit_gate_blocked} | "
+              f"PROFIT-GATE-BYPASSED (in loss): {tier3_profit_gate_bypassed_in_loss}")
+        print(f"    • Grid Amount Distance: {grid_amount_distance_value}")
         print(f"    • Categories processed: {total_categories}")
         print(f"    • Total symbols: {total_symbols}")
         print(f"    • Successful: {successful_symbols}")
         print(f"    • Failed: {failed_symbols}")
-        print(f"    • Success rate: {(successful_symbols/total_symbols*100):.1f}%")
+        if total_symbols > 0:
+            print(f"    • Success rate: {(successful_symbols/total_symbols*100):.1f}%")
         print(f"    • Order Types: Bid={bid_order_type}, Ask={ask_order_type}")
         if apply_m_c_flags:
             print(f"    • Closest-level R:R (grid_m): 1:{risk_reward_value}")
             print(f"    • Helpers R:R (grid_mh): 1:{all_grid_m_helpers_rr_value}")
             print(f"    • Other levels R:R (grid_c): 1:{all_grid_c_rr_value}")
-            print(f"    • Helpers count: first int(main_rr) // 2 grid_c levels per side")
         else:
             print(f"    • All levels R:R: 1:{all_grid_c_rr_value}")
         print(f"    • Enable Single Position And Pending: {enable_single_position}")
@@ -11183,7 +11614,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 print(f"\n  {'='*10} ⏭️  SKIPPING DYNAMIC PRICE COLLECTION {'='*10}")
                 print(f"  Investor: {inv_id}")
                 print(f"  Reason: 'symbols_grid_strategy' is set to FALSE in settings.grid_prices_setup")
-                print(f"  Action: Set to \"1\" (or true) to enable automatic grid price generation")
                 print(f"  {'='*55}\n")
                 return stats
 
@@ -11197,7 +11627,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
             else:
                 symbols_dict = config.get("symbols_dictionary", {})
                 if not symbols_dict:
-                    print(f" [{inv_id}] ⚠️ No symbols found (checked settings.grid_prices_setup.symbols and symbols_dictionary)")
+                    print(f" [{inv_id}] ⚠️ No symbols found")
                     return stats
                 print(f"\n  📋 Symbols loaded from legacy 'symbols_dictionary'")
 
@@ -11207,7 +11637,11 @@ def symbols_dynamic_grid_prices(inv_id=None):
                  flag_same_direction, apply_m_c_flags, manage_each_direction_levels_count,
                  enable_single_position, skip_orders_close_to_position,
                  candle_tf_key, candle_tf_seconds, first_grid_distance_value,
-                 grid_amount_distance_value) = get_grid_configuration(config)
+                 grid_amount_distance_value, first_grids_stoploss_lock,
+                 generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                 generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                 generate_new_orders_if_position_exists,
+                 generate_new_orders_if_position_profit_reward_is_at) = get_grid_configuration(config)
             except ValueError as e:
                 print(f" [{inv_id}] {e}")
                 return stats
@@ -11239,7 +11673,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
 
             if not strategy_name:
                 print(f"   SKIPPED - No strategy name found from invested_with for {inv_id}")
-                print(f"     → Cannot create grid prices without strategy folder")
                 return stats
 
             prices_dir = inv_root / strategy_name
@@ -11269,7 +11702,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
             stats["candle_circle"]["candle_close_lagos"] = candle_close_lagos.strftime('%Y-%m-%d %H:%M:%S %Z')
 
             recent_trade = get_most_recent_closed_trade(server_offset, lookback_days=7)
-
             recent_trade_is_profit = None
             recent_trade_within_current_candle = None
 
@@ -11284,19 +11716,15 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 print(f"     • Close time (Lagos): {recent_trade['close_time_lagos'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
                 recent_trade_is_profit = recent_trade['profit'] > 0
-
                 if recent_trade_is_profit:
                     print(f"  ✅ Recent trade is a PROFIT (${recent_trade['profit']:.2f})")
                     within = (candle_open_lagos <= recent_trade['close_time_lagos'] < candle_close_lagos)
                     recent_trade_within_current_candle = within
-
                     if within:
                         print(f"     ⚠️ This profit CLOSED WITHIN the current {candle_tf_key} candle window")
                         print(f"        → PURGE ALL pending orders AND close ALL open positions")
                         print(f"        → SKIP grid generation this cycle")
-
                         purge_stats = purge_all_orders_and_positions_for_investor(inv_id)
-
                         stats["candle_circle"]["recent_trade_profit"] = recent_trade['profit']
                         stats["candle_circle"]["recent_trade_close_lagos"] = recent_trade['close_time_lagos'].strftime('%Y-%m-%d %H:%M:%S %Z')
                         stats["candle_circle"]["recent_trade_is_profit"] = True
@@ -11305,7 +11733,6 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         stats["candle_circle"]["purge_stats"] = purge_stats
                         stats["candle_circle"]["grid_skipped"] = True
                         stats["signals_generated"] = False
-
                         print(f"\n  ⏭️  GRID GENERATION SKIPPED (profit taken within current candle)")
                         return stats
                     else:
@@ -11332,21 +11759,44 @@ def symbols_dynamic_grid_prices(inv_id=None):
             category_results = {}
             all_symbols_price_data = {}
             resolution_cache = {}
-
             flat_orders = []
-
+            locked_orders_total = 0
+            pos_anchored_interlocks_total = 0
+            tier1_gen = 0
+            tier1_skip = 0
+            tier2_gen = 0
+            tier2_skip = 0
+            tier3_gen = 0
+            tier3_skip = 0
+            tier2_profit_gate_blocked = 0
+            tier3_profit_gate_blocked = 0
+            tier2_profit_gate_bypassed_in_loss = 0
+            tier3_profit_gate_bypassed_in_loss = 0
             generated_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             print(f"\n  🎯 GRID SPACING MODEL: TWO-PHASE MONEY-DISTANCE")
             print(f"     PHASE 1 — FOUNDATION (anchor placement only):")
-            print(f"       • SELL grid_m entry is `first_grid_amount_distance` (money) below live bid")
-            print(f"       • BUY  grid_m entry is `first_grid_amount_distance` (money) above live ask")
-            print(f"     PHASE 2 — BUILDING (all spacing + SL/TP):")
-            print(f"       • Every consecutive entry steps by `grid_amount_distance` (money)")
-            print(f"       • Every level's SL = `level ± grid_amount_distance` (money)")
-            print(f"       • Every level's TP = `level ± grid_amount_distance × risk_reward` (money)")
-            print(f"     • Next int(main_rr)//2 levels per side are grid_mh (helpers)")
-            print(f"     • Remaining levels per side are grid_c (children)")
+            if first_grids_stoploss_lock:
+                print(f"       • LOCK MODE: first_grid_amount_distance = TOTAL gap between anchors")
+                print(f"       • Each side placed at HALF that distance from its reference price")
+                print(f"       • NO widening. NO per-side min-stop enforcement.")
+                print(f"       • SLs are interlocked: sell SL = buy entry, buy SL = sell entry")
+            else:
+                print(f"       • NORMAL MODE: each anchor placed first_grid_amount_distance from price")
+                print(f"       • Broker min-stop enforced; anchors widen if needed")
+            print(f"     • THREE-TIER GATE:")
+            print(f"       TIER 1: SL-locked pair + NO position → "
+                  f"{generate_new_orders_if_stoploss_lock_order_and_no_position_exists}")
+            print(f"       TIER 2: SL-locked pair + position    → "
+                  f"{generate_new_orders_if_stoploss_lock_order_and_position_exists}")
+            print(f"       TIER 3: else block (position gate)   → "
+                  f"{generate_new_orders_if_position_exists}")
+            print(f"     • POSITION PROFIT-REWARD GATE: reward ratio must be "
+                  f">= 1:{generate_new_orders_if_position_profit_reward_is_at} "
+                  f"WHEN position is in profit/break-even. "
+                  f"If position is IN LOSS → gate bypassed (interlock handles it)")
+            print(f"     • POSITION-ANCHORED INTERLOCK: when a position exists IN LOSS, "
+                  f"its SL→opposite entry, its entry→opposite SL")
 
             for category, symbols in symbols_dict.items():
                 print(f"\n  📂 Category: {category.upper()} ({len(symbols)} symbols)")
@@ -11367,36 +11817,241 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         category_symbols_failed += 1
                         continue
 
+                    # ----------------------------------------------------------
+                    # THREE-TIER GATE + POSITION PROFIT-REWARD GATE
+                    # ----------------------------------------------------------
+                    skip_this_symbol = False
+                    decision_made = False
+
+                    lock_pair = find_existing_sl_locked_pair_for_symbol(normalized_symbol) if first_grids_stoploss_lock else None
+                    lock_pair_price_inside = False
+                    if lock_pair is not None:
+                        s_entry = lock_pair["sell_entry"]
+                        b_entry = lock_pair["buy_entry"]
+                        lock_pair_price_inside = (current_bid > s_entry) and (current_ask < b_entry)
+
+                    if lock_pair is not None and lock_pair_price_inside:
+                        live_positions = find_live_positions_for_symbol(normalized_symbol)
+
+                        print(f"\n        🔒 SL-LOCKED PAIR DETECTED for {normalized_symbol}:")
+                        print(f"          • sell_stop #{lock_pair['sell_ticket']}: "
+                              f"entry={s_entry:.{symbol_info.digits}f} SL={lock_pair['sell_sl']:.{symbol_info.digits}f}")
+                        print(f"          • buy_stop  #{lock_pair['buy_ticket']}: "
+                              f"entry={b_entry:.{symbol_info.digits}f} SL={lock_pair['buy_sl']:.{symbol_info.digits}f}")
+                        print(f"          • current BID={current_bid:.{symbol_info.digits}f}, "
+                              f"ASK={current_ask:.{symbol_info.digits}f}")
+                        print(f"          • position exists? {bool(live_positions)} ({len(live_positions)} position(s))")
+
+                        if not live_positions:
+                            print(f"        ▶ [TIER 1] SL-lock + NO position")
+                            if generate_new_orders_if_stoploss_lock_order_and_no_position_exists:
+                                print(f"        🔄 [TIER 1] config=TRUE → GENERATE fresh orders")
+                                tier1_gen += 1
+                                decision_made = True
+                            else:
+                                print(f"        ↩️  [TIER 1] config=FALSE → fall through to TIER 3")
+                        else:
+                            # === TIER 2: check the profit gate BEFORE its own config ===
+                            print(f"        ▶ [TIER 2] SL-lock + position exists")
+                            profit_gate_ok = True
+                            if generate_new_orders_if_position_profit_reward_is_at is not None:
+                                chosen_pos_t2 = pick_latest_position(live_positions)
+                                if chosen_pos_t2 is not None:
+                                    gate_eval = evaluate_position_profit_gate(
+                                        symbol_info, chosen_pos_t2, account_currency,
+                                        generate_new_orders_if_position_profit_reward_is_at
+                                    )
+                                    print(f"        📊 [TIER 2] POSITION PROFIT CHECK:")
+                                    print(f"           • ticket #{getattr(chosen_pos_t2, 'ticket', '?')}")
+                                    print(f"           • floating profit (USD): ${gate_eval['profit_usd']:.4f}")
+                                    print(f"           • position risk (USD):   "
+                                          f"${gate_eval['risk_usd']:.4f}" if gate_eval['risk_usd'] is not None else "n/a")
+                                    print(f"           • current reward ratio:  "
+                                          f"1:{gate_eval['current_rr']:.4f}" if gate_eval['current_rr'] is not None else "n/a")
+                                    print(f"           • target reward ratio:   1:{gate_eval['target_rr']}")
+                                    print(f"           • in profit?             {gate_eval['in_profit']}")
+                                    print(f"           • in loss?               {gate_eval['in_loss']}")
+                                    print(f"           • gate applied?          {gate_eval['gate_applied']}")
+                                    print(f"           • gate passed?           {gate_eval['gate_passed']}")
+
+                                    if gate_eval['in_loss']:
+                                        print(f"        📌 [TIER 2] Position is IN LOSS → "
+                                              f"PROFIT GATE BYPASSED (interlock will handle)")
+                                        tier2_profit_gate_bypassed_in_loss += 1
+
+                                    profit_gate_ok = gate_eval['gate_passed']
+                                else:
+                                    print(f"        ⚠️  [TIER 2] Position gate: no position to evaluate "
+                                          f"— allowing (unexpected)")
+                            else:
+                                print(f"        ℹ️  [TIER 2] Profit-reward gate DISABLED (config not set) "
+                                      f"— proceeding to TIER 2 decision")
+
+                            if not profit_gate_ok:
+                                print(f"        ⏭️  [TIER 2] PROFIT GATE BLOCKED → fall through to TIER 3")
+                                tier2_profit_gate_blocked += 1
+                                # falls to TIER 3
+                            elif generate_new_orders_if_stoploss_lock_order_and_position_exists:
+                                print(f"        🔄 [TIER 2] config=TRUE → GENERATE fresh orders")
+                                tier2_gen += 1
+                                decision_made = True
+                            else:
+                                print(f"        ↩️  [TIER 2] config=FALSE → fall through to TIER 3")
+                    else:
+                        if lock_pair is not None:
+                            print(f"\n        ℹ️  SL-locked pair exists for {normalized_symbol} but price is OUTSIDE anchors "
+                                  f"— TIER 1/TIER 2 do not apply")
+                        else:
+                            print(f"\n        ℹ️  No existing SL-locked pair for {normalized_symbol} "
+                                  f"— TIER 1/TIER 2 do not apply")
+
+                    if not decision_made:
+                        live_positions_t3 = find_live_positions_for_symbol(normalized_symbol)
+                        print(f"        ▶ [TIER 3] else block (position gate)")
+                        if live_positions_t3:
+                            print(f"          • position exists ({len(live_positions_t3)} position(s))")
+
+                            # === TIER 3: check the profit gate BEFORE its own config ===
+                            profit_gate_ok_t3 = True
+                            if generate_new_orders_if_position_profit_reward_is_at is not None:
+                                chosen_pos_t3 = pick_latest_position(live_positions_t3)
+                                if chosen_pos_t3 is not None:
+                                    gate_eval_t3 = evaluate_position_profit_gate(
+                                        symbol_info, chosen_pos_t3, account_currency,
+                                        generate_new_orders_if_position_profit_reward_is_at
+                                    )
+                                    print(f"        📊 [TIER 3] POSITION PROFIT CHECK:")
+                                    print(f"           • ticket #{getattr(chosen_pos_t3, 'ticket', '?')}")
+                                    print(f"           • floating profit (USD): ${gate_eval_t3['profit_usd']:.4f}")
+                                    print(f"           • position risk (USD):   "
+                                          f"${gate_eval_t3['risk_usd']:.4f}" if gate_eval_t3['risk_usd'] is not None else "n/a")
+                                    print(f"           • current reward ratio:  "
+                                          f"1:{gate_eval_t3['current_rr']:.4f}" if gate_eval_t3['current_rr'] is not None else "n/a")
+                                    print(f"           • target reward ratio:   1:{gate_eval_t3['target_rr']}")
+                                    print(f"           • in profit?             {gate_eval_t3['in_profit']}")
+                                    print(f"           • in loss?               {gate_eval_t3['in_loss']}")
+                                    print(f"           • gate applied?          {gate_eval_t3['gate_applied']}")
+                                    print(f"           • gate passed?           {gate_eval_t3['gate_passed']}")
+
+                                    if gate_eval_t3['in_loss']:
+                                        print(f"        📌 [TIER 3] Position is IN LOSS → "
+                                              f"PROFIT GATE BYPASSED (interlock will handle)")
+                                        tier3_profit_gate_bypassed_in_loss += 1
+
+                                    profit_gate_ok_t3 = gate_eval_t3['gate_passed']
+                                else:
+                                    print(f"        ⚠️  [TIER 3] Position gate: no position to evaluate "
+                                          f"— allowing (unexpected)")
+                            else:
+                                print(f"        ℹ️  [TIER 3] Profit-reward gate DISABLED (config not set) "
+                                      f"— proceeding to TIER 3 decision")
+
+                            if not profit_gate_ok_t3:
+                                print(f"        ⏭️  [TIER 3] PROFIT GATE BLOCKED → SKIP generation")
+                                skip_this_symbol = True
+                                tier3_profit_gate_blocked += 1
+                                successful_symbols += 1
+                                category_symbols_success += 1
+                            elif generate_new_orders_if_position_exists:
+                                print(f"        🔄 [TIER 3] config=TRUE → GENERATE")
+                                tier3_gen += 1
+                            else:
+                                print(f"        ⏭️  [TIER 3] config=FALSE → SKIP generation")
+                                skip_this_symbol = True
+                                tier3_skip += 1
+                                successful_symbols += 1
+                                category_symbols_success += 1
+                        else:
+                            print(f"          • no position → GENERATE normally (no gate applies)")
+                            tier3_gen += 1
+
+                    if skip_this_symbol:
+                        continue
+
                     digits = symbol_info.digits
                     min_volume, volume_step = get_min_volume(symbol_info)
+
+                    min_stop_price_distance = get_min_stop_distance_price(symbol_info)
+                    min_stop_usd_at_min_vol = None
+                    if min_stop_price_distance > 0:
+                        min_stop_usd_at_min_vol = price_distance_to_usd(
+                            symbol_info, min_stop_price_distance, min_volume, account_currency
+                        )
+                    print(f"        📏 Broker min stop distance (informational only in LOCK MODE): "
+                          f"{min_stop_price_distance:.{digits}f} price"
+                          + (f" (~{min_stop_usd_at_min_vol:.4f} {account_currency} at min_vol {min_volume})"
+                             if min_stop_usd_at_min_vol is not None else ""))
+
+                    # ----------------------------------------------------------
+                    # POSITION-ANCHORED INTERLOCK
+                    # ----------------------------------------------------------
+                    position_anchor_for_ladder = None
+                    live_positions_now = find_live_positions_for_symbol(normalized_symbol)
+                    if live_positions_now:
+                        chosen_pos = pick_latest_position(live_positions_now)
+                        if chosen_pos is not None:
+                            pos_profit = float(getattr(chosen_pos, 'profit', 0.0) or 0.0)
+                            pos_sl = float(getattr(chosen_pos, 'sl', 0.0) or 0.0)
+                            pos_entry = float(getattr(chosen_pos, 'price_open', 0.0) or 0.0)
+                            pos_type = getattr(chosen_pos, 'type', None)
+                            pos_is_buy = (pos_type == mt5.ORDER_TYPE_BUY)
+                            print(f"\n        📌 EXISTING POSITION for {normalized_symbol}:")
+                            print(f"          • ticket #{getattr(chosen_pos,'ticket','?')}")
+                            print(f"          • direction: {'BUY' if pos_is_buy else 'SELL'}")
+                            print(f"          • entry: {pos_entry:.{digits}f}")
+                            print(f"          • SL: {pos_sl:.{digits}f}")
+                            print(f"          • floating profit (USD): ${pos_profit:.4f}")
+                            if pos_profit < 0 and pos_sl > 0:
+                                print(f"        📌 Position is IN LOSS → anchoring opposite side to it")
+                                position_anchor_for_ladder = {
+                                    "is_buy": pos_is_buy,
+                                    "entry": pos_entry,
+                                    "sl": pos_sl,
+                                }
+                                pos_anchored_interlocks_total += 1
+                            elif pos_profit < 0 and pos_sl <= 0:
+                                print(f"        ⚠️  Position is IN LOSS but has NO SL set "
+                                      f"— cannot anchor (generating normally)")
+                            else:
+                                print(f"        ℹ️  Position is in PROFIT or break-even → NOT anchoring "
+                                      f"(generating normally)")
 
                     print(f"\n      📊 Generating TWO-PHASE ladders "
                           f"(grid_amount_distance={grid_amount_distance_value}, "
                           f"first_grid_amount_distance={first_grid_distance_value}, "
+                          f"stoploss_lock={first_grids_stoploss_lock}, "
                           f"{each_direction_levels_count} levels per side):")
-                    print(f"        Reference: BID={current_bid:.{digits}f}, "
-                          f"ASK={current_ask:.{digits}f}")
+                    print(f"        Reference: BID={current_bid:.{digits}f}, ASK={current_ask:.{digits}f}")
 
-                    # ---- SELL ladder ----
+                    if first_grids_stoploss_lock and first_grid_distance_value > 0:
+                        anchor_gap_money = first_grid_distance_value / 2.0
+                        print(f"        🔒 LOCK MODE: per-side anchor gap = "
+                              f"{anchor_gap_money} money (= {first_grid_distance_value} / 2)")
+                    else:
+                        anchor_gap_money = first_grid_distance_value
+
                     bid_levels, bid_step_price, bid_first_price = generate_validated_sell_ladder(
                         current_bid=current_bid,
                         num_levels=each_direction_levels_count,
-                        first_grid_money_distance=first_grid_distance_value,
+                        first_grid_money_distance=anchor_gap_money,
                         grid_money_step=grid_amount_distance_value,
                         symbol_info=symbol_info,
                         min_volume=min_volume,
                         digits=digits,
+                        min_stop_price_distance=min_stop_price_distance,
+                        lock_mode=first_grids_stoploss_lock,
                     )
 
-                    # ---- BUY ladder ----
                     ask_levels, ask_step_price, ask_first_price = generate_validated_buy_ladder(
                         current_ask=current_ask,
                         num_levels=each_direction_levels_count,
-                        first_grid_money_distance=first_grid_distance_value,
+                        first_grid_money_distance=anchor_gap_money,
                         grid_money_step=grid_amount_distance_value,
                         symbol_info=symbol_info,
                         min_volume=min_volume,
                         digits=digits,
+                        min_stop_price_distance=min_stop_price_distance,
+                        lock_mode=first_grids_stoploss_lock,
                     )
 
                     if not bid_levels and not ask_levels:
@@ -11417,30 +12072,42 @@ def symbols_dynamic_grid_prices(inv_id=None):
                     print(f"        💵 Money→Price conversions @ min vol {min_volume}:")
                     print(f"          • PHASE 2 grid_amount_distance={grid_amount_distance_value} → "
                           f"price step (and SL/TP base)={grid_step_price_distance:.{digits}f}")
-                    if first_grid_distance_value > 0:
-                        print(f"          • PHASE 1 first_grid_amount_distance={first_grid_distance_value} → "
-                              f"sell anchor gap={bid_first_price:.{digits}f} price, "
-                              f"buy anchor gap={ask_first_price:.{digits}f} price (PLACEMENT ONLY)")
-                    else:
-                        print(f"          • PHASE 1 first_grid_amount_distance not set — anchor falls back to grid step")
+
+                    if bid_levels and ask_levels and first_grids_stoploss_lock:
+                        actual_gap_price = ask_levels[0] - bid_levels[0]
+                        actual_gap_money = price_distance_to_money(
+                            symbol_info, actual_gap_price, min_volume
+                        )
+                        gap_str = f"{actual_gap_money:.4f}" if actual_gap_money is not None else "n/a"
+                        print(f"          • LOCK GAP CHECK: sell_m={bid_levels[0]:.{digits}f}, "
+                              f"buy_m={ask_levels[0]:.{digits}f}, gap={actual_gap_price:.{digits}f} price "
+                              f"= {gap_str} money (target {first_grid_distance_value})")
 
                     if bid_levels:
-                        print(f"        SELL ladder below BID {current_bid:.{digits}f} (descending from anchor):")
+                        print(f"        SELL ladder below BID {current_bid:.{digits}f}:")
                         for i, level in enumerate(bid_levels[:6]):
                             tag = "grid_m" if i == 0 else (
                                 "grid_mh" if i <= (int(risk_reward_value) // 2) else "grid_c"
                             )
-                            print(f"          {i+1}. {level:.{digits}f}  [{tag}]  (dist from bid: "
-                                  f"{current_bid - level:.{digits}f})")
+                            d_usd = price_distance_to_usd(
+                                symbol_info, current_bid - level, min_volume, account_currency
+                            )
+                            d_usd_str = f"{d_usd:.4f}" if d_usd is not None else "n/a"
+                            print(f"          {i+1}. {level:.{digits}f}  [{tag}]  "
+                                  f"(dist from bid: {current_bid - level:.{digits}f} price = {d_usd_str} USD)")
 
                     if ask_levels:
-                        print(f"        BUY ladder above ASK {current_ask:.{digits}f} (ascending from anchor):")
+                        print(f"        BUY ladder above ASK {current_ask:.{digits}f}:")
                         for i, level in enumerate(ask_levels[:6]):
                             tag = "grid_m" if i == 0 else (
                                 "grid_mh" if i <= (int(risk_reward_value) // 2) else "grid_c"
                             )
-                            print(f"          {i+1}. {level:.{digits}f}  [{tag}]  (dist from ask: "
-                                  f"{level - current_ask:.{digits}f})")
+                            d_usd = price_distance_to_usd(
+                                symbol_info, level - current_ask, min_volume, account_currency
+                            )
+                            d_usd_str = f"{d_usd:.4f}" if d_usd is not None else "n/a"
+                            print(f"          {i+1}. {level:.{digits}f}  [{tag}]  "
+                                  f"(dist from ask: {level - current_ask:.{digits}f} price = {d_usd_str} USD)")
 
                     safe_bid_levels = bid_levels if bid_levels else []
                     safe_ask_levels = ask_levels if ask_levels else []
@@ -11453,7 +12120,14 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         symbol_info, account_currency,
                         grid_step_price_distance,
                         apply_m_c_flags,
+                        first_grids_stoploss_lock=first_grids_stoploss_lock,
+                        first_grid_money_distance=first_grid_distance_value,
+                        position_anchor=position_anchor_for_ladder,
                     )
+
+                    for lvl in (grid_bid_levels + grid_ask_levels):
+                        if lvl.get("sl_locked"):
+                            locked_orders_total += 1
 
                     current_prices = {
                         "bid": current_bid,
@@ -11467,6 +12141,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
                             lvl, normalized_symbol, category, digits, current_prices,
                             "bid", stats["grid_configuration"],
                             generated_at_str, strategy_name,
+                            symbol_info, min_volume, account_currency,
                         )
                         flat_orders.append(rec)
 
@@ -11475,6 +12150,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
                             lvl, normalized_symbol, category, digits, current_prices,
                             "ask", stats["grid_configuration"],
                             generated_at_str, strategy_name,
+                            symbol_info, min_volume, account_currency,
                         )
                         flat_orders.append(rec)
 
@@ -11485,6 +12161,10 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         "tick_size": symbol_info.trade_tick_size,
                         "tick_value": symbol_info.trade_tick_value,
                         "contract_size": symbol_info.trade_contract_size,
+                        "broker_min_stop_distance_price": round(min_stop_price_distance, digits),
+                        "broker_min_stop_distance_usd_at_min_vol": (
+                            round(min_stop_usd_at_min_vol, 6) if min_stop_usd_at_min_vol is not None else None
+                        ),
                         "account_login": int(broker_cfg['LOGIN_ID']),
                         "account_server": acc_info.server,
                         "account_balance": account_balance,
@@ -11492,6 +12172,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
                         "category": category,
                         "collected_at": generated_at_str,
                         "current_prices": current_prices,
+                        "position_anchor_applied": bool(position_anchor_for_ladder),
                         "generated_levels": {
                             "levels_below_bid": [round(p, digits) for p in safe_bid_levels],
                             "levels_above_ask": [round(p, digits) for p in safe_ask_levels],
@@ -11501,6 +12182,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
                             "levels_emitted_buy": len(safe_ask_levels),
                             "grid_amount_distance": grid_amount_distance_value,
                             "first_grid_amount_distance": first_grid_distance_value,
+                            "first_grids_stoploss_lock": first_grids_stoploss_lock,
                             "grid_step_price_distance": round(grid_step_price_distance, digits),
                             "first_grid_bid_price_distance": round(bid_first_price, digits) if bid_first_price else None,
                             "first_grid_ask_price_distance": round(ask_first_price, digits) if ask_first_price else None,
@@ -11537,6 +12219,7 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 child_count = sum(1 for o in flat_orders if o.get("grid_c") and not o.get("grid_mh") and not o.get("grid_m"))
                 buy_stop_count = sum(1 for o in flat_orders if "buy" in str(o.get("order_type", "")).lower())
                 sell_stop_count = sum(1 for o in flat_orders if "sell" in str(o.get("order_type", "")).lower())
+                pos_anchored_count = sum(1 for o in flat_orders if o.get("position_anchored"))
 
                 print(f"\n      💾 WROTE FLAT limit_orders.json: {limit_orders_path}")
                 print(f"        • Total flat orders: {len(flat_orders)}")
@@ -11545,12 +12228,25 @@ def symbols_dynamic_grid_prices(inv_id=None):
                 print(f"        • grid_m (main) orders: {main_count}")
                 print(f"        • grid_mh (helper) orders: {helper_count}")
                 print(f"        • grid_c (child) orders: {child_count}")
-                print(f"        • Each record carries is_grid_order=true and grid_side=bid/ask")
+                print(f"        • SL-locked (interlocked) orders: {locked_orders_total}")
+                print(f"        • Position-anchored grid_m orders: {pos_anchored_count}")
+                print(f"        • [Tier 1] GEN: {tier1_gen} | SKIP: {tier1_skip}")
+                print(f"        • [Tier 2] GEN: {tier2_gen} | SKIP: {tier2_skip} | "
+                      f"PROFIT-GATE-BLOCKED: {tier2_profit_gate_blocked} | "
+                      f"PROFIT-GATE-BYPASSED (in loss): {tier2_profit_gate_bypassed_in_loss}")
+                print(f"        • [Tier 3] GEN: {tier3_gen} | SKIP: {tier3_skip} | "
+                      f"PROFIT-GATE-BLOCKED: {tier3_profit_gate_blocked} | "
+                      f"PROFIT-GATE-BYPASSED (in loss): {tier3_profit_gate_bypassed_in_loss}")
 
                 save_symbols_prices_snapshot(
                     prices_dir, all_symbols_price_data, acc_info,
                     stats["grid_configuration"], candle_tf_key, candle_tf_seconds,
-                    first_grid_distance_value, grid_amount_distance_value
+                    first_grid_distance_value, grid_amount_distance_value,
+                    first_grids_stoploss_lock,
+                    generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                    generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                    generate_new_orders_if_position_exists,
+                    generate_new_orders_if_position_profit_reward_is_at,
                 )
 
                 print_investor_summary(
@@ -11561,7 +12257,20 @@ def symbols_dynamic_grid_prices(inv_id=None):
                     manage_each_direction_levels_count, flag_same_direction, apply_m_c_flags,
                     enable_single_position, skip_orders_close_to_position,
                     candle_tf_key, candle_tf_seconds, first_grid_distance_value,
-                    grid_amount_distance_value, len(flat_orders)
+                    grid_amount_distance_value, len(flat_orders),
+                    first_grids_stoploss_lock, locked_orders_total,
+                    generate_new_orders_if_stoploss_lock_order_and_no_position_exists,
+                    generate_new_orders_if_stoploss_lock_order_and_position_exists,
+                    generate_new_orders_if_position_exists,
+                    generate_new_orders_if_position_profit_reward_is_at,
+                    tier1_gen, tier1_skip,
+                    tier2_gen, tier2_skip,
+                    tier3_gen, tier3_skip,
+                    tier2_profit_gate_blocked,
+                    tier3_profit_gate_blocked,
+                    tier2_profit_gate_bypassed_in_loss,
+                    tier3_profit_gate_bypassed_in_loss,
+                    pos_anchored_interlocks_total,
                 )
             else:
                 pending_dir = prices_dir / "pending_orders"
@@ -11575,6 +12284,18 @@ def symbols_dynamic_grid_prices(inv_id=None):
             stats["successful_symbols"] = successful_symbols
             stats["failed_symbols"] = failed_symbols
             stats["total_categories"] = total_categories
+            stats["locked_orders_written"] = locked_orders_total
+            stats["tier1_lock_no_pos_generate"] = tier1_gen
+            stats["tier1_lock_no_pos_skip"] = tier1_skip
+            stats["tier2_lock_pos_generate"] = tier2_gen
+            stats["tier2_lock_pos_skip"] = tier2_skip
+            stats["tier3_position_generate"] = tier3_gen
+            stats["tier3_position_skip"] = tier3_skip
+            stats["tier2_profit_gate_blocked"] = tier2_profit_gate_blocked
+            stats["tier3_profit_gate_blocked"] = tier3_profit_gate_blocked
+            stats["tier2_profit_gate_bypassed_in_loss"] = tier2_profit_gate_bypassed_in_loss
+            stats["tier3_profit_gate_bypassed_in_loss"] = tier3_profit_gate_bypassed_in_loss
+            stats["position_anchored_interlocks"] = pos_anchored_interlocks_total
 
         except Exception as e:
             print(f" [{inv_id}]  Error: {e}")
@@ -13260,6 +13981,13 @@ def recent_highest_balance_target(inv_id=None):
       the balance is re-anchored to the current MT5 balance (or broker
       balance if MT5 is below it), and the date is reset to yesterday.
 
+    INCLUDE CURRENT DAY AS OWED:
+    - If `include_current_day_as_owed` is True, the current day's target
+      is treated like any other day: if it's not fully met, the remaining
+      amount is added to the owed debt.
+    - If False, the current day is always PENDING and never contributes
+      to owed debt (original behavior).
+
     TIMEZONE ALIGNMENT:
     - MT5 may be running in any server region. ALL timestamps derived from
       MT5 (deal times, "today" boundaries, wall clock) are converted to
@@ -13884,11 +14612,15 @@ def recent_highest_balance_target(inv_id=None):
         `effective_today` is the date the current profit run should be
         attributed to (Lagos time).
 
-        TODAY RULE:
-        - TODAY is 'met' if covered, otherwise 'pending'. NEVER 'owed'.
-
-        MISSED-DAY HANDLING:
-        - `include_missed_days` controls past-day OWED treatment.
+        TODAY RULE (updated):
+        - If `include_current_day_as_owed` is True:
+          * If today's target is fully met → status = 'met'
+          * If today's target is partially met → status = 'owed' with
+            remaining_needed added to total owed debt.
+          * If today's target is not met at all → status = 'owed' with
+            full target added to total owed debt.
+        - If `include_current_day_as_owed` is False:
+          * TODAY is 'met' if covered, otherwise 'pending'. NEVER 'owed'.
         """
         result = {
             'weekly_targets': {},
@@ -13903,6 +14635,7 @@ def recent_highest_balance_target(inv_id=None):
             'daily_target_owed': 0.0,
             'balance_used_for_bracket': starting_balance_for_today,
             'include_missed_days': False,
+            'include_current_day_as_owed': False,
             'effective_today': effective_today.strftime("%Y-%m-%d") if effective_today else None
         }
 
@@ -13929,7 +14662,9 @@ def recent_highest_balance_target(inv_id=None):
 
         daily_target_config = investor_data.get('daily_target_config', {})
         include_missed_days = daily_target_config.get('include_missed_days', False) if daily_target_config else False
+        include_current_day_as_owed = daily_target_config.get('include_current_day_as_owed', False) if daily_target_config else False
         result['include_missed_days'] = include_missed_days
+        result['include_current_day_as_owed'] = include_current_day_as_owed
 
         print(f"\n  📊 CALCULATING DAILY TARGET STATUS (SECTION 2)")
         print(f"  ──────────────────────────────────────────")
@@ -13944,6 +14679,7 @@ def recent_highest_balance_target(inv_id=None):
         print(f"  💰 Total Profit: ${profit:.2f}")
         print(f"  📌 Week starts on: {start_date.strftime('%A')} (execution start day)")
         print(f"  🔁 Include Missed Days: {'YES ✅' if include_missed_days else 'NO ⏭️ (past missed days will be skipped)'}")
+        print(f"  🔁 Include Current Day As Owed: {'YES ✅' if include_current_day_as_owed else 'NO ⏭️ (today is always PENDING)'}")
         if starting_balance_for_today is not None:
             print(f"  🎯 Balance used for bracket resolution: ${starting_balance_for_today:.2f}")
         else:
@@ -14027,9 +14763,17 @@ def recent_highest_balance_target(inv_id=None):
                         profit_allocated = target
                         remaining_profit -= target
                     else:
-                        status = 'pending'
-                        profit_allocated = remaining_profit
-                        remaining_profit = 0
+                        # Today is not fully met
+                        if include_current_day_as_owed:
+                            # Treat like an owed day: allocate what we can, owe the rest
+                            status = 'owed'
+                            profit_allocated = remaining_profit
+                            remaining_profit = 0
+                        else:
+                            # Original behavior: today is always PENDING, never owed
+                            status = 'pending'
+                            profit_allocated = remaining_profit
+                            remaining_profit = 0
                 else:
                     status = 'pending'
                     profit_allocated = 0.0
@@ -14057,6 +14801,12 @@ def recent_highest_balance_target(inv_id=None):
                         result['today_met'] = True
                         result['today_target_met'] = True
                         print(f"\n  ✅ TODAY ({day_name_proper}): Target MET! Profit allocation: ${profit_allocated:.2f} >= ${target:.2f}")
+                    elif status == 'owed':
+                        result['today_met'] = False
+                        result['today_target_met'] = False
+                        print(f"\n  ⚠️ TODAY ({day_name_proper}): Target OWED (include_current_day_as_owed=True). "
+                              f"Profit allocation: ${profit_allocated:.2f} < ${target:.2f}")
+                        print(f"     Remaining needed today (now added to owed debt): ${target - profit_allocated:.2f}")
                     else:
                         result['today_met'] = False
                         result['today_target_met'] = False
@@ -14125,6 +14875,7 @@ def recent_highest_balance_target(inv_id=None):
         print(f"\n  📊 FINAL STATUS:")
         print(f"  ──────────────────")
         print(f"  Include Missed Days: {'YES ✅' if include_missed_days else 'NO ⏭️'}")
+        print(f"  Include Current Day As Owed: {'YES ✅' if include_current_day_as_owed else 'NO ⏭️'}")
         print(f"  Today's Target Met: {'YES ✅' if result['today_met'] else 'NO ⏳ (PENDING)'}")
         print(f"  Total Owed (backward, PAST days only): ${total_owed:.2f}")
         print(f"  Pre-Pending Total (forward, current week): ${result['pre_pending_total']:.2f}")
@@ -14807,6 +15558,7 @@ def recent_highest_balance_target(inv_id=None):
         daily_target_met['total_all_debt'] = total_all_debt
         daily_target_met['balance_used_for_bracket'] = today_start_balance
         daily_target_met['effective_today'] = result.get('effective_today')
+        daily_target_met['include_current_day_as_owed'] = result.get('include_current_day_as_owed', False)
         daily_target_met['latest_trade_date'] = (
             latest_trade_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if latest_trade_dt else None
         )
@@ -14945,6 +15697,7 @@ def recent_highest_balance_target(inv_id=None):
             "pre_pending_total": pre_pending_total,
             "total_all_debt": total_all_debt,
             "daily_target_owed": daily_target_owed_combined,
+            "include_current_day_as_owed": result.get('include_current_day_as_owed', False),
             "last_update_date": today_str if alarm_trigger else existing_last_update,
             "effective_today": effective_today.strftime("%Y-%m-%d"),
             "latest_trade_date": latest_trade_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if latest_trade_dt else None,
@@ -15134,48 +15887,75 @@ def martingale_system(inv_id=None):
         def get_open_positions_total_risk():
             """
             Calculate total risk of all open positions.
+
+            BREAKEVEN / PROFIT-LOCKED HANDLING:
+                A position only contributes to risk if its stop loss is still
+                on the LOSS side of the entry price. If the SL has been moved
+                to breakeven (SL == entry) or into profit territory
+                (SL > entry for BUY, SL < entry for SELL), the position has
+                NO remaining risk and is EXCLUDED from the drawdown total.
+
             Returns: (total_risk, list_of_position_risks)
             """
             positions = mt5.positions_get()
             if positions is None or len(positions) == 0:
                 return 0, []
-            
+
             total_risk = 0
             position_risks = []
-            
+            skipped_no_sl = 0
+            skipped_breakeven_or_profit = 0
+
             for pos in positions:
                 symbol = pos.symbol
                 symbol_info = mt5.symbol_info(symbol)
                 if not symbol_info:
                     continue
-                
+
                 # Skip if no stop loss
                 if pos.sl is None or pos.sl == 0:
+                    skipped_no_sl += 1
                     continue
-                
+
                 # Calculate risk based on position type
                 if pos.type == mt5.POSITION_TYPE_BUY:
                     price_diff = pos.price_open - pos.sl
+                    direction = "BUY"
                 else:  # SELL
                     price_diff = pos.sl - pos.price_open
-                
+                    direction = "SELL"
+
+                # BREAKEVEN / PROFIT-LOCKED EXCLUSION:
+                #   price_diff <= 0 means the SL is at breakeven or in profit
+                #   territory for this position → NO remaining risk.
+                #   These positions do NOT contribute to drawdown.
                 if price_diff <= 0:
+                    skipped_breakeven_or_profit += 1
+                    print(f"  │ ⏭️ {symbol} {direction}: SL at/beyond breakeven "
+                          f"(entry={pos.price_open:.5f}, SL={pos.sl:.5f}) "
+                          f"→ NO RISK, excluded from drawdown")
                     continue
-                
+
                 contract_size = symbol_info.trade_contract_size
                 risk = price_diff * pos.volume * contract_size
                 total_risk += risk
-                
+
                 position_risks.append({
                     'ticket': pos.ticket,
                     'symbol': symbol,
                     'volume': pos.volume,
                     'entry': pos.price_open,
                     'sl': pos.sl,
-                    'type': 'BUY' if pos.type == 0 else 'SELL',
+                    'type': direction,
                     'risk': risk
                 })
-            
+
+            if skipped_no_sl > 0:
+                print(f"  │ ℹ️ Skipped {skipped_no_sl} position(s) with no stop loss")
+            if skipped_breakeven_or_profit > 0:
+                print(f"  │ ℹ️ Skipped {skipped_breakeven_or_profit} position(s) at breakeven/profit-locked "
+                      f"(no remaining risk)")
+
             return total_risk, position_risks
 
         # ========== LEVERAGE / MARGIN VALIDATION HELPERS ==========
@@ -32444,37 +33224,32 @@ def process_single_investor_(inv_folder):
         return account_stats
 
     # =====================================================================
-    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
+    # VERIFY TERMINAL IS ALREADY LOGGED INTO THE EXPECTED ACCOUNT
+    # ---------------------------------------------------------------------
+    # ✅ FIX: removed mt5.login() re-login. The terminal at Terminal_path is
+    # already logged in via its saved session (portable=True). We simply
+    # confirm the attached account matches the investor's expected login.
     # =====================================================================
     try:
-        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-
-        # ✅ FIX: replaced shutdown/sleep/re-init block with a proper mt5.login() call.
-        # mt5.initialize() only attaches to the terminal; it does NOT log in.
-        # mt5.login() switches the account on the already-attached terminal — fast.
-        logged_in = mt5.login(
-            login=login_id,
-            password=broker_password_str,
-            server=server_str,
-            timeout=10000,
-        )
-
-        if not logged_in:
-            print(f"[FAIL] MT5 login failed for {login_id}: {mt5.last_error()}")
-            mt5.shutdown()
-            account_stats["skip_reason"] = "MT5 Login Failure"
-            return account_stats
-
-        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-
-        # Verify account info
         acc = mt5.account_info()
 
         if acc is None:
-            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"[FAIL] No account attached after initialization for {inv_id}")
             print(f"       Error: {mt5.last_error()}")
             mt5.shutdown()
+            account_stats["skip_reason"] = "No account attached after initialization"
             return account_stats
+
+        if str(acc.login) != str(login_id):
+            print(f"[FAIL] Account mismatch for {inv_id}: "
+                  f"terminal is logged into {acc.login}, expected {login_id}")
+            mt5.shutdown()
+            account_stats["skip_reason"] = (
+                f"Account mismatch: terminal={acc.login} expected={login_id}"
+            )
+            return account_stats
+
+        print(f"✅ Confirmed terminal is logged into expected account: {acc.login}")
 
         # =================================================================
         # ACCOUNT TYPE IDENTIFICATION HIERARCHY
@@ -32605,11 +33380,11 @@ def process_single_investor_(inv_folder):
         #trades_analytics(inv_id=inv_id)
         #check_and_record_unauthorized_actions(inv_id=inv_id)
         #symbols_dynamic_grid_prices(inv_id=inv_id)
-        #convert_grid_prices_to_limit_orders(inv_id=inv_id)
         recent_highest_balance_target(inv_id=inv_id)
-        martingale_system(inv_id=inv_id)
+        #martingale_system(inv_id=inv_id)
         #place_usd_orders(inv_id=inv_id)
-        #trailing_amount_distance_limit(inv_id=inv_id)
+        #chunk_orders_with_volume_beyond_max(inv_id=inv_id)
+        #
 
         mt5.shutdown()
 
@@ -32771,37 +33546,32 @@ def process_single_investor(inv_folder):
         return account_stats
 
     # =====================================================================
-    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
+    # VERIFY TERMINAL IS ALREADY LOGGED INTO THE EXPECTED ACCOUNT
+    # ---------------------------------------------------------------------
+    # ✅ FIX: removed mt5.login() re-login. The terminal at Terminal_path is
+    # already logged in via its saved session (portable=True). We simply
+    # confirm the attached account matches the investor's expected login.
     # =====================================================================
     try:
-        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-
-        # ✅ FIX: replaced shutdown/sleep/re-init block with a proper mt5.login() call.
-        # mt5.initialize() only attaches to the terminal; it does NOT log in.
-        # mt5.login() switches the account on the already-attached terminal — fast.
-        logged_in = mt5.login(
-            login=login_id,
-            password=broker_password_str,
-            server=server_str,
-            timeout=10000,
-        )
-
-        if not logged_in:
-            print(f"[FAIL] MT5 login failed for {login_id}: {mt5.last_error()}")
-            mt5.shutdown()
-            account_stats["skip_reason"] = "MT5 Login Failure"
-            return account_stats
-
-        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-
-        # Verify account info
         acc = mt5.account_info()
 
         if acc is None:
-            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"[FAIL] No account attached after initialization for {inv_id}")
             print(f"       Error: {mt5.last_error()}")
             mt5.shutdown()
+            account_stats["skip_reason"] = "No account attached after initialization"
             return account_stats
+
+        if str(acc.login) != str(login_id):
+            print(f"[FAIL] Account mismatch for {inv_id}: "
+                  f"terminal is logged into {acc.login}, expected {login_id}")
+            mt5.shutdown()
+            account_stats["skip_reason"] = (
+                f"Account mismatch: terminal={acc.login} expected={login_id}"
+            )
+            return account_stats
+
+        print(f"✅ Confirmed terminal is logged into expected account: {acc.login}")
 
         # =================================================================
         # ACCOUNT TYPE IDENTIFICATION HIERARCHY
@@ -33101,7 +33871,7 @@ def process_single_investor(inv_folder):
             pass
 
     return account_stats
-    
+   
 def main_once():
     """
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders

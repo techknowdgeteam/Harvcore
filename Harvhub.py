@@ -13983,6 +13983,13 @@ def recent_highest_balance_target(inv_id=None):
       the balance is re-anchored to the current MT5 balance (or broker
       balance if MT5 is below it), and the date is reset to yesterday.
 
+    INCLUDE CURRENT DAY AS OWED:
+    - If `include_current_day_as_owed` is True, the current day's target
+      is treated like any other day: if it's not fully met, the remaining
+      amount is added to the owed debt.
+    - If False, the current day is always PENDING and never contributes
+      to owed debt (original behavior).
+
     TIMEZONE ALIGNMENT:
     - MT5 may be running in any server region. ALL timestamps derived from
       MT5 (deal times, "today" boundaries, wall clock) are converted to
@@ -14607,11 +14614,15 @@ def recent_highest_balance_target(inv_id=None):
         `effective_today` is the date the current profit run should be
         attributed to (Lagos time).
 
-        TODAY RULE:
-        - TODAY is 'met' if covered, otherwise 'pending'. NEVER 'owed'.
-
-        MISSED-DAY HANDLING:
-        - `include_missed_days` controls past-day OWED treatment.
+        TODAY RULE (updated):
+        - If `include_current_day_as_owed` is True:
+          * If today's target is fully met → status = 'met'
+          * If today's target is partially met → status = 'owed' with
+            remaining_needed added to total owed debt.
+          * If today's target is not met at all → status = 'owed' with
+            full target added to total owed debt.
+        - If `include_current_day_as_owed` is False:
+          * TODAY is 'met' if covered, otherwise 'pending'. NEVER 'owed'.
         """
         result = {
             'weekly_targets': {},
@@ -14626,6 +14637,7 @@ def recent_highest_balance_target(inv_id=None):
             'daily_target_owed': 0.0,
             'balance_used_for_bracket': starting_balance_for_today,
             'include_missed_days': False,
+            'include_current_day_as_owed': False,
             'effective_today': effective_today.strftime("%Y-%m-%d") if effective_today else None
         }
 
@@ -14652,7 +14664,9 @@ def recent_highest_balance_target(inv_id=None):
 
         daily_target_config = investor_data.get('daily_target_config', {})
         include_missed_days = daily_target_config.get('include_missed_days', False) if daily_target_config else False
+        include_current_day_as_owed = daily_target_config.get('include_current_day_as_owed', False) if daily_target_config else False
         result['include_missed_days'] = include_missed_days
+        result['include_current_day_as_owed'] = include_current_day_as_owed
 
         print(f"\n  📊 CALCULATING DAILY TARGET STATUS (SECTION 2)")
         print(f"  ──────────────────────────────────────────")
@@ -14667,6 +14681,7 @@ def recent_highest_balance_target(inv_id=None):
         print(f"  💰 Total Profit: ${profit:.2f}")
         print(f"  📌 Week starts on: {start_date.strftime('%A')} (execution start day)")
         print(f"  🔁 Include Missed Days: {'YES ✅' if include_missed_days else 'NO ⏭️ (past missed days will be skipped)'}")
+        print(f"  🔁 Include Current Day As Owed: {'YES ✅' if include_current_day_as_owed else 'NO ⏭️ (today is always PENDING)'}")
         if starting_balance_for_today is not None:
             print(f"  🎯 Balance used for bracket resolution: ${starting_balance_for_today:.2f}")
         else:
@@ -14750,9 +14765,17 @@ def recent_highest_balance_target(inv_id=None):
                         profit_allocated = target
                         remaining_profit -= target
                     else:
-                        status = 'pending'
-                        profit_allocated = remaining_profit
-                        remaining_profit = 0
+                        # Today is not fully met
+                        if include_current_day_as_owed:
+                            # Treat like an owed day: allocate what we can, owe the rest
+                            status = 'owed'
+                            profit_allocated = remaining_profit
+                            remaining_profit = 0
+                        else:
+                            # Original behavior: today is always PENDING, never owed
+                            status = 'pending'
+                            profit_allocated = remaining_profit
+                            remaining_profit = 0
                 else:
                     status = 'pending'
                     profit_allocated = 0.0
@@ -14780,6 +14803,12 @@ def recent_highest_balance_target(inv_id=None):
                         result['today_met'] = True
                         result['today_target_met'] = True
                         print(f"\n  ✅ TODAY ({day_name_proper}): Target MET! Profit allocation: ${profit_allocated:.2f} >= ${target:.2f}")
+                    elif status == 'owed':
+                        result['today_met'] = False
+                        result['today_target_met'] = False
+                        print(f"\n  ⚠️ TODAY ({day_name_proper}): Target OWED (include_current_day_as_owed=True). "
+                              f"Profit allocation: ${profit_allocated:.2f} < ${target:.2f}")
+                        print(f"     Remaining needed today (now added to owed debt): ${target - profit_allocated:.2f}")
                     else:
                         result['today_met'] = False
                         result['today_target_met'] = False
@@ -14848,6 +14877,7 @@ def recent_highest_balance_target(inv_id=None):
         print(f"\n  📊 FINAL STATUS:")
         print(f"  ──────────────────")
         print(f"  Include Missed Days: {'YES ✅' if include_missed_days else 'NO ⏭️'}")
+        print(f"  Include Current Day As Owed: {'YES ✅' if include_current_day_as_owed else 'NO ⏭️'}")
         print(f"  Today's Target Met: {'YES ✅' if result['today_met'] else 'NO ⏳ (PENDING)'}")
         print(f"  Total Owed (backward, PAST days only): ${total_owed:.2f}")
         print(f"  Pre-Pending Total (forward, current week): ${result['pre_pending_total']:.2f}")
@@ -15530,6 +15560,7 @@ def recent_highest_balance_target(inv_id=None):
         daily_target_met['total_all_debt'] = total_all_debt
         daily_target_met['balance_used_for_bracket'] = today_start_balance
         daily_target_met['effective_today'] = result.get('effective_today')
+        daily_target_met['include_current_day_as_owed'] = result.get('include_current_day_as_owed', False)
         daily_target_met['latest_trade_date'] = (
             latest_trade_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if latest_trade_dt else None
         )
@@ -15668,6 +15699,7 @@ def recent_highest_balance_target(inv_id=None):
             "pre_pending_total": pre_pending_total,
             "total_all_debt": total_all_debt,
             "daily_target_owed": daily_target_owed_combined,
+            "include_current_day_as_owed": result.get('include_current_day_as_owed', False),
             "last_update_date": today_str if alarm_trigger else existing_last_update,
             "effective_today": effective_today.strftime("%Y-%m-%d"),
             "latest_trade_date": latest_trade_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if latest_trade_dt else None,
@@ -15857,48 +15889,75 @@ def martingale_system(inv_id=None):
         def get_open_positions_total_risk():
             """
             Calculate total risk of all open positions.
+
+            BREAKEVEN / PROFIT-LOCKED HANDLING:
+                A position only contributes to risk if its stop loss is still
+                on the LOSS side of the entry price. If the SL has been moved
+                to breakeven (SL == entry) or into profit territory
+                (SL > entry for BUY, SL < entry for SELL), the position has
+                NO remaining risk and is EXCLUDED from the drawdown total.
+
             Returns: (total_risk, list_of_position_risks)
             """
             positions = mt5.positions_get()
             if positions is None or len(positions) == 0:
                 return 0, []
-            
+
             total_risk = 0
             position_risks = []
-            
+            skipped_no_sl = 0
+            skipped_breakeven_or_profit = 0
+
             for pos in positions:
                 symbol = pos.symbol
                 symbol_info = mt5.symbol_info(symbol)
                 if not symbol_info:
                     continue
-                
+
                 # Skip if no stop loss
                 if pos.sl is None or pos.sl == 0:
+                    skipped_no_sl += 1
                     continue
-                
+
                 # Calculate risk based on position type
                 if pos.type == mt5.POSITION_TYPE_BUY:
                     price_diff = pos.price_open - pos.sl
+                    direction = "BUY"
                 else:  # SELL
                     price_diff = pos.sl - pos.price_open
-                
+                    direction = "SELL"
+
+                # BREAKEVEN / PROFIT-LOCKED EXCLUSION:
+                #   price_diff <= 0 means the SL is at breakeven or in profit
+                #   territory for this position → NO remaining risk.
+                #   These positions do NOT contribute to drawdown.
                 if price_diff <= 0:
+                    skipped_breakeven_or_profit += 1
+                    print(f"  │ ⏭️ {symbol} {direction}: SL at/beyond breakeven "
+                          f"(entry={pos.price_open:.5f}, SL={pos.sl:.5f}) "
+                          f"→ NO RISK, excluded from drawdown")
                     continue
-                
+
                 contract_size = symbol_info.trade_contract_size
                 risk = price_diff * pos.volume * contract_size
                 total_risk += risk
-                
+
                 position_risks.append({
                     'ticket': pos.ticket,
                     'symbol': symbol,
                     'volume': pos.volume,
                     'entry': pos.price_open,
                     'sl': pos.sl,
-                    'type': 'BUY' if pos.type == 0 else 'SELL',
+                    'type': direction,
                     'risk': risk
                 })
-            
+
+            if skipped_no_sl > 0:
+                print(f"  │ ℹ️ Skipped {skipped_no_sl} position(s) with no stop loss")
+            if skipped_breakeven_or_profit > 0:
+                print(f"  │ ℹ️ Skipped {skipped_breakeven_or_profit} position(s) at breakeven/profit-locked "
+                      f"(no remaining risk)")
+
             return total_risk, position_risks
 
         # ========== LEVERAGE / MARGIN VALIDATION HELPERS ==========
@@ -33922,37 +33981,32 @@ def process_single_investor_(inv_folder):
         return account_stats
 
     # =====================================================================
-    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
+    # VERIFY TERMINAL IS ALREADY LOGGED INTO THE EXPECTED ACCOUNT
+    # ---------------------------------------------------------------------
+    # ✅ FIX: removed mt5.login() re-login. The terminal at Terminal_path is
+    # already logged in via its saved session (portable=True). We simply
+    # confirm the attached account matches the investor's expected login.
     # =====================================================================
     try:
-        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-
-        # ✅ FIX: replaced shutdown/sleep/re-init block with a proper mt5.login() call.
-        # mt5.initialize() only attaches to the terminal; it does NOT log in.
-        # mt5.login() switches the account on the already-attached terminal — fast.
-        logged_in = mt5.login(
-            login=login_id,
-            password=broker_password_str,
-            server=server_str,
-            timeout=10000,
-        )
-
-        if not logged_in:
-            print(f"[FAIL] MT5 login failed for {login_id}: {mt5.last_error()}")
-            mt5.shutdown()
-            account_stats["skip_reason"] = "MT5 Login Failure"
-            return account_stats
-
-        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-
-        # Verify account info
         acc = mt5.account_info()
 
         if acc is None:
-            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"[FAIL] No account attached after initialization for {inv_id}")
             print(f"       Error: {mt5.last_error()}")
             mt5.shutdown()
+            account_stats["skip_reason"] = "No account attached after initialization"
             return account_stats
+
+        if str(acc.login) != str(login_id):
+            print(f"[FAIL] Account mismatch for {inv_id}: "
+                  f"terminal is logged into {acc.login}, expected {login_id}")
+            mt5.shutdown()
+            account_stats["skip_reason"] = (
+                f"Account mismatch: terminal={acc.login} expected={login_id}"
+            )
+            return account_stats
+
+        print(f"✅ Confirmed terminal is logged into expected account: {acc.login}")
 
         # =================================================================
         # ACCOUNT TYPE IDENTIFICATION HIERARCHY
@@ -34082,8 +34136,8 @@ def process_single_investor_(inv_folder):
         # =====================================================================
         #trades_analytics(inv_id=inv_id)
         #check_and_record_unauthorized_actions(inv_id=inv_id)
-        symbols_dynamic_grid_prices(inv_id=inv_id)
-        #recent_highest_balance_target(inv_id=inv_id)
+        #symbols_dynamic_grid_prices(inv_id=inv_id)
+        recent_highest_balance_target(inv_id=inv_id)
         #martingale_system(inv_id=inv_id)
         #place_usd_orders(inv_id=inv_id)
         #chunk_orders_with_volume_beyond_max(inv_id=inv_id)
@@ -34249,37 +34303,32 @@ def process_single_investor(inv_folder):
         return account_stats
 
     # =====================================================================
-    # DIRECT LOGIN WITH PROVIDED CREDENTIALS
+    # VERIFY TERMINAL IS ALREADY LOGGED INTO THE EXPECTED ACCOUNT
+    # ---------------------------------------------------------------------
+    # ✅ FIX: removed mt5.login() re-login. The terminal at Terminal_path is
+    # already logged in via its saved session (portable=True). We simply
+    # confirm the attached account matches the investor's expected login.
     # =====================================================================
     try:
-        print(f"🔐 Attempting direct login with credentials for ID: {login_id} on server: {server_str}")
-
-        # ✅ FIX: replaced shutdown/sleep/re-init block with a proper mt5.login() call.
-        # mt5.initialize() only attaches to the terminal; it does NOT log in.
-        # mt5.login() switches the account on the already-attached terminal — fast.
-        logged_in = mt5.login(
-            login=login_id,
-            password=broker_password_str,
-            server=server_str,
-            timeout=10000,
-        )
-
-        if not logged_in:
-            print(f"[FAIL] MT5 login failed for {login_id}: {mt5.last_error()}")
-            mt5.shutdown()
-            account_stats["skip_reason"] = "MT5 Login Failure"
-            return account_stats
-
-        print(f"✅ Successfully logged in with credentials for ID: {login_id}")
-
-        # Verify account info
         acc = mt5.account_info()
 
         if acc is None:
-            print(f"[FAIL] Could not retrieve account information after login")
+            print(f"[FAIL] No account attached after initialization for {inv_id}")
             print(f"       Error: {mt5.last_error()}")
             mt5.shutdown()
+            account_stats["skip_reason"] = "No account attached after initialization"
             return account_stats
+
+        if str(acc.login) != str(login_id):
+            print(f"[FAIL] Account mismatch for {inv_id}: "
+                  f"terminal is logged into {acc.login}, expected {login_id}")
+            mt5.shutdown()
+            account_stats["skip_reason"] = (
+                f"Account mismatch: terminal={acc.login} expected={login_id}"
+            )
+            return account_stats
+
+        print(f"✅ Confirmed terminal is logged into expected account: {acc.login}")
 
         # =================================================================
         # ACCOUNT TYPE IDENTIFICATION HIERARCHY
@@ -34579,7 +34628,7 @@ def process_single_investor(inv_folder):
             pass
 
     return account_stats
-    
+
 def main_once():
     """
     ORCHESTRATOR (Persistent Unlimited Loop): Processes ALL investor folders
@@ -34878,5 +34927,4 @@ def main_loop():
   
 if __name__ == "__main__":
    main_once()
-
 
