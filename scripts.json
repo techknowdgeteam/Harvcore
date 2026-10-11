@@ -1,0 +1,8 @@
+{
+    "scripts": [
+        {
+            "name": "HARVHUB",
+            "path": "C:\\xampp\\htdocs\\harvcore\\harvox\\harvhub\\Harvcore_harvhub.py"
+        }
+    ]
+}
