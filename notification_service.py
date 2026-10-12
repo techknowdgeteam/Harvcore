@@ -13,12 +13,16 @@ Public API (mirrors the PHP):
 
     record_broker_login_status_notification(pdo, user)  -> int | None
     record_broker_login_success_notification(pdo, user) -> int | None
+    record_broker_login_reconnected_notification(pdo, user) -> int | None
 
     record_programme_broker_login_status_notification(pdo, row) -> int | None
     record_programme_broker_login_success_notification(pdo, row) -> int | None
+    record_programme_broker_login_reconnected_notification(pdo, row) -> int | None
     record_programme_disconnect_broker_completed_notification(pdo, row) -> int | None
 
     record_disconnect_broker_completed_notification(pdo, user) -> int | None
+
+    record_balance_verification_notification(pdo, user) -> int | None
 
     get_contract_notifications(pdo, email, sub_id, limit=100) -> list
     get_programme_notifications(pdo, programme_id, email, limit=100) -> list
@@ -29,23 +33,6 @@ Public API (mirrors the PHP):
     get_programme_notification_unread_count(pdo, programme_id, email) -> int
 
     sync_notification_unread_flag(pdo, email, sub_id) -> None
-
-The `pdo` argument is any object exposing `query(sql, params)` that
-returns a dict shaped like the mysqlremote result:
-
-    {
-      'status': 'success' | 'error',
-      'results': [...],       # list of dict rows
-      'affected_rows': int,
-      'message': str,
-      'query_id': ...
-    }
-
-NULL handling
--------------
-mysqlremote commonly returns the literal string 'NULL' for SQL NULL
-columns rather than Python None. All emptiness checks below treat
-None, '', and 'NULL'/'null'/'none'/'nan' as equivalent.
 """
 
 from __future__ import annotations
@@ -88,14 +75,12 @@ _NULLY = {'', 'null', 'none', 'nan'}
 
 
 def _is_empty_value(v) -> bool:
-    """True if v is None, '', or the string 'NULL'/'null'/'none'/'nan'."""
     if v is None:
         return True
     return str(v).strip().lower() in _NULLY
 
 
 def _to_int_or_none(v) -> Optional[int]:
-    """Parse an int from v, or return None if v is empty / unparseable."""
     if _is_empty_value(v):
         return None
     try:
@@ -134,7 +119,7 @@ def harvhub_notification_clean_text(value: Any) -> str:
 
 
 # ==============================================================================
-# EMAIL ADAPTER — pulled in lazily so notification_service stays importable
+# EMAIL ADAPTER
 # ==============================================================================
 
 def _send_notification_email(
@@ -143,9 +128,6 @@ def _send_notification_email(
     message: str,
     meta: dict,
 ) -> bool:
-    """
-    Delegates to notification_email.send_notification_email.
-    """
     try:
         from notification_email import send_notification_email
     except Exception as e:
@@ -160,16 +142,10 @@ def _send_notification_email(
 
 
 # ==============================================================================
-# PDO ADAPTER — duck-types mysqlremote's db_query()
+# PDO ADAPTER
 # ==============================================================================
 
 class _PdoAdapter:
-    """
-    Wraps a `db_query(sql, params, timeout=..., quiet=...)` callable so the
-    Python notification service can call `pdo.query(sql, params)` and get
-    back a dict shaped the same as mysqlremote's result.
-    """
-
     def __init__(self, query_fn, default_timeout: float = 20.0):
         self._query_fn = query_fn
         self._timeout = default_timeout
@@ -196,7 +172,6 @@ class _PdoAdapter:
 
 
 def make_pdo(query_fn) -> _PdoAdapter:
-    """Public helper so callers can build a pdo from `db_query`."""
     return _PdoAdapter(query_fn)
 
 
@@ -225,7 +200,6 @@ def _first_value(row) -> Any:
 
 
 def _row_get(row, key: str, default: Any = None) -> Any:
-    """Case-insensitive column fetch from a mysqlremote dict."""
     if not isinstance(row, dict):
         return default
     lk = key.lower()
@@ -236,14 +210,6 @@ def _row_get(row, key: str, default: Any = None) -> Any:
 
 
 def _normalize_row(row) -> Optional[dict]:
-    """
-    Return a lowercase-key dict for the incoming row.
-
-    Accepts:
-      * dict with any key casing
-      * list / tuple in the SELECT order used by _fetch_row_for_notify
-      * None
-    """
     if row is None:
         return None
     if isinstance(row, dict):
@@ -289,13 +255,7 @@ def record_contract_notification(pdo, payload: dict) -> Optional[int]:
         action_tab = None
     force = bool(payload.get('force'))
 
-    if (
-        not email
-        or '@' not in email
-        or sub_id <= 0
-        or not key
-        or not message
-    ):
+    if (not email or '@' not in email or sub_id <= 0 or not key or not message):
         print('[HarvHub Notification Service] Invalid notification payload.')
         return None
 
@@ -585,16 +545,6 @@ def record_programme_notification_once(
 # ==============================================================================
 # BROKER LOGIN STATUS NOTIFICATIONS — INVESTOR / SUB-ACCOUNT
 # ==============================================================================
-#
-# Called by brokerdetails.py at the end of a probe pass for a harvhub row.
-#
-# Three failure statuses are handled:
-#
-#   invalid_credentials  -> the credentials were rejected by the broker.
-#   fullname_mismatch    -> the broker name does not match the HarvHub name.
-#   invalid_account      -> a demo account was used while demo is disallowed.
-#
-# A separate success helper fires the "logged on" notification.
 
 def record_broker_login_status_notification(pdo, user) -> Optional[int]:
     row = _normalize_row(user)
@@ -626,10 +576,6 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
         print(
             '[HarvHub Notification Service] broker-login: broker columns '
             'not cleared yet, skipping'
-            f' | broker={row.get("broker")!r}'
-            f' | server={row.get("server")!r}'
-            f' | login={row.get("login")!r}'
-            f' | broker_password={"***" if not _is_empty_value(row.get("broker_password")) else row.get("broker_password")!r}'
         )
         return None
 
@@ -651,14 +597,12 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
     # INVALID CREDENTIALS
     # ----------------------------------------------------------------
     if status == 'invalid_credentials':
-
         if used_int is None:
             title = 'Broker Login Error'
             message = (
                 'Your broker credentials are invalid. '
                 'Please connect your broker details to continue.'
             )
-
         elif exhausted:
             title = 'Broker Connection Attempts Exhausted'
             message = (
@@ -667,7 +611,6 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
                 'this account. Please contact support if you believe '
                 'this was a mistake.'
             )
-
         else:
             title = 'Broker Login Error'
             plural = '' if remaining == 1 else 's'
@@ -694,7 +637,6 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
     # FULLNAME MISMATCH
     # ----------------------------------------------------------------
     if status == 'fullname_mismatch':
-
         if used_int is None:
             title = 'Broker Name Mismatch'
             message = (
@@ -702,7 +644,6 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
                 "broker account does not match the name on your HarvHub "
                 "profile."
             )
-
         elif exhausted:
             title = 'Broker Connection Attempts Exhausted'
             message = (
@@ -711,7 +652,6 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
                 'this account. Please contact support if you believe '
                 'this was a mistake.'
             )
-
         else:
             title = 'Broker Name Mismatch'
             message = (
@@ -738,7 +678,6 @@ def record_broker_login_status_notification(pdo, user) -> Optional[int]:
     # INVALID ACCOUNT — demo account used when demo is disallowed
     # ----------------------------------------------------------------
     if status == 'invalid_account':
-
         if used_int is None or total_attempt <= 0:
             title = 'Demo Account Not Allowed'
             message = (
@@ -835,6 +774,64 @@ def record_broker_login_success_notification(pdo, user) -> Optional[int]:
 
 
 # ------------------------------------------------------------------------------
+# BROKER LOGIN RECONNECTED NOTIFICATION — INVESTOR / SUB-ACCOUNT
+# ------------------------------------------------------------------------------
+# Fires when the DB already said valid_credentials and the terminal was
+# observed DARK (missing / IPC-failed) on a previous probe but is now
+# live again. This is a status change, not a re-confirmation.
+
+def record_broker_login_reconnected_notification(pdo, user) -> Optional[int]:
+    row = _normalize_row(user)
+    if row is None:
+        print('[HarvHub Notification Service] broker-reconnected: unusable user row shape')
+        return None
+
+    email   = (str(row.get('email') or '')).strip().lower()
+    sub_id  = _to_int_or_none(row.get('sub_account_id')) or 0
+    main_id = _to_int_or_none(row.get('main_account_id')) or 0
+
+    if not email or '@' not in email or sub_id <= 0:
+        print(
+            '[HarvHub Notification Service] broker-reconnected: invalid identity'
+            f' | email={email!r} | sub_id={sub_id!r}'
+        )
+        return None
+
+    demo_int = _to_int_or_none(row.get('demo_account'))
+    is_demo  = (demo_int == 1)
+
+    if is_demo:
+        title   = 'Demo Broker Reconnected'
+        message = (
+            'Your demo broker terminal was inactive and has now been '
+            'relaunched and logged back on to your VPS. Your terminal is '
+            'live and ready for programme trades again.'
+        )
+        ntype   = 'info'
+    else:
+        title   = 'Broker Reconnected'
+        message = (
+            'Your broker terminal was inactive and has now been '
+            'relaunched and logged back on to your VPS. Your terminal is '
+            'live and ready for programme trades again.'
+        )
+        ntype   = 'success'
+
+    return record_contract_notification(pdo, {
+        'user_email': email,
+        'sub_account_id': sub_id,
+        'main_account_id': main_id,
+        'notification_key': f'broker-login-reconnected-{sub_id}-{int(time.time())}',
+        'title': title,
+        'message': message,
+        'type': ntype,
+        'section': 'Broker',
+        'action_tab': 'connect_investor_broker',
+        'force': True,
+    })
+
+
+# ------------------------------------------------------------------------------
 # DISCONNECT BROKER COMPLETED NOTIFICATION — INVESTOR / SUB-ACCOUNT
 # ------------------------------------------------------------------------------
 
@@ -873,18 +870,52 @@ def record_disconnect_broker_completed_notification(pdo, user) -> Optional[int]:
     })
 
 
+# ------------------------------------------------------------------------------
+# BALANCE VERIFICATION UPDATED NOTIFICATION — INVESTOR / SUB-ACCOUNT
+# ------------------------------------------------------------------------------
+# Fires once per sub-account the first time the harvhub row flips from
+# balance_verification='applied-for-verification' to 'verified' (and
+# broker_balance is written). Uses record_contract_notification_once so
+# the user only ever receives ONE balance-verification email per
+# sub-account, regardless of how many times the verification loop runs.
+
+def record_balance_verification_notification(pdo, user) -> Optional[int]:
+    row = _normalize_row(user)
+    if row is None:
+        print('[HarvHub Notification Service] balance-verification: unusable row shape')
+        return None
+
+    email   = (str(row.get('email') or '')).strip().lower()
+    sub_id  = _to_int_or_none(row.get('sub_account_id')) or 0
+    main_id = _to_int_or_none(row.get('main_account_id')) or 0
+
+    if not email or '@' not in email or sub_id <= 0:
+        print(
+            '[HarvHub Notification Service] balance-verification: invalid identity'
+            f' | email={email!r} | sub_id={sub_id!r}'
+        )
+        return None
+
+    return record_contract_notification_once(pdo, {
+        'user_email': email,
+        'sub_account_id': sub_id,
+        'main_account_id': main_id,
+        'notification_key': f'balance-verification-{sub_id}',
+        'title': 'MT5 Balance Verification Updated',
+        'message': (
+            'Your MT5 balance verification has been updated. '
+            'Go to your dashboard for more details.'
+        ),
+        'type': 'success',
+        'section': 'Broker',
+        'action_tab': 'connect_investor_broker',
+        'force': False,
+    })
+
+
 # ==============================================================================
 # BROKER LOGIN STATUS NOTIFICATIONS — PROGRAMME / TRADER
 # ==============================================================================
-#
-# Same rules as the investor side EXCEPT:
-#   * demo accounts are allowed by default
-#   * the "invalid_account" status is never produced for programmes
-#
-# Failure statuses handled here:
-#   invalid_credentials
-#   fullname_mismatch
-# (demo is only reported, never flagged)
 
 def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]:
     row = _normalize_row(row)
@@ -915,9 +946,6 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
         print(
             '[HarvHub Notification Service] prog-broker-login: broker columns '
             'not cleared yet, skipping'
-            f' | broker={row.get("broker")!r}'
-            f' | server={row.get("server")!r}'
-            f' | login={row.get("login")!r}'
         )
         return None
 
@@ -935,18 +963,13 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
         and used_int >= total_attempt
     )
 
-    # ----------------------------------------------------------------
-    # INVALID CREDENTIALS
-    # ----------------------------------------------------------------
     if status == 'invalid_credentials':
-
         if used_int is None:
             title = 'Programme Broker Login Error'
             message = (
                 'Your programme broker credentials are invalid. '
                 'Please connect your programme broker details to continue.'
             )
-
         elif exhausted:
             title = 'Programme Broker Connection Attempts Exhausted'
             message = (
@@ -955,7 +978,6 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
                 'on this programme. Please contact support if you believe '
                 'this was a mistake.'
             )
-
         else:
             title = 'Programme Broker Login Error'
             plural = '' if remaining == 1 else 's'
@@ -980,11 +1002,7 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
             },
         )
 
-    # ----------------------------------------------------------------
-    # FULLNAME MISMATCH
-    # ----------------------------------------------------------------
     if status == 'fullname_mismatch':
-
         if used_int is None:
             title = 'Programme Broker Name Mismatch'
             message = (
@@ -992,7 +1010,6 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
                 "on your broker account does not match the name registered "
                 "on your HarvHub profile."
             )
-
         elif exhausted:
             title = 'Programme Broker Connection Attempts Exhausted'
             message = (
@@ -1001,7 +1018,6 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
                 'on this programme. Please contact support if you believe '
                 'this was a mistake.'
             )
-
         else:
             title = 'Programme Broker Name Mismatch'
             message = (
@@ -1032,10 +1048,6 @@ def record_programme_broker_login_status_notification(pdo, row) -> Optional[int]
 # ------------------------------------------------------------------------------
 # BROKER LOGIN SUCCESS NOTIFICATION — PROGRAMME / TRADER
 # ------------------------------------------------------------------------------
-# Same as the investor version, but the account is a programme account so
-# the wording mentions "programme". Demo is allowed by default — the
-# notification still tells the user whether the terminal is demo or real,
-# but it never treats it as an error.
 
 def record_programme_broker_login_success_notification(pdo, row) -> Optional[int]:
     row = _normalize_row(row)
@@ -1077,6 +1089,66 @@ def record_programme_broker_login_success_notification(pdo, row) -> Optional[int
         email,
         {
             'notification_key': f'prog-broker-login-success-{programme_id}-{int(time.time())}',
+            'title': title,
+            'message': message,
+            'type': ntype,
+            'section': 'Broker',
+            'action_tab': 'connect_trader_broker',
+            'force': True,
+            'send_email': True,
+        },
+    )
+
+
+# ------------------------------------------------------------------------------
+# BROKER LOGIN RECONNECTED NOTIFICATION — PROGRAMME / TRADER
+# ------------------------------------------------------------------------------
+# Fires when the DB already said valid_credentials and the terminal was
+# observed DARK (missing / IPC-failed) on a previous probe but is now
+# live again.
+
+def record_programme_broker_login_reconnected_notification(pdo, row) -> Optional[int]:
+    row = _normalize_row(row)
+    if row is None:
+        print('[HarvHub Notification Service] prog-broker-reconnected: unusable row shape')
+        return None
+
+    email        = (str(row.get('email') or '')).strip().lower()
+    programme_id = _to_int_or_none(row.get('id')) or 0
+
+    if not email or '@' not in email or programme_id <= 0:
+        print(
+            '[HarvHub Notification Service] prog-broker-reconnected: invalid identity'
+            f' | email={email!r} | programme_id={programme_id!r}'
+        )
+        return None
+
+    demo_int = _to_int_or_none(row.get('demo_account'))
+    is_demo  = (demo_int == 1)
+
+    if is_demo:
+        title   = 'Programme Demo Broker Reconnected'
+        message = (
+            'Your programme demo broker terminal was inactive and has now '
+            'been relaunched and logged back on to your VPS. Your terminal '
+            'is live and ready to analyse the programme again.'
+        )
+        ntype   = 'info'
+    else:
+        title   = 'Programme Broker Reconnected'
+        message = (
+            'Your programme broker terminal was inactive and has now '
+            'been relaunched and logged back on to your VPS. Your terminal '
+            'is live and ready to analyse the programme again.'
+        )
+        ntype   = 'success'
+
+    return record_programme_notification(
+        pdo,
+        programme_id,
+        email,
+        {
+            'notification_key': f'prog-broker-login-reconnected-{programme_id}-{int(time.time())}',
             'title': title,
             'message': message,
             'type': ntype,

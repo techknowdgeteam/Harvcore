@@ -4614,7 +4614,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
         return daily_groups
     
     # ============================================================
-    # LOAD ALL FILES FIRST (same pattern as recent_highest_balance_target)
+    # LOAD ALL FILES FIRST (same pattern as recent_highest_balance_target_local_version)
     # ============================================================
     print("\n" + "─"*80)
     print(" 📁 LOADING INVESTOR FILES")
@@ -4660,7 +4660,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
     print("─"*80)
     
     # ============================================================
-    # SAFE MERGE HELPER (from recent_highest_balance_target)
+    # SAFE MERGE HELPER (from recent_highest_balance_target_local_version)
     # ============================================================
     def safe_merge_dict(existing, updates):
         """Safely merge updates into existing dict without overwriting other fields"""
@@ -4676,13 +4676,13 @@ def check_and_record_unauthorized_actions(inv_id=None):
         return result
     
     # ============================================================
-    # UPDATE ALL FILES HELPER (using the same pattern as recent_highest_balance_target)
+    # UPDATE ALL FILES HELPER (using the same pattern as recent_highest_balance_target_local_version)
     # ============================================================
     def update_all_files(inv_id, update_data):
         """
         Update ALL files (fetched_data, updated_data, all_fetched_data, all_updated_data)
         using safe_merge_dict to preserve existing data.
-        This is the EXACT same pattern used in recent_highest_balance_target.
+        This is the EXACT same pattern used in recent_highest_balance_target_local_version.
         """
         files_updated = 0
         
@@ -4699,10 +4699,10 @@ def check_and_record_unauthorized_actions(inv_id=None):
         return files_updated
     
     # ============================================================
-    # SAVE ALL FILES HELPER (using the same pattern as recent_highest_balance_target)
+    # SAVE ALL FILES HELPER (using the same pattern as recent_highest_balance_target_local_version)
     # ============================================================
     def save_all_files():
-        """Save ALL files using the same pattern as recent_highest_balance_target"""
+        """Save ALL files using the same pattern as recent_highest_balance_target_local_version"""
         saved_count = 0
         
         # Save FETCHED_INVESTORS
@@ -5469,7 +5469,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
             print(f"│   Error saving activities.json: {e}")
         
         # ============================================================
-        # UPDATE ALL INVESTOR FILES USING THE SAME PATTERN AS recent_highest_balance_target
+        # UPDATE ALL INVESTOR FILES USING THE SAME PATTERN AS recent_highest_balance_target_local_version
         # ============================================================
         print(f"│\n├─ 🔄 UPDATING ALL INVESTOR FILES".ljust(79) + "┤")
         
@@ -5525,7 +5525,7 @@ def check_and_record_unauthorized_actions(inv_id=None):
         print(f"│  • Daily balance log entries: {len(daily_balance_log)} (EVERY DAY from execution start to today)")
     
     # ============================================================
-    # SAVE ALL FILES (using the same pattern as recent_highest_balance_target)
+    # SAVE ALL FILES (using the same pattern as recent_highest_balance_target_local_version)
     # ============================================================
     print("\n" + "─"*80)
     print(" 💾 SAVING ALL UPDATED FILES (PRESERVING EXISTING DATA)")
@@ -14090,7 +14090,7 @@ def trailing_amount_distance_limit(inv_id=None):
 
 
 # RECENT HIGHEST BALANCE
-def recent_highest_balance_target(inv_id=None):
+def recent_highest_balance_target_local_version(inv_id=None):
     """
     Function: Manages recent_highest_balance tracking for investors.
 
@@ -16089,7 +16089,7 @@ def recent_highest_balance_target(inv_id=None):
     return stats
 #==================#
 # MARTINGALE SYSTEM #
-def martingale_system(inv_id=None):
+def martingale_system_local_version(inv_id=None):
     print(f"\n{'='*10} 🎰 MARTINGALE STAGED DRAWDOWN SYSTEM {'='*10}")
     if inv_id:
         print(f" Processing single investor: {inv_id}")
@@ -34587,8 +34587,8 @@ def process_single_investor(inv_folder):
         #trades_analytics(inv_id=inv_id)
         #check_and_record_unauthorized_actions(inv_id=inv_id)
         symbols_dynamic_grid_prices(inv_id=inv_id)
-        #recent_highest_balance_target(inv_id=inv_id)
-        martingale_system(inv_id=inv_id)
+        #recent_highest_balance_target_local_version(inv_id=inv_id)
+        martingale_system_local_version(inv_id=inv_id)
         #place_usd_orders(inv_id=inv_id)
         #chunk_orders_with_volume_beyond_max(inv_id=inv_id)
         #apply_dynamic_breakeven(inv_id=inv_id)
@@ -34606,7 +34606,7 @@ def process_single_investor(inv_folder):
 
     return account_stats
 
-def process_single_investor_(inv_folder):
+def process_single_investor_local(inv_folder):
     """
     WORKER FUNCTION: Handles the entire pipeline for ONE investor.
     Connects directly to MT5 using the investor's credentials.
@@ -34932,7 +34932,7 @@ def process_single_investor_(inv_folder):
             # ================================================================
             # CHECK DAILY TARGET AND RECENT HIGHEST BALANCE
             # ================================================================
-            recent_highest_stats = recent_highest_balance_target(inv_id=inv_id)
+            recent_highest_stats = recent_highest_balance_target_local_version(inv_id=inv_id)
             recent_highest_hit = recent_highest_alert['is_triggered'] if recent_highest_alert else False
 
             if recent_highest_hit:
@@ -34997,11 +34997,11 @@ def process_single_investor_(inv_folder):
                 
                 live_usd_risk_and_scaling(inv_id=inv_id)
                 apply_default_prices(inv_id=inv_id)
-                martingale_system(inv_id=inv_id)
+                martingale_system_local_version(inv_id=inv_id)
                 #remove_existing_mt5orders_in_json(inv_id=inv_id)
                 
-                #padding_stoploss_below_minimum_risk_to_maximum_risk(inv_id=inv_id)
-                #maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id)
+                padding_stoploss_below_minimum_risk_to_maximum_risk(inv_id=inv_id)
+                maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_id=inv_id)
 
                 pending_orders_per_symbol_limitation(inv_id=inv_id)
                 chunk_orders_with_volume_beyond_max(inv_id=inv_id)

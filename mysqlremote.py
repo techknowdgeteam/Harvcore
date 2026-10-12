@@ -1,10 +1,31 @@
 # mysqlremote.py
+#
+# Long-running Chrome/Selenium bridge with MULTI-WINDOW CHANNEL MULTIPLEXING.
+#
+#   * Launches Chrome ONCE at startup (headless).
+#   * Listens on 127.0.0.1:5599 for length-prefixed JSON requests.
+#   * Mints dynamic channel IDs (queryrequest_{n} / queryresult_{n}).
+#   * Creates one DOM window per channel inside phpmyadmintemplate.php.
+#   * Each channel gets its own per-channel lock -> no cross-script overwrite.
+#
+# Protocol (all length-prefixed JSON):
+#   {"op":"acquire_channel","owner":"brokerdetails"}   -> {"channel_id":N,"window_id":N}
+#   {"op":"release_channel","channel_id":N}            -> {"ok":true}
+#   {"op":"channel_status","channel_id":N}             -> {"in_use":bool,"owner":str}
+#   {"op":"list_channels"}                             -> {"channels":[{...}]}
+#   {"op":"sql","channel_id":N,"sql":"...","params":[...],"timeout":20.0}
+#                                                      -> standard result dict
+#   {"sql":"..."}   (legacy)                           -> auto-temp-channel
+#
+# Nothing is written to disk. Everything is live over the socket.
+
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, TimeoutException
 
 import requests
 import urllib3
@@ -16,12 +37,13 @@ import sys
 import os
 import re
 import json
+import socket
+import struct
 import subprocess
 import tempfile
 import glob
 import shutil
 import threading
-import queue
 import uuid as _uuid_module
 from datetime import datetime, date
 from decimal import Decimal
@@ -38,13 +60,10 @@ primary_servers = {
     'query_page': 'https://harvhub.wuaze.com/phpmyadmintemplate.php',
     'fetch': 'https://harvhub.wuaze.com/phpmyadmin_tablesfetch.php'
 }
-backup_servers = {
-    'query_page': 'https://harvhub.wuaze.com/phpmyadmintemplate.php',
-    'fetch': 'https://harvhub.wuaze.com/phpmyadmin_tablesfetch.php'
-}
+backup_servers = dict(primary_servers)
 server3 = {
-    'query_page': 'https://harvhub.wuaze.com/phpmyadmintemplate.php',
-    'fetch': 'https://harvhub.wuaze.com/phpmyadmin_tablesfetch.php'
+    'query_page': 'https://harvhub.free.nf/phpmyadmintemplate.php',
+    'fetch': 'https://harvhub.free.nf/phpmyadmin_tablesfetch.php'
 }
 
 DEFAULT_WAIT_TIMEOUT = 20.0
@@ -53,9 +72,12 @@ CHROMEDRIVER_CACHE_DIR = os.path.expanduser(r"~\.chromedriver_cache")
 CHROMEDRIVER_EXE = os.path.join(CHROMEDRIVER_CACHE_DIR, "chromedriver.exe")
 CHROMEDRIVER_VERSION_FILE = os.path.join(CHROMEDRIVER_CACHE_DIR, "driver.version")
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DNS / HOST OVERRIDE (disabled — InfinityFree rotates edge IPs)
-# ─────────────────────────────────────────────────────────────────────────────
+BIND_HOST = "127.0.0.1"
+BIND_PORT = 5599
+
+_HEADER = struct.Struct(">I")
+MAX_FRAME = 64 * 1024 * 1024
+
 PIN_KNOWN_HOST = False
 KNOWN_HOST_IP = "185.27.134.138"
 KNOWN_HOST_NAME = "harvhub.wuaze.com"
@@ -69,6 +91,12 @@ CFT_JSON_URLS = [
     "https://registry.npmmirror.com/-/binary/chrome-for-testing/known-good-versions-with-downloads.json",
 ]
 
+# Auto-close windows after this many seconds idle (0 = never auto-close).
+CHANNEL_IDLE_CLOSE_SECONDS = 0
+
+# Max concurrent channels (windows) to keep resource use bounded.
+MAX_CHANNELS = 32
+
 
 def _cft_zip_candidates(version):
     return [
@@ -80,24 +108,6 @@ def _cft_zip_candidates(version):
     ]
 
 
-# ==============================================================================
-#  PUBLIC API — QUEUES
-# ==============================================================================
-queryrequest: "queue.Queue" = queue.Queue()
-queryresult:  "queue.Queue" = queue.Queue()
-
-_browser_lock = threading.Lock()
-_shutdown_event = threading.Event()
-_worker_thread = None
-_driver = None
-_session = None
-_current_servers = primary_servers
-_browser_ready = threading.Event()
-
-
-# ==============================================================================
-#  LOGGING
-# ==============================================================================
 def _log(msg):
     try:
         print(f"[mysqlremote] {msg}", flush=True)
@@ -161,9 +171,6 @@ def _http_get_bytes(url, timeout=90):
     return buf.getvalue()
 
 
-# ==============================================================================
-#  VERSION PICKING / ZIP EXTRACT
-# ==============================================================================
 def _pick_best_cft_version(versions, target):
     if not versions:
         return None
@@ -222,10 +229,10 @@ def _fetch_catalog():
             data = _http_get_json(url)
             versions = data.get("versions")
             if versions:
-                _log(f"  ✅ Catalog from: {url} ({len(versions)} versions)")
+                _log(f"  OK Catalog from: {url} ({len(versions)} versions)")
                 return versions
         except Exception as e:
-            _log(f"  ❌ Failed: {str(e)[:140]}")
+            _log(f"  FAILED: {str(e)[:140]}")
     return None
 
 
@@ -234,10 +241,10 @@ def _try_download_zip_for_version(version):
         try:
             _log(f"  Trying ZIP: {url}")
             blob = _http_get_bytes(url)
-            _log(f"  ✅ Downloaded {len(blob):,} bytes")
+            _log(f"  OK Downloaded {len(blob):,} bytes")
             return blob
         except Exception as e:
-            _log(f"  ❌ Failed: {str(e)[:140]}")
+            _log(f"  FAILED: {str(e)[:140]}")
     return None
 
 
@@ -399,9 +406,7 @@ def _build_chrome_options(temp_dir):
     opts.add_argument(f"--user-data-dir={temp_dir}")
     opts.add_experimental_option("excludeSwitches", ["enable-logging"])
     opts.add_experimental_option("useAutomationExtension", False)
-
     opts.add_argument("--no-proxy-server")
-
     opts.add_argument("--disable-background-timer-throttling")
     opts.add_argument("--disable-renderer-backgrounding")
     opts.add_argument("--disable-backgrounding-occluded-windows")
@@ -409,14 +414,20 @@ def _build_chrome_options(temp_dir):
     if PIN_KNOWN_HOST and KNOWN_HOST_IP and KNOWN_HOST_NAME:
         rule = f"MAP {KNOWN_HOST_NAME} {KNOWN_HOST_IP}"
         opts.add_argument(f"--host-resolver-rules={rule}")
-        _log(f"Pinned DNS: {KNOWN_HOST_NAME} → {KNOWN_HOST_IP}")
+        _log(f"Pinned DNS: {KNOWN_HOST_NAME} -> {KNOWN_HOST_IP}")
 
     return opts
 
 
 # ==============================================================================
-#  BROWSER LIFECYCLE
+#  BROWSER STATE
 # ==============================================================================
+_browser_lock = threading.Lock()          # protects _driver lifecycle
+_driver = None
+_session = None
+_current_servers = primary_servers
+
+
 def _is_browser_alive():
     global _driver
     if _driver is None:
@@ -481,8 +492,6 @@ def _open_browser():
         if _driver is None:
             return False
 
-        # ── Navigate to the query page. The textarea is built by JS, so we
-        #    wait for `textarea.sql-query` to appear inside a `.db-window`.
         last_error = None
         for servers, label in [(primary_servers, "Primary"),
                                (backup_servers, "Backup"),
@@ -506,27 +515,10 @@ def _open_browser():
                         cur_title = _driver.title
                     except Exception:
                         cur_title = "<unavailable>"
-                    try:
-                        body_text = _driver.find_element(
-                            By.TAG_NAME, "body").text[:600]
-                    except Exception:
-                        body_text = "<no body>"
-                    try:
-                        win_count = len(_driver.find_elements(
-                            By.CSS_SELECTOR, ".db-window"))
-                        ta_count = len(_driver.find_elements(
-                            By.CSS_SELECTOR, "textarea.sql-query"))
-                    except Exception:
-                        win_count = ta_count = -1
-                    _log(f"[{label}] ❌ wait for textarea.sql-query failed")
-                    _log(f"[{label}]    url   = {cur_url}")
-                    _log(f"[{label}]    title = {cur_title!r}")
-                    _log(f"[{label}]    windows={win_count} textareas={ta_count}")
-                    _log(f"[{label}]    body  = {body_text!r}")
-                    _log(f"[{label}]    err   = {type(wait_err).__name__}: {wait_err}")
+                    _log(f"[{label}] wait failed | url={cur_url} | title={cur_title!r} | err={wait_err}")
                     raise
 
-                _log(f"[{label}] ✅ ready (found textarea.sql-query)")
+                _log(f"[{label}] ready")
 
                 if _session:
                     try:
@@ -536,13 +528,11 @@ def _open_browser():
                 _session = requests.Session()
                 for c in _driver.get_cookies():
                     _session.cookies.set(c['name'], c['value'])
-
-                _browser_ready.set()
                 return True
 
             except Exception as e:
                 last_error = f"{label}: {type(e).__name__}: {e}"
-                _log(f"[{label}] ❌ {str(e)[:200]}")
+                _log(f"[{label}] FAILED {str(e)[:200]}")
 
         _log(f"All servers failed. Last error: {last_error}")
         try:
@@ -550,160 +540,384 @@ def _open_browser():
         except Exception:
             pass
         _driver = None
-        _browser_ready.clear()
         return False
 
 
 def _ensure_browser():
     if _is_browser_alive():
-        _browser_ready.set()
         return True
     return _open_browser()
 
 
 # ==============================================================================
-#  DOM HELPERS — scoped to the focused / first .db-window
+#  CHANNEL REGISTRY  (queryrequest_{id} / queryresult_{id})
 # ==============================================================================
-def _active_window(d):
-    """Return the focused .db-window element or the first one, or None."""
+class _Channel:
+    __slots__ = ('channel_id', 'owner', 'created_at', 'last_used_at',
+                 'lock', 'window_handle', 'window_ready')
+
+    def __init__(self, channel_id, owner):
+        self.channel_id = channel_id
+        self.owner = owner
+        self.created_at = time.time()
+        self.last_used_at = time.time()
+        # Per-channel lock: SQL from two channels never interleave inside
+        # the same window, and two threads on the same channel are serialized.
+        self.lock = threading.Lock()
+        self.window_handle = None
+        self.window_ready = threading.Event()
+
+
+_channels = {}                # channel_id -> _Channel
+_channels_lock = threading.Lock()
+_next_channel_id = 1
+
+
+def _alloc_channel_id_locked():
+    """Caller must hold _channels_lock."""
+    global _next_channel_id
+    # Sequential 1..1_000_000, reuse freed IDs.
+    start = _next_channel_id
+    while True:
+        cid = _next_channel_id
+        _next_channel_id += 1
+        if _next_channel_id > 1_000_000:
+            _next_channel_id = 1
+        if cid not in _channels:
+            return cid
+        if _next_channel_id == start:
+            return None  # exhausted
+
+
+def _acquire_channel(owner):
+    with _channels_lock:
+        if len(_channels) >= MAX_CHANNELS:
+            return None, f"channel limit reached ({MAX_CHANNELS})"
+        # Reuse: if a channel with same owner exists and is idle, reuse it.
+        for ch in _channels.values():
+            if ch.owner == owner and not ch.lock.locked():
+                ch.last_used_at = time.time()
+                return ch, None
+        cid = _alloc_channel_id_locked()
+        if cid is None:
+            return None, "channel id space exhausted"
+        ch = _Channel(cid, owner)
+        _channels[cid] = ch
+    # Create the DOM window OUTSIDE the registry lock.
+    ok = _spawn_window_for_channel(ch)
+    if not ok:
+        with _channels_lock:
+            _channels.pop(ch.channel_id, None)
+        return None, "failed to spawn DOM window"
+    return ch, None
+
+
+def _release_channel(cid):
+    with _channels_lock:
+        ch = _channels.pop(cid, None)
+    if ch is None:
+        return False
+    # Destroy the DOM window.
     try:
-        els = d.find_elements(By.CSS_SELECTOR, ".db-window.focused")
-        if els:
-            return els[0]
-        els = d.find_elements(By.CSS_SELECTOR, ".db-window")
-        if els:
-            return els[0]
-    except Exception:
-        pass
-    return None
+        _destroy_window_for_channel(cid)
+    except Exception as e:
+        _log(f"destroy window for channel {cid} failed: {e}")
+    return True
 
 
-def _read_exec_status(d):
+def _channel_status(cid):
+    with _channels_lock:
+        ch = _channels.get(cid)
+        if ch is None:
+            return {'in_use': False, 'owner': None}
+        return {
+            'in_use': ch.lock.locked(),
+            'owner': ch.owner,
+            'created_at': ch.created_at,
+            'last_used_at': ch.last_used_at,
+        }
+
+
+def _list_channels():
+    with _channels_lock:
+        return [
+            {
+                'channel_id': ch.channel_id,
+                'owner': ch.owner,
+                'in_use': ch.lock.locked(),
+                'created_at': ch.created_at,
+                'last_used_at': ch.last_used_at,
+            }
+            for ch in _channels.values()
+        ]
+
+
+def _get_channel(cid):
+    with _channels_lock:
+        return _channels.get(cid)
+
+
+# ==============================================================================
+#  DOM WINDOW MANAGEMENT (one window per channel)
+# ==============================================================================
+def _find_window_handles():
+    return list(_driver.window_handles)
+
+
+def _spawn_window_for_channel(ch):
     """
-    Read the per-window status banner:
-        <div class="win-exec-status" data-state="idle|loading|success|partial|empty|error">
-          <span class="status-label">…</span>
-          <span class="status-meta">…</span>
-        </div>
+    Click the floating '+' button in the template, wait for the new
+    .db-window[data-window-id] to appear, then tag it with
+    data-channel-id so we can address it reliably later.
     """
-    win = _active_window(d)
-    if win is None:
+    global _driver
+    if not _ensure_browser():
+        return False
+
+    try:
+        # Snapshot existing window ids in the workspace.
+        existing_ids = set(_driver.execute_script("""
+            return Array.from(document.querySelectorAll('.db-window'))
+                        .map(w => w.dataset.windowId);
+        """) or [])
+
+        # Click the '+' button.
+        btn = _driver.find_element(By.CSS_SELECTOR, "#new-window-btn")
+        _driver.execute_script("arguments[0].click();", btn)
+
+        # Wait for a new .db-window to appear.
+        deadline = time.time() + 5.0
+        new_id = None
+        while time.time() < deadline:
+            cur_ids = set(_driver.execute_script("""
+                return Array.from(document.querySelectorAll('.db-window'))
+                            .map(w => w.dataset.windowId);
+            """) or [])
+            diff = cur_ids - existing_ids
+            if diff:
+                new_id = sorted(diff)[-1]
+                break
+            time.sleep(0.1)
+
+        if new_id is None:
+            _log(f"channel {ch.channel_id}: no new window appeared")
+            return False
+
+        # Tag the new window with the channel id and remember its DOM id.
+        _driver.execute_script("""
+            var w = document.querySelector('.db-window[data-window-id="' + arguments[0] + '"]');
+            if (w) {
+                w.setAttribute('data-channel-id', String(arguments[1]));
+            }
+        """, str(new_id), int(ch.channel_id))
+
+        ch.window_handle = str(new_id)
+        ch.window_ready.set()
+        _log(f"channel {ch.channel_id}: window #{new_id} ready (owner={ch.owner})")
+        return True
+    except Exception as e:
+        _log(f"channel {ch.channel_id}: spawn failed: {e}")
+        return False
+
+
+def _destroy_window_for_channel(cid):
+    global _driver
+    if _driver is None:
+        return
+    try:
+        _driver.execute_script("""
+            var w = document.querySelector('.db-window[data-channel-id="' + arguments[0] + '"]');
+            if (w) {
+                var closeBtn = w.querySelector('.close-btn');
+                if (closeBtn) closeBtn.click();
+                else w.remove();
+            }
+        """, int(cid))
+        time.sleep(0.1)
+    except Exception as e:
+        _log(f"channel {cid}: destroy failed: {e}")
+
+
+# ==============================================================================
+#  PER-WINDOW DOM HELPERS
+# ==============================================================================
+def _channel_window_selector(cid):
+    # Escape not needed since cid is numeric, but keep it safe.
+    return f'.db-window[data-channel-id="{int(cid)}"]'
+
+
+def _channel_read_status(cid):
+    if _driver is None:
         return None
     try:
-        el = win.find_element(By.CSS_SELECTOR, ".win-exec-status")
+        return _driver.execute_script("""
+            var w = document.querySelector(arguments[0]);
+            if (!w) return null;
+            var s = w.querySelector('.win-exec-status');
+            if (!s) return null;
+            var state = (s.dataset.state || '').toLowerCase();
+            var labelEl = s.querySelector('.status-label');
+            var metaEl  = s.querySelector('.status-meta');
+            return {
+                state: state,
+                label: labelEl ? labelEl.textContent.trim() : '',
+                meta:  metaEl  ? metaEl.textContent.trim()  : ''
+            };
+        """, _channel_window_selector(cid))
     except Exception:
         return None
 
-    try:
-        state = (el.get_attribute("data-state") or "").strip().lower()
-    except Exception:
-        state = ""
-    if not state:
-        return None
 
-    label = ""
+def _channel_reset_status(cid):
+    if _driver is None:
+        return
     try:
-        label = (el.find_element(By.CSS_SELECTOR, ".status-label").text or "").strip()
+        _driver.execute_script("""
+            var w = document.querySelector(arguments[0]);
+            if (!w) return;
+            var s = w.querySelector('.win-exec-status');
+            if (s) {
+                s.dataset.state = 'idle';
+                var l = s.querySelector('.status-label');
+                var m = s.querySelector('.status-meta');
+                if (l) l.textContent = 'Waiting…';
+                if (m) m.textContent = '';
+            }
+            var d = w.querySelector('.win-sql-display');
+            if (d) d.style.display = 'none';
+            var r = w.querySelector('.win-query-result');
+            if (r) r.innerHTML = '';
+            var sm = w.querySelector('.win-results-summary');
+            if (sm) { sm.style.display = 'none'; sm.innerHTML = ''; }
+            var msg = w.querySelector('.win-message');
+            if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
+        """, _channel_window_selector(cid))
     except Exception:
         pass
-    meta = ""
-    try:
-        meta = (el.find_element(By.CSS_SELECTOR, ".status-meta").text or "").strip()
-    except Exception:
-        pass
-
-    return {
-        'state':    state,
-        'label':    label,
-        'meta':     meta,
-        'rows':     None,
-        'affected': None,
-        'query_id': None,
-    }
 
 
-def _status_terminal(d, query_id=None):
-    """This page uses: idle | loading | success | partial | empty | error."""
-    s = _read_exec_status(d)
-    if not s:
-        return False
-    return s['state'] in ('success', 'partial', 'empty', 'error')
-
-
-def _js_display_ready(d):
-    """The 'SQL Query' display block is shown once execution starts."""
-    win = _active_window(d)
-    if win is None:
+def _channel_set_sql(cid, sql):
+    if _driver is None:
         return False
     try:
-        for el in win.find_elements(By.CSS_SELECTOR, ".win-sql-display"):
-            if el.is_displayed():
-                return True
+        return bool(_driver.execute_script("""
+            var w = document.querySelector(arguments[0]);
+            if (!w) return false;
+            var ta = w.querySelector('textarea.sql-query');
+            if (!ta) return false;
+            var val = arguments[1];
+            var proto = Object.getPrototypeOf(ta);
+            var desc  = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) { desc.set.call(ta, val); }
+            else { ta.value = val; }
+            ta.dispatchEvent(new Event('input',  { bubbles: true }));
+            ta.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        """, _channel_window_selector(cid), sql))
     except Exception:
-        pass
-    return False
+        return False
 
 
-def _btn_re_enabled(d):
-    win = _active_window(d)
-    if win is None:
+def _channel_click_execute(cid):
+    if _driver is None:
         return False
     try:
-        for el in win.find_elements(By.CSS_SELECTOR, ".exec-btn"):
-            if el.is_enabled() and (el.text or "").strip() == "Execute Query":
-                return True
+        return bool(_driver.execute_script("""
+            var w = document.querySelector(arguments[0]);
+            if (!w) return false;
+            var btn = w.querySelector('.exec-btn');
+            if (!btn) return false;
+            btn.click();
+            return true;
+        """, _channel_window_selector(cid)))
     except Exception:
-        pass
-    return False
-
-
-def _result_table_ready(d):
-    """True once the page has rendered any per-statement block or result."""
-    win = _active_window(d)
-    if win is None:
         return False
-    try:
-        if win.find_elements(By.CSS_SELECTOR, ".stmt-block"):
-            return True
-        if win.find_elements(By.CSS_SELECTOR, ".win-message.error"):
-            return True
-        for el in win.find_elements(By.CSS_SELECTOR, ".win-results-summary"):
-            if el.is_displayed():
-                return True
-    except Exception:
-        pass
-    return False
 
 
-def _any_terminal_state(d):
-    return _js_display_ready(d) or _btn_re_enabled(d) or _result_table_ready(d)
-
-
-def _wait_for_completion(timeout, query_id=None):
-    """
-    Wait until the status banner reaches a terminal state.
-    The banner is guaranteed to exist (built with the window), so we can
-    rely purely on the exec-status state machine here.
-    """
+def _channel_wait_completion(cid, timeout):
+    """Wait until this specific window's status is terminal."""
     t0 = time.perf_counter()
+    # Small grace period for the state to flip to loading.
+    deadline_loading = time.time() + min(2.0, timeout)
+    while time.time() < deadline_loading:
+        s = _channel_read_status(cid)
+        if s and s.get('state') in ('loading', 'success', 'partial', 'empty', 'error'):
+            break
+        time.sleep(0.1)
 
-    # Give the page a brief moment to enter 'loading' if it's going to.
-    try:
-        WebDriverWait(_driver, min(2.0, timeout), poll_frequency=0.1).until(
-            lambda d: (_read_exec_status(d) or {}).get('state') in
-                      ('loading', 'success', 'partial', 'empty', 'error')
-        )
-    except Exception:
-        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = _channel_read_status(cid) or {}
+        if s.get('state') in ('success', 'partial', 'empty', 'error'):
+            return True, time.perf_counter() - t0, f"exec-status={s.get('state')}"
+        time.sleep(0.1)
+    s = _channel_read_status(cid) or {}
+    return False, time.perf_counter() - t0, f"timeout (last={s.get('state')!r})"
 
+
+def _channel_read_message(cid):
+    if _driver is None:
+        return ""
     try:
-        WebDriverWait(_driver, timeout, poll_frequency=0.1).until(
-            lambda d: _status_terminal(d, query_id))
-        s = _read_exec_status(_driver) or {}
-        return True, time.perf_counter() - t0, f"exec-status={s.get('state')}"
+        return (_driver.execute_script("""
+            var w = document.querySelector(arguments[0]);
+            if (!w) return '';
+            var m = w.querySelector('.win-message');
+            if (!m) return '';
+            var st = (m.style.display || '').toLowerCase();
+            if (st === 'none') return '';
+            return (m.textContent || '').trim();
+        """, _channel_window_selector(cid)) or "").strip()
     except Exception:
-        s = _read_exec_status(_driver) or {}
-        return False, time.perf_counter() - t0, f"timeout (last={s.get('state')!r})"
+        return ""
+
+
+def _channel_collect_results(cid, is_read):
+    """Extract rows/affected from this channel's window."""
+    results = []
+    affected_rows = 0
+    if _driver is None:
+        return results, affected_rows
+    try:
+        html = _driver.execute_script("""
+            var w = document.querySelector(arguments[0]);
+            if (!w) return '';
+            var r = w.querySelector('.win-query-result');
+            return r ? r.innerHTML : '';
+        """, _channel_window_selector(cid))
+        soup = BeautifulSoup(html, 'html.parser')
+
+        if not is_read:
+            for blk in soup.select('.stmt-block[data-status="success"]'):
+                body = blk.find('div', class_='stmt-affected-body')
+                if body:
+                    m = re.search(r'Affected rows:\s*(\d+)', body.get_text())
+                    if m:
+                        affected_rows += int(m.group(1))
+            return results, affected_rows
+
+        for blk in soup.select('.stmt-block'):
+            blk_status = (blk.get('data-status') or '').strip().lower()
+            if blk_status != 'success':
+                continue
+            tbl = blk.find('table')
+            if not tbl:
+                continue
+            headers = [th.get_text(strip=True) for th in tbl.find_all('th')]
+            for tr in tbl.find_all('tr')[1:]:
+                tds = tr.find_all('td')
+                if not tds:
+                    continue
+                row = {}
+                for i, td in enumerate(tds):
+                    key = headers[i] if i < len(headers) else f"col{i}"
+                    span = td.find('span', class_='cell-content')
+                    row[key] = (span.get_text() if span
+                                else td.get_text(strip=True))
+                results.append(row)
+    except Exception as e:
+        _log(f"channel {cid}: collect results failed: {e}")
+    return results, affected_rows
 
 
 # ==============================================================================
@@ -732,7 +946,116 @@ def _is_read_query(sql):
 
 
 # ==============================================================================
-#  PARAM SUBSTITUTION
+#  SQL EXECUTION ON A SPECIFIC CHANNEL
+# ==============================================================================
+def _execute_sql_on_channel(ch, sql, timeout):
+    """Runs inside ch.lock. Assumes browser is alive."""
+    t_start = time.perf_counter()
+    query_id = str(_uuid_module.uuid4().int)[:12]
+
+    if not _ensure_browser():
+        return {
+            'status': 'error', 'message': 'Browser not available',
+            'results': [], 'affected_rows': 0, 'query_id': query_id,
+            'raw_sql': sql, 'elapsed': 0.0,
+            'channel_id': ch.channel_id,
+        }
+
+    # Make sure the window still exists; recreate if it vanished.
+    if not _channel_exists(ch.channel_id):
+        _log(f"channel {ch.channel_id}: window missing, respawning")
+        ch.window_ready.clear()
+        ch.window_handle = None
+        if not _spawn_window_for_channel(ch):
+            return {
+                'status': 'error', 'message': 'Channel window missing',
+                'results': [], 'affected_rows': 0, 'query_id': query_id,
+                'raw_sql': sql, 'elapsed': 0.0,
+                'channel_id': ch.channel_id,
+            }
+
+    try:
+        _channel_reset_status(ch.channel_id)
+        if not _channel_set_sql(ch.channel_id, sql):
+            raise RuntimeError("could not write into channel textarea")
+        time.sleep(0.1)
+        if not _channel_click_execute(ch.channel_id):
+            raise RuntimeError("could not click execute in channel window")
+    except Exception as e:
+        return {
+            'status': 'error', 'message': f"Query input failed: {e}",
+            'results': [], 'affected_rows': 0, 'query_id': query_id,
+            'raw_sql': sql, 'elapsed': time.perf_counter() - t_start,
+            'channel_id': ch.channel_id,
+        }
+
+    ready, _, reason = _channel_wait_completion(ch.channel_id, timeout)
+
+    status_banner = _channel_read_status(ch.channel_id) or {}
+    state = (status_banner.get('state') or '').lower()
+    banner_meta = (status_banner.get('meta') or '').strip()
+    banner_label = (status_banner.get('label') or '').strip()
+
+    is_read = _is_read_query(sql)
+
+    if state == 'error':
+        err_msg = _channel_read_message(ch.channel_id) or banner_label or "query failed"
+        return {
+            'status': 'error', 'message': err_msg,
+            'results': [], 'affected_rows': 0, 'query_id': query_id,
+            'raw_sql': sql, 'elapsed': time.perf_counter() - t_start,
+            'channel_id': ch.channel_id,
+        }
+
+    if state == 'empty':
+        return {
+            'status': 'success',
+            'message': banner_label or 'Query executed successfully (0 rows)',
+            'results': [], 'affected_rows': 0, 'query_id': query_id,
+            'raw_sql': sql, 'elapsed': time.perf_counter() - t_start,
+            'channel_id': ch.channel_id,
+        }
+
+    results, affected_rows = _channel_collect_results(ch.channel_id, is_read)
+
+    if not is_read:
+        if not affected_rows and banner_meta:
+            m = re.search(r'(\d+)\s*affected', banner_meta, re.IGNORECASE)
+            if m:
+                affected_rows = int(m.group(1))
+        return {
+            'status': 'success',
+            'message': banner_label or
+                       f'Write query executed ({affected_rows} row(s) affected)',
+            'results': [], 'affected_rows': affected_rows,
+            'query_id': query_id, 'raw_sql': sql,
+            'elapsed': time.perf_counter() - t_start,
+            'channel_id': ch.channel_id,
+        }
+
+    return {
+        'status': 'success',
+        'message': banner_label or f'Query executed successfully ({len(results)} rows)',
+        'results': results, 'affected_rows': affected_rows,
+        'query_id': query_id, 'raw_sql': sql,
+        'elapsed': time.perf_counter() - t_start,
+        'channel_id': ch.channel_id,
+    }
+
+
+def _channel_exists(cid):
+    if _driver is None:
+        return False
+    try:
+        return bool(_driver.execute_script(
+            "return !!document.querySelector(arguments[0]);",
+            _channel_window_selector(cid)))
+    except Exception:
+        return False
+
+
+# ==============================================================================
+#  PARAM SUBSTITUTION  (mirrors the client-side behaviour)
 # ==============================================================================
 def _substitute_params(sql_query, params):
     if not params:
@@ -762,410 +1085,263 @@ def _substitute_params(sql_query, params):
 
 
 # ==============================================================================
-#  CORE QUERY EXECUTOR
+#  REQUEST DISPATCH
 # ==============================================================================
-def _execute_sql_on_page(final_sql, timeout=DEFAULT_WAIT_TIMEOUT):
-    global _driver
-
-    if not _ensure_browser():
+def _handle_request(req):
+    if not isinstance(req, dict):
         return {
-            'status': 'error',
-            'message': 'Browser not available',
-            'results': [],
-            'affected_rows': 0,
-            'query_id': None,
-            'raw_sql': final_sql,
-            'elapsed': 0.0,
+            'status': 'error', 'message': 'request must be a JSON object',
+            'results': [], 'affected_rows': 0, 'query_id': None,
+            'raw_sql': None, 'elapsed': 0.0,
         }
 
-    t_start = time.perf_counter()
-    query_id = str(_uuid_module.uuid4().int)[:12]
+    op = (req.get('op') or '').strip().lower()
 
-    # ── Reset per-window UI state for a clean read ─────────────────────────
-    try:
-        _driver.execute_script("""
-            (function(){
-                var w = document.querySelector('.db-window.focused')
-                     || document.querySelector('.db-window');
-                if (!w) return;
-                var s = w.querySelector('.win-exec-status');
-                if (s) {
-                    s.dataset.state = 'idle';
-                    var l = s.querySelector('.status-label');
-                    var m = s.querySelector('.status-meta');
-                    if (l) l.textContent = 'Waiting…';
-                    if (m) m.textContent = '';
-                }
-                var d = w.querySelector('.win-sql-display');
-                if (d) d.style.display = 'none';
-                var r = w.querySelector('.win-query-result');
-                if (r) r.innerHTML = '';
-                var sm = w.querySelector('.win-results-summary');
-                if (sm) { sm.style.display = 'none'; sm.innerHTML = ''; }
-                var msg = w.querySelector('.win-message');
-                if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
-            })();
-        """)
-    except Exception:
-        pass
-
-    # ── Inject SQL and click Execute ───────────────────────────────────────
-    try:
-        ta = None
-        for sel in ["textarea.sql-query", ".sql-query", "textarea"]:
-            try:
-                ta = WebDriverWait(_driver, 4).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
-                break
-            except Exception:
-                continue
-        if not ta:
-            raise Exception("query textarea (textarea.sql-query) not found")
-
-        # Native setter so JS frameworks see the change
-        _driver.execute_script("""
-            var el = arguments[0], val = arguments[1];
-            var proto = Object.getPrototypeOf(el);
-            var desc  = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (desc && desc.set) { desc.set.call(el, val); }
-            else { el.value = val; }
-            el.dispatchEvent(new Event('input',  { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-        """, ta, final_sql)
-        time.sleep(0.15)
-
-        btn = None
-        for sel in [".exec-btn",
-                    "//button[contains(text(), 'Execute')]",
-                    "//button[@type='submit']"]:
-            try:
-                btn = (_driver.find_element(By.XPATH, sel)
-                       if sel.startswith("//")
-                       else _driver.find_element(By.CSS_SELECTOR, sel))
-                if btn:
-                    break
-            except Exception:
-                continue
-
-        if btn is None:
-            raise Exception("execute button (.exec-btn) not found")
-
-        _driver.execute_script("arguments[0].click();", btn)
-    except Exception as e:
-        return {
-            'status': 'error',
-            'message': f"Query input failed: {e}",
-            'results': [],
-            'affected_rows': 0,
-            'query_id': query_id,
-            'raw_sql': final_sql,
-            'elapsed': time.perf_counter() - t_start,
-        }
-
-    # ── Wait for terminal state ────────────────────────────────────────────
-    ready, _, reason = _wait_for_completion(timeout, query_id)
-
-    status_banner = _read_exec_status(_driver) or {}
-    state = (status_banner.get('state') or '').lower()
-    banner_meta = (status_banner.get('meta') or '').strip()
-    banner_label = (status_banner.get('label') or '').strip()
-
-    is_read = _is_read_query(final_sql)
-
-    # Pull the per-window message banner (error/success text)
-    def _win_message():
-        try:
-            win = _active_window(_driver)
-            if win is None:
-                return ""
-            els = win.find_elements(By.CSS_SELECTOR, ".win-message")
-            if els and els[0].is_displayed():
-                return (els[0].text or "").strip()
-        except Exception:
-            pass
-        return ""
-
-    # ── Error ──────────────────────────────────────────────────────────────
-    if state == 'error':
-        err_msg = _win_message() or banner_label or "query failed"
-        return {
-            'status': 'error',
-            'message': err_msg,
-            'results': [],
-            'affected_rows': 0,
-            'query_id': query_id,
-            'raw_sql': final_sql,
-            'elapsed': time.perf_counter() - t_start,
-        }
-
-    # ── Empty ──────────────────────────────────────────────────────────────
-    if state == 'empty':
+    # ---- Channel management ops ----
+    if op == 'acquire_channel':
+        owner = (req.get('owner') or 'anonymous').strip() or 'anonymous'
+        ch, err = _acquire_channel(owner)
+        if ch is None:
+            return {'status': 'error', 'message': err}
         return {
             'status': 'success',
-            'message': banner_label or 'Query executed successfully (0 rows)',
-            'results': [],
-            'affected_rows': 0,
-            'query_id': query_id,
-            'raw_sql': final_sql,
-            'elapsed': time.perf_counter() - t_start,
+            'channel_id': ch.channel_id,
+            'window_id': ch.channel_id,   # template window id == channel id
+            'owner': ch.owner,
         }
 
-    # ── Parse results ──────────────────────────────────────────────────────
-    results = []
-    affected_rows = 0
-    try:
-        soup = BeautifulSoup(_driver.page_source, 'html.parser')
+    if op == 'release_channel':
+        cid = int(req.get('channel_id') or 0)
+        ok = _release_channel(cid)
+        return {'status': 'success' if ok else 'error',
+                'released': ok, 'channel_id': cid}
 
-        # Find the active window in the soup
-        win = (soup.find('div', class_='db-window focused')
-               or soup.find('div', class_='db-window'))
+    if op == 'channel_status':
+        cid = int(req.get('channel_id') or 0)
+        st = _channel_status(cid)
+        return {'status': 'success', 'channel_id': cid, **st}
 
-        # Non-read queries: affected rows reported in the message/summary
-        if not is_read:
-            # Try to extract from statement blocks first
-            if win:
-                for blk in win.select('.stmt-block[data-status="success"]'):
-                    body = blk.find('div', class_='stmt-affected-body')
-                    if body:
-                        m = re.search(r'Affected rows:\s*(\d+)', body.get_text())
-                        if m:
-                            affected_rows += int(m.group(1))
-            # Fallback: status-meta "N affected"
-            if not affected_rows and banner_meta:
-                m = re.search(r'(\d+)\s*affected', banner_meta, re.IGNORECASE)
-                if m:
-                    affected_rows = int(m.group(1))
+    if op == 'list_channels':
+        return {'status': 'success', 'channels': _list_channels()}
 
+    # ---- SQL op (channel-bound or legacy auto) ----
+    sql = req.get('sql', '')
+    params = req.get('params')
+    timeout = float(req.get('timeout', DEFAULT_WAIT_TIMEOUT))
+
+    if not sql or not sql.strip():
+        return {
+            'status': 'error', 'message': 'Empty SQL',
+            'results': [], 'affected_rows': 0, 'query_id': None,
+            'raw_sql': sql, 'elapsed': 0.0,
+        }
+
+    final_sql = _substitute_params(sql, params)
+
+    cid = req.get('channel_id')
+    if cid is None:
+        # Legacy call — use a hidden auto-channel that lives in a fresh
+        # window. We allocate, run, release.
+        ch, err = _acquire_channel('legacy-auto')
+        if ch is None:
             return {
-                'status': 'success',
-                'message': banner_label or
-                           f'Write query executed ({affected_rows} row(s) affected)',
-                'results': [],
-                'affected_rows': affected_rows,
-                'query_id': query_id,
-                'raw_sql': final_sql,
-                'elapsed': time.perf_counter() - t_start,
+                'status': 'error', 'message': f'auto-channel failed: {err}',
+                'results': [], 'affected_rows': 0, 'query_id': None,
+                'raw_sql': final_sql, 'elapsed': 0.0,
             }
+        try:
+            with ch.lock:
+                ch.last_used_at = time.time()
+                return _execute_sql_on_channel(ch, final_sql, timeout)
+        finally:
+            _release_channel(ch.channel_id)
 
-        # Read queries: parse statement blocks
-        if win:
-            for blk in win.select('.stmt-block'):
-                blk_status = (blk.get('data-status') or '').strip().lower()
-                if blk_status not in ('success',):
-                    continue
-                tbl = blk.find('table')
-                if not tbl:
-                    continue
-                headers = [th.get_text(strip=True)
-                           for th in tbl.find_all('th')]
-                for tr in tbl.find_all('tr')[1:]:
-                    tds = tr.find_all('td')
-                    if not tds:
-                        continue
-                    row = {}
-                    for i, td in enumerate(tds):
-                        key = headers[i] if i < len(headers) else f"col{i}"
-                        # Cell content lives in span.cell-content; fall back to td text
-                        span = td.find('span', class_='cell-content')
-                        row[key] = (span.get_text() if span
-                                    else td.get_text(strip=True))
-                    results.append(row)
-
-            # Fallback: classic container / table search
-            if not results:
-                container = (win.find('div', class_='win-query-result') if win
-                             else None)
-                tbl = container.find('table') if container else None
-                if tbl:
-                    headers = [th.get_text(strip=True)
-                               for th in tbl.find_all('th')]
-                    for tr in tbl.find_all('tr')[1:]:
-                        tds = tr.find_all('td')
-                        if not tds:
-                            continue
-                        row = {}
-                        for i, td in enumerate(tds):
-                            key = headers[i] if i < len(headers) else f"col{i}"
-                            span = td.find('span', class_='cell-content')
-                            row[key] = (span.get_text() if span
-                                        else td.get_text(strip=True))
-                        results.append(row)
-    except Exception as e:
+    # Channel-bound.
+    ch = _get_channel(int(cid))
+    if ch is None:
         return {
             'status': 'error',
-            'message': f"Parse error: {e}",
-            'results': [],
-            'affected_rows': 0,
-            'query_id': query_id,
-            'raw_sql': final_sql,
-            'elapsed': time.perf_counter() - t_start,
+            'message': f'unknown channel_id {cid} (acquire_channel first)',
+            'results': [], 'affected_rows': 0, 'query_id': None,
+            'raw_sql': final_sql, 'elapsed': 0.0,
         }
 
-    return {
-        'status': 'success',
-        'message': banner_label or f'Query executed successfully ({len(results)} rows)',
-        'results': results,
-        'affected_rows': affected_rows,
-        'query_id': query_id,
-        'raw_sql': final_sql,
-        'elapsed': time.perf_counter() - t_start,
-    }
+    with ch.lock:
+        ch.last_used_at = time.time()
+        try:
+            return _execute_sql_on_channel(ch, final_sql, timeout)
+        except Exception as e:
+            return {
+                'status': 'error', 'message': f'Unhandled executor error: {e}',
+                'results': [], 'affected_rows': 0, 'query_id': None,
+                'raw_sql': final_sql, 'elapsed': 0.0,
+                'channel_id': ch.channel_id,
+            }
 
 
 # ==============================================================================
-#  WORKER THREAD
+#  SOCKET FRAMING
 # ==============================================================================
-def _worker_loop():
-    _log("Worker thread started")
+def _recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
 
-    _ensure_browser()
+
+def _send_frame(sock, obj):
+    payload = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+    if len(payload) > MAX_FRAME:
+        raise ValueError("frame too large")
+    sock.sendall(_HEADER.pack(len(payload)) + payload)
+
+
+def _recv_frame(sock):
+    header = _recv_exact(sock, _HEADER.size)
+    if header is None:
+        return None
+    (length,) = _HEADER.unpack(header)
+    if length == 0:
+        return None
+    if length > MAX_FRAME:
+        raise ValueError(f"frame too large: {length}")
+    payload = _recv_exact(sock, length)
+    if payload is None:
+        return None
+    return json.loads(payload.decode('utf-8'))
+
+
+# ==============================================================================
+#  CLIENT HANDLER
+# ==============================================================================
+def _client_loop(conn, addr):
+    _log(f"client connected: {addr}")
+    try:
+        while True:
+            try:
+                req = _recv_frame(conn)
+            except Exception as e:
+                _log(f"client {addr} recv error: {e}")
+                break
+            if req is None:
+                _log(f"client {addr} closed")
+                break
+
+            op = (req.get('op') or 'sql').lower() if isinstance(req, dict) else '?'
+            _log(f"client {addr} op={op} "
+                 f"channel={req.get('channel_id') if isinstance(req, dict) else '-'}")
+            try:
+                resp = _handle_request(req)
+            except Exception as e:
+                resp = {
+                    'status': 'error',
+                    'message': f'bridge dispatcher error: {e}',
+                    'results': [], 'affected_rows': 0, 'query_id': None,
+                    'raw_sql': None, 'elapsed': 0.0,
+                }
+            try:
+                _send_frame(conn, resp)
+            except Exception as e:
+                _log(f"client {addr} send error: {e}")
+                break
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _log(f"client disconnected: {addr}")
+
+
+# ==============================================================================
+#  SERVER
+# ==============================================================================
+_shutdown_event = threading.Event()
+_server_sock = None
+
+
+def _serve():
+    global _server_sock
+
+    _server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _server_sock.bind((BIND_HOST, BIND_PORT))
+    _server_sock.listen(32)
+    _server_sock.settimeout(1.0)
+    _log(f"listening on {BIND_HOST}:{BIND_PORT}")
 
     while not _shutdown_event.is_set():
         try:
-            item = queryrequest.get(timeout=1.0)
-        except queue.Empty:
-            if not _is_browser_alive():
-                _log("Browser died — attempting relaunch")
-                _ensure_browser()
+            conn, addr = _server_sock.accept()
+        except socket.timeout:
             continue
-
-        if item is None:
-            _log("Received sentinel — worker exiting")
+        except OSError:
             break
-
-        if isinstance(item, str):
-            sql = item
-            params = None
-            timeout = DEFAULT_WAIT_TIMEOUT
-        elif isinstance(item, dict):
-            sql = item.get('sql', '')
-            params = item.get('params')
-            timeout = float(item.get('timeout', DEFAULT_WAIT_TIMEOUT))
-        else:
-            queryresult.put({
-                'status': 'error',
-                'message': f'Unsupported queryrequest item type: {type(item).__name__}',
-                'results': [],
-                'affected_rows': 0,
-                'query_id': None,
-                'raw_sql': None,
-                'elapsed': 0.0,
-            })
-            continue
-
-        if not sql or not sql.strip():
-            queryresult.put({
-                'status': 'error',
-                'message': 'Empty SQL',
-                'results': [],
-                'affected_rows': 0,
-                'query_id': None,
-                'raw_sql': sql,
-                'elapsed': 0.0,
-            })
-            continue
-
-        final_sql = _substitute_params(sql, params)
-
-        try:
-            result = _execute_sql_on_page(final_sql, timeout=timeout)
         except Exception as e:
-            result = {
-                'status': 'error',
-                'message': f'Unhandled executor error: {e}',
-                'results': [],
-                'affected_rows': 0,
-                'query_id': None,
-                'raw_sql': final_sql,
-                'elapsed': 0.0,
-            }
+            _log(f"accept error: {e}")
+            continue
 
-        queryresult.put(result)
-
-    _log("Worker thread exiting")
+        t = threading.Thread(target=_client_loop, args=(conn, addr), daemon=True)
+        t.start()
 
 
-def start_worker():
-    global _worker_thread
-    if _worker_thread and _worker_thread.is_alive():
+def _idle_reaper():
+    """Optional: close channels idle for a long time."""
+    if CHANNEL_IDLE_CLOSE_SECONDS <= 0:
         return
-    _shutdown_event.clear()
-    _worker_thread = threading.Thread(
-        target=_worker_loop, name="mysqlremote-worker", daemon=True)
-    _worker_thread.start()
+    while not _shutdown_event.is_set():
+        time.sleep(30)
+        now = time.time()
+        with _channels_lock:
+            stale = [c.channel_id for c in _channels.values()
+                     if not c.lock.locked()
+                     and (now - c.last_used_at) > CHANNEL_IDLE_CLOSE_SECONDS]
+        for cid in stale:
+            _log(f"reaping idle channel {cid}")
+            _release_channel(cid)
 
 
-# ==============================================================================
-#  SYNCHRONOUS HELPER
-# ==============================================================================
-def request_query(sql, params=None, timeout=DEFAULT_WAIT_TIMEOUT,
-                  result_timeout=None):
-    start_worker()
-    queryrequest.put({'sql': sql, 'params': params, 'timeout': timeout})
-
-    if result_timeout is None:
-        result_timeout = timeout + 30.0
-
-    try:
-        return queryresult.get(timeout=result_timeout)
-    except queue.Empty:
-        return {
-            'status': 'error',
-            'message': f'No result within {result_timeout:.1f}s',
-            'results': [],
-            'affected_rows': 0,
-            'query_id': None,
-            'raw_sql': sql,
-            'elapsed': 0.0,
-        }
-
-
-# ==============================================================================
-#  SHUTDOWN
-# ==============================================================================
-def shutdown_browser():
-    global _driver, _session
-    with _browser_lock:
-        try:
-            if _driver:
-                _driver.quit()
-        except Exception:
-            pass
-        _driver = None
-        if _session:
-            try:
-                _session.close()
-            except Exception:
-                pass
-        _session = None
-        _browser_ready.clear()
-
-
-def stop_worker():
+def _signal_handler(sig, frame):
+    _log("interrupt — shutting down")
     _shutdown_event.set()
     try:
-        queryrequest.put(None, timeout=1.0)
+        if _server_sock:
+            _server_sock.close()
     except Exception:
         pass
-    if _worker_thread:
-        _worker_thread.join(timeout=5.0)
-    shutdown_browser()
-
-
-# ==============================================================================
-#  SIGNAL HANDLING
-# ==============================================================================
-def _signal_handler(sig, frame):
-    _log("Interrupt — stopping worker")
-    stop_worker()
+    try:
+        if _driver:
+            _driver.quit()
+    except Exception:
+        pass
     sys.exit(0)
 
 
 signal.signal(signal.SIGINT, _signal_handler)
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+except Exception:
+    pass
 
 
 # ==============================================================================
-#  AUTO-START WORKER ON IMPORT
+#  MAIN
 # ==============================================================================
-start_worker()
+def main():
+    _log(f"starting at {datetime.now().isoformat(timespec='seconds')}")
 
+    if not _ensure_browser():
+        _log("WARNING: initial browser launch failed — will retry on first request")
+
+    # Start idle reaper if configured.
+    if CHANNEL_IDLE_CLOSE_SECONDS > 0:
+        threading.Thread(target=_idle_reaper, daemon=True).start()
+
+    _log("bridge is up. Ctrl+C to stop.")
+    _serve()
+
+
+if __name__ == "__main__":
+    main()

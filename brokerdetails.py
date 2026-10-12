@@ -1,123 +1,62 @@
 # brokerdetails.py
 """
-Handles MT5 broker detection for two independent account families:
+Handles MT5 broker detection for two FULLY INDEPENDENT account families:
 
-    [SA]   sub-accounts / investors        (harvhub table)
-    [PRG]  programme / trader accounts     (programme table)
+    [SA]   sub-accounts / investors        (harvhub + vps tables)
+    [PRG]  programme / trader accounts     (programme + programme_vps tables)
 
-Rules:
-  * Read-only IPC probe (initialize with portable=True -> account_info ->
-    shutdown). NEVER call mt5.login().
-  * Two passes run every loop for EACH family:
+DB ACCESS MODEL
+---------------
+This script is a CLIENT of the long-running mysqlremote bridge process.
+It does NOT launch Chrome itself and does NOT import mysqlremote.
+It opens a TCP connection to 127.0.0.1:5599 and exchanges framed JSON.
 
-      1. Disconnect-request pass
-         For every row with disconnect_broker_request = 1:
-           - Glob MT5_DESTINATION_PATH for every folder whose name ends in
-             "_{U<user_id>_SA<sub_account_id>}" (SA)
-             or "_{U<user_id>_P<programme_id>}"   (PRG).
-           - For each matched folder:
-               * kill every MT5 process (terminal64.exe, metatester64.exe,
-                 mt5liveupdate.exe, metaeditor64.exe) — not just the ones
-                 inside the folder, because MT5 helpers can hold files
-                 from anywhere,
-               * wait until the processes are gone,
-               * try shutil.rmtree up to 10 times with 3s between retries,
-               * if that fails, try `cmd /c rmdir /s /q "folder"`,
-               * if that fails, rename the folder out of the way.
-           - Only when every folder is gone: clear the flag and fire the
-             "disconnection complete" notification.
+MULTIPLEXED CHANNELS
+--------------------
+On first DB call this client ACQUIRES a dedicated channel from the bridge
+(`queryrequest_{id}` / `queryresult_{id}`). The bridge maps that channel to
+exactly ONE DOM window inside phpmyadmintemplate.php. Every subsequent
+query from this process is sent on the same channel, so no other script
+(e.g. script_b.py) can overwrite our textarea / results pane, and
+vice versa. The channel is released at interpreter shutdown via atexit.
 
-      2. Normal owner + follower probe pass
+BALANCE VERIFICATION (SA only)
+------------------------------
+After a live, matching probe for an SA sub-account whose DB
+`broker_login_status` is `valid_credentials`, and whose
+`balance_verification` column is `applied-for-verification`, this script
+reads `mt5.account_info()` under the same IPC lock and writes
+`broker_balance`, `balance_verification='verified'`, `verified_at`, and
+`account_mode` directly back to `harvhub` via the bridge. No JSON files,
+no temp files. Programme accounts are never balance-verified here.
 
-    The two families are processed independently — a failing programme
-    broker never stops an investor probe and vice versa.
+PROGRAMME BROKER SYMBOLS / TIMEFRAMES (PRG only)
+------------------------------------------------
+Whenever a programme account is confirmed LIVE with matching login + name
+(newly_valid / reconnected / silent keep), this script opens the same
+terminal under the MT5 IPC lock, enumerates every symbol via
+`mt5.symbols_get()`, and probes the supported timeframes using the exact
+same logic as the OHLC collector. The resulting lists are then written
+back to `programme.broker_symbols` and `programme.broker_timeframes`,
+always CLEARING the existing column value first so the data is a fresh
+snapshot of what the broker currently offers. No notification is fired
+for this — it is a silent background refresh.
 
-Valid-credentials rule (both families)
---------------------------------------
-  `broker_login_status = 'valid_credentials'` means "we already told the
-  user this terminal is live". It must NOT short-circuit the probe.
-
-  Every loop still:
-      1. ensures the folder exists and launches the terminal if needed,
-      2. probes the terminal via IPC,
-      3. verifies the terminal login matches the DB login,
-      4. verifies the terminal account name matches the HarvHub name.
-
-  After probing:
-
-      probe OK + row already 'valid_credentials'
-          -> silent keep. Log OK-NO-EMAIL. No DB write. No email.
-
-      probe OK + row NULL/empty
-          -> stamp 'valid_credentials', reset attempts, fire success
-             email ONCE, log OK-NEW.
-
-      probe NOT ok (no session / wrong login / wrong name / unreachable)
-          -> hand off to the manual-login window so the user can log in
-             and confirm. No email, no DB changes on the failure path.
-
-  Failure statuses (invalid_credentials, fullname_mismatch, and for
-  SA-only: invalid_account) are still skipped — the terminal was already
-  deleted and the user already notified.
-
-Programme account demo rule
----------------------------
-  Programme accounts are analysis-only. Demo accounts ARE allowed.
-  The programme broker pass will never mark an account as
-  `invalid_account` and will never delete a terminal because it's
-  detected as demo. It just reports demo/real in the logs and in the
-  success notification body.
-
-VPS bindings — investor vs programme
-------------------------------------
-  The `vps` table has three possible binding shapes:
-
-      (A) user_id + sub_account_id + programme_id IS NULL
-          -> investor / sub-account candidate for the [SA] pass.
-
-      (B) user_id + programme_id IS NOT NULL
-          -> programme pinned to this VPS. Feeds the [PRG] pass
-             directly by `programme.id`, independent of the investor
-             row. `sub_account_id` is ignored here.
-
-      (C) user_id only (legacy row with sub_account_id = 0 or NULL
-          and no programme_id)
-          -> still treated as an investor candidate for backwards
-             compatibility (sub_id defaults to user_id).
-
-  Programme candidates are gathered from BOTH:
-      * rows with `programme_id IS NOT NULL` (option B above), and
-      * the legacy fallback `_fetch_programmes_for_owner(uid)` for any
-        vps owner who does not have a pinned programme row.
-  A dedup set makes sure each `programme.id` is probed at most once
-  per loop.
-
-harvhub schema note
--------------------
-`harvhub` has no `user_id` column. Match on:
-    harvhub.id             = <user_id>
-    harvhub.sub_account_id = <sub_account_id>
-
-programme schema note
----------------------
-`programme` has NO `email` column. Owner email is resolved from
-`harvhub` via `programme.userid -> harvhub.id -> harvhub.email`.
-The `_resolve_programme_owner_email` helper encapsulates that lookup,
-and `_fetch_programme_row_for_notify` injects the resolved value into
-the row dict so downstream notification helpers keep working.
-
-Folder naming
--------------
-  Investor / sub-account:  <server>_<login>_U<user_id>_SA<sub_account_id>
-  Programme / trader:      <server>_<login>_U<user_id>_P<programme_id>
+On a successful SA balance verification, a one-time contract notification
+is fired via notification_service.record_balance_verification_notification():
+"Your MT5 balance verification has been updated. Go to your dashboard
+for more details." Deduplicated per sub-account.
 """
 
+import atexit
 import os
 import re
 import sys
 import time
-import shutil
+import json
 import socket
+import struct
+import shutil
 import threading
 import subprocess
 import traceback
@@ -125,8 +64,6 @@ from datetime import datetime
 
 import tkinter as tk
 from tkinter import ttk
-
-import mysqlremote as db
 
 import notification_service as notifier
 
@@ -137,17 +74,142 @@ except Exception:
 
 
 # ==============================================================================
+#  BRIDGE CLIENT — channel-aware, talks to mysqlremote over localhost TCP
+# ==============================================================================
+BRIDGE_HOST = "127.0.0.1"
+BRIDGE_PORT = 5599
+
+BRIDGE_OWNER = "brokerdetails"
+
+_HEADER = struct.Struct(">I")
+MAX_FRAME = 64 * 1024 * 1024
+
+
+class _BridgeError(Exception):
+    pass
+
+
+class _BridgeClient:
+    def __init__(self, host=BRIDGE_HOST, port=BRIDGE_PORT, owner=BRIDGE_OWNER):
+        self.host = host
+        self.port = port
+        self.owner = owner
+        self.channel_id = None
+        self._channel_lock = threading.Lock()
+
+        self.queryrequest = self
+        self.queryresult  = self
+
+    def _send_request(self, req):
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=15)
+        except Exception as e:
+            raise _BridgeError(
+                f"cannot connect to bridge {self.host}:{self.port}: {e}")
+
+        try:
+            payload = json.dumps(req, ensure_ascii=False).encode('utf-8')
+            sock.sendall(_HEADER.pack(len(payload)) + payload)
+
+            header = self._recv_exact(sock, _HEADER.size)
+            if header is None:
+                raise _BridgeError("bridge closed the connection (no header)")
+            (length,) = _HEADER.unpack(header)
+            if length == 0 or length > MAX_FRAME:
+                raise _BridgeError(f"bad frame length from bridge: {length}")
+
+            body = self._recv_exact(sock, length)
+            if body is None:
+                raise _BridgeError("bridge closed the connection (no body)")
+
+            return json.loads(body.decode('utf-8'))
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _recv_exact(sock, n):
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def acquire_channel(self):
+        with self._channel_lock:
+            if self.channel_id is not None:
+                return self.channel_id
+            resp = self._send_request({
+                'op': 'acquire_channel',
+                'owner': self.owner,
+            })
+            if resp.get('status') != 'success':
+                raise _BridgeError(
+                    f"acquire_channel failed: {resp.get('message')}")
+            self.channel_id = int(resp['channel_id'])
+            print(f"[bridge] {self.owner}: acquired channel "
+                  f"queryrequest_{self.channel_id} / "
+                  f"queryresult_{self.channel_id} "
+                  f"(window #{resp.get('window_id')})")
+            return self.channel_id
+
+    def release_channel(self):
+        with self._channel_lock:
+            if self.channel_id is None:
+                return
+            cid = self.channel_id
+            self.channel_id = None
+            try:
+                self._send_request({'op': 'release_channel',
+                                    'channel_id': cid})
+                print(f"[bridge] {self.owner}: released channel {cid}")
+            except Exception as e:
+                print(f"[bridge] release_channel({cid}) failed: {e}")
+
+    def channel_status(self):
+        if self.channel_id is None:
+            return None
+        return self._send_request({
+            'op': 'channel_status',
+            'channel_id': self.channel_id,
+        })
+
+    def list_channels(self):
+        return self._send_request({'op': 'list_channels'})
+
+    def put(self, request, timeout=None):
+        req = dict(request)
+        if 'sql' in req and 'channel_id' not in req:
+            cid = self.acquire_channel()
+            req['channel_id'] = cid
+        return self._send_request(req)
+
+    def get(self, timeout=None, block=True):
+        raise _BridgeError(
+            "brokerdetails now uses request/response in one call; "
+            "queryresult.get() should not be used directly."
+        )
+
+
+db = _BridgeClient()
+atexit.register(db.release_channel)
+
+
+# ==============================================================================
 #  CONFIG
 # ==============================================================================
 DEFAULT_MT5_PATH     = r"C:\xampp\htdocs\harvcore\mt5\MetaTrader 5"
 MT5_DESTINATION_PATH = r"C:\xampp\htdocs\harvcore\mt5"
 
-MANUAL_POLL_INTERVAL = 1.0
-COPY_FEEDBACK_MS     = 1200
+MANUAL_POLL_INTERVAL = 1.5
+COPY_FEEDBACK_MS     = 900
 
-TERMINAL_BOOT_WAIT   = 6.0
+TERMINAL_BOOT_WAIT   = 9.0
 
-# MT5 process image names we always kill before trying to delete a folder.
 MT5_PROCESS_NAMES = (
     'terminal64.exe',
     'metatester64.exe',
@@ -155,11 +217,9 @@ MT5_PROCESS_NAMES = (
     'metaeditor64.exe',
 )
 
-# How long to wait for a killed process to disappear.
 TERMINAL_KILL_WAIT_TOTAL = 15.0
 TERMINAL_KILL_POLL       = 0.5
 
-# Folder deletion retry policy.
 DELETE_RETRY_COUNT = 10
 DELETE_RETRY_WAIT  = 3.0
 
@@ -169,19 +229,45 @@ TERMINAL_NEGATIVE_STATUSES = (
     'invalid_account',
 )
 
-# Programme broker: demo accounts are allowed by default, so only these
-# two failure statuses ever apply.
 PROGRAMME_NEGATIVE_STATUSES = (
     'invalid_credentials',
     'fullname_mismatch',
 )
 
-# A row with this status is already confirmed live AND the user was
-# already emailed. The probe still runs every loop; only the email is
-# suppressed on repeats.
 VALID_STATUS = 'valid_credentials'
 
+BALANCE_VERIFICATION_TRIGGERS = (
+    'applied-for-verification',
+    'applied_for_verification',
+    'applied',
+)
+
 CREATE_NO_WINDOW = 0x08000000
+
+_MT5_IPC_LOCK = threading.RLock()
+
+
+# ==============================================================================
+#  TIMEFRAME MAP  (mirrors ohlc collector exactly)
+# ==============================================================================
+TIMEFRAME_MAP = None  # populated lazily below once mt5 is available
+
+
+def _build_timeframe_map():
+    global TIMEFRAME_MAP
+    if mt5 is None:
+        TIMEFRAME_MAP = {}
+        return
+    TIMEFRAME_MAP = {
+        "1m":  mt5.TIMEFRAME_M1,  "2m":  mt5.TIMEFRAME_M2,  "3m":  mt5.TIMEFRAME_M3,
+        "4m":  mt5.TIMEFRAME_M4,  "5m":  mt5.TIMEFRAME_M5,  "6m":  mt5.TIMEFRAME_M6,
+        "10m": mt5.TIMEFRAME_M10, "12m": mt5.TIMEFRAME_M12, "15m": mt5.TIMEFRAME_M15,
+        "20m": mt5.TIMEFRAME_M20, "30m": mt5.TIMEFRAME_M30,
+        "1h":  mt5.TIMEFRAME_H1,  "2h":  mt5.TIMEFRAME_H2,  "3h":  mt5.TIMEFRAME_H3,
+        "4h":  mt5.TIMEFRAME_H4,  "6h":  mt5.TIMEFRAME_H6,  "8h":  mt5.TIMEFRAME_H8,
+        "12h": mt5.TIMEFRAME_H12, "1d":  mt5.TIMEFRAME_D1,  "1w":  mt5.TIMEFRAME_W1,
+        "1mo": mt5.TIMEFRAME_MN1,
+    }
 
 
 # ==============================================================================
@@ -203,14 +289,14 @@ def get_local_ip():
 # ==============================================================================
 def db_query(sql, params=None, timeout=20.0, quiet=False):
     start = time.perf_counter()
-    db.queryrequest.put({'sql': sql, 'params': params, 'timeout': timeout})
-
     try:
-        result = db.queryresult.get(timeout=timeout + 30.0)
-    except Exception as e:
+        result = db.put(
+            {'sql': sql, 'params': params, 'timeout': timeout},
+        )
+    except _BridgeError as e:
         return {
             'status': 'error',
-            'message': f'Timed out waiting for queryresult: {e}',
+            'message': f'bridge error: {e}',
             'results': [], 'affected_rows': 0,
             'query_id': None, 'raw_sql': sql,
             'elapsed': time.perf_counter() - start,
@@ -225,6 +311,33 @@ def db_query(sql, params=None, timeout=20.0, quiet=False):
 
 
 _PDO = notifier.make_pdo(db_query)
+
+
+# ==============================================================================
+#  IN-MEMORY TERMINAL STATE
+# ==============================================================================
+_ACCOUNT_STATE = {}
+_ACCOUNT_STATE_LOCK = threading.Lock()
+
+
+def _mark_terminal_live(kind, owner_id, account_id):
+    with _ACCOUNT_STATE_LOCK:
+        _ACCOUNT_STATE[(kind, owner_id, account_id)] = 'live'
+
+
+def _mark_terminal_dark(kind, owner_id, account_id):
+    with _ACCOUNT_STATE_LOCK:
+        _ACCOUNT_STATE[(kind, owner_id, account_id)] = 'dark'
+
+
+def _was_terminal_dark(kind, owner_id, account_id):
+    with _ACCOUNT_STATE_LOCK:
+        return _ACCOUNT_STATE.get((kind, owner_id, account_id)) == 'dark'
+
+
+def _was_terminal_live(kind, owner_id, account_id):
+    with _ACCOUNT_STATE_LOCK:
+        return _ACCOUNT_STATE.get((kind, owner_id, account_id)) == 'live'
 
 
 # ==============================================================================
@@ -336,40 +449,22 @@ def _normalize_row(row):
     return None
 
 
+def _is_ok(res):
+    return bool(res) and res.get('status') == 'success'
+
+
 # ==============================================================================
-#  harvhub column whitelist
+#  harvhub / programme column whitelists
 # ==============================================================================
 HARVHUB_SELECT_COLUMNS = [
-    'id',
-    'main_account_id',
-    'sub_account_id',
-    'sub_account_name',
-    'is_main_account',
-    'broker',
-    'email',
-    'fullname',
-    'first_name',
-    'last_name',
-    'username',
-    'server',
-    'login',
-    'broker_password',
-    'application_status',
-    'broker_balance',
-    'recent_highest_balance',
-    'balance_verification',
-    'profitandloss',
-    'balance_display',
-    'execution_start_date',
-    'loyalties',
-    'reset_contract',
-    'contract_id',
-    'account_mode',
-    'demo_account',
-    'Terminal_path',
-    'broker_login_status',
-    'broker_login_attempt_used',
-    'broker_total_login_attempt',
+    'id', 'main_account_id', 'sub_account_id', 'sub_account_name',
+    'is_main_account', 'broker', 'email', 'fullname', 'first_name',
+    'last_name', 'username', 'server', 'login', 'broker_password',
+    'application_status', 'broker_balance', 'recent_highest_balance',
+    'balance_verification', 'profitandloss', 'balance_display',
+    'execution_start_date', 'loyalties', 'reset_contract', 'contract_id',
+    'account_mode', 'demo_account', 'Terminal_path', 'broker_login_status',
+    'broker_login_attempt_used', 'broker_total_login_attempt',
     'disconnect_broker_request',
 ]
 
@@ -378,27 +473,11 @@ def _broker_select_sql():
     return ', '.join(HARVHUB_SELECT_COLUMNS)
 
 
-# ==============================================================================
-#  programme column whitelist
-#  -------------------------------------------------------------
-#  NOTE: the `programme` table has NO `email` column. Owner email is
-#  resolved on demand from `harvhub` via `programme.userid`. That is
-#  done in `_resolve_programme_owner_email` and injected by
-#  `_fetch_programme_row_for_notify`.
-# ==============================================================================
 PROGRAMME_SELECT_COLUMNS = [
-    'id',
-    'userid',
-    'program_name',
-    'broker',
-    'server',
-    'login',
-    'broker_password',
-    'broker_login_status',
-    'broker_login_attempt_used',
-    'broker_total_login_attempt',
-    'disconnect_broker_request',
-    'demo_account',
+    'id', 'userid', 'program_name', 'broker', 'server', 'login',
+    'broker_password', 'broker_login_status', 'broker_login_attempt_used',
+    'broker_total_login_attempt', 'disconnect_broker_request', 'demo_account',
+    'broker_symbols', 'broker_timeframes',
 ]
 
 
@@ -410,10 +489,6 @@ def _programme_select_sql():
 #  Folder / path
 # ==============================================================================
 def build_mt5_folder_name(server, login, user_id, kind, account_id):
-    """
-    kind = 'SA'  -> sub-account / investor suffix:  _U{user_id}_SA{account_id}
-    kind = 'P'   -> programme / trader suffix:      _U{user_id}_P{account_id}
-    """
     s   = _sanitize_folder_component(server)
     l   = _sanitize_folder_component(login)
     u   = _sanitize_folder_component(user_id)
@@ -422,25 +497,20 @@ def build_mt5_folder_name(server, login, user_id, kind, account_id):
 
 
 def build_mt5_terminal_path_sa(server, login, user_id, sub_account_id):
-    folder_name = build_mt5_folder_name(
-        server, login, user_id, 'SA', sub_account_id
-    )
+    folder_name = build_mt5_folder_name(server, login, user_id, 'SA', sub_account_id)
     folder_abs   = os.path.join(MT5_DESTINATION_PATH, folder_name)
     terminal_exe = os.path.join(folder_abs, "terminal64.exe")
     return folder_name, folder_abs, terminal_exe
 
 
 def build_mt5_terminal_path_prog(server, login, user_id, programme_id):
-    folder_name = build_mt5_folder_name(
-        server, login, user_id, 'P', programme_id
-    )
+    folder_name = build_mt5_folder_name(server, login, user_id, 'P', programme_id)
     folder_abs   = os.path.join(MT5_DESTINATION_PATH, folder_name)
     terminal_exe = os.path.join(folder_abs, "terminal64.exe")
     return folder_name, folder_abs, terminal_exe
 
 
 def find_all_folders_for_sub_account(user_id, sub_account_id):
-    """Investor folders: *_{U<user_id>_SA<sub_account_id>}"""
     matches = []
     if not os.path.isdir(MT5_DESTINATION_PATH):
         return matches
@@ -458,7 +528,6 @@ def find_all_folders_for_sub_account(user_id, sub_account_id):
 
 
 def find_all_folders_for_programme(user_id, programme_id):
-    """Programme folders: *_{U<user_id>_P<programme_id>}"""
     matches = []
     if not os.path.isdir(MT5_DESTINATION_PATH):
         return matches
@@ -476,9 +545,6 @@ def find_all_folders_for_programme(user_id, programme_id):
 
 
 def ensure_mt5_folder(server, login, user_id, kind, account_id):
-    """
-    Generic folder creation. `kind` is 'SA' or 'P'.
-    """
     if kind == 'SA':
         folder_name, folder_abs, terminal_exe = build_mt5_terminal_path_sa(
             server, login, user_id, account_id
@@ -539,16 +605,35 @@ def delete_mt5_folder(folder_abs, tag='SA'):
 # ==============================================================================
 #  Terminal launcher
 # ==============================================================================
-_LAUNCHED_PATHS = set()
-_LAUNCH_LOCK    = threading.Lock()
+_LAUNCHED_FOLDERS = set()
+_LAUNCH_LOCK      = threading.Lock()
+
+
+def _terminal_running_for_folder(folder_abs):
+    target_exe = os.path.join(folder_abs, "terminal64.exe")
+    if not os.path.exists(target_exe):
+        return False
+    try:
+        with open(target_exe, 'a'):
+            pass
+    except Exception:
+        return True
+    return False
 
 
 def launch_terminal(terminal_exe, folder_abs):
+    folder_key = os.path.normcase(os.path.abspath(folder_abs))
+
     with _LAUNCH_LOCK:
-        already = terminal_exe in _LAUNCHED_PATHS
-    if already:
-        print(f"      [LAUNCH] already running: {terminal_exe}")
-        return True
+        if folder_key in _LAUNCHED_FOLDERS:
+            print(f"      [LAUNCH] already launched this session: {terminal_exe}")
+            return False, True
+
+    if _terminal_running_for_folder(folder_abs):
+        with _LAUNCH_LOCK:
+            _LAUNCHED_FOLDERS.add(folder_key)
+        print(f"      [LAUNCH] terminal already running: {terminal_exe}")
+        return False, True
 
     try:
         DETACHED_PROCESS = 0x00000008
@@ -561,22 +646,28 @@ def launch_terminal(terminal_exe, folder_abs):
         )
     except Exception as e:
         print(f"      [LAUNCH] failed: {e}")
-        return False
+        return False, False
 
     with _LAUNCH_LOCK:
-        _LAUNCHED_PATHS.add(terminal_exe)
+        _LAUNCHED_FOLDERS.add(folder_key)
     print(f"      [LAUNCH] started: {terminal_exe}")
-    return True
+    return True, True
 
 
 def bring_terminal_to_front(terminal_exe):
     try:
-        subprocess.Popen([terminal_exe])
-        print(f"      [FOCUS] re-opened: {terminal_exe}")
+        os.startfile(terminal_exe)
+        print(f"      [FOCUS] opened: {terminal_exe}")
         return True
     except Exception as e:
-        print(f"      [FOCUS] failed: {e}")
-        return False
+        print(f"      [FOCUS] os.startfile failed: {e}")
+        try:
+            subprocess.Popen([terminal_exe], close_fds=True)
+            print(f"      [FOCUS] Popen opened: {terminal_exe}")
+            return True
+        except Exception as e2:
+            print(f"      [FOCUS] Popen failed: {e2}")
+            return False
 
 
 # ==============================================================================
@@ -667,7 +758,7 @@ def kill_terminal_for_folder(folder_abs):
     if not procs:
         print(f"      [KILL-TERMINAL] no MT5 process running")
         with _LAUNCH_LOCK:
-            _LAUNCHED_PATHS.discard(os.path.join(folder_abs, "terminal64.exe"))
+            _LAUNCHED_FOLDERS.discard(os.path.normcase(os.path.abspath(folder_abs)))
         return 0
 
     print(f"      [KILL-TERMINAL] found running MT5 processes: {procs}")
@@ -675,7 +766,7 @@ def kill_terminal_for_folder(folder_abs):
     kill_pids(pids)
 
     with _LAUNCH_LOCK:
-        _LAUNCHED_PATHS.discard(os.path.join(folder_abs, "terminal64.exe"))
+        _LAUNCHED_FOLDERS.discard(os.path.normcase(os.path.abspath(folder_abs)))
 
     return len(pids)
 
@@ -750,56 +841,580 @@ def force_delete_folder(folder_abs, terminal_exe=None):
 #  Read-only IPC probe
 # ==============================================================================
 def probe_terminal_account(terminal_exe, folder_abs):
-    if mt5 is None:
-        return 'unreachable', {'error': 'MetaTrader5 module not available'}
+    with _MT5_IPC_LOCK:
+        if mt5 is None:
+            return 'unreachable', {'error': 'MetaTrader5 module not available'}
 
-    if not os.path.exists(terminal_exe):
-        return 'unreachable', {'error': f'Terminal not found: {terminal_exe}'}
+        if not os.path.exists(terminal_exe):
+            return 'unreachable', {'error': f'Terminal not found: {terminal_exe}'}
 
-    try:
-        mt5.shutdown()
-    except Exception:
-        pass
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
 
-    try:
-        ok = mt5.initialize(
-            path=terminal_exe,
-            timeout=10000,
-            portable=True,
-        )
-    except Exception as e:
-        return 'unreachable', {'error': f'initialize() raised: {e}'}
+        try:
+            ok = mt5.initialize(
+                path=terminal_exe,
+                timeout=10000,
+                portable=True,
+            )
+        except Exception as e:
+            return 'unreachable', {'error': f'initialize() raised: {e}'}
 
-    if not ok:
-        return 'unreachable', {'error': f'initialize() failed: {mt5.last_error()}'}
+        if not ok:
+            return 'unreachable', {'error': f'initialize() failed: {mt5.last_error()}'}
 
-    info = None
-    try:
-        acc = mt5.account_info()
-        if acc is not None and getattr(acc, 'login', None):
-            info = {
-                'login':    int(acc.login),
-                'server':   getattr(acc, 'server', None),
-                'name':     getattr(acc, 'name', None),
-                'balance':  getattr(acc, 'balance', None),
-                'currency': getattr(acc, 'currency', None),
-                'leverage': getattr(acc, 'leverage', None),
-            }
-    except Exception:
         info = None
+        try:
+            acc = mt5.account_info()
+            if acc is not None and getattr(acc, 'login', None):
+                info = {
+                    'login':    int(acc.login),
+                    'server':   getattr(acc, 'server', None),
+                    'name':     getattr(acc, 'name', None),
+                    'balance':  getattr(acc, 'balance', None),
+                    'currency': getattr(acc, 'currency', None),
+                    'leverage': getattr(acc, 'leverage', None),
+                }
+        except Exception:
+            info = None
 
-    try:
-        mt5.shutdown()
-    except Exception:
-        pass
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
 
-    if info is None:
-        return 'not_logged_in', None
-    return 'logged_in', info
+        if info is None:
+            return 'not_logged_in', None
+        return 'logged_in', info
 
 
 # ==============================================================================
-#  harvhub mutation helpers (sub-account / investor)
+#  BALANCE VERIFICATION (SA only)
+# ==============================================================================
+def _read_live_balance(terminal_exe):
+    with _MT5_IPC_LOCK:
+        if mt5 is None:
+            return False, {'error': 'MetaTrader5 module not available'}
+
+        if not os.path.exists(terminal_exe):
+            return False, {'error': f'Terminal not found: {terminal_exe}'}
+
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+        try:
+            ok = mt5.initialize(
+                path=terminal_exe,
+                timeout=10000,
+                portable=True,
+            )
+        except Exception as e:
+            return False, {'error': f'initialize() raised: {e}'}
+
+        if not ok:
+            return False, {'error': f'initialize() failed: {mt5.last_error()}'}
+
+        payload = None
+        try:
+            acc = mt5.account_info()
+            if acc is not None:
+                trade_mode = getattr(acc, 'trade_mode', None)
+                payload = {
+                    'login':      int(acc.login) if getattr(acc, 'login', None) else None,
+                    'server':     getattr(acc, 'server', None),
+                    'name':       getattr(acc, 'name', None),
+                    'balance':    float(getattr(acc, 'balance', 0) or 0),
+                    'currency':   getattr(acc, 'currency', None) or '',
+                    'leverage':   getattr(acc, 'leverage', None),
+                    'trade_mode': trade_mode,
+                }
+        except Exception as e:
+            payload = {'error': f'account_info() raised: {e}'}
+        finally:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+
+        if payload is None:
+            return False, {'error': 'account_info() returned None'}
+        if 'error' in payload:
+            return False, payload
+        return True, payload
+
+
+def _mt5_trade_mode_to_str(trade_mode):
+    if mt5 is None or trade_mode is None:
+        return 'unknown'
+    try:
+        if trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL:
+            return 'real'
+        if trade_mode in (mt5.ACCOUNT_TRADE_MODE_DEMO,
+                          mt5.ACCOUNT_TRADE_MODE_CONTEST):
+            return 'demo'
+    except Exception:
+        pass
+    return 'unknown'
+
+
+def _verify_and_persist_balance(user_id, sub_account_id, terminal_exe, row):
+    if mt5 is None:
+        return {'ok': False, 'reason': 'mt5_unavailable'}
+
+    pk_id = _coerce_int(_pick_first_key(row, 'id'))
+    if pk_id is None:
+        pk_id = _coerce_int(user_id)
+    if pk_id is None:
+        return {'ok': False, 'reason': 'no_pk_id'}
+
+    raw_bv = (_pick_first_key(row, 'balance_verification') or '').strip().lower()
+    if raw_bv not in BALANCE_VERIFICATION_TRIGGERS:
+        return {'ok': False, 'reason': f'not_applied:{raw_bv}'}
+
+    demo_account_raw = (_pick_first_key(row, 'demo_account') or '')
+    demo_account_str = str(demo_account_raw).strip()
+    account_mode_raw = (_pick_first_key(row, 'account_mode') or '')
+    account_mode_str = str(account_mode_raw).strip().lower()
+
+    ok, payload = _read_live_balance(terminal_exe)
+    if not ok:
+        print(f"      [SA][VERIFY] sub={sub_account_id} balance read failed: "
+              f"{payload.get('error')}")
+        return {'ok': False, 'reason': 'read_failed', 'error': payload.get('error')}
+
+    balance      = float(payload.get('balance') or 0)
+    currency     = payload.get('currency') or ''
+    term_login   = payload.get('login')
+    term_server  = payload.get('server')
+    actual_mode  = _mt5_trade_mode_to_str(payload.get('trade_mode'))
+
+    print(f"      [SA][VERIFY] sub={sub_account_id} acct={term_login} "
+          f"mode={actual_mode} balance={currency} {balance:,.2f}")
+
+    if actual_mode == 'demo':
+        if demo_account_str == '0':
+            msg = 'DEMO account disabled (demo_account=0)'
+            print(f"      [SA][VERIFY] sub={sub_account_id} skip: {msg}")
+            return {'ok': False, 'reason': 'demo_disabled'}
+        if demo_account_str != '1':
+            msg = 'DEMO account not enabled'
+            print(f"      [SA][VERIFY] sub={sub_account_id} skip: {msg}")
+            return {'ok': False, 'reason': 'demo_not_enabled'}
+
+    update_data = {
+        'broker_balance':      f"{balance:.2f}",
+        'balance_verification': 'verified',
+    }
+
+    if account_mode_str != actual_mode and actual_mode != 'unknown':
+        update_data['account_mode'] = actual_mode
+
+    set_clauses = ', '.join(f"`{k}` = %s" for k in update_data.keys())
+    params = list(update_data.values())
+    params.append(pk_id)
+
+    sql = f"UPDATE harvhub SET {set_clauses} WHERE id = %s"
+    res = db_query(sql, params, timeout=10.0, quiet=True)
+
+    if not _is_ok(res):
+        print(f"      [SA][VERIFY] sub={sub_account_id} DB write failed: "
+              f"{res.get('message')}")
+        return {'ok': False, 'reason': 'db_write_failed',
+                'error': res.get('message')}
+
+    print(f"      [SA][VERIFY] sub={sub_account_id} -> VERIFIED "
+          f"({currency} {balance:,.2f}) written to harvhub.id={pk_id}")
+
+    try:
+        notif_id = notifier.record_balance_verification_notification(_PDO, row)
+        if notif_id:
+            print(f"      [SA][VERIFY] sub={sub_account_id} "
+                  f"-> balance-verification notification_id={notif_id}")
+        else:
+            print(f"      [SA][VERIFY] sub={sub_account_id} "
+                  f"-> balance-verification notification already sent "
+                  f"(dedup) or ineligible")
+    except Exception as e:
+        print(f"      [SA][VERIFY] balance-verification notification raised: {e}")
+        traceback.print_exc()
+
+    return {
+        'ok':       True,
+        'status':   'verified',
+        'balance':  balance,
+        'currency': currency,
+        'login':    term_login,
+        'server':   term_server,
+        'mode':     actual_mode,
+    }
+
+
+# ==============================================================================
+#  PROGRAMME BROKER SYMBOLS / TIMEFRAMES COLLECTION
+#  (mirrors ohlc collector logic exactly — but ONLY metadata, no candles)
+# ==============================================================================
+def _probe_timeframes_for_broker(available_symbols_set, sample_size=5):
+    """
+    Exact same logic as the OHLC collector's `_probe_timeframes_for_broker`.
+    Probes up to `sample_size` preferred symbols against every timeframe in
+    TIMEFRAME_MAP, returning the list of timeframe keys the broker supports.
+    """
+    if not available_symbols_set:
+        return []
+    preferred = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD", "ETHUSD",
+                 "US30", "NAS100", "SPX500", "AUDUSD", "USDCAD", "USDCHF"]
+    probes = [s for s in preferred if s in available_symbols_set]
+    for s in available_symbols_set:
+        if s not in probes:
+            probes.append(s)
+        if len(probes) >= sample_size:
+            break
+    probes = probes[:sample_size]
+
+    supported = []
+    for tf_key, tf_const in TIMEFRAME_MAP.items():
+        for sym in probes:
+            try:
+                if not mt5.symbol_select(sym, True):
+                    continue
+                rates = mt5.copy_rates_from_pos(sym, tf_const, 0, 5)
+                if rates is not None and len(rates) > 0:
+                    supported.append(tf_key)
+                    break
+            except Exception:
+                continue
+    return [tf for tf in TIMEFRAME_MAP.keys() if tf in supported]
+
+
+def _collect_broker_symbols_and_timeframes(terminal_exe):
+    """
+    Open the terminal, enumerate every symbol and probe the supported
+    timeframes — exactly like the OHLC collector does. Returns:
+
+        (ok: bool, symbols: list[str], timeframes: list[str], err: str|None)
+
+    All MT5 IPC is done under _MT5_IPC_LOCK. Terminal is shut down before
+    returning.
+    """
+    if mt5 is None:
+        return False, [], [], 'MetaTrader5 module not available'
+
+    if not os.path.exists(terminal_exe):
+        return False, [], [], f'Terminal not found: {terminal_exe}'
+
+    _build_timeframe_map()
+    if not TIMEFRAME_MAP:
+        return False, [], [], 'TIMEFRAME_MAP is empty'
+
+    with _MT5_IPC_LOCK:
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+        try:
+            ok = mt5.initialize(
+                path=terminal_exe,
+                timeout=10000,
+                portable=True,
+            )
+        except Exception as e:
+            return False, [], [], f'initialize() raised: {e}'
+
+        if not ok:
+            return False, [], [], f'initialize() failed: {mt5.last_error()}'
+
+        symbols_out = []
+        timeframes_out = []
+        err = None
+        try:
+            all_symbols = mt5.symbols_get()
+            if not all_symbols:
+                err = f'symbols_get() returned empty: {mt5.last_error()}'
+            else:
+                broker_symbols = [s.name for s in all_symbols]
+                available_symbols_set = set(broker_symbols)
+                symbols_out = sorted(broker_symbols)
+                print(f"      [PRG][META] symbols_get() -> "
+                      f"{len(broker_symbols)} symbol(s)")
+
+                try:
+                    supported_tfs = _probe_timeframes_for_broker(
+                        available_symbols_set, sample_size=5
+                    )
+                    timeframes_out = supported_tfs
+                    print(f"      [PRG][META] timeframe probe -> "
+                          f"{len(supported_tfs)} timeframe(s): {supported_tfs}")
+                except Exception as tf_err:
+                    err = f'timeframe probe failed: {tf_err}'
+                    print(f"      [PRG][META] {err}")
+        except Exception as e:
+            err = f'enumeration raised: {e}'
+        finally:
+            try:
+                mt5.shutdown()
+            except Exception:
+                pass
+
+        if err is not None and not symbols_out:
+            return False, [], [], err
+        return True, symbols_out, timeframes_out, err
+
+
+def _persist_programme_broker_metadata(programme_id,
+                                       symbols,
+                                       timeframes):
+    """
+    Safely overwrite `broker_symbols` and `broker_timeframes` for the
+    given programme row, while protecting any existing user selections
+    in `selected_symbols` / `selected_timeframes` from being lost due
+    to a transient glitch (empty result, partial fetch, terminal
+    disconnect, etc.).
+
+    Strategy
+    --------
+    1. READ the current row: existing broker_symbols, broker_timeframes,
+       selected_symbols, selected_timeframes.
+
+    2. VALIDATE the incoming snapshot:
+       * If the incoming `symbols` is empty but the existing broker_symbols
+         is non-empty → REFUSE to overwrite (transient glitch protection).
+       * If the incoming `timeframes` is empty but the existing
+         broker_timeframes is non-empty → REFUSE to overwrite.
+       This avoids wiping good data on a momentary `symbols_get()` hiccup.
+
+    3. RECONCILE the existing selections against the new snapshot:
+       * Any existing selected_symbol that IS in the new symbols → keep.
+       * Any existing selected_symbol that is NOT in the new symbols → drop.
+       * Same rule for timeframes.
+
+    4. WRITE the new broker_symbols / broker_timeframes and the reconciled
+       selected_symbols / selected_timeframes in a single UPDATE.
+
+    Returns
+    -------
+    bool : True on success, False on failure.
+    """
+    if programme_id is None:
+        return False
+
+    pid = _coerce_int(programme_id)
+    if pid is None:
+        return False
+
+    # ------------------------------------------------------------------
+    # Step 1: read the CURRENT row so we can reconcile safely.
+    # ------------------------------------------------------------------
+    read_sql = (
+        "SELECT broker_symbols, broker_timeframes, "
+        "       selected_symbols, selected_timeframes "
+        "FROM programme WHERE id = %s LIMIT 1"
+    )
+    read_res = db_query(read_sql, [pid], timeout=10.0, quiet=True)
+    if not _is_ok(read_res) or not read_res.get('results'):
+        print(f"      [PRG][META] read failed for programme={pid}: "
+              f"{read_res.get('message')}")
+        return False
+
+    current = read_res['results'][0]
+
+    def _read_col(row, key):
+        if not isinstance(row, dict):
+            return ''
+        for k, v in row.items():
+            if isinstance(k, str) and k.strip().lower() == key:
+                return '' if v is None else str(v)
+        return ''
+
+    def _split_csv(raw):
+        if raw is None:
+            return []
+        s = str(raw).strip()
+        if s == '' or s.lower() == 'null':
+            return []
+        s = s.strip('[]{}"\'')
+        return [p.strip().strip('[]{}"\'') for p in s.split(',') if p.strip()]
+
+    def _split_json_or_csv(raw):
+        if raw is None:
+            return []
+        s = str(raw).strip()
+        if s == '' or s.lower() == 'null':
+            return []
+        if s.startswith('[') or s.startswith('{'):
+            try:
+                decoded = json.loads(s)
+                if isinstance(decoded, list):
+                    return [str(x).strip() for x in decoded if str(x).strip()]
+            except Exception:
+                pass
+        s = s.strip('[]{}"\'')
+        return [p.strip().strip('[]{}"\'') for p in s.split(',') if p.strip()]
+
+    existing_broker_symbols    = _split_csv(_read_col(current, 'broker_symbols'))
+    existing_broker_timeframes = _split_json_or_csv(_read_col(current, 'broker_timeframes'))
+    existing_selected_symbols  = _split_csv(_read_col(current, 'selected_symbols'))
+    existing_selected_tfs      = _split_json_or_csv(_read_col(current, 'selected_timeframes'))
+
+    print(f"      [PRG][META] programme={pid} BEFORE: "
+          f"broker_sym={len(existing_broker_symbols)} "
+          f"broker_tf={len(existing_broker_timeframes)} "
+          f"selected_sym={len(existing_selected_symbols)} "
+          f"selected_tf={len(existing_selected_tfs)}")
+
+    # ------------------------------------------------------------------
+    # Step 2: glitch protection — refuse to wipe good data with empty.
+    # ------------------------------------------------------------------
+    incoming_symbols    = list(symbols or [])
+    incoming_timeframes = list(timeframes or [])
+
+    if not incoming_symbols and existing_broker_symbols:
+        print(f"      [PRG][META] programme={pid} ABORT symbols write: "
+              f"incoming empty but {len(existing_broker_symbols)} "
+              f"broker_symbols already stored — keeping existing, "
+              f"not overwriting (transient glitch protection)")
+        return False
+
+    if not incoming_timeframes and existing_broker_timeframes:
+        print(f"      [PRG][META] programme={pid} ABORT timeframes write: "
+              f"incoming empty but {len(existing_broker_timeframes)} "
+              f"broker_timeframes already stored — keeping existing, "
+              f"not overwriting (transient glitch protection)")
+        return False
+
+    # ------------------------------------------------------------------
+    # Step 3: reconcile existing selections against the new snapshot.
+    #
+    #   • selected_symbol  ∈ new symbols  → keep
+    #   • selected_symbol  ∉ new symbols  → drop
+    #   • same rule for timeframes
+    #
+    # This is the "safe overwrite" behaviour: nothing a user picked is
+    # lost unless the broker genuinely no longer offers that instrument.
+    # ------------------------------------------------------------------
+    new_sym_lookup = {s: True for s in incoming_symbols}
+    new_tf_lookup  = {t: True for t in incoming_timeframes}
+
+    reconciled_selected_symbols = []
+    dropped_symbols = []
+    for s in existing_selected_symbols:
+        if s in new_sym_lookup:
+            reconciled_selected_symbols.append(s)
+        else:
+            dropped_symbols.append(s)
+
+    reconciled_selected_tfs = []
+    dropped_tfs = []
+    for t in existing_selected_tfs:
+        if t in new_tf_lookup:
+            reconciled_selected_tfs.append(t)
+        else:
+            dropped_tfs.append(t)
+
+    # De-dupe while preserving order.
+    seen = set()
+    reconciled_selected_symbols = [
+        s for s in reconciled_selected_symbols
+        if not (s in seen or seen.add(s))
+    ]
+    seen = set()
+    reconciled_selected_tfs = [
+        t for t in reconciled_selected_tfs
+        if not (t in seen or seen.add(t))
+    ]
+
+    if dropped_symbols:
+        print(f"      [PRG][META] programme={pid} dropped stale selected "
+              f"symbols not in new snapshot: {dropped_symbols}")
+    if dropped_tfs:
+        print(f"      [PRG][META] programme={pid} dropped stale selected "
+              f"timeframes not in new snapshot: {dropped_tfs}")
+
+    # ------------------------------------------------------------------
+    # Step 4: single UPDATE — clear + write broker columns AND the
+    # reconciled selected columns together, so there is no window where
+    # one is updated and the other is stale.
+    # ------------------------------------------------------------------
+    symbols_csv     = ','.join(incoming_symbols)
+    timeframes_json = json.dumps(incoming_timeframes, ensure_ascii=False)
+
+    selected_syms_csv = ','.join(reconciled_selected_symbols)
+    selected_tfs_json = json.dumps(reconciled_selected_tfs, ensure_ascii=False)
+
+    # 4a: clear both broker columns first so we always start from a
+    #     blank slate (matching the ohlc-style full-snapshot semantics).
+    clear_sql = (
+        "UPDATE programme "
+        "SET broker_symbols = NULL, broker_timeframes = NULL "
+        "WHERE id = %s"
+    )
+    clear_res = db_query(clear_sql, [pid], timeout=10.0, quiet=True)
+    if not _is_ok(clear_res):
+        print(f"      [PRG][META] clear columns failed for programme={pid}: "
+              f"{clear_res.get('message')}")
+        return False
+
+    # 4b: write the fresh broker snapshot AND the reconciled selections
+    #     in one statement so they always stay in sync.
+    write_sql = (
+        "UPDATE programme "
+        "SET broker_symbols      = %s, "
+        "    broker_timeframes   = %s, "
+        "    selected_symbols    = %s, "
+        "    selected_timeframes = %s "
+        "WHERE id = %s"
+    )
+    write_res = db_query(
+        write_sql,
+        [symbols_csv, timeframes_json,
+         selected_syms_csv, selected_tfs_json,
+         pid],
+        timeout=20.0, quiet=True,
+    )
+    if not _is_ok(write_res):
+        print(f"      [PRG][META] write failed for programme={pid}: "
+              f"{write_res.get('message')}")
+        return False
+
+    print(f"      [PRG][META] programme={pid} AFTER: "
+          f"broker_sym={len(incoming_symbols)} "
+          f"broker_tf={len(incoming_timeframes)} "
+          f"selected_sym={len(reconciled_selected_symbols)} "
+          f"selected_tf={len(reconciled_selected_tfs)}")
+    return True
+
+def _refresh_programme_broker_metadata(user_id, programme_id, terminal_exe):
+    """
+    Convenience wrapper: collect + persist. Called only for programme
+    accounts that have just been confirmed LIVE with matching login+name.
+    Never raises; logs on failure.
+    """
+    try:
+        ok, symbols, timeframes, err = _collect_broker_symbols_and_timeframes(
+            terminal_exe
+        )
+        if not ok:
+            print(f"      [PRG][META] collection failed for programme="
+                  f"{programme_id}: {err}")
+            return False
+
+        return _persist_programme_broker_metadata(
+            programme_id=programme_id,
+            symbols=symbols,
+            timeframes=timeframes,
+        )
+    except Exception as e:
+        print(f"      [PRG][META] refresh raised for programme={programme_id}: {e}")
+        traceback.print_exc()
+        return False
+
+
+# ==============================================================================
+#  [SA] harvhub mutation helpers
 # ==============================================================================
 def _get_broker_login_status(user_id):
     sql = "SELECT broker_login_status FROM harvhub WHERE id = %s LIMIT 1"
@@ -938,6 +1553,31 @@ def _notify_broker_success(user_id, sub_account_id):
         return None
 
 
+def _notify_broker_reconnected(user_id, sub_account_id):
+    row = _fetch_row_for_notify(user_id, sub_account_id)
+    if row is None:
+        print(f"      [SA][NOTIFY-RECONNECTED] could not re-fetch row for user={user_id}")
+        return None
+
+    try:
+        notif_id = notifier.record_broker_login_reconnected_notification(_PDO, row)
+        if notif_id:
+            print(
+                f"      [SA][NOTIFY-RECONNECTED] user={user_id} "
+                f"-> notification_id={notif_id}"
+            )
+        else:
+            print(
+                f"      [SA][NOTIFY-RECONNECTED] user={user_id} "
+                f"-> no notification created"
+            )
+        return notif_id
+    except Exception as e:
+        print(f"      [SA][NOTIFY-RECONNECTED] raised: {e}")
+        traceback.print_exc()
+        return None
+
+
 def _notify_disconnect_completed(user_id, sub_account_id):
     row = _fetch_row_for_notify(user_id, sub_account_id)
     if row is None:
@@ -970,7 +1610,7 @@ def _clear_disconnect_request(user_id):
 
 
 # ==============================================================================
-#  programme mutation helpers (trader)
+#  [PRG] programme mutation helpers
 # ==============================================================================
 def _get_programme_broker_login_status(programme_id):
     sql = "SELECT broker_login_status FROM programme WHERE id = %s LIMIT 1"
@@ -985,13 +1625,6 @@ def _get_programme_broker_login_status(programme_id):
 
 
 def _resolve_programme_owner_email(user_id):
-    """
-    The `programme` table has NO `email` column. Owner email is a
-    property of the user, so we resolve it from `harvhub` via
-    `programme.userid == harvhub.id`.
-
-    Returns a lowercase, stripped email string, or '' if not found.
-    """
     if user_id is None:
         return ''
     uid = _coerce_int(user_id)
@@ -1012,11 +1645,6 @@ def _resolve_programme_owner_email(user_id):
 
 
 def _fetch_programme_row_for_notify(programme_id, user_id):
-    """
-    Fetches a programme row and injects the owner's email resolved
-    from `harvhub` via `programme.userid`, so downstream notification
-    helpers can uniformly access `row['email']`.
-    """
     select_cols = _programme_select_sql()
 
     row = None
@@ -1037,7 +1665,6 @@ def _fetch_programme_row_for_notify(programme_id, user_id):
             row = _normalize_row(res2['results'][0])
 
     if row is not None:
-        # `programme` has no email column — resolve it from harvhub.
         owner_uid = _coerce_int(row.get('userid')) or user_id
         row['email'] = _resolve_programme_owner_email(owner_uid)
 
@@ -1076,10 +1703,6 @@ def _reset_programme_broker_login_attempt(programme_id):
 
 
 def _notify_programme_broker_failure(programme_id, user_id, new_status):
-    """
-    Programme equivalent of _notify_broker_failure. Demo is NEVER
-    produced here — only 'invalid_credentials' or 'fullname_mismatch'.
-    """
     if new_status not in PROGRAMME_NEGATIVE_STATUSES:
         return None
 
@@ -1144,6 +1767,31 @@ def _notify_programme_broker_success(programme_id, user_id):
         return None
 
 
+def _notify_programme_broker_reconnected(programme_id, user_id):
+    row = _fetch_programme_row_for_notify(programme_id, user_id)
+    if row is None:
+        print(f"      [PRG][NOTIFY-RECONNECTED] could not re-fetch row for programme={programme_id}")
+        return None
+
+    try:
+        notif_id = notifier.record_programme_broker_login_reconnected_notification(_PDO, row)
+        if notif_id:
+            print(
+                f"      [PRG][NOTIFY-RECONNECTED] programme={programme_id} "
+                f"-> notification_id={notif_id}"
+            )
+        else:
+            print(
+                f"      [PRG][NOTIFY-RECONNECTED] programme={programme_id} "
+                f"-> no notification created"
+            )
+        return notif_id
+    except Exception as e:
+        print(f"      [PRG][NOTIFY-RECONNECTED] raised: {e}")
+        traceback.print_exc()
+        return None
+
+
 def _notify_programme_disconnect_completed(programme_id, user_id):
     row = _fetch_programme_row_for_notify(programme_id, user_id)
     if row is None:
@@ -1176,7 +1824,7 @@ def _clear_programme_disconnect_request(programme_id):
 
 
 # ==============================================================================
-#  DISCONNECT-REQUEST PASS — SUB-ACCOUNT / INVESTOR
+#  [SA] DISCONNECT-REQUEST PASS
 # ==============================================================================
 def _process_disconnect_requests():
     completed = 0
@@ -1244,7 +1892,7 @@ def _process_disconnect_requests():
 
 
 # ==============================================================================
-#  DISCONNECT-REQUEST PASS — PROGRAMME / TRADER
+#  [PRG] DISCONNECT-REQUEST PASS
 # ==============================================================================
 def _process_programme_disconnect_requests():
     completed = 0
@@ -1311,31 +1959,26 @@ def _process_programme_disconnect_requests():
     return completed
 
 
-def _is_ok(res):
-    return bool(res) and res.get('status') == 'success'
-
-
 # ==============================================================================
-#  SINGLE manual login window
+#  [SHARED UI] Single manual-login window, two columns
 # ==============================================================================
-class SingleManualLoginWindow:
+class _ManualLoginWindow:
     def __init__(self):
-        self._lock        = threading.Lock()
-        self._items       = {}
-        self._root        = None
-        self._rows_holder = None
-        self._started     = False
-        self._stop_poll   = threading.Event()
-        self._thread      = None
+        self._lock           = threading.Lock()
+        self._sa_items       = {}
+        self._prg_items      = {}
+        self._pending_dec    = {}
+        self._root           = None
+        self._sa_holder      = None
+        self._prg_holder     = None
+        self._started        = False
+        self._stop_poll      = threading.Event()
+        self._thread         = None
+        self._polling        = False
 
-    def add_item(self, kind, owner_id, account_id, broker, server, login,
-                 password, terminal_exe):
-        """
-        kind:    'SA'  (sub-account)   or 'PRG' (programme)
-        owner_id: user_id
-        account_id: sub_account_id (SA) or programme_id (PRG)
-        """
-        item_key = f"{kind}:{owner_id}:{account_id}"
+    def add_item(self, kind, owner_id, account_id, broker, server,
+                 login, password, terminal_exe):
+        item_key = (kind, owner_id, account_id)
 
         new_item = {
             'kind':         kind,
@@ -1348,8 +1991,10 @@ class SingleManualLoginWindow:
             'terminal_exe': terminal_exe,
         }
 
+        store = self._sa_items if kind == 'SA' else self._prg_items
+
         with self._lock:
-            existing = self._items.get(item_key)
+            existing = store.get(item_key)
             if existing is not None:
                 same = all(
                     str(existing.get(k)) == str(new_item.get(k))
@@ -1358,17 +2003,24 @@ class SingleManualLoginWindow:
                 )
                 if same:
                     return
-            self._items[item_key] = new_item
+            store[item_key] = new_item
 
         self._ensure_started()
-        self._refresh_rows()
+        self._request_refresh(kind)
 
     def remove_item(self, kind, owner_id, account_id):
-        item_key = f"{kind}:{owner_id}:{account_id}"
+        item_key = (kind, owner_id, account_id)
+        store = self._sa_items if kind == 'SA' else self._prg_items
         with self._lock:
-            existed = self._items.pop(item_key, None) is not None
+            existed = store.pop(item_key, None) is not None
+            self._pending_dec.pop(item_key, None)
         if existed:
-            self._refresh_rows()
+            self._request_refresh(kind)
+
+    def take_decision(self, kind, owner_id, account_id):
+        item_key = (kind, owner_id, account_id)
+        with self._lock:
+            return self._pending_dec.pop(item_key, None)
 
     def stop(self):
         self._stop_poll.set()
@@ -1379,7 +2031,7 @@ class SingleManualLoginWindow:
                 return
             self._started = True
         self._thread = threading.Thread(
-            target=self._run, name="single_manual_login", daemon=True)
+            target=self._run, name="manual_login_window", daemon=True)
         self._thread.start()
 
     def _run(self):
@@ -1387,12 +2039,13 @@ class SingleManualLoginWindow:
             self._build_and_loop()
         except Exception as e:
             print(f"      [WINDOW] Tk thread died: {e}")
+            traceback.print_exc()
 
     def _build_and_loop(self):
         self._root = tk.Tk()
-        self._root.title("Manual MT5 Login — Accounts Needing Session")
-        self._root.geometry("860x620")
-        self._root.minsize(680, 400)
+        self._root.title("Manual MT5 Login — Sub Accounts | Programme Accounts")
+        self._root.geometry("1180x680")
+        self._root.minsize(900, 460)
 
         try:
             self._root.attributes('-topmost', True)
@@ -1405,49 +2058,34 @@ class SingleManualLoginWindow:
 
         ttk.Label(
             header,
-            text="Login Manually to These Accounts",
-            font=("Segoe UI", 13, "bold")
+            text="Manual MT5 Login",
+            font=("Segoe UI", 14, "bold")
         ).pack(anchor="w")
 
         ttk.Label(
             header,
             text="Each MT5 terminal has been launched in the background. "
-                 "Log in manually. Click Valid or Invalid per account to "
-                 "record the result. Use Open Terminal to bring its window "
-                 "forward. Rows are tagged [SA] (investor sub-account) or "
-                 "[PRG] (programme).",
+                 "Log in manually, then click Valid or Invalid on the row. "
+                 "Rows stay here until the live terminal probe confirms the "
+                 "login and account name, or you mark them Invalid. "
+                 "Demo is allowed for programme accounts; investors must be "
+                 "real-account.",
             foreground="#555",
-            wraplength=820,
+            wraplength=1140,
             justify="left"
         ).pack(anchor="w", pady=(4, 0))
 
-        container = ttk.Frame(self._root)
-        container.pack(fill="both", expand=True, padx=12, pady=(4, 8))
+        body = ttk.Frame(self._root)
+        body.pack(fill="both", expand=True, padx=12, pady=(6, 8))
 
-        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
-        vbar   = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vbar.set)
+        left  = ttk.LabelFrame(body, text="[SA] Sub Accounts", padding=6)
+        right = ttk.LabelFrame(body, text="[PRG] Programme Accounts", padding=6)
 
-        canvas.pack(side="left", fill="both", expand=True)
-        vbar.pack(side="right", fill="y")
+        left.pack(side="left",  fill="both", expand=True, padx=(0, 6))
+        right.pack(side="right", fill="both", expand=True, padx=(6, 0))
 
-        self._rows_holder = ttk.Frame(canvas)
-        canvas.create_window((0, 0), window=self._rows_holder, anchor="nw")
-
-        def _on_configure(_evt=None):
-            try:
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            except Exception:
-                pass
-
-        self._rows_holder.bind("<Configure>", _on_configure)
-
-        def _on_mousewheel(event):
-            try:
-                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            except Exception:
-                pass
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self._sa_holder  = self._build_scroll_column(left)
+        self._prg_holder = self._build_scroll_column(right)
 
         footer = ttk.Frame(self._root, padding=(12, 0, 12, 10))
         footer.pack(fill="x")
@@ -1456,13 +2094,46 @@ class SingleManualLoginWindow:
 
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._refresh_rows()
+        self._refresh_column('SA')
+        self._refresh_column('PRG')
+
         self._schedule_db_poll()
 
         try:
             self._root.mainloop()
         except Exception:
             pass
+
+    def _build_scroll_column(self, parent):
+        container = ttk.Frame(parent)
+        container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+        vbar   = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.pack(side="right", fill="y")
+
+        holder = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=holder, anchor="nw")
+
+        def _on_configure(_evt=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except Exception:
+                pass
+
+        holder.bind("<Configure>", _on_configure)
+
+        def _on_mousewheel(event):
+            try:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        return holder
 
     def _on_close(self):
         print("      [WINDOW] closed by user; will reopen if rows remain")
@@ -1474,83 +2145,74 @@ class SingleManualLoginWindow:
         with self._lock:
             self._started = False
             self._root = None
-            self._rows_holder = None
+            self._sa_holder = None
+            self._prg_holder = None
 
-    def _make_copy_button(self, parent, value, label="Copy"):
-        btn = ttk.Button(parent, text=label, width=8)
-
-        def _do_copy():
-            try:
-                self._root.clipboard_clear()
-                self._root.clipboard_append(str(value))
-                self._root.update_idletasks()
-                print(f"      [COPY] {value}")
-            except Exception:
-                pass
-            try:
-                btn.configure(text="Copied!")
-                btn.after(COPY_FEEDBACK_MS,
-                          lambda: btn.configure(text=label))
-            except Exception:
-                pass
-
-        btn.configure(command=_do_copy)
-        return btn
-
-    def _refresh_rows(self):
-        holder = self._rows_holder
-        if holder is None:
+    def _request_refresh(self, kind):
+        root = self._root
+        if root is None:
             return
         try:
+            root.after(0, lambda k=kind: self._refresh_column(k))
+        except Exception:
+            pass
+
+    def _refresh_column(self, kind):
+        holder = self._sa_holder if kind == 'SA' else self._prg_holder
+        if holder is None:
+            return
+
+        store = self._sa_items if kind == 'SA' else self._prg_items
+
+        try:
+            with self._lock:
+                snapshot = list(store.items())
+
             for child in holder.winfo_children():
                 child.destroy()
-
-            with self._lock:
-                snapshot = list(self._items.values())
 
             if not snapshot:
                 ttk.Label(
                     holder,
-                    text="No accounts pending manual login.",
+                    text=("No [SA] accounts pending manual login."
+                          if kind == 'SA' else
+                          "No [PRG] programmes pending manual login."),
                     foreground="#666",
                     padding=12
                 ).pack(anchor="w")
                 return
 
-            for idx, item in enumerate(snapshot, start=1):
-                self._render_row(idx, item)
+            for idx, (_, item) in enumerate(snapshot, start=1):
+                self._render_row(kind, idx, item)
         except Exception as e:
-            print(f"      [WINDOW] refresh error: {e}")
+            print(f"      [{kind}][WINDOW] refresh error: {e}")
 
-    def _render_row(self, idx, item):
-        kind       = item['kind']
+    def _render_row(self, kind, idx, item):
+        holder = self._sa_holder if kind == 'SA' else self._prg_holder
         owner_id   = item['owner_id']
         account_id = item['account_id']
 
-        tag = 'SA' if kind == 'SA' else 'PRG'
-        label_acct = 'sub account' if kind == 'SA' else 'programme'
+        label = ('[SA] user {u} | sub {a}'.format(u=owner_id, a=account_id)
+                 if kind == 'SA' else
+                 '[PRG] user {u} | programme {a}'.format(u=owner_id, a=account_id))
 
-        card = ttk.LabelFrame(
-            self._rows_holder,
-            text=f"{idx}. [{tag}] user {owner_id} | {label_acct} {account_id}",
-            padding=10
-        )
-        card.pack(fill="x", expand=True, pady=6, padx=2)
+        card = ttk.LabelFrame(holder, text=f"{idx}. {label}", padding=8)
+        card.pack(fill="x", expand=True, pady=4, padx=2)
 
-        def _field(parent, label, value):
+        def _field(parent, name, value):
             row = ttk.Frame(parent)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f"{label}:", width=12, anchor="w").pack(side="left")
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=f"{name}:", width=10, anchor="w").pack(side="left")
             ttk.Label(row, text=str(value), anchor="w").pack(side="left")
-            self._make_copy_button(row, value).pack(side="left", padx=(8, 0))
+            self._make_copy_button(row, value).pack(side="left", padx=(6, 0))
 
         _field(card, "Broker", item['broker'])
         _field(card, "Server", item['server'])
         _field(card, "Login",  item['login'])
 
         pw_row = ttk.Frame(card)
-        pw_row.pack(fill="x", pady=2)
-        ttk.Label(pw_row, text="Password:", width=12, anchor="w").pack(side="left")
+        pw_row.pack(fill="x", pady=1)
+        ttk.Label(pw_row, text="Password:", width=10, anchor="w").pack(side="left")
         pw_var = tk.StringVar(value="••••••••")
         ttk.Label(pw_row, textvariable=pw_var, anchor="w").pack(side="left")
 
@@ -1560,97 +2222,70 @@ class SingleManualLoginWindow:
             else:
                 pw_var.set("••••••••")
 
-        ttk.Button(pw_row, text="Show", width=8,
-                   command=_toggle_pw).pack(side="left", padx=(8, 0))
-        self._make_copy_button(pw_row, item['password']).pack(side="left", padx=(6, 0))
+        ttk.Button(pw_row, text="Show", width=6,
+                   command=_toggle_pw).pack(side="left", padx=(6, 0))
+        self._make_copy_button(pw_row, item['password']).pack(side="left", padx=(4, 0))
 
-        row_actions = ttk.Frame(card)
-        row_actions.pack(fill="x", pady=(8, 0))
+        actions = ttk.Frame(card)
+        actions.pack(fill="x", pady=(6, 0))
 
         def _on_open_terminal():
-            print(f"      [{tag}][OPEN] {item['terminal_exe']}")
             bring_terminal_to_front(item['terminal_exe'])
 
-        ttk.Button(row_actions, text="Open Terminal",
+        ttk.Button(actions, text="Open Terminal",
                    command=_on_open_terminal).pack(side="left", padx=(0, 6))
 
-        if kind == 'SA':
-            def _on_valid():
-                _set_broker_login_status(owner_id, VALID_STATUS)
-                _reset_broker_login_attempt(owner_id)
-                _notify_broker_success(owner_id, account_id)
-                print(f"      [SA][MANUAL] user={owner_id} -> valid_credentials (attempts reset)")
-                self.remove_item(kind, owner_id, account_id)
+        def _on_valid():
+            key = (kind, owner_id, account_id)
+            with self._lock:
+                self._pending_dec[key] = 'valid'
+            print(f"      [{kind}][UI] queued VALID for owner={owner_id} "
+                  f"account={account_id}")
 
-            def _on_invalid():
-                _notify_broker_failure(
-                    user_id=owner_id,
-                    sub_account_id=account_id,
-                    new_status='invalid_credentials',
-                )
-                print(f"      [SA][MANUAL] user={owner_id} -> invalid_credentials (broker cleared)")
-                self.remove_item(kind, owner_id, account_id)
-        else:
-            def _on_valid():
-                _set_programme_broker_login_status(account_id, VALID_STATUS)
-                _reset_programme_broker_login_attempt(account_id)
-                _notify_programme_broker_success(account_id, owner_id)
-                print(f"      [PRG][MANUAL] programme={account_id} -> valid_credentials (attempts reset)")
-                self.remove_item(kind, owner_id, account_id)
+        def _on_invalid():
+            key = (kind, owner_id, account_id)
+            with self._lock:
+                self._pending_dec[key] = 'invalid'
+            print(f"      [{kind}][UI] queued INVALID for owner={owner_id} "
+                  f"account={account_id}")
 
-            def _on_invalid():
-                _notify_programme_broker_failure(
-                    programme_id=account_id,
-                    user_id=owner_id,
-                    new_status='invalid_credentials',
-                )
-                print(f"      [PRG][MANUAL] programme={account_id} -> invalid_credentials (broker cleared)")
-                self.remove_item(kind, owner_id, account_id)
-
-        ttk.Button(row_actions, text="Invalid Credentials",
+        ttk.Button(actions, text="Invalid Credentials",
                    command=_on_invalid).pack(side="left", expand=True,
                                              fill="x", padx=(0, 4))
-        ttk.Button(row_actions, text="Valid Credentials",
+        ttk.Button(actions, text="Valid Credentials",
                    command=_on_valid).pack(side="left", expand=True,
                                            fill="x", padx=(4, 0))
+
+    def _make_copy_button(self, parent, value, label="Copy"):
+        btn = ttk.Button(parent, text=label, width=6)
+
+        def _do_copy():
+            try:
+                self._root.clipboard_clear()
+                self._root.clipboard_append(str(value))
+                self._root.update_idletasks()
+                print(f"      [COPY] {value}")
+            except Exception as e:
+                print(f"      [COPY] failed: {e}")
+            try:
+                btn.configure(text="✓")
+                btn.after(COPY_FEEDBACK_MS,
+                          lambda: btn.configure(text=label))
+            except Exception:
+                pass
+
+        btn.configure(command=_do_copy)
+        return btn
 
     def _schedule_db_poll(self):
         if self._stop_poll.is_set():
             return
         try:
-            with self._lock:
-                snapshot = list(self._items.items())
-
-            changed = False
-            for item_key, item in snapshot:
-                kind       = item['kind']
-                owner_id   = item['owner_id']
-                account_id = item['account_id']
-
-                if kind == 'SA':
-                    status = _get_broker_login_status(owner_id)
-                    resolved = (
-                        status in TERMINAL_NEGATIVE_STATUSES
-                        or status == VALID_STATUS
-                    )
-                else:
-                    status = _get_programme_broker_login_status(account_id)
-                    resolved = (
-                        status in PROGRAMME_NEGATIVE_STATUSES
-                        or status == VALID_STATUS
-                    )
-
-                if resolved:
-                    print(
-                        f"      [{kind}][MANUAL] owner={owner_id} "
-                        f"account={account_id} resolved externally -> {status}"
-                    )
-                    with self._lock:
-                        self._items.pop(item_key, None)
-                    changed = True
-
-            if changed:
-                self._refresh_rows()
+            if not self._polling:
+                self._polling = True
+                threading.Thread(
+                    target=self._poll_worker, daemon=True
+                ).start()
         except Exception:
             pass
 
@@ -1661,12 +2296,98 @@ class SingleManualLoginWindow:
         except Exception:
             pass
 
+    def _poll_worker(self):
+        try:
+            self._poll_db_once()
+        except Exception as e:
+            print(f"      [WINDOW][POLL] raised: {e}")
+            traceback.print_exc()
+        finally:
+            self._polling = False
 
-_MANUAL_WINDOW = SingleManualLoginWindow()
+    def _poll_db_once(self):
+        with self._lock:
+            sa_snapshot  = list(self._sa_items.items())
+            prg_snapshot = list(self._prg_items.items())
+
+        removed_sa  = False
+        removed_prg = False
+
+        for key, item in sa_snapshot:
+            kind, owner_id, account_id = key
+            try:
+                db_status = _get_broker_login_status(owner_id)
+            except Exception:
+                db_status = None
+
+            db_status_l = (db_status or '').strip().lower()
+
+            if db_status_l in TERMINAL_NEGATIVE_STATUSES:
+                print(f"      [SA][MANUAL] owner={owner_id} "
+                      f"account={account_id} removed — DB negative "
+                      f"status -> {db_status_l}")
+                with self._lock:
+                    self._sa_items.pop(key, None)
+                    self._pending_dec.pop(key, None)
+                removed_sa = True
+                continue
+
+            if db_status_l == VALID_STATUS and _was_terminal_live(
+                    'SA', owner_id, account_id):
+                print(f"      [SA][MANUAL] owner={owner_id} "
+                      f"account={account_id} removed — pipeline confirmed live")
+                with self._lock:
+                    self._sa_items.pop(key, None)
+                    self._pending_dec.pop(key, None)
+                removed_sa = True
+                continue
+
+            print(f"      [SA][MANUAL] owner={owner_id} "
+                  f"account={account_id} still pending (db={db_status_l!r})")
+
+        for key, item in prg_snapshot:
+            kind, owner_id, account_id = key
+            try:
+                db_status = _get_programme_broker_login_status(account_id)
+            except Exception:
+                db_status = None
+
+            db_status_l = (db_status or '').strip().lower()
+
+            if db_status_l in PROGRAMME_NEGATIVE_STATUSES:
+                print(f"      [PRG][MANUAL] owner={owner_id} "
+                      f"account={account_id} removed — DB negative "
+                      f"status -> {db_status_l}")
+                with self._lock:
+                    self._prg_items.pop(key, None)
+                    self._pending_dec.pop(key, None)
+                removed_prg = True
+                continue
+
+            if db_status_l == VALID_STATUS and _was_terminal_live(
+                    'PRG', owner_id, account_id):
+                print(f"      [PRG][MANUAL] owner={owner_id} "
+                      f"account={account_id} removed — pipeline confirmed live")
+                with self._lock:
+                    self._prg_items.pop(key, None)
+                    self._pending_dec.pop(key, None)
+                removed_prg = True
+                continue
+
+            print(f"      [PRG][MANUAL] owner={owner_id} "
+                  f"account={account_id} still pending (db={db_status_l!r})")
+
+        if removed_sa:
+            self._request_refresh('SA')
+        if removed_prg:
+            self._request_refresh('PRG')
+
+
+_MANUAL_WINDOW = _ManualLoginWindow()
 
 
 # ==============================================================================
-#  Broker row fetch — sub-account / investor
+#  [SA] / [PRG] row fetchers
 # ==============================================================================
 def _fetch_broker_row(user_id, sub_account_id):
     select_cols = _broker_select_sql()
@@ -1694,13 +2415,6 @@ def _fetch_broker_row(user_id, sub_account_id):
     return None
 
 
-# ==============================================================================
-#  Broker row fetch — programme / trader
-#  -------------------------------------------------------------
-#  Uses PROGRAMME_SELECT_COLUMNS (which no longer contains `email`).
-#  We still inject the owner's email from harvhub so downstream code
-#  that expects `row['email']` continues to work.
-# ==============================================================================
 def _fetch_programme_row(programme_id, user_id):
     select_cols = _programme_select_sql()
 
@@ -1727,18 +2441,9 @@ def _fetch_programme_row(programme_id, user_id):
 
 
 # ==============================================================================
-#  SUB-ACCOUNT TARGET PROCESSING
+#  [SA] SUB-ACCOUNT TARGET PROCESSING
 # ==============================================================================
 def _process_target(row, role, user_id, sub_account_id):
-    """
-    Sub-account / investor probe.
-
-    `broker_login_status = 'valid_credentials'` does NOT skip the probe.
-    It only means we already told the user the terminal was live, so we
-    suppress a repeat success email — but we still confirm every loop
-    that the terminal is genuinely logged in with the right login and
-    the right fullname.
-    """
     result = {
         'source':         'SA',
         'role':           role,
@@ -1758,7 +2463,6 @@ def _process_target(row, role, user_id, sub_account_id):
 
     already_notified = (manual_status == VALID_STATUS)
 
-    # Failure statuses still skip — terminal was deleted, user notified.
     if manual_status in TERMINAL_NEGATIVE_STATUSES:
         print(f"      [SA][SKIP] sub={sub_account_id} — {manual_status}")
         result['reason'] = manual_status
@@ -1779,9 +2483,42 @@ def _process_target(row, role, user_id, sub_account_id):
         result['reason'] = f'folder: {msg_folder}'
         return result
 
-    ok_launch = launch_terminal(terminal_exe, folder_abs)
+    was_running_before = _terminal_running_for_folder(folder_abs)
+    launched_now, ok_launch = launch_terminal(terminal_exe, folder_abs)
     if not ok_launch:
         result['reason'] = 'launch failed'
+        return result
+
+    queued = _MANUAL_WINDOW.take_decision('SA', user_id, sub_account_id)
+    if queued == 'valid':
+        print(f"      [SA][UI-DECISION] sub={sub_account_id} -> valid (queued)")
+        _reset_broker_login_attempt(user_id)
+        _set_broker_login_status(user_id, VALID_STATUS)
+        _notify_broker_success(user_id, sub_account_id)
+        _mark_terminal_live('SA', user_id, sub_account_id)
+        _MANUAL_WINDOW.remove_item('SA', user_id, sub_account_id)
+        result['ok'] = True
+        result['reason'] = 'ui_valid'
+        result['login'] = login_int
+        result['server'] = server
+        result['broker'] = broker
+        result['folder'] = folder_abs
+        result['terminal_exe'] = terminal_exe
+        return result
+    elif queued == 'invalid':
+        print(f"      [SA][UI-DECISION] sub={sub_account_id} -> invalid (queued)")
+        _notify_broker_failure(
+            user_id=user_id,
+            sub_account_id=sub_account_id,
+            new_status='invalid_credentials',
+        )
+        _MANUAL_WINDOW.remove_item('SA', user_id, sub_account_id)
+        result['reason'] = 'invalid_credentials'
+        result['login'] = login_int
+        result['server'] = server
+        result['broker'] = broker
+        result['folder'] = folder_abs
+        result['terminal_exe'] = terminal_exe
         return result
 
     time.sleep(TERMINAL_BOOT_WAIT)
@@ -1794,7 +2531,6 @@ def _process_target(row, role, user_id, sub_account_id):
 
         if str(term_login) == str(login_int):
             if _names_match(expected_name, term_name):
-                # Investor: demo check still applies.
                 if demo_int == 0:
                     print(f"      [SA][INVALID-DEMO] sub={sub_account_id} | "
                           f"demo_account=0 but terminal is a demo "
@@ -1820,13 +2556,62 @@ def _process_target(row, role, user_id, sub_account_id):
                     return result
 
                 if already_notified:
-                    # Probe OK, row already valid — silent keep.
+                    was_dark = _was_terminal_dark('SA', user_id, sub_account_id)
+
+                    if was_dark or launched_now or not was_running_before:
+                        print(f"      [SA][RECONNECTED] sub={sub_account_id} | "
+                              f"DB valid + terminal went dark and is now "
+                              f"live (was_dark={was_dark}, "
+                              f"launched_now={launched_now}) — "
+                              f"firing reconnect email")
+
+                        _notify_broker_reconnected(user_id, sub_account_id)
+
+                        _mark_terminal_live('SA', user_id, sub_account_id)
+                        _MANUAL_WINDOW.remove_item('SA', user_id, sub_account_id)
+
+                        try:
+                            verify_res = _verify_and_persist_balance(
+                                user_id=user_id,
+                                sub_account_id=sub_account_id,
+                                terminal_exe=terminal_exe,
+                                row=row,
+                            )
+                            result['balance_verification'] = verify_res
+                        except Exception as ve:
+                            print(f"      [SA][VERIFY] raised: {ve}")
+                            traceback.print_exc()
+
+                        result['ok'] = True
+                        result['reason'] = 'reconnected'
+                        result['login'] = term_login
+                        result['server'] = term_server or server
+                        result['broker'] = broker
+                        result['folder'] = folder_abs
+                        result['terminal_exe'] = terminal_exe
+                        result.update(probe_info or {})
+                        return result
+
                     print(f"      [SA][OK-NO-EMAIL] sub={sub_account_id} | "
                           f"still logged in as {term_login} @ {term_server} "
                           f"| name='{term_name}' matches "
-                          f"'{expected_name}'; email already sent earlier")
+                          f"'{expected_name}'; already live, silent keep")
 
+                    _mark_terminal_live('SA', user_id, sub_account_id)
                     _MANUAL_WINDOW.remove_item('SA', user_id, sub_account_id)
+
+                    try:
+                        verify_res = _verify_and_persist_balance(
+                            user_id=user_id,
+                            sub_account_id=sub_account_id,
+                            terminal_exe=terminal_exe,
+                            row=row,
+                        )
+                        result['balance_verification'] = verify_res
+                    except Exception as ve:
+                        print(f"      [SA][VERIFY] raised: {ve}")
+                        traceback.print_exc()
+
                     result['ok'] = True
                     result['reason'] = 'already_notified'
                     result['login'] = term_login
@@ -1837,7 +2622,6 @@ def _process_target(row, role, user_id, sub_account_id):
                     result.update(probe_info or {})
                     return result
 
-                # First-time confirmation — stamp + notify once.
                 print(f"      [SA][OK-NEW] sub={sub_account_id} | logged in as "
                       f"{term_login} @ {term_server} | name='{term_name}' "
                       f"matches '{expected_name}' | demo_account={demo_int} "
@@ -1846,6 +2630,7 @@ def _process_target(row, role, user_id, sub_account_id):
                 _reset_broker_login_attempt(user_id)
                 _set_broker_login_status(user_id, VALID_STATUS)
                 _notify_broker_success(user_id, sub_account_id)
+                _mark_terminal_live('SA', user_id, sub_account_id)
 
                 result['ok'] = True
                 result['reason'] = 'newly_valid'
@@ -1896,6 +2681,11 @@ def _process_target(row, role, user_id, sub_account_id):
         print(f"      [SA][MANUAL] sub={sub_account_id} | probe unavailable "
               f"({probe_info.get('error')}) — needs manual login")
 
+    if already_notified:
+        _mark_terminal_dark('SA', user_id, sub_account_id)
+        print(f"      [SA][DARK] sub={sub_account_id} | DB valid but terminal "
+              f"unreachable — marked DARK, will notify on next successful probe")
+
     _MANUAL_WINDOW.add_item(
         kind='SA',
         owner_id=user_id,
@@ -1911,18 +2701,10 @@ def _process_target(row, role, user_id, sub_account_id):
 
 
 # ==============================================================================
-#  PROGRAMME TARGET PROCESSING
+#  [PRG] PROGRAMME TARGET PROCESSING
+#  (broker symbols / timeframes refresh added)
 # ==============================================================================
 def _process_programme_target(row, user_id, programme_id):
-    """
-    Programme / trader probe.
-
-    Same rules as sub-account EXCEPT:
-      * folder suffix is _U<user_id>_P<programme_id>
-      * demo accounts are allowed by default; demo is never a failure
-      * valid_credentials does NOT skip the probe — it only suppresses
-        a repeat success email.
-    """
     result = {
         'source':       'PRG',
         'role':         'programme',
@@ -1962,9 +2744,54 @@ def _process_programme_target(row, user_id, programme_id):
         result['reason'] = f'folder: {msg_folder}'
         return result
 
-    ok_launch = launch_terminal(terminal_exe, folder_abs)
+    was_running_before = _terminal_running_for_folder(folder_abs)
+    launched_now, ok_launch = launch_terminal(terminal_exe, folder_abs)
     if not ok_launch:
         result['reason'] = 'launch failed'
+        return result
+
+    queued = _MANUAL_WINDOW.take_decision('PRG', user_id, programme_id)
+    if queued == 'valid':
+        print(f"      [PRG][UI-DECISION] programme={programme_id} -> valid (queued)")
+        _reset_programme_broker_login_attempt(programme_id)
+        _set_programme_broker_login_status(programme_id, VALID_STATUS)
+        _notify_programme_broker_success(programme_id, user_id)
+        _mark_terminal_live('PRG', user_id, programme_id)
+        _MANUAL_WINDOW.remove_item('PRG', user_id, programme_id)
+        result['ok'] = True
+        result['reason'] = 'ui_valid'
+        result['login'] = login_int
+        result['server'] = server
+        result['broker'] = broker
+        result['folder'] = folder_abs
+        result['terminal_exe'] = terminal_exe
+
+        # Silent metadata refresh — programme was just marked valid.
+        try:
+            _refresh_programme_broker_metadata(
+                user_id=user_id,
+                programme_id=programme_id,
+                terminal_exe=terminal_exe,
+            )
+        except Exception as me:
+            print(f"      [PRG][META] ui_valid refresh raised: {me}")
+            traceback.print_exc()
+
+        return result
+    elif queued == 'invalid':
+        print(f"      [PRG][UI-DECISION] programme={programme_id} -> invalid (queued)")
+        _notify_programme_broker_failure(
+            programme_id=programme_id,
+            user_id=user_id,
+            new_status='invalid_credentials',
+        )
+        _MANUAL_WINDOW.remove_item('PRG', user_id, programme_id)
+        result['reason'] = 'invalid_credentials'
+        result['login'] = login_int
+        result['server'] = server
+        result['broker'] = broker
+        result['folder'] = folder_abs
+        result['terminal_exe'] = terminal_exe
         return result
 
     time.sleep(TERMINAL_BOOT_WAIT)
@@ -1977,14 +2804,51 @@ def _process_programme_target(row, user_id, programme_id):
 
         if str(term_login) == str(login_int):
             if _names_match(expected_name, term_name):
-                # Programme accounts: demo allowed, no demo check.
                 if already_notified:
+                    was_dark = _was_terminal_dark('PRG', user_id, programme_id)
+
+                    if was_dark or launched_now or not was_running_before:
+                        print(f"      [PRG][RECONNECTED] programme={programme_id} | "
+                              f"DB valid + terminal went dark and is now "
+                              f"live (was_dark={was_dark}, "
+                              f"launched_now={launched_now}) — "
+                              f"firing reconnect email")
+
+                        _notify_programme_broker_reconnected(programme_id, user_id)
+
+                        _mark_terminal_live('PRG', user_id, programme_id)
+                        _MANUAL_WINDOW.remove_item('PRG', user_id, programme_id)
+
+                        result['ok'] = True
+                        result['reason'] = 'reconnected'
+                        result['login'] = term_login
+                        result['server'] = term_server or server
+                        result['broker'] = broker
+                        result['folder'] = folder_abs
+                        result['terminal_exe'] = terminal_exe
+                        result['demo_account'] = demo_int
+                        result.update(probe_info or {})
+
+                        # Silent metadata refresh — terminal is live.
+                        try:
+                            _refresh_programme_broker_metadata(
+                                user_id=user_id,
+                                programme_id=programme_id,
+                                terminal_exe=terminal_exe,
+                            )
+                        except Exception as me:
+                            print(f"      [PRG][META] reconnected refresh raised: {me}")
+                            traceback.print_exc()
+
+                        return result
+
                     print(f"      [PRG][OK-NO-EMAIL] programme={programme_id} | "
                           f"still logged in as {term_login} @ {term_server} "
                           f"| name='{term_name}' matches "
                           f"'{expected_name}' | demo_account={demo_int} "
-                          f"(allowed); email already sent earlier")
+                          f"(allowed); already live, silent keep")
 
+                    _mark_terminal_live('PRG', user_id, programme_id)
                     _MANUAL_WINDOW.remove_item('PRG', user_id, programme_id)
                     result['ok'] = True
                     result['reason'] = 'already_notified'
@@ -1995,6 +2859,18 @@ def _process_programme_target(row, user_id, programme_id):
                     result['terminal_exe'] = terminal_exe
                     result['demo_account'] = demo_int
                     result.update(probe_info or {})
+
+                    # Silent metadata refresh — terminal is live.
+                    try:
+                        _refresh_programme_broker_metadata(
+                            user_id=user_id,
+                            programme_id=programme_id,
+                            terminal_exe=terminal_exe,
+                        )
+                    except Exception as me:
+                        print(f"      [PRG][META] silent-keep refresh raised: {me}")
+                        traceback.print_exc()
+
                     return result
 
                 print(f"      [PRG][OK-NEW] programme={programme_id} | logged in as "
@@ -2005,6 +2881,7 @@ def _process_programme_target(row, user_id, programme_id):
                 _reset_programme_broker_login_attempt(programme_id)
                 _set_programme_broker_login_status(programme_id, VALID_STATUS)
                 _notify_programme_broker_success(programme_id, user_id)
+                _mark_terminal_live('PRG', user_id, programme_id)
 
                 result['ok'] = True
                 result['reason'] = 'newly_valid'
@@ -2016,6 +2893,18 @@ def _process_programme_target(row, user_id, programme_id):
                 result['demo_account'] = demo_int
                 result.update(probe_info or {})
                 _MANUAL_WINDOW.remove_item('PRG', user_id, programme_id)
+
+                # Silent metadata refresh — programme just became valid.
+                try:
+                    _refresh_programme_broker_metadata(
+                        user_id=user_id,
+                        programme_id=programme_id,
+                        terminal_exe=terminal_exe,
+                    )
+                except Exception as me:
+                    print(f"      [PRG][META] newly-valid refresh raised: {me}")
+                    traceback.print_exc()
+
                 return result
 
             print(f"      [PRG][INVALID-FULLNAME] programme={programme_id} | "
@@ -2056,6 +2945,12 @@ def _process_programme_target(row, user_id, programme_id):
         print(f"      [PRG][MANUAL] programme={programme_id} | probe unavailable "
               f"({probe_info.get('error')}) — needs manual login")
 
+    if already_notified:
+        _mark_terminal_dark('PRG', user_id, programme_id)
+        print(f"      [PRG][DARK] programme={programme_id} | DB valid but "
+              f"terminal unreachable — marked DARK, will notify on next "
+              f"successful probe")
+
     _MANUAL_WINDOW.add_item(
         kind='PRG',
         owner_id=user_id,
@@ -2071,7 +2966,7 @@ def _process_programme_target(row, user_id, programme_id):
 
 
 # ==============================================================================
-#  PROGRAMME DETECTION
+#  [PRG] programme discovery
 # ==============================================================================
 def _fetch_programmes_for_owner(user_id):
     select_cols = _programme_select_sql()
@@ -2088,7 +2983,163 @@ def _fetch_programmes_for_owner(user_id):
 
 
 # ==============================================================================
-#  MAIN
+#  [SA] PASS — vps table
+# ==============================================================================
+def _collect_sa_candidates_for_ip(local_ip):
+    owners    = []
+    followers = []
+
+    vps_sql = (
+        "SELECT id, user_id, sub_account_id, programme_id, vps_ip_address "
+        "FROM vps WHERE vps_ip_address = %s"
+    )
+    vps_res = db_query(vps_sql, [local_ip], timeout=15.0)
+    if vps_res.get('status') != 'success':
+        print(f"   [SA][ERROR] vps lookup failed: {vps_res.get('message')}")
+        return owners, followers
+
+    vps_rows = vps_res.get('results', []) or []
+    print(f"   [SA][VPS] {len(vps_rows)} vps row(s) for IP {local_ip}")
+
+    for row in vps_rows:
+        uid   = _coerce_int(_pick_first_key(row, 'user_id', 'userid', 'uid'))
+        sub   = _coerce_int(_pick_first_key(row, 'sub_account_id', 'subaccountid'))
+        vpsid = _coerce_int(_pick_first_key(row, 'id', 'vps_id'))
+        prog  = _coerce_int(_pick_first_key(row, 'programme_id', 'programmeid'))
+
+        if uid is None:
+            continue
+
+        if prog is not None and prog > 0:
+            continue
+
+        sub_norm = sub if (sub is not None and sub > 0) else uid
+        owners.append({
+            'vps_row_id':     vpsid,
+            'user_id':        uid,
+            'sub_account_id': sub_norm,
+        })
+
+    print(f"   [SA][OWNER] Detected: {len(owners)}")
+
+    for owner in owners:
+        fol_sql = ("SELECT id, owner_id, sub_account_id, "
+                   "follower_id, follower_sub_account_id, host_status "
+                   "FROM vps_hosts_followers "
+                   "WHERE owner_id = %s AND sub_account_id = %s "
+                   "AND host_status = 'active'")
+        fol_res = db_query(
+            fol_sql,
+            [owner['user_id'], owner['sub_account_id']],
+            timeout=15.0,
+        )
+        if fol_res.get('status') != 'success':
+            print(f"   [SA][WARN] followers lookup failed: {fol_res.get('message')}")
+            continue
+
+        for row in fol_res.get('results', []) or []:
+            fid  = _coerce_int(_pick_first_key(row, 'follower_id', 'followerid'))
+            fsub = _coerce_int(_pick_first_key(
+                row, 'follower_sub_account_id', 'followersubaccountid'))
+            if fid is None:
+                continue
+            followers.append({
+                'owner_id':              owner['user_id'],
+                'owner_sub_account_id':  owner['sub_account_id'],
+                'follower_id':           fid,
+                'follower_sub_account_id': fsub if fsub is not None else fid,
+            })
+
+    print(f"   [SA][FOLLOWER] Detected: {len(followers)}")
+    return owners, followers
+
+
+# ==============================================================================
+#  [PRG] PASS — programme_vps table
+# ==============================================================================
+def _collect_prg_candidates_for_ip(local_ip):
+    bindings           = []
+    candidate_user_ids = set()
+    follower_progs     = []
+
+    pv_sql = (
+        "SELECT id, programme_id, user_id, sub_account_id, "
+        "programme_vps_ip_address "
+        "FROM programme_vps "
+        "WHERE programme_vps_ip_address = %s"
+    )
+    pv_res = db_query(pv_sql, [local_ip], timeout=15.0)
+    if pv_res.get('status') != 'success':
+        print(f"   [PRG][ERROR] programme_vps lookup failed: {pv_res.get('message')}")
+        return bindings, follower_progs, candidate_user_ids
+
+    pv_rows = pv_res.get('results', []) or []
+    print(f"   [PRG][PROGRAMME_VPS] {len(pv_rows)} row(s) for IP {local_ip}")
+
+    for row in pv_rows:
+        uid   = _coerce_int(_pick_first_key(row, 'user_id', 'userid', 'uid'))
+        pid   = _coerce_int(_pick_first_key(row, 'programme_id', 'programmeid'))
+        pvid  = _coerce_int(_pick_first_key(row, 'id', 'pv_id'))
+
+        if uid is None or pid is None or pid <= 0:
+            continue
+
+        print(
+            f"   [PRG][PROGRAMME_VPS] row id={pvid} user_id={uid} "
+            f"programme_id={pid} — owner binding"
+        )
+        bindings.append({
+            'vps_row_id':   pvid,
+            'user_id':      uid,
+            'programme_id': pid,
+        })
+        candidate_user_ids.add(uid)
+
+    print(f"   [PRG][BINDING] Owner bindings: {len(bindings)}")
+
+    owner_prog_ids = [b['programme_id'] for b in bindings]
+    if owner_prog_ids:
+        placeholders = ','.join(['%s'] * len(owner_prog_ids))
+        fol_sql = (
+            f"SELECT id, owner_programme_id, follower_programme_id, "
+            f"host_status "
+            f"FROM programme_vps_hosts_followers "
+            f"WHERE owner_programme_id IN ({placeholders}) "
+            f"  AND host_status = 'active'"
+        )
+        fol_res = db_query(fol_sql, owner_prog_ids, timeout=15.0)
+        if fol_res.get('status') != 'success':
+            print(f"   [PRG][WARN] follower lookup failed: {fol_res.get('message')}")
+        else:
+            for row in fol_res.get('results', []) or []:
+                fpid = _coerce_int(_pick_first_key(
+                    row, 'follower_programme_id', 'followerprogrammeid'))
+                opid = _coerce_int(_pick_first_key(
+                    row, 'owner_programme_id', 'ownerprogrammeid'))
+                if fpid is None or fpid <= 0:
+                    continue
+                follower_progs.append({
+                    'owner_programme_id':    opid,
+                    'follower_programme_id': fpid,
+                })
+                q = db_query(
+                    "SELECT userid FROM programme WHERE id = %s LIMIT 1",
+                    [fpid], timeout=15.0, quiet=True,
+                )
+                if q.get('status') == 'success' and q.get('results'):
+                    for v in q['results'][0].values():
+                        fuid = _coerce_int(v)
+                        if fuid is not None and fuid > 0:
+                            candidate_user_ids.add(fuid)
+                        break
+
+    print(f"   [PRG][FOLLOWER] Follower programmes: {len(follower_progs)}")
+
+    return bindings, follower_progs, candidate_user_ids
+
+
+# ==============================================================================
+#  MAIN ENTRY
 # ==============================================================================
 def check_if_broker_is_logged_in(inv_id=None):
     report = {
@@ -2096,10 +3147,11 @@ def check_if_broker_is_logged_in(inv_id=None):
         'local_ip':          None,
         'owners':            [],
         'followers':         [],
-        'programme_bindings': [],
         'owner_results':     [],
         'follower_results':  [],
-        'programme_results': [],
+        'programme_bindings':  [],
+        'programme_followers': [],
+        'programme_results':   [],
         'success':           False,
         'message':           '',
     }
@@ -2124,28 +3176,6 @@ def check_if_broker_is_logged_in(inv_id=None):
     print(f"   [PATH] DEFAULT : {DEFAULT_MT5_PATH}")
     print(f"   [PATH] DEST    : {MT5_DESTINATION_PATH}")
 
-    # ----------------------------------------------------------------
-    # DISCONNECT PASSES (SA + PRG)
-    # ----------------------------------------------------------------
-    try:
-        completed = _process_disconnect_requests()
-        if completed:
-            print(f"   [SA][DISCONNECT] completed: {completed}")
-    except Exception as e:
-        print(f"   [SA][DISCONNECT] pass raised: {e}")
-        traceback.print_exc()
-
-    try:
-        completed = _process_programme_disconnect_requests()
-        if completed:
-            print(f"   [PRG][DISCONNECT] completed: {completed}")
-    except Exception as e:
-        print(f"   [PRG][DISCONNECT] pass raised: {e}")
-        traceback.print_exc()
-
-    # ----------------------------------------------------------------
-    # RESOLVE OWNERS / FOLLOWERS / PROGRAMME BINDINGS
-    # ----------------------------------------------------------------
     local_ip = get_local_ip()
     report['local_ip'] = local_ip
     if not local_ip:
@@ -2154,225 +3184,189 @@ def check_if_broker_is_logged_in(inv_id=None):
         return report
     print(f"   [IP] {local_ip}")
 
-    vps_sql = (
-        "SELECT id, user_id, sub_account_id, programme_id, vps_ip_address "
-        "FROM vps WHERE vps_ip_address = %s"
-    )
-    vps_res = db_query(vps_sql, [local_ip], timeout=15.0)
-    if vps_res.get('status') != 'success':
-        report['message'] = f"VPS lookup failed: {vps_res.get('message')}"
-        print(f"   [ERROR] {report['message']}")
-        return report
+    # ==================================================================
+    #  [SA] PIPELINE
+    # ==================================================================
+    print(f"\n{'#'*70}")
+    print(f"#  [SA] INVESTOR / SUB-ACCOUNT PIPELINE")
+    print(f"#  Tables: vps, vps_hosts_followers, vps_hosts_requestors, harvhub")
+    print(f"{'#'*70}")
+    try:
+        try:
+            completed = _process_disconnect_requests()
+            if completed:
+                print(f"   [SA][DISCONNECT] completed: {completed}")
+        except Exception as e:
+            print(f"   [SA][DISCONNECT] pass raised: {e}")
+            traceback.print_exc()
 
-    vps_rows = vps_res.get('results', []) or []
-    print(f"   [VPS] {len(vps_rows)} row(s) for IP")
+        sa_owners, sa_followers = _collect_sa_candidates_for_ip(local_ip)
+        report['owners']    = sa_owners
+        report['followers'] = sa_followers
 
-    for row in vps_rows:
-        uid   = _coerce_int(_pick_first_key(row, 'user_id', 'userid', 'uid'))
-        sub   = _coerce_int(_pick_first_key(row, 'sub_account_id', 'subaccountid'))
-        vpsid = _coerce_int(_pick_first_key(row, 'id', 'vps_id'))
-        prog  = _coerce_int(_pick_first_key(row, 'programme_id', 'programmeid'))
-
-        if uid is None:
-            continue
-
-        # ---- Programme-pinned VPS row --------------------------------
-        if prog is not None and prog > 0:
-            print(
-                f"   [VPS] row id={vpsid} user_id={uid} "
-                f"programme_id={prog} — programme binding"
-            )
-            report['programme_bindings'].append({
-                'vps_row_id':   vpsid,
-                'user_id':      uid,
-                'programme_id': prog,
-            })
-            continue
-
-        # ---- Investor / sub-account row ------------------------------
-        sub_norm = sub if (sub is not None and sub > 0) else uid
-        report['owners'].append({
-            'vps_row_id':     vpsid,
-            'user_id':        uid,
-            'sub_account_id': sub_norm,
-        })
-
-    print(f"   [SA][OWNER] Detected: {len(report['owners'])}")
-    print(f"   [PRG][BINDING] Detected: {len(report['programme_bindings'])}")
-
-    if not report['owners'] and not report['programme_bindings']:
-        report['message'] = f'No VPS owner found for IP {local_ip}'
-        print(f"   [INFO] {report['message']}")
-        return report
-
-    # Followers are gathered from every investor owner row we saw.
-    for owner in report['owners']:
-        fol_sql = ("SELECT id, owner_id, sub_account_id, "
-                   "follower_id, follower_sub_account_id, host_status "
-                   "FROM vps_hosts_followers "
-                   "WHERE owner_id = %s AND sub_account_id = %s "
-                   "AND host_status = 'active'")
-        fol_res = db_query(
-            fol_sql,
-            [owner['user_id'], owner['sub_account_id']],
-            timeout=15.0,
-        )
-        if fol_res.get('status') != 'success':
-            print(f"   [WARN] followers lookup failed: {fol_res.get('message')}")
-            continue
-
-        for row in fol_res.get('results', []) or []:
-            fid  = _coerce_int(_pick_first_key(row, 'follower_id', 'followerid'))
-            fsub = _coerce_int(_pick_first_key(
-                row, 'follower_sub_account_id', 'followersubaccountid'))
-            if fid is None:
+        print(f"\n   --- [SA] OWNERS ---")
+        for owner in report['owners']:
+            uid = owner['user_id']
+            sub = owner['sub_account_id']
+            print(f"\n   [SA][OWNER] user={uid} sub={sub}")
+            row = _fetch_broker_row(user_id=uid, sub_account_id=sub)
+            if not row:
+                print(f"      [SA][WARN] No harvhub row")
+                report['owner_results'].append({
+                    'source': 'SA',
+                    'user_id': uid, 'sub_account_id': sub,
+                    'ok': False, 'reason': 'no harvhub row',
+                })
                 continue
-            report['followers'].append({
-                'owner_id':              owner['user_id'],
-                'owner_sub_account_id':  owner['sub_account_id'],
-                'follower_id':           fid,
-                'follower_sub_account_id': fsub if fsub is not None else fid,
-            })
+            res = _process_target(row, role='owner', user_id=uid, sub_account_id=sub)
+            report['owner_results'].append(res)
 
-    print(f"   [SA][FOLLOWER] Detected: {len(report['followers'])}")
+        if report['followers']:
+            print(f"\n   --- [SA] FOLLOWERS ---")
 
-    # ----------------------------------------------------------------
-    # SUB-ACCOUNT PROBE PASS
-    # ----------------------------------------------------------------
-    print(f"\n   --- [SA] OWNERS ---")
-    for owner in report['owners']:
-        uid = owner['user_id']
-        sub = owner['sub_account_id']
-        print(f"\n   [SA][OWNER] user={uid} sub={sub}")
-        row = _fetch_broker_row(user_id=uid, sub_account_id=sub)
-        if not row:
-            print(f"      [SA][WARN] No harvhub row")
-            report['owner_results'].append({
-                'source': 'SA',
-                'user_id': uid, 'sub_account_id': sub,
-                'ok': False, 'reason': 'no harvhub row',
-            })
-            continue
-        res = _process_target(row, role='owner', user_id=uid, sub_account_id=sub)
-        report['owner_results'].append(res)
-
-    if report['followers']:
-        print(f"\n   --- [SA] FOLLOWERS ---")
-
-    for fol in report['followers']:
-        uid = fol['follower_id']
-        sub = fol['follower_sub_account_id']
-        print(f"\n   [SA][FOLLOWER] user={uid} sub={sub}")
-        row = _fetch_broker_row(user_id=uid, sub_account_id=sub)
-        if not row:
-            print(f"      [SA][WARN] No harvhub row")
-            report['follower_results'].append({
-                'source': 'SA',
-                'user_id': uid, 'sub_account_id': sub,
-                'ok': False, 'reason': 'no harvhub row',
-            })
-            continue
-        res = _process_target(row, role='follower', user_id=uid, sub_account_id=sub)
-        report['follower_results'].append(res)
-
-    # ----------------------------------------------------------------
-    # PROGRAMME PROBE PASS
-    # ----------------------------------------------------------------
-    print(f"\n   --- [PRG] PROGRAMMES ---")
-
-    processed_programme_ids = set()
-
-    def _process_one_programme(uid, programme_id):
-        if programme_id in processed_programme_ids:
-            return
-        processed_programme_ids.add(programme_id)
-
-        prog_row = _fetch_programme_row(programme_id=programme_id, user_id=uid)
-        if not prog_row:
-            print(f"      [PRG][WARN] No programme row for id={programme_id}")
-            report['programme_results'].append({
-                'source': 'PRG',
-                'user_id': uid,
-                'programme_id': programme_id,
-                'ok': False,
-                'reason': 'no programme row',
-            })
-            return
-
-        manual_status = (
-            _pick_first_key(prog_row, 'broker_login_status') or ''
-        ).strip().lower()
-
-        if manual_status in PROGRAMME_NEGATIVE_STATUSES:
-            print(f"      [PRG][SKIP] programme={programme_id} — {manual_status}")
-            report['programme_results'].append({
-                'source': 'PRG',
-                'user_id': uid,
-                'programme_id': programme_id,
-                'ok': False,
-                'reason': manual_status,
-            })
-            return
-
-        login_v  = _pick_first_key(prog_row, 'login')
-        server_v = _pick_first_key(prog_row, 'server')
-        if not _coerce_int(login_v) or not (server_v or '').strip():
-            print(f"      [PRG][SKIP] programme={programme_id} — no broker details")
-            report['programme_results'].append({
-                'source': 'PRG',
-                'user_id': uid,
-                'programme_id': programme_id,
-                'ok': False,
-                'reason': 'no broker details',
-            })
-            return
-
-        res = _process_programme_target(
-            prog_row, user_id=uid, programme_id=programme_id
-        )
-        report['programme_results'].append(res)
-
-    # 1) Direct bindings from `vps.programme_id`
-    for binding in report['programme_bindings']:
-        uid = binding['user_id']
-        pid = binding['programme_id']
-        print(f"\n   [PRG] user={uid} programme={pid} (VPS binding)")
-        _process_one_programme(uid, pid)
-
-    # 2) Legacy fallback: every candidate user_id discovered above
-    candidate_user_ids = set()
-    for owner in report['owners']:
-        candidate_user_ids.add(owner['user_id'])
-    for fol in report['followers']:
-        candidate_user_ids.add(fol['follower_id'])
-
-    for uid in sorted(candidate_user_ids):
-        programmes = _fetch_programmes_for_owner(uid)
-        if not programmes:
-            continue
-
-        for prog_row in programmes:
-            programme_id = _coerce_int(prog_row.get('id'))
-            if not programme_id:
+        for fol in report['followers']:
+            uid = fol['follower_id']
+            sub = fol['follower_sub_account_id']
+            print(f"\n   [SA][FOLLOWER] user={uid} sub={sub}")
+            row = _fetch_broker_row(user_id=uid, sub_account_id=sub)
+            if not row:
+                print(f"      [SA][WARN] No harvhub row")
+                report['follower_results'].append({
+                    'source': 'SA',
+                    'user_id': uid, 'sub_account_id': sub,
+                    'ok': False, 'reason': 'no harvhub row',
+                })
                 continue
+            res = _process_target(row, role='follower', user_id=uid, sub_account_id=sub)
+            report['follower_results'].append(res)
+
+    except Exception as e:
+        print(f"   [SA] PIPELINE raised: {e}")
+        traceback.print_exc()
+
+    # ==================================================================
+    #  [PRG] PIPELINE
+    # ==================================================================
+    print(f"\n{'#'*70}")
+    print(f"#  [PRG] PROGRAMME / TRADER PIPELINE")
+    print(f"#  Tables: programme_vps, programme_vps_hosts_followers,")
+    print(f"#          programme_vps_hosts_requestors, programme")
+    print(f"{'#'*70}")
+    try:
+        try:
+            completed = _process_programme_disconnect_requests()
+            if completed:
+                print(f"   [PRG][DISCONNECT] completed: {completed}")
+        except Exception as e:
+            print(f"   [PRG][DISCONNECT] pass raised: {e}")
+            traceback.print_exc()
+
+        prg_bindings, prg_followers, prg_user_ids = (
+            _collect_prg_candidates_for_ip(local_ip)
+        )
+        report['programme_bindings']  = prg_bindings
+        report['programme_followers'] = prg_followers
+
+        processed_programme_ids = set()
+
+        def _process_one_programme(uid, programme_id, origin):
             if programme_id in processed_programme_ids:
+                return
+            processed_programme_ids.add(programme_id)
+
+            prog_row = _fetch_programme_row(programme_id=programme_id, user_id=uid)
+            if not prog_row:
+                print(f"      [PRG][WARN] No programme row for id={programme_id}")
+                report['programme_results'].append({
+                    'source': 'PRG',
+                    'user_id': uid,
+                    'programme_id': programme_id,
+                    'ok': False,
+                    'reason': 'no programme row',
+                })
+                return
+
+            manual_status = (
+                _pick_first_key(prog_row, 'broker_login_status') or ''
+            ).strip().lower()
+
+            if manual_status in PROGRAMME_NEGATIVE_STATUSES:
+                print(f"      [PRG][SKIP] programme={programme_id} — {manual_status}")
+                report['programme_results'].append({
+                    'source': 'PRG',
+                    'user_id': uid,
+                    'programme_id': programme_id,
+                    'ok': False,
+                    'reason': manual_status,
+                })
+                return
+
+            login_v  = _pick_first_key(prog_row, 'login')
+            server_v = _pick_first_key(prog_row, 'server')
+            if not _coerce_int(login_v) or not (server_v or '').strip():
+                print(f"      [PRG][SKIP] programme={programme_id} — no broker details")
+                report['programme_results'].append({
+                    'source': 'PRG',
+                    'user_id': uid,
+                    'programme_id': programme_id,
+                    'ok': False,
+                    'reason': 'no broker details',
+                })
+                return
+
+            res = _process_programme_target(
+                prog_row, user_id=uid, programme_id=programme_id
+            )
+            report['programme_results'].append(res)
+
+        print(f"\n   --- [PRG] OWNER PROGRAMMES (programme_vps) ---")
+        for binding in report['programme_bindings']:
+            uid = binding['user_id']
+            pid = binding['programme_id']
+            print(f"\n   [PRG] user={uid} programme={pid} (owner binding)")
+            _process_one_programme(uid, pid, origin='programme_vps')
+
+        print(f"\n   --- [PRG] FOLLOWER PROGRAMMES ---")
+        for fol in report['programme_followers']:
+            fpid = fol['follower_programme_id']
+            opid = fol['owner_programme_id']
+            q = db_query(
+                "SELECT userid FROM programme WHERE id = %s LIMIT 1",
+                [fpid], timeout=15.0, quiet=True,
+            )
+            fuid = None
+            if q.get('status') == 'success' and q.get('results'):
+                for v in q['results'][0].values():
+                    fuid = _coerce_int(v)
+                    break
+            if fuid is None:
+                print(f"      [PRG][WARN] follower programme={fpid} has no userid")
                 continue
+            print(f"\n   [PRG] follower user={fuid} programme={fpid} "
+                  f"(under owner programme={opid})")
+            _process_one_programme(fuid, fpid, origin='follower')
 
-            print(f"\n   [PRG] user={uid} programme={programme_id} (owner lookup)")
-            _process_one_programme(uid, programme_id)
+    except Exception as e:
+        print(f"   [PRG] PIPELINE raised: {e}")
+        traceback.print_exc()
 
-    # ----------------------------------------------------------------
-    # SUMMARY
-    # ----------------------------------------------------------------
+    # ==================================================================
+    #  SUMMARY
+    # ==================================================================
     ok_owners    = sum(1 for r in report['owner_results']    if r.get('ok'))
     ok_followers = sum(1 for r in report['follower_results'] if r.get('ok'))
     ok_progs     = sum(1 for r in report['programme_results'] if r.get('ok'))
 
-    report['success'] = (ok_owners + ok_followers + ok_progs) > 0
+    sa_total = len(report['owners']) + len(report['followers'])
+    sa_ok    = ok_owners + ok_followers
+
+    prg_total = len(report['programme_results'])
+    prg_ok    = ok_progs
+
+    report['success'] = (sa_ok + prg_ok) > 0
     report['message'] = (
-        f"[SA] owners={len(report['owners'])}({ok_owners} ok), "
-        f"followers={len(report['followers'])}({ok_followers} ok) | "
-        f"[PRG] programmes={len(report['programme_results'])}({ok_progs} ok)"
+        f"[SA] accounts={sa_total}({sa_ok} ok) | "
+        f"[PRG] programmes={prg_total}({prg_ok} ok)"
     )
     print(f"\n   [RESULT] {report['message']}")
     return report
@@ -2382,6 +3376,9 @@ def check_if_broker_is_logged_in(inv_id=None):
 #  MAIN LOOP
 # ==============================================================================
 def main():
+    # Ensure TIMEFRAME_MAP is built before any MT5 work begins.
+    _build_timeframe_map()
+
     print(f"\n{'#'*70}")
     print(f"#  brokerdetails — check_if_broker_is_logged_in loop")
     print(f"#  started at {datetime.now().isoformat(timespec='seconds')}")
@@ -2403,15 +3400,8 @@ def main():
             except Exception as e:
                 print(f"[main] check_if_broker_is_logged_in raised: {e}")
                 traceback.print_exc()
-
-            print(f"[main] sleeping {interval}s...\n")
-            time.sleep(interval)
     except KeyboardInterrupt:
-        print("[main] interrupted — shutting down mysqlremote")
-        try:
-            db.stop_worker()
-        except Exception:
-            pass
+        print("[main] interrupted — shutting down")
 
 
 if __name__ == "__main__":
