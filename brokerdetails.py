@@ -1169,35 +1169,13 @@ def _persist_programme_broker_metadata(programme_id,
                                        symbols,
                                        timeframes):
     """
-    Safely overwrite `broker_symbols` and `broker_timeframes` for the
-    given programme row, while protecting any existing user selections
-    in `selected_symbols` / `selected_timeframes` from being lost due
-    to a transient glitch (empty result, partial fetch, terminal
-    disconnect, etc.).
+    CLEAR then write `broker_symbols` and `broker_timeframes` for the
+    given programme row. Uses the exact same comma-separated format the
+    rest of the codebase parses via parseCleanList() (CSV for symbols,
+    JSON array for timeframes — matching the ohlc-style storage).
 
-    Strategy
-    --------
-    1. READ the current row: existing broker_symbols, broker_timeframes,
-       selected_symbols, selected_timeframes.
-
-    2. VALIDATE the incoming snapshot:
-       * If the incoming `symbols` is empty but the existing broker_symbols
-         is non-empty → REFUSE to overwrite (transient glitch protection).
-       * If the incoming `timeframes` is empty but the existing
-         broker_timeframes is non-empty → REFUSE to overwrite.
-       This avoids wiping good data on a momentary `symbols_get()` hiccup.
-
-    3. RECONCILE the existing selections against the new snapshot:
-       * Any existing selected_symbol that IS in the new symbols → keep.
-       * Any existing selected_symbol that is NOT in the new symbols → drop.
-       * Same rule for timeframes.
-
-    4. WRITE the new broker_symbols / broker_timeframes and the reconciled
-       selected_symbols / selected_timeframes in a single UPDATE.
-
-    Returns
-    -------
-    bool : True on success, False on failure.
+    ALWAYS clears the columns first so every refresh is a full snapshot
+    of what the broker currently offers.
     """
     if programme_id is None:
         return False
@@ -1206,147 +1184,10 @@ def _persist_programme_broker_metadata(programme_id,
     if pid is None:
         return False
 
-    # ------------------------------------------------------------------
-    # Step 1: read the CURRENT row so we can reconcile safely.
-    # ------------------------------------------------------------------
-    read_sql = (
-        "SELECT broker_symbols, broker_timeframes, "
-        "       selected_symbols, selected_timeframes "
-        "FROM programme WHERE id = %s LIMIT 1"
-    )
-    read_res = db_query(read_sql, [pid], timeout=10.0, quiet=True)
-    if not _is_ok(read_res) or not read_res.get('results'):
-        print(f"      [PRG][META] read failed for programme={pid}: "
-              f"{read_res.get('message')}")
-        return False
+    symbols_csv = ','.join(symbols or [])
+    timeframes_json = json.dumps(timeframes or [], ensure_ascii=False)
 
-    current = read_res['results'][0]
-
-    def _read_col(row, key):
-        if not isinstance(row, dict):
-            return ''
-        for k, v in row.items():
-            if isinstance(k, str) and k.strip().lower() == key:
-                return '' if v is None else str(v)
-        return ''
-
-    def _split_csv(raw):
-        if raw is None:
-            return []
-        s = str(raw).strip()
-        if s == '' or s.lower() == 'null':
-            return []
-        s = s.strip('[]{}"\'')
-        return [p.strip().strip('[]{}"\'') for p in s.split(',') if p.strip()]
-
-    def _split_json_or_csv(raw):
-        if raw is None:
-            return []
-        s = str(raw).strip()
-        if s == '' or s.lower() == 'null':
-            return []
-        if s.startswith('[') or s.startswith('{'):
-            try:
-                decoded = json.loads(s)
-                if isinstance(decoded, list):
-                    return [str(x).strip() for x in decoded if str(x).strip()]
-            except Exception:
-                pass
-        s = s.strip('[]{}"\'')
-        return [p.strip().strip('[]{}"\'') for p in s.split(',') if p.strip()]
-
-    existing_broker_symbols    = _split_csv(_read_col(current, 'broker_symbols'))
-    existing_broker_timeframes = _split_json_or_csv(_read_col(current, 'broker_timeframes'))
-    existing_selected_symbols  = _split_csv(_read_col(current, 'selected_symbols'))
-    existing_selected_tfs      = _split_json_or_csv(_read_col(current, 'selected_timeframes'))
-
-    print(f"      [PRG][META] programme={pid} BEFORE: "
-          f"broker_sym={len(existing_broker_symbols)} "
-          f"broker_tf={len(existing_broker_timeframes)} "
-          f"selected_sym={len(existing_selected_symbols)} "
-          f"selected_tf={len(existing_selected_tfs)}")
-
-    # ------------------------------------------------------------------
-    # Step 2: glitch protection — refuse to wipe good data with empty.
-    # ------------------------------------------------------------------
-    incoming_symbols    = list(symbols or [])
-    incoming_timeframes = list(timeframes or [])
-
-    if not incoming_symbols and existing_broker_symbols:
-        print(f"      [PRG][META] programme={pid} ABORT symbols write: "
-              f"incoming empty but {len(existing_broker_symbols)} "
-              f"broker_symbols already stored — keeping existing, "
-              f"not overwriting (transient glitch protection)")
-        return False
-
-    if not incoming_timeframes and existing_broker_timeframes:
-        print(f"      [PRG][META] programme={pid} ABORT timeframes write: "
-              f"incoming empty but {len(existing_broker_timeframes)} "
-              f"broker_timeframes already stored — keeping existing, "
-              f"not overwriting (transient glitch protection)")
-        return False
-
-    # ------------------------------------------------------------------
-    # Step 3: reconcile existing selections against the new snapshot.
-    #
-    #   • selected_symbol  ∈ new symbols  → keep
-    #   • selected_symbol  ∉ new symbols  → drop
-    #   • same rule for timeframes
-    #
-    # This is the "safe overwrite" behaviour: nothing a user picked is
-    # lost unless the broker genuinely no longer offers that instrument.
-    # ------------------------------------------------------------------
-    new_sym_lookup = {s: True for s in incoming_symbols}
-    new_tf_lookup  = {t: True for t in incoming_timeframes}
-
-    reconciled_selected_symbols = []
-    dropped_symbols = []
-    for s in existing_selected_symbols:
-        if s in new_sym_lookup:
-            reconciled_selected_symbols.append(s)
-        else:
-            dropped_symbols.append(s)
-
-    reconciled_selected_tfs = []
-    dropped_tfs = []
-    for t in existing_selected_tfs:
-        if t in new_tf_lookup:
-            reconciled_selected_tfs.append(t)
-        else:
-            dropped_tfs.append(t)
-
-    # De-dupe while preserving order.
-    seen = set()
-    reconciled_selected_symbols = [
-        s for s in reconciled_selected_symbols
-        if not (s in seen or seen.add(s))
-    ]
-    seen = set()
-    reconciled_selected_tfs = [
-        t for t in reconciled_selected_tfs
-        if not (t in seen or seen.add(t))
-    ]
-
-    if dropped_symbols:
-        print(f"      [PRG][META] programme={pid} dropped stale selected "
-              f"symbols not in new snapshot: {dropped_symbols}")
-    if dropped_tfs:
-        print(f"      [PRG][META] programme={pid} dropped stale selected "
-              f"timeframes not in new snapshot: {dropped_tfs}")
-
-    # ------------------------------------------------------------------
-    # Step 4: single UPDATE — clear + write broker columns AND the
-    # reconciled selected columns together, so there is no window where
-    # one is updated and the other is stale.
-    # ------------------------------------------------------------------
-    symbols_csv     = ','.join(incoming_symbols)
-    timeframes_json = json.dumps(incoming_timeframes, ensure_ascii=False)
-
-    selected_syms_csv = ','.join(reconciled_selected_symbols)
-    selected_tfs_json = json.dumps(reconciled_selected_tfs, ensure_ascii=False)
-
-    # 4a: clear both broker columns first so we always start from a
-    #     blank slate (matching the ohlc-style full-snapshot semantics).
+    # Step 1: clear both columns so we always start from a blank slate.
     clear_sql = (
         "UPDATE programme "
         "SET broker_symbols = NULL, broker_timeframes = NULL "
@@ -1358,21 +1199,15 @@ def _persist_programme_broker_metadata(programme_id,
               f"{clear_res.get('message')}")
         return False
 
-    # 4b: write the fresh broker snapshot AND the reconciled selections
-    #     in one statement so they always stay in sync.
+    # Step 2: write the fresh snapshot.
     write_sql = (
         "UPDATE programme "
-        "SET broker_symbols      = %s, "
-        "    broker_timeframes   = %s, "
-        "    selected_symbols    = %s, "
-        "    selected_timeframes = %s "
+        "SET broker_symbols = %s, broker_timeframes = %s "
         "WHERE id = %s"
     )
     write_res = db_query(
         write_sql,
-        [symbols_csv, timeframes_json,
-         selected_syms_csv, selected_tfs_json,
-         pid],
+        [symbols_csv, timeframes_json, pid],
         timeout=20.0, quiet=True,
     )
     if not _is_ok(write_res):
@@ -1380,12 +1215,10 @@ def _persist_programme_broker_metadata(programme_id,
               f"{write_res.get('message')}")
         return False
 
-    print(f"      [PRG][META] programme={pid} AFTER: "
-          f"broker_sym={len(incoming_symbols)} "
-          f"broker_tf={len(incoming_timeframes)} "
-          f"selected_sym={len(reconciled_selected_symbols)} "
-          f"selected_tf={len(reconciled_selected_tfs)}")
+    print(f"      [PRG][META] programme={pid} updated: "
+          f"symbols={len(symbols or [])} timeframes={len(timeframes or [])}")
     return True
+
 
 def _refresh_programme_broker_metadata(user_id, programme_id, terminal_exe):
     """

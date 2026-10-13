@@ -24,6 +24,12 @@ Public API (mirrors the PHP):
 
     record_balance_verification_notification(pdo, user) -> int | None
 
+    # ---- Programme-scoped restriction + daily-target helpers ----
+    record_programme_restriction_date_notification(pdo, ...)      -> int | None
+    record_programme_restriction_day_full_notification(pdo, ...)  -> int | None
+    record_programme_restriction_day_window_notification(pdo, ...)-> int | None
+    record_programme_daily_target_summary_notification(pdo, ...)  -> int | None
+
     get_contract_notifications(pdo, email, sub_id, limit=100) -> list
     get_programme_notifications(pdo, programme_id, email, limit=100) -> list
     mark_contract_notifications_read(pdo, email, sub_id) -> bool
@@ -1202,6 +1208,295 @@ def record_programme_disconnect_broker_completed_notification(pdo, row) -> Optio
 
 
 # ==============================================================================
+# PROGRAMME-SCOPED RESTRICTION + DAILY-TARGET NOTIFICATIONS
+# ==============================================================================
+# All of these go ONLY to the programme owner (email is resolved by the
+# caller from programme.userid -> harvhub.email). Nothing is ever sent
+# to investors. All use dedup keys so a repeated run within the same
+# day does not spam the programme owner.
+
+def _format_time_label_12h(raw: str) -> str:
+    """
+    Best-effort normaliser. The caller already passes a 12h label
+    ('9:00 AM'), but if raw is 24h ('09:00') we still convert.
+    """
+    s = (raw or '').strip()
+    if not s:
+        return ''
+    if re.search(r'\b(am|pm)\b', s, re.IGNORECASE):
+        return s
+    m = re.match(r'^(\d{1,2}):(\d{2})(?::\d{2})?$', s)
+    if not m:
+        return s
+    try:
+        h = int(m.group(1))
+        mi = int(m.group(2))
+    except Exception:
+        return s
+    period = 'AM' if h < 12 else 'PM'
+    h12 = h % 12 or 12
+    return f"{h12}:{mi:02d} {period}"
+
+
+# ------------------------------------------------------------------------------
+# RESTRICTED DATE — full-day lockout from accountmanagement_restricted_dates
+# ------------------------------------------------------------------------------
+
+def record_programme_restriction_date_notification(
+    pdo,
+    programme_id: int,
+    programme_name: str,
+    owner_email: str,
+    restricted_date: str,
+    timezone_str: str,
+) -> Optional[int]:
+    programme_id = int(programme_id or 0)
+    owner_email = (owner_email or '').strip().lower()
+    programme_name = (programme_name or '').strip() or f"programme {programme_id}"
+    restricted_date = (restricted_date or '').strip()
+    timezone_str = (timezone_str or '').strip() or 'your configured'
+
+    if programme_id <= 0 or not owner_email or '@' not in owner_email:
+        print('[HarvHub Notification Service] restriction-date: invalid identity')
+        return None
+    if not restricted_date:
+        return None
+
+    title = 'Trading Paused Today'
+    message = (
+        f"Just a heads-up: today is the date {restricted_date} you added "
+        f"to pause trading. No trading activity will "
+        f"take place today in the {timezone_str} timezone for your investors as well."
+    )
+
+    return record_programme_notification_once(
+        pdo,
+        programme_id,
+        owner_email,
+        {
+            'notification_key': (
+                f'prog-restricted-date-{programme_id}-{restricted_date}'
+            ),
+            'title': title,
+            'message': message,
+            'type': 'warning',
+            'section': 'Programme',
+            'action_tab': 'account_management',
+            'force': False,
+            'send_email': True,
+            'recipient_name': programme_name,
+        },
+    )
+
+
+# ------------------------------------------------------------------------------
+# RESTRICTED DAY — FULL DAY (from accountmanagement_restricted_days)
+# ------------------------------------------------------------------------------
+
+def record_programme_restriction_day_full_notification(
+    pdo,
+    programme_id: int,
+    programme_name: str,
+    owner_email: str,
+    day_name: str,
+    restricted_date: str,
+    timezone_str: str,
+) -> Optional[int]:
+    programme_id = int(programme_id or 0)
+    owner_email = (owner_email or '').strip().lower()
+    programme_name = (programme_name or '').strip() or f"programme {programme_id}"
+    day_name = (day_name or '').strip() or 'today'
+    restricted_date = (restricted_date or '').strip()
+    timezone_str = (timezone_str or '').strip() or 'your configured'
+
+    if programme_id <= 0 or not owner_email or '@' not in owner_email:
+        print('[HarvHub Notification Service] restriction-day-full: invalid identity')
+        return None
+
+    title = f'Trading Paused All Day on {day_name}'
+    message = (
+        f"Your programme has {day_name} set as a fully paused trading day, "
+        f"so your investors get a breather today. No trading activity will "
+        f"take place for your investors."
+    )
+
+    return record_programme_notification_once(
+        pdo,
+        programme_id,
+        owner_email,
+        {
+            'notification_key': (
+                f'prog-restricted-day-full-{programme_id}-{restricted_date}'
+            ),
+            'title': title,
+            'message': message,
+            'type': 'warning',
+            'section': 'Programme',
+            'action_tab': 'account_management',
+            'force': False,
+            'send_email': True,
+            'recipient_name': programme_name,
+        },
+    )
+
+
+# ------------------------------------------------------------------------------
+# RESTRICTED DAY — TIME WINDOW
+# ------------------------------------------------------------------------------
+
+def record_programme_restriction_day_window_notification(
+    pdo,
+    programme_id: int,
+    programme_name: str,
+    owner_email: str,
+    day_name: str,
+    restricted_date: str,
+    from_label: str,
+    to_label: str,
+    timezone_str: str,
+) -> Optional[int]:
+    programme_id = int(programme_id or 0)
+    owner_email = (owner_email or '').strip().lower()
+    programme_name = (programme_name or '').strip() or f"programme {programme_id}"
+    day_name = (day_name or '').strip() or 'today'
+    restricted_date = (restricted_date or '').strip()
+    timezone_str = (timezone_str or '').strip() or 'your configured'
+
+    from_label = _format_time_label_12h(from_label)
+    to_label = _format_time_label_12h(to_label)
+
+    if programme_id <= 0 or not owner_email or '@' not in owner_email:
+        print('[HarvHub Notification Service] restriction-day-window: invalid identity')
+        return None
+
+    if from_label and to_label:
+        window_text = f"from {from_label} to {to_label}"
+    elif from_label:
+        window_text = f"from {from_label} onwards"
+    elif to_label:
+        window_text = f"up to {to_label}"
+    else:
+        window_text = "for the configured window"
+
+    title = f'Trading Paused on {day_name}'
+    message = (
+        f"Today is {day_name}, and your programme has a trading pause "
+        f"scheduled {window_text} in the {timezone_str} timezone, giving "
+        f"your investors a short break during that window. Trade activity "
+        f"across your investors is paused for that period."
+    )
+
+    return record_programme_notification_once(
+        pdo,
+        programme_id,
+        owner_email,
+        {
+            'notification_key': (
+                f'prog-restricted-day-window-{programme_id}-'
+                f'{restricted_date}-{from_label}-{to_label}'
+            ),
+            'title': title,
+            'message': message,
+            'type': 'warning',
+            'section': 'Programme',
+            'action_tab': 'account_management',
+            'force': False,
+            'send_email': True,
+            'recipient_name': programme_name,
+        },
+    )
+
+
+# ------------------------------------------------------------------------------
+# DAILY TARGET SUMMARY (roll-up)
+# ------------------------------------------------------------------------------
+
+def record_programme_daily_target_summary_notification(
+    pdo,
+    programme_id: int,
+    programme_name: str,
+    owner_email: str,
+    met_count: int,
+    total_count: int,
+    trade_date: str,
+    timezone_str: str = 'Africa/Lagos',
+) -> Optional[int]:
+    """
+    Roll-up notification sent to the programme owner whenever at least
+    one investor has met the daily target for the given trade date.
+
+    Called from `recent_highest_balance_target()` (later). This helper
+    is intentionally decoupled so you can wire it in without touching
+    the existing stats flow.
+
+    Dedup: keyed on (programme_id, trade_date, met_count, total_count)
+    so repeated runs with the same numbers do not spam, but a change in
+    the counts re-sends (that's the point of a progress signal).
+    """
+    programme_id = int(programme_id or 0)
+    owner_email = (owner_email or '').strip().lower()
+    programme_name = (programme_name or '').strip() or f"programme {programme_id}"
+    trade_date = (trade_date or '').strip()
+    timezone_str = (timezone_str or '').strip() or 'Africa/Lagos'
+
+    try:
+        met_count = int(met_count or 0)
+        total_count = int(total_count or 0)
+    except Exception:
+        return None
+
+    if programme_id <= 0 or not owner_email or '@' not in owner_email:
+        print('[HarvHub Notification Service] daily-target-summary: invalid identity')
+        return None
+
+    if total_count <= 0:
+        return None
+
+    # Only send when at least one investor has met the target, per spec.
+    if met_count <= 0:
+        return None
+
+    pending_count = max(0, total_count - met_count)
+
+    if pending_count == 0:
+        title = 'All Investors Met Their Daily Target'
+        message = (
+            f"Great news. All {total_count} of your active investors have "
+            f"met their daily target for {trade_date} "
+            f"({timezone_str} timezone)."
+        )
+        ntype = 'success'
+    else:
+        title = 'Daily Target Progress'
+        message = (
+            f"{met_count} of your investors have met their daily target "
+            f"while {pending_count} are yet to meet theirs for {trade_date} "
+            f"({timezone_str} timezone)."
+        )
+        ntype = 'info'
+
+    return record_programme_notification(
+        pdo,
+        programme_id,
+        owner_email,
+        {
+            'notification_key': (
+                f'prog-daily-target-summary-{programme_id}-{trade_date}-'
+                f'{met_count}-{total_count}'
+            ),
+            'title': title,
+            'message': message,
+            'type': ntype,
+            'section': 'Programme',
+            'action_tab': 'programme_statistics',
+            'force': True,
+            'send_email': True,
+            'recipient_name': programme_name,
+        },
+    )
+
+
+# ==============================================================================
 # READ HELPERS
 # ==============================================================================
 
@@ -1362,3 +1657,202 @@ def sync_notification_unread_flag(
         "WHERE sub_account_id = %s AND LOWER(email) = %s",
         [1 if count > 0 else 0, sub_account_id, email],
     )
+# ==============================================================================
+# INVESTOR-SIDE UNAUTHORIZED ACTION NOTIFICATION
+# ==============================================================================
+# Fires when an investor's sub-account has actions that do not belong to
+# any magic number issued by the programme. One notification per investor
+# per programme per day (dedup by date).
+
+def record_investor_unauthorized_action_notification(
+    pdo,
+    programme_id: int,
+    programme_name: str,
+    investor_email: str,
+    investor_id: int,
+    sub_account_id: int,
+    unauthorized_types: list,
+    unauthorized_pnl: float,
+    unaccounted_deficit: float,
+) -> Optional[int]:
+    """
+    Notify the investor's sub-account that unauthorized actions were
+    detected on a programme they invested in.
+
+    unauthorized_types is a list of strings such as:
+        ['unauthorized_trades', 'unauthorized_orders',
+         'unauthorized_positions', 'unaccounted_balance_deficit']
+    """
+    programme_id = int(programme_id or 0)
+    investor_email = (investor_email or '').strip().lower()
+    programme_name = (programme_name or '').strip() or f"programme {programme_id}"
+
+    if programme_id <= 0 or not investor_email or '@' not in investor_email:
+        print('[HarvHub Notification Service] investor-unauth: invalid identity')
+        return None
+
+    today = _unauth_today_key()
+    parts = _unauth_summary_parts(
+        unauthorized_types, unauthorized_pnl, unaccounted_deficit
+    )
+
+    if not parts:
+        return None
+
+    summary = ", ".join(parts)
+
+    # Danger if anything more serious than pending orders was found
+    has_serious = any(
+        t in ('unauthorized_trades', 'unauthorized_positions',
+              'unaccounted_balance_deficit')
+        for t in (unauthorized_types or [])
+    )
+    ntype = 'danger' if has_serious else 'warning'
+
+    title = 'Unauthorized Actions Detected'
+    message = (
+        f"We detected unauthorized actions on your programme "
+        f"'{programme_name}': {summary}. This means trading activity was "
+        f"observed outside the magic numbers issued by the programme. "
+        f"Please stop any manual or third-party trading on this "
+        f"sub-account immediately to avoid contract violations."
+    )
+
+    return record_programme_notification_once(
+        pdo,
+        programme_id,
+        investor_email,
+        {
+            'notification_key': (
+                f'prog-unauth-investor-{programme_id}-{sub_account_id}-{today}'
+            ),
+            'title': title,
+            'message': message,
+            'type': ntype,
+            'section': 'Unauthorized',
+            'action_tab': 'activity',
+            'force': False,
+            'send_email': True,
+            'recipient_name': f"investor {investor_id}",
+        },
+    )
+
+
+# ==============================================================================
+# PROGRAMME-OWNER-SIDE UNAUTHORIZED ACTION NOTIFICATION
+# ==============================================================================
+# Fires when one of the programme owner's investors has actions that do
+# not belong to any magic number the programme issued. One notification
+# per investor per programme per day (dedup by date).
+
+def record_programme_owner_unauthorized_action_notification(
+    pdo,
+    programme_id: int,
+    programme_name: str,
+    owner_email: str,
+    investor_id: int,
+    sub_account_id: int,
+    unauthorized_types: list,
+    unauthorized_pnl: float,
+    unaccounted_deficit: float,
+) -> Optional[int]:
+    """
+    Notify the programme owner that one of their investors violated the
+    contract agreement.
+    """
+    programme_id = int(programme_id or 0)
+    owner_email = (owner_email or '').strip().lower()
+    programme_name = (programme_name or '').strip() or f"programme {programme_id}"
+
+    if programme_id <= 0 or not owner_email or '@' not in owner_email:
+        print('[HarvHub Notification Service] owner-unauth: invalid identity')
+        return None
+
+    today = _unauth_today_key()
+    parts = _unauth_summary_parts(
+        unauthorized_types, unauthorized_pnl, unaccounted_deficit
+    )
+
+    if not parts:
+        return None
+
+    summary = ", ".join(parts)
+
+    title = f'Contract Violation — Investor {investor_id}'
+    message = (
+        f"Investor {investor_id} (sub-account {sub_account_id}) on your "
+        f"programme '{programme_name}' has violated the contract "
+        f"agreement: {summary}. The investor's trading activity is "
+        f"outside the magic numbers your programme issued. Please review "
+        f"and take the appropriate action."
+    )
+
+    return record_programme_notification_once(
+        pdo,
+        programme_id,
+        owner_email,
+        {
+            'notification_key': (
+                f'prog-unauth-owner-{programme_id}-{sub_account_id}-{today}'
+            ),
+            'title': title,
+            'message': message,
+            'type': 'danger',
+            'section': 'Unauthorized',
+            'action_tab': 'programme_investors',
+            'force': False,
+            'send_email': True,
+            'recipient_name': programme_name,
+        },
+    )
+
+
+# ==============================================================================
+# INTERNAL HELPERS FOR THE TWO HELPERS ABOVE
+# ==============================================================================
+
+def _unauth_today_key() -> str:
+    from datetime import datetime, timezone, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Africa/Lagos")
+    except Exception:
+        tz = timezone(timedelta(hours=1))
+    return datetime.now(tz).strftime("%Y-%m-%d")
+
+
+def _unauth_summary_parts(unauthorized_types, unauthorized_pnl, unaccounted_deficit) -> list:
+    """
+    Turn the raw classification into the human-readable fragments used
+    by both the investor-side and owner-side messages.
+    """
+    parts = []
+    ut = set(unauthorized_types or [])
+
+    if 'unauthorized_trades' in ut:
+        if unauthorized_pnl > 0.01:
+            parts.append(
+                f"closed trades placed outside the programme "
+                f"(net P&L +${unauthorized_pnl:.2f})"
+            )
+        elif unauthorized_pnl < -0.01:
+            parts.append(
+                f"closed trades placed outside the programme "
+                f"(net P&L −${abs(unauthorized_pnl):.2f})"
+            )
+        else:
+            parts.append("closed trades placed outside the programme")
+
+    if 'unauthorized_orders' in ut:
+        parts.append("pending orders placed outside the programme")
+
+    if 'unauthorized_positions' in ut:
+        parts.append("open positions placed outside the programme")
+
+    if 'unaccounted_balance_deficit' in ut or (unaccounted_deficit or 0.0) > 0.01:
+        parts.append(
+            f"an unaccounted balance deficit of "
+            f"${float(unaccounted_deficit or 0.0):.2f}"
+        )
+
+    return parts

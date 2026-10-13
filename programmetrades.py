@@ -2,17 +2,18 @@
 """
 Programme-scoped trade pipeline orchestrator.
 
-Currently ships ONLY the restricted-timerange stage. Future functions
-(candle fetch, crosser analysis, liquidator, ranging, order placement,
-risk audit, etc.) will be dropped into process_single_investor() in the
-priority order shown by the commented section.
+Currently ships ONLY the restricted-timerange stage + recent-highest-balance
+target stage. Future functions (candle fetch, crosser analysis, liquidator,
+ranging, order placement, risk audit, etc.) will be dropped into
+process_single_investor_from_db() in the priority order shown by the commented
+section.
 
 ARCHITECTURE
 ------------
 * Same bridge pattern as brokerdetails.py: this file is a TCP CLIENT of
   the long-running mysqlremote.py bridge. It does NOT launch Chrome.
 * The DATABASE is the source of truth. No local folder scanning, no JSON
-  reads, no JSON writes.
+  reads, no JSON writes. EVER.
 * Every worker process (one per investor) acquires its OWN dedicated
   channel from the bridge. Channels are isolated.
 * Helpers (db_query, _BridgeClient, channel mgmt, time helpers) live at
@@ -59,6 +60,23 @@ An investor is considered active for a programme when a row exists in
 (investor_id, sub_account_id) with `harvhub.account_contract_status =
 'contract_active'`. This mirrors the signals dashboard exactly. No
 accepted_at / contract_duration date math is performed here.
+
+PIPELINE GATES (mirrors process_single_investor_from_db_local semantics)
+----------------------------------------------------------------
+Two short-circuits run in order inside process_single_investor_from_db():
+
+  GATE 1 — Restricted timerange
+    If the investor's programme is currently restricted (restricted
+    date / full restricted day / inside restricted time window), skip
+    EVERY other stage, including recent_highest_balance_target_db.
+
+  GATE 2 — Daily-target alarm
+    recent_highest_balance_target_db() populates the module-global
+    `recent_highest_alert`. If `is_triggered` is True after that stage
+    runs (target met, or pre-pending alarm fired), skip every future
+    trading stage. No trading decisions are made by this file yet — the
+    gate is here so that when future stages are wired in, they never
+    run while an alarm is active.
 """
 
 import os
@@ -204,6 +222,8 @@ class _BridgeClient:
 #  MODULE-SCOPE HELPERS (shared by all future functions)
 # ==============================================================================
 _db = None
+recent_highest_alert = None
+martingale_alert = None   # populated by martingale_system_db()
 
 
 def _worker_init():
@@ -237,6 +257,17 @@ def db_query(sql, params=None, timeout=20.0, quiet=False):
         print(f"      [PARAMS  ] {params}")
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Programme-scoped notification PDO adapter (single instance per worker)
+# ---------------------------------------------------------------------------
+try:
+    import notification_service as _notif_service
+    _NOTIF_PDO = _notif_service.make_pdo(db_query)
+except Exception:
+    _notif_service = None
+    _NOTIF_PDO = None
 
 
 def _is_ok(res):
@@ -606,7 +637,7 @@ def build_mt5_terminal_path_sa(server, login, user_id, sub_account_id):
     return folder_name, folder_abs, terminal_exe
 
 
-def resolve_investor_terminal_path(inv_id, sub_id):
+def resolve_investor_terminal_path(inv_db_id, sub_id):
     """
     Return the correct terminal64.exe path for this investor sub-account.
 
@@ -619,10 +650,10 @@ def resolve_investor_terminal_path(inv_id, sub_id):
     row = db_fetch_one(
         "SELECT login, server, Terminal_path FROM harvhub "
         "WHERE id = %s AND sub_account_id = %s LIMIT 1",
-        [inv_id, sub_id], timeout=10.0, quiet=True,
+        [inv_db_id, sub_id], timeout=10.0, quiet=True,
     )
     if not row:
-        print(f"[MT5-PATH] no harvhub row for investor={inv_id} sub={sub_id}")
+        print(f"[MT5-PATH] no harvhub row for investor={inv_db_id} sub={sub_id}")
         return None
 
     db_terminal_path = _raw_first_key(row, 'Terminal_path')
@@ -641,7 +672,7 @@ def resolve_investor_terminal_path(inv_id, sub_id):
     # 2. Rebuild using brokerdetails formula
     if login_v and server_v:
         _, folder_abs, terminal_exe = build_mt5_terminal_path_sa(
-            server_v, login_v, inv_id, sub_id
+            server_v, login_v, inv_db_id, sub_id
         )
         if os.path.isfile(terminal_exe):
             print(f"[MT5-PATH] rebuilt from server+login = {terminal_exe}")
@@ -650,7 +681,7 @@ def resolve_investor_terminal_path(inv_id, sub_id):
                 db_execute(
                     "UPDATE harvhub SET Terminal_path = %s "
                     "WHERE id = %s AND sub_account_id = %s",
-                    [terminal_exe, inv_id, sub_id],
+                    [terminal_exe, inv_db_id, sub_id],
                     timeout=10.0, quiet=True,
                 )
                 print(f"[MT5-PATH] wrote rebuilt path back to harvhub.Terminal_path")
@@ -944,15 +975,15 @@ def fetch_active_investors_for_programme(programme_id):
 
     for raw in res.get('results') or []:
         row = _normalize_row(raw)
-        inv_id = _coerce_int(_pick_first_key(row, 'investor_id'))
+        inv_db_id = _coerce_int(_pick_first_key(row, 'investor_id'))
         sub_id = _coerce_int(_pick_first_key(row, 'investor_sub_account_id'))
-        if inv_id is None or inv_id <= 0 or sub_id is None or sub_id <= 0:
+        if inv_db_id is None or inv_db_id <= 0 or sub_id is None or sub_id <= 0:
             continue
-        key = (inv_id, sub_id)
+        key = (inv_db_id, sub_id)
         if key in seen:
             continue
         seen.add(key)
-        out.append({'investor_id': inv_id, 'sub_account_id': sub_id})
+        out.append({'investor_id': inv_db_id, 'sub_account_id': sub_id})
     return out
 
 
@@ -970,14 +1001,14 @@ def fetch_vps_investor_jobs(local_ip):
 
         investors = fetch_active_investors_for_programme(programme_id)
         for inv in investors:
-            inv_id = inv['investor_id']
+            inv_db_id = inv['investor_id']
             sub_id = inv['sub_account_id']
-            key = (inv_id, sub_id, programme_id)
+            key = (inv_db_id, sub_id, programme_id)
             if key in seen:
                 continue
             seen.add(key)
             jobs.append({
-                'investor_id':    inv_id,
+                'investor_id':    inv_db_id,
                 'sub_account_id': sub_id,
                 'programme_id':   programme_id,
                 'programme_name': programme_name,
@@ -1083,21 +1114,805 @@ def fetch_programme_name(programme_id):
             return '' if v is None else str(v).strip()
     return ''
 
+# ==============================================================================
+#  CHECK AND RECORD UNAUTHORIZED ACTIONS — DB version
+#
+#  Investor-scoped, MT5-facing, magic-number-driven.
+#
+#  A trade (pending order, open position, or closed deal) is AUTHORIZED for
+#  an investor iff its `magic` is present in that investor's
+#  programme_trades.magic set. Otherwise it is UNAUTHORIZED.
+#
+#  On every run:
+#    * classify MT5 orders / positions / history deals as authorized or not
+#    * compute an expected current balance from an anchor + authorized P&L
+#    * detect an unaccounted deficit (MT5 < expected) → "unaccounted deficit"
+#    * write one row into `balance_log` for the current Lagos day
+#    * if any unauthorized action or deficit was detected, notify the
+#      investor's sub-account AND the programme owner (dedup per day, per
+#      kind) via the notification service
+#
+#  Nothing here touches JSON files.
+# ==============================================================================
+def check_and_record_unauthorized_actions_db(inv_db_id=None):
+    """
+    Reads:
+        * programme_trades        -> this investor's authorized magic set
+        * harvhub                 -> anchor (broker_balance, execution_start_date)
+                                     + current_balance semantics
+        * balance_log             -> last known closing balance for continuity
+        * MT5                     -> live orders / positions / history deals
+
+    Writes:
+        * balance_log             -> one row per investor per Lagos day
+        * programme_notifications -> investor-side + programme-side alerts
+                                     via notification_service (dedup keyed)
+
+    Populates the module-global `unauthorized_alert` with:
+        {
+          'is_triggered': bool,
+          'investor_id': int,
+          'sub_account_id': int,
+          'programme_id': int,
+          'investor_authorized_magics': set,
+          'unauthorized_trades': [...],
+          'unauthorized_orders': [...],
+          'unauthorized_positions': [...],
+          'unauthorized_pnl_total': float,
+          'unaccounted_deficit': float,
+          'unauthorized_types': [...],
+          'application_status': str,
+          'errors': [...],
+        }
+    """
+
+    global unauthorized_alert
+    from datetime import datetime, timedelta, timezone
+
+    # ------------------------------------------------------------------
+    # LAGOS TIMEZONE
+    # ------------------------------------------------------------------
+    try:
+        from zoneinfo import ZoneInfo
+        LAGOS_TZ = ZoneInfo("Africa/Lagos")
+        _LAGOS_TZ_SOURCE = "zoneinfo"
+    except Exception:
+        LAGOS_TZ = timezone(timedelta(hours=1))
+        _LAGOS_TZ_SOURCE = "fixed_utc+1"
+
+    def lagos_now():
+        return datetime.now(LAGOS_TZ)
+
+    def lagos_now_str():
+        return lagos_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def lagos_today_str():
+        return lagos_now().strftime("%Y-%m-%d")
+
+    def lagos_from_timestamp(ts):
+        if not ts:
+            return None
+        try:
+            ts_float = float(ts)
+        except (TypeError, ValueError):
+            return None
+        if ts_float > 1e11:
+            ts_float = ts_float / 1000.0
+        try:
+            return datetime.fromtimestamp(ts_float, tz=timezone.utc).astimezone(LAGOS_TZ)
+        except Exception:
+            return None
+
+    unauthorized_alert = {
+        'is_triggered': False,
+        'investor_id': inv_db_id if inv_db_id else 'all',
+        'sub_account_id': None,
+        'programme_id': None,
+        'investor_authorized_magics': set(),
+        'unauthorized_trades': [],
+        'unauthorized_orders': [],
+        'unauthorized_positions': [],
+        'unauthorized_pnl_total': 0.0,
+        'unaccounted_deficit': 0.0,
+        'unauthorized_types': [],
+        'application_status': 'approved',
+        'errors': [],
+        'timestamp': lagos_now_str(),
+    }
+
+    print(f"\n{'='*10} 🔍 AUTHORIZED-ACTIONS AUDIT (DB) {'='*10}")
+    print(f" 🕒 Lagos time now: {lagos_now().strftime('%Y-%m-%d %H:%M:%S %Z')} (source: {_LAGOS_TZ_SOURCE})")
+
+    stats = {
+        'investor_id': inv_db_id if inv_db_id else 'all',
+        'investors_processed': 0,
+        'investors_with_unauthorized': 0,
+        'unauthorized_orders_found': 0,
+        'unauthorized_positions_found': 0,
+        'unauthorized_trades_found': 0,
+        'unaccounted_deficits_found': 0,
+        'balance_log_rows_written': 0,
+        'notifications_queued': 0,
+        'errors': [],
+        'processing_success': False,
+        'details': [],
+    }
+
+    # ==================================================================
+    # SECTION 1 — PROGRAMME-SCOPED READERS
+    # ==================================================================
+    def programme_fetch_owner_email(programme_id):
+        """
+        Resolve the programme owner's email via programme.userid -> harvhub.email.
+        Returns (owner_email, programme_name) — both may be empty.
+        """
+        row = db_fetch_one(
+            """
+            SELECT p.program_name AS programme_name,
+                   h.email        AS owner_email
+              FROM programme p
+              LEFT JOIN harvhub h ON h.id = p.userid AND h.is_main_account = 1
+             WHERE p.id = %s
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        if not row:
+            return '', ''
+        owner_email = (_pick_first_key(row, 'owner_email') or '').strip().lower()
+        programme_name = (_pick_first_key(row, 'programme_name') or '').strip()
+        return owner_email, programme_name
+
+    # ==================================================================
+    # SECTION 2 — INVESTOR-SCOPED READERS
+    # ==================================================================
+    def investor_fetch_identity(investor_id, sub_account_id):
+        row = db_fetch_one(
+            """
+            SELECT id, sub_account_id, main_account_id,
+                   fullname, username, email
+              FROM harvhub
+             WHERE id = %s AND sub_account_id = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        )
+        return row or {}
+
+    def investor_fetch_anchor(investor_id, sub_account_id):
+        """broker_balance = execution-start balance; also gives execution_start_date."""
+        return db_fetch_one(
+            """
+            SELECT id, sub_account_id, broker_balance, execution_start_date
+              FROM harvhub
+             WHERE id = %s AND sub_account_id = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        ) or {}
+
+    def investor_fetch_authorized_magics(investor_id, sub_account_id, programme_id):
+        """
+        Every pending programme_trades.magic for THIS investor under THIS
+        programme is an authorized magic. Anything MT5 shows with a
+        different magic is unauthorized.
+        """
+        rows = db_fetch_all(
+            """
+            SELECT magic
+              FROM programme_trades
+             WHERE userid = %s
+               AND programmeid = %s
+               AND investor_id = %s
+               AND investor_sub_account_id = %s
+               AND orderstatus = 'pending'
+               AND magic IS NOT NULL
+            """,
+            [investor_id, programme_id, investor_id, sub_account_id],
+            timeout=10.0, quiet=True,
+        )
+        out = set()
+        for r in rows:
+            m = _coerce_int(_raw_first_key(r, 'magic'))
+            if m is not None and m > 0:
+                out.add(m)
+        return out
+
+    def balance_log_fetch_last_closing(investor_id, sub_account_id):
+        """Look up the last recorded closing balance for continuity."""
+        row = db_fetch_one(
+            """
+            SELECT date, day_closing_balance
+              FROM balance_log
+             WHERE userid = %s AND sub_account_id = %s
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        )
+        if not row:
+            return None, None
+        return (_raw_first_key(row, 'date'),
+                _coerce_float(_raw_first_key(row, 'day_closing_balance'), default=None))
+
+    def balance_log_upsert(investor_id, sub_account_id, date_str,
+                           day_start_balance, auth_pnl, unauth_pnl,
+                           unauth_withdrawals, closing_balance,
+                           unusual, auth_count, unauth_count):
+        existing = db_fetch_one(
+            """
+            SELECT id FROM balance_log
+             WHERE userid = %s AND sub_account_id = %s AND date = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id, date_str], timeout=10.0, quiet=True,
+        )
+        if existing and _raw_first_key(existing, 'id'):
+            row_id = _coerce_int(_raw_first_key(existing, 'id'))
+            ok, _, _ = db_execute(
+                """
+                UPDATE balance_log
+                   SET day_starting_balance         = %s,
+                       day_authorized_trades_pnl    = %s,
+                       day_unauthorized_trades_pnl  = %s,
+                       day_unauthorized_withdrawals = %s,
+                       day_closing_balance          = %s,
+                       unusual_activity             = %s,
+                       authorized_trades_count      = %s,
+                       unauthorized_trades_count    = %s
+                 WHERE id = %s
+                """,
+                [round(day_start_balance, 8), round(auth_pnl, 8),
+                 round(unauth_pnl, 8), round(unauth_withdrawals, 8),
+                 round(closing_balance, 8), 1 if unusual else 0,
+                 int(auth_count), int(unauth_count), row_id],
+                timeout=15.0, quiet=True,
+            )
+            return ok, 'updated'
+        else:
+            ok, _, _ = db_execute(
+                """
+                INSERT INTO balance_log
+                    (userid, sub_account_id, date,
+                     day_starting_balance, day_authorized_trades_pnl,
+                     day_unauthorized_trades_pnl, day_unauthorized_withdrawals,
+                     day_closing_balance, unusual_activity,
+                     authorized_trades_count, unauthorized_trades_count)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                [investor_id, sub_account_id, date_str,
+                 round(day_start_balance, 8), round(auth_pnl, 8),
+                 round(unauth_pnl, 8), round(unauth_withdrawals, 8),
+                 round(closing_balance, 8), 1 if unusual else 0,
+                 int(auth_count), int(unauth_count)],
+                timeout=15.0, quiet=True,
+            )
+            return ok, 'inserted'
+
+    # ==================================================================
+    # SECTION 3 — MT5 READS (investor-scoped)
+    # ==================================================================
+    def mt5_history_deals_for_investor(execution_start_dt):
+        if execution_start_dt is None:
+            execution_start_dt = lagos_now() - timedelta(days=30)
+        try:
+            deals = mt5_history_deals(execution_start_dt, lagos_now())
+        except Exception:
+            deals = []
+        return deals or []
+
+    def mt5_open_positions():
+        try:
+            return mt5_positions_get() or []
+        except Exception:
+            return []
+
+    def mt5_pending_orders():
+        try:
+            return mt5_orders_get() or []
+        except Exception:
+            return []
+
+    # ==================================================================
+    # SECTION 4 — NOTIFICATION HOOKS
+    # ==================================================================
+    def notify_investor_and_owner(investor_id, sub_account_id, programme_id,
+                                  investor_email, owner_email,
+                                  programme_name,
+                                  unauth_trades, unauth_orders,
+                                  unauth_positions, unauth_pnl,
+                                  unaccounted_deficit):
+        """
+        Fire investor-side + programme-side notifications about the
+        violations found. Uses record_programme_notification for BOTH
+        (the service exposes programme-scoped rows keyed by programme_id).
+
+        For investor-side we also use record_programme_notification with
+        the investor's own email — the row is scoped by
+        (programme_id, email), so the investor receives their own copy
+        while the owner receives theirs, without collision.
+        """
+        try:
+            from notification_service import (
+                record_programme_notification_once,
+            )
+        except Exception as e:
+            print(f"      [NOTIF] notification_service unavailable: {e}")
+            return 0
+
+        today = lagos_today_str()
+        sent = 0
+
+        # ---- Build the human-readable summary once ----
+        parts = []
+        if unauth_trades:
+            parts.append(f"{len(unauth_trades)} unauthorized closed trade(s)")
+        if unauth_orders:
+            parts.append(f"{len(unauth_orders)} unauthorized pending order(s)")
+        if unauth_positions:
+            parts.append(f"{len(unauth_positions)} unauthorized open position(s)")
+        if unaccounted_deficit > 0.01:
+            parts.append(
+                f"an unaccounted balance deficit of ${unaccounted_deficit:.2f}"
+            )
+        if not parts:
+            return 0
+        summary = ", ".join(parts)
+
+        # ---- How severe? ----
+        # Any unauthorized trade / position / deficit → danger
+        # Only unauthorized pending orders → warning
+        if unauth_trades or unauth_positions or unaccounted_deficit > 0.01:
+            ntype = 'danger'
+            title_core = 'Unauthorized Actions Detected'
+        else:
+            ntype = 'warning'
+            title_core = 'Unauthorized Pending Orders Detected'
+
+        # ---- Investor-side message ----
+        investor_msg = (
+            f"We detected unauthorized actions on your programme "
+            f"'{programme_name}': {summary}. This means trades were "
+            f"placed outside the magic numbers issued by the programme. "
+            f"Please stop manual or third-party trading on this sub-account "
+            f"immediately to avoid contract violations."
+        )
+        try:
+            nid = record_programme_notification_once(
+                _NOTIF_PDO,
+                int(programme_id),
+                investor_email,
+                {
+                    'notification_key': f'prog-unauth-investor-{programme_id}-{sub_account_id}-{today}',
+                    'title': title_core,
+                    'message': investor_msg,
+                    'type': ntype,
+                    'section': 'Unauthorized',
+                    'action_tab': 'activity',
+                    'force': False,
+                    'send_email': True,
+                },
+            )
+            if nid:
+                sent += 1
+                print(f"      [NOTIF] investor {investor_email} notified (id={nid})")
+            else:
+                print(f"      [NOTIF] investor {investor_email} — already notified today (dedup)")
+        except Exception as e:
+            print(f"      [NOTIF] investor notify failed: {e}")
+
+        # ---- Programme-owner message ----
+        if owner_email and '@' in owner_email:
+            owner_msg = (
+                f"Investor {investor_id} (sub-account {sub_account_id}) on "
+                f"programme '{programme_name}' has violated the contract "
+                f"agreement: {summary}. The investor's trading activity is "
+                f"outside the magic numbers your programme issued. Please "
+                f"review and take action."
+            )
+            try:
+                nid = record_programme_notification_once(
+                    _NOTIF_PDO,
+                    int(programme_id),
+                    owner_email,
+                    {
+                        'notification_key': f'prog-unauth-owner-{programme_id}-{sub_account_id}-{today}',
+                        'title': f'Contract Violation — Investor {investor_id}',
+                        'message': owner_msg,
+                        'type': 'danger',
+                        'section': 'Unauthorized',
+                        'action_tab': 'programme_investors',
+                        'force': False,
+                        'send_email': True,
+                    },
+                )
+                if nid:
+                    sent += 1
+                    print(f"      [NOTIF] owner {owner_email} notified (id={nid})")
+                else:
+                    print(f"      [NOTIF] owner {owner_email} — already notified today (dedup)")
+            except Exception as e:
+                print(f"      [NOTIF] owner notify failed: {e}")
+
+        return sent
+
+    # ==================================================================
+    # SECTION 5 — PER-INVESTOR PIPELINE
+    # ==================================================================
+    def process_investor(investor_id, sub_account_id, programme_id, programme_name):
+        detail = {
+            'investor_id': investor_id,
+            'sub_account_id': sub_account_id,
+            'programme_id': programme_id,
+            'investor_email': None,
+            'owner_email': None,
+            'authorized_magic_count': 0,
+            'unauthorized_orders': 0,
+            'unauthorized_positions': 0,
+            'unauthorized_trades': 0,
+            'unauthorized_pnl_total': 0.0,
+            'unaccounted_deficit': 0.0,
+            'unauthorized_types': [],
+            'balance_log_action': None,
+            'notifications_sent': 0,
+            'application_status': 'approved',
+            'error': None,
+        }
+
+        # -------- identity + anchor + programme owner --------
+        identity = investor_fetch_identity(investor_id, sub_account_id)
+        investor_email = (_pick_first_key(identity, 'email') or '').strip().lower()
+        fullname = _pick_first_key(identity, 'fullname') or f"user{investor_id}"
+        detail['investor_email'] = investor_email
+
+        owner_email, prog_name = programme_fetch_owner_email(programme_id)
+        if not programme_name:
+            programme_name = prog_name
+        detail['owner_email'] = owner_email
+
+        print(f"\n{'─'*72}")
+        print(f" 🔍 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+        print(f"  │ Investor email      : {investor_email or '—'}")
+        print(f"  │ Programme owner     : {owner_email or '—'}")
+
+        # -------- authorized magic set --------
+        authorized_magics = investor_fetch_authorized_magics(
+            investor_id, sub_account_id, programme_id)
+        detail['authorized_magic_count'] = len(authorized_magics)
+        if authorized_magics:
+            sample = sorted(authorized_magics)[:8]
+            print(f"  │ Authorized magics   : {len(authorized_magics)} "
+                  f"(sample: {sample}{'…' if len(authorized_magics) > 8 else ''})")
+        else:
+            print(f"  │ Authorized magics   : NONE — every MT5 action will be flagged")
+
+        # -------- anchor: broker_balance = execution-start balance --------
+        anchor = investor_fetch_anchor(investor_id, sub_account_id)
+        broker_balance = _coerce_float(_raw_first_key(anchor, 'broker_balance'), default=None)
+        execution_start_date = _raw_first_key(anchor, 'execution_start_date')
+
+        mt5_balance_now = None
+        try:
+            acc = mt5_account_info()
+            if acc is not None:
+                mt5_balance_now = float(acc.balance)
+        except Exception:
+            mt5_balance_now = None
+
+        if broker_balance is None:
+            # no anchor at all — we can still audit but cannot compute a deficit
+            broker_balance = mt5_balance_now
+            print(f"  │ ⚠️ harvhub.broker_balance NULL — using MT5 balance "
+                  f"as anchor (${(mt5_balance_now or 0):.2f})")
+
+        # -------- MT5: pending orders / open positions --------
+        pending_orders = mt5_pending_orders()
+        open_positions = mt5_open_positions()
+
+        unauth_orders = []
+        for order in pending_orders:
+            try:
+                om = int(getattr(order, 'magic', 0) or 0)
+            except Exception:
+                om = 0
+            if om not in authorized_magics:
+                unauth_orders.append({
+                    'ticket': getattr(order, 'ticket', None),
+                    'symbol': getattr(order, 'symbol', None),
+                    'volume': float(getattr(order, 'volume_current', 0) or 0),
+                    'price': float(getattr(order, 'price_open', 0) or 0),
+                    'magic': om,
+                })
+
+        unauth_positions = []
+        for pos in open_positions:
+            try:
+                pm = int(getattr(pos, 'magic', 0) or 0)
+            except Exception:
+                pm = 0
+            if pm not in authorized_magics:
+                unauth_positions.append({
+                    'ticket': getattr(pos, 'ticket', None),
+                    'symbol': getattr(pos, 'symbol', None),
+                    'volume': float(getattr(pos, 'volume', 0) or 0),
+                    'price': float(getattr(pos, 'price_open', 0) or 0),
+                    'profit': float(getattr(pos, 'profit', 0) or 0),
+                    'magic': pm,
+                })
+
+        # -------- MT5: closed deals since execution start --------
+        start_dt = None
+        if execution_start_date:
+            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d",
+                        "%Y-%m-%d %H:%M:%S"):
+                try:
+                    start_dt = datetime.strptime(str(execution_start_date), fmt)
+                    break
+                except Exception:
+                    continue
+        if start_dt is None:
+            start_dt = lagos_now() - timedelta(days=30)
+        # Make naive for MT5
+        start_dt_naive = start_dt.replace(tzinfo=None)
+
+        deals = mt5_history_deals_for_investor(start_dt_naive)
+
+        authorized_deals = []
+        unauthorized_deals = []
+        total_auth_pnl = 0.0
+        total_unauth_pnl = 0.0
+        auth_count = 0
+        unauth_count = 0
+
+        for deal in deals:
+            try:
+                dm = int(getattr(deal, 'magic', 0) or 0)
+            except Exception:
+                dm = 0
+            pnl = float(getattr(deal, 'profit', 0) or 0) \
+                + float(getattr(deal, 'commission', 0) or 0) \
+                + float(getattr(deal, 'swap', 0) or 0)
+            deal_ts = getattr(deal, 'time', None) or getattr(deal, 'time_msc', None)
+            deal_lagos = lagos_from_timestamp(deal_ts)
+            rec = {
+                'ticket': getattr(deal, 'ticket', None),
+                'symbol': getattr(deal, 'symbol', None),
+                'volume': float(getattr(deal, 'volume', 0) or 0),
+                'pnl': pnl,
+                'magic': dm,
+                'time': deal_lagos.strftime('%Y-%m-%d %H:%M:%S') if deal_lagos else None,
+            }
+            if dm in authorized_magics:
+                authorized_deals.append(rec)
+                total_auth_pnl += pnl
+                auth_count += 1
+            else:
+                unauthorized_deals.append(rec)
+                total_unauth_pnl += pnl
+                unauth_count += 1
+
+        # -------- expected balance + unaccounted deficit --------
+        expected_balance = None
+        if broker_balance is not None:
+            expected_balance = float(broker_balance) + total_auth_pnl + total_unauth_pnl
+
+        unaccounted_deficit = 0.0
+        if expected_balance is not None and mt5_balance_now is not None:
+            if mt5_balance_now + 0.01 < expected_balance:
+                unaccounted_deficit = round(expected_balance - mt5_balance_now, 2)
+
+        # -------- classify status --------
+        has_trades = bool(unauthorized_deals)
+        has_orders = bool(unauth_orders)
+        has_positions = bool(unauth_positions)
+        has_deficit = unaccounted_deficit > 0.01
+        any_unauthorized = has_trades or has_orders or has_positions or has_deficit
+
+        unauth_types = []
+        if has_trades:
+            unauth_types.append('unauthorized_trades')
+        if has_orders:
+            unauth_types.append('unauthorized_orders')
+        if has_positions:
+            unauth_types.append('unauthorized_positions')
+        if has_deficit:
+            unauth_types.append('unaccounted_balance_deficit')
+
+        if any_unauthorized:
+            application_status = 'approved_with_issues' if not has_deficit else 'approved_with_issues'
+        else:
+            application_status = 'approved'
+
+        detail['unauthorized_orders'] = len(unauth_orders)
+        detail['unauthorized_positions'] = len(unauth_positions)
+        detail['unauthorized_trades'] = len(unauthorized_deals)
+        detail['unauthorized_pnl_total'] = round(total_unauth_pnl, 2)
+        detail['unaccounted_deficit'] = unaccounted_deficit
+        detail['unauthorized_types'] = unauth_types
+        detail['application_status'] = application_status
+
+        # -------- summary print --------
+        print(f"  │ Authorized closed   : {auth_count} (P&L ${total_auth_pnl:+.2f})")
+        print(f"  │ Unauthorized closed : {len(unauthorized_deals)} "
+              f"(P&L ${total_unauth_pnl:+.2f})")
+        print(f"  │ Unauthorized orders : {len(unauth_orders)}")
+        print(f"  │ Unauthorized pos.   : {len(unauth_positions)}")
+        if expected_balance is not None and mt5_balance_now is not None:
+            print(f"  │ Expected balance    : ${expected_balance:.2f}")
+            print(f"  │ MT5 balance         : ${mt5_balance_now:.2f}")
+            if unaccounted_deficit > 0.01:
+                print(f"  │ 🚫 Unaccounted deficit: ${unaccounted_deficit:.2f}")
+        if any_unauthorized:
+            print(f"  │ Status              : ⚠️ UNAUTHORIZED — {', '.join(unauth_types)}")
+        else:
+            print(f"  │ Status              : ✅ clean")
+
+        # -------- upsert balance_log row for today --------
+        today = lagos_today_str()
+
+        # day-start balance: the last recorded closing balance if any, else
+        # MT5 balance minus today's realized P&L
+        last_date, last_closing = balance_log_fetch_last_closing(
+            investor_id, sub_account_id)
+        if last_date == today and last_closing is not None:
+            day_start_balance = float(last_closing)
+        else:
+            day_start_balance = float(mt5_balance_now or 0.0) - total_auth_pnl - total_unauth_pnl
+            # but that may drift — prefer last_closing if available and
+            # today is a fresh row
+            if last_closing is not None:
+                day_start_balance = float(last_closing)
+
+        closing_balance = float(mt5_balance_now or 0.0)
+
+        unusual = any_unauthorized
+        ok, action = balance_log_upsert(
+            investor_id, sub_account_id, today,
+            day_start_balance=day_start_balance,
+            auth_pnl=total_auth_pnl,
+            unauth_pnl=total_unauth_pnl,
+            unauth_withdrawals=unaccounted_deficit,
+            closing_balance=closing_balance,
+            unusual=unusual,
+            auth_count=auth_count,
+            unauth_count=unauth_count,
+        )
+        if ok:
+            detail['balance_log_action'] = action
+            print(f"  │ 📝 balance_log {action} for {today}")
+        else:
+            print(f"  │ ⚠️ balance_log upsert failed")
+
+        # -------- notify if any violation --------
+        if any_unauthorized:
+            sent = notify_investor_and_owner(
+                investor_id=investor_id,
+                sub_account_id=sub_account_id,
+                programme_id=programme_id,
+                investor_email=investor_email,
+                owner_email=owner_email,
+                programme_name=programme_name,
+                unauth_trades=unauthorized_deals,
+                unauth_orders=unauth_orders,
+                unauth_positions=unauth_positions,
+                unauth_pnl=total_unauth_pnl,
+                unaccounted_deficit=unaccounted_deficit,
+            )
+            detail['notifications_sent'] = sent
+
+        return detail
+
+    # ==================================================================
+    # SECTION 6 — TOP-LEVEL ENUMERATION
+    # ==================================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─"*80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        stats['processing_success'] = False
+        unauthorized_alert['errors'] = list(stats['errors'])
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            stats['processing_success'] = False
+            unauthorized_alert['errors'] = list(stats['errors'])
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─"*80)
+
+    for job in jobs:
+        investor_id = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            continue
+
+        try:
+            detail = process_investor(investor_id, sub_account_id,
+                                      programme_id, programme_name)
+            stats['details'].append(detail)
+            stats['investors_processed'] += 1
+            stats['unauthorized_orders_found'] += detail.get('unauthorized_orders', 0)
+            stats['unauthorized_positions_found'] += detail.get('unauthorized_positions', 0)
+            stats['unauthorized_trades_found'] += detail.get('unauthorized_trades', 0)
+            if detail.get('unaccounted_deficit', 0.0) > 0.01:
+                stats['unaccounted_deficits_found'] += 1
+            if detail.get('unauthorized_types'):
+                stats['investors_with_unauthorized'] += 1
+            if detail.get('balance_log_action'):
+                stats['balance_log_rows_written'] += 1
+            stats['notifications_queued'] += detail.get('notifications_sent', 0)
+
+            if not unauthorized_alert.get('programme_id'):
+                unauthorized_alert['programme_id'] = programme_id
+                unauthorized_alert['investor_id'] = investor_id
+                unauthorized_alert['sub_account_id'] = sub_account_id
+                unauthorized_alert['investor_authorized_magics'] = set()
+                unauthorized_alert['application_status'] = detail.get('application_status', 'approved')
+                if detail.get('unauthorized_types'):
+                    unauthorized_alert['is_triggered'] = True
+                    unauthorized_alert['unauthorized_types'] = detail['unauthorized_types']
+                    unauthorized_alert['unauthorized_pnl_total'] = detail.get('unauthorized_pnl_total', 0.0)
+                    unauthorized_alert['unaccounted_deficit'] = detail.get('unaccounted_deficit', 0.0)
+        except Exception as e:
+            print(f"\n[CRITICAL] unauthorized-audit investor={investor_id}: {e}")
+            traceback.print_exc()
+            stats['errors'].append(f"investor={investor_id}: {e}")
+
+    print(f"\n{'='*10} 🔍 AUTHORIZED-ACTIONS AUDIT SUMMARY (DB) {'='*10}")
+    print(f"  Investors processed        : {stats['investors_processed']}")
+    print(f"  Investors with unauthorized: {stats['investors_with_unauthorized']}")
+    print(f"  Unauthorized orders        : {stats['unauthorized_orders_found']}")
+    print(f"  Unauthorized positions     : {stats['unauthorized_positions_found']}")
+    print(f"  Unauthorized trades        : {stats['unauthorized_trades_found']}")
+    print(f"  Unaccounted deficits       : {stats['unaccounted_deficits_found']}")
+    print(f"  balance_log rows written   : {stats['balance_log_rows_written']}")
+    print(f"  Notifications queued       : {stats['notifications_queued']}")
+    print(f"  Errors                     : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
 
 # ==============================================================================
 #  RESTRICTED TIMERANGE — Restricted Dates FIRST, then Restricted Days
-#  (DETAILED VERSION — restored)
 # ==============================================================================
-def restricted_timerange(inv_id=None):
+def restricted_timerange_db(inv_db_id=None):
     print(f"\n{'='*10} ⏰ PROGRAMME RESTRICTED TIMERANGE {'='*10}")
 
     local_ip = get_local_ip()
     if not local_ip:
         print("  ⚠️ Could not determine local IP")
         return {
-            'investor_id': inv_id if inv_id else 'all',
+            'investor_id': inv_db_id if inv_db_id else 'all',
             'processing_success': False,
             'errors': ['local IP unknown'],
+            'restriction_map': {},
+            'any_restricted': False,
         }
 
     print(f"  🌐 Local IP: {local_ip}")
@@ -1106,13 +1921,106 @@ def restricted_timerange(inv_id=None):
     if not programmes:
         print("  ℹ️ No programmes bound to this VPS")
         return {
-            'investor_id': inv_id if inv_id else 'all',
+            'investor_id': inv_db_id if inv_db_id else 'all',
             'processing_success': True,
             'programmes_checked': 0,
+            'restriction_map': {},
+            'any_restricted': False,
         }
 
     total_programmes = len(programmes)
     print(f"  📋 Found {total_programmes} programme(s) bound to this VPS")
+
+    # ------------------------------------------------------------------
+    # Per-programme restriction verdict, populated as we go.
+    # ------------------------------------------------------------------
+    restriction_map = {}
+
+    # ------------------------------------------------------------------
+    # Helper: fire a programme-scoped restriction notification.
+    # ------------------------------------------------------------------
+    def _notify_programme_restriction(programme_id, programme_name,
+                                      userid, notif_kind,
+                                      today_date_str, tz_str,
+                                      extra=None):
+        extra = extra or {}
+        try:
+            from notification_service import (
+                record_programme_restriction_date_notification,
+                record_programme_restriction_day_full_notification,
+                record_programme_restriction_day_window_notification,
+            )
+        except Exception as e:
+            print(f"      [PRG][NOTIFY] notification_service unavailable: {e}")
+            return None
+
+        owner_email = ''
+        try:
+            if userid:
+                q = db_query(
+                    "SELECT email FROM harvhub WHERE id = %s LIMIT 1",
+                    [userid], timeout=10.0, quiet=True,
+                )
+                if _is_ok(q) and q.get('results'):
+                    for v in q['results'][0].values():
+                        if v is not None:
+                            owner_email = str(v).strip().lower()
+                            break
+        except Exception:
+            owner_email = ''
+
+        if not owner_email or '@' not in owner_email:
+            print(f"      [PRG][NOTIFY] programme={programme_id} "
+                  f"owner email unresolved (userid={userid}) — "
+                  f"notification skipped")
+            return None
+
+        try:
+            if notif_kind == 'restricted_date':
+                nid = record_programme_restriction_date_notification(
+                    _NOTIF_PDO,
+                    programme_id=programme_id,
+                    programme_name=programme_name,
+                    owner_email=owner_email,
+                    restricted_date=today_date_str,
+                    timezone_str=tz_str,
+                )
+            elif notif_kind == 'restricted_day_full':
+                nid = record_programme_restriction_day_full_notification(
+                    _NOTIF_PDO,
+                    programme_id=programme_id,
+                    programme_name=programme_name,
+                    owner_email=owner_email,
+                    day_name=extra.get('day_name', ''),
+                    restricted_date=today_date_str,
+                    timezone_str=tz_str,
+                )
+            elif notif_kind == 'restricted_day_window':
+                nid = record_programme_restriction_day_window_notification(
+                    _NOTIF_PDO,
+                    programme_id=programme_id,
+                    programme_name=programme_name,
+                    owner_email=owner_email,
+                    day_name=extra.get('day_name', ''),
+                    restricted_date=today_date_str,
+                    from_label=extra.get('from_label', ''),
+                    to_label=extra.get('to_label', ''),
+                    timezone_str=tz_str,
+                )
+            else:
+                return None
+
+            if nid:
+                print(f"      [PRG][NOTIFY] programme={programme_id} "
+                      f"({notif_kind}) -> notification_id={nid}")
+            else:
+                print(f"      [PRG][NOTIFY] programme={programme_id} "
+                      f"({notif_kind}) -> already sent or ineligible (dedup)")
+            return nid
+        except Exception as e:
+            print(f"      [PRG][NOTIFY] {notif_kind} raised: {e}")
+            traceback.print_exc()
+            return None
 
     for idx, prog in enumerate(programmes, start=1):
         programme_id = prog['programme_id']
@@ -1125,6 +2033,12 @@ def restricted_timerange(inv_id=None):
             print(f"\n  [{idx}/{total_programmes}] 📊 Programme "
                   f"'{programme_name}' (id={programme_id}) | "
                   f"⚠️ timezone NOT configured — skipping restriction check")
+            restriction_map[programme_id] = {
+                'is_restricted': False,
+                'kind':          None,
+                'day_name':      '',
+                'window_desc':   'timezone not configured',
+            }
             continue
 
         now_local, resolved = get_current_time_in_timezone(tz_str)
@@ -1133,6 +2047,12 @@ def restricted_timerange(inv_id=None):
                   f"'{programme_name}' (id={programme_id}) | "
                   f"⚠️ Could not resolve timezone '{tz_str}' "
                   f"— skipping restriction check")
+            restriction_map[programme_id] = {
+                'is_restricted': False,
+                'kind':          None,
+                'day_name':      '',
+                'window_desc':   f"timezone '{tz_str}' unresolvable",
+            }
             continue
 
         now_day_name = now_local.strftime("%A")
@@ -1165,11 +2085,26 @@ def restricted_timerange(inv_id=None):
                 print(f"         • {d}{marker}")
 
         if today_in_dates:
-            # Stage 1 wins — full-day lockout. Skip day-of-week evaluation.
             print(f"      🚨 {today_date_str} IS a restricted date "
                   f"— FULL-DAY LOCKOUT (Stage 1)")
             day_state = "full_day_date"
             window_desc = "FULL DAY (restricted date)"
+
+            restriction_map[programme_id] = {
+                'is_restricted': True,
+                'kind':          'restricted_date',
+                'day_name':      now_day_name,
+                'window_desc':   window_desc,
+            }
+
+            _notify_programme_restriction(
+                programme_id=programme_id,
+                programme_name=programme_name,
+                userid=developer_id,
+                notif_kind='restricted_date',
+                today_date_str=today_date_str,
+                tz_str=tz_str,
+            )
         else:
             # =================================================================
             # STAGE 2 — Restricted Days (only when Stage 1 did not hit)
@@ -1189,10 +2124,26 @@ def restricted_timerange(inv_id=None):
                 print("      ✅ No restricted days configured for this programme")
                 day_state = "no_restriction"
                 window_desc = "—"
+
+                restriction_map[programme_id] = {
+                    'is_restricted': False,
+                    'kind':          None,
+                    'day_name':      now_day_name,
+                    'window_desc':   window_desc,
+                }
+
             elif today_row is None:
                 print(f"      ✅ {now_day_name} is NOT restricted for this programme")
                 day_state = "not_today"
                 window_desc = "—"
+
+                restriction_map[programme_id] = {
+                    'is_restricted': False,
+                    'kind':          None,
+                    'day_name':      now_day_name,
+                    'window_desc':   window_desc,
+                }
+
             else:
                 from_h, from_m = parse_time_string(today_row['from_time'])
                 to_h, to_m = parse_time_string(today_row['to_time'])
@@ -1202,11 +2153,36 @@ def restricted_timerange(inv_id=None):
                           f"{today_row['from_time']} -> {today_row['to_time']}")
                     day_state = "invalid"
                     window_desc = "invalid"
+
+                    restriction_map[programme_id] = {
+                        'is_restricted': False,
+                        'kind':          None,
+                        'day_name':      now_day_name,
+                        'window_desc':   window_desc,
+                    }
+
                 elif is_full_day_window(from_h, from_m, to_h, to_m):
                     print(f"      🚨 {now_day_name} is FULLY RESTRICTED "
                           f"(no trading allowed all day)")
                     day_state = "full_day"
                     window_desc = "12:00 AM - 12:00 AM (FULL DAY)"
+
+                    restriction_map[programme_id] = {
+                        'is_restricted': True,
+                        'kind':          'restricted_day_full',
+                        'day_name':      now_day_name,
+                        'window_desc':   window_desc,
+                    }
+
+                    _notify_programme_restriction(
+                        programme_id=programme_id,
+                        programme_name=programme_name,
+                        userid=developer_id,
+                        notif_kind='restricted_day_full',
+                        today_date_str=today_date_str,
+                        tz_str=tz_str,
+                        extra={'day_name': now_day_name},
+                    )
                 else:
                     in_window = is_time_in_window(
                         now_local.hour, now_local.minute,
@@ -1220,7 +2196,36 @@ def restricted_timerange(inv_id=None):
                     print(f"      📅 {now_day_name} restricted window: "
                           f"{window_desc} | {marker}")
 
-            # Print day list for this programme
+                    if in_window:
+                        restriction_map[programme_id] = {
+                            'is_restricted': True,
+                            'kind':          'restricted_day_window',
+                            'day_name':      now_day_name,
+                            'window_desc':   window_desc,
+                        }
+                    else:
+                        restriction_map[programme_id] = {
+                            'is_restricted': False,
+                            'kind':          None,
+                            'day_name':      now_day_name,
+                            'window_desc':   window_desc,
+                        }
+
+                    if in_window:
+                        _notify_programme_restriction(
+                            programme_id=programme_id,
+                            programme_name=programme_name,
+                            userid=developer_id,
+                            notif_kind='restricted_day_window',
+                            today_date_str=today_date_str,
+                            tz_str=tz_str,
+                            extra={
+                                'day_name':   now_day_name,
+                                'from_label': to_12hr(from_h, from_m),
+                                'to_label':   to_12hr(to_h, to_m),
+                            },
+                        )
+
             print(f"      📋 Restricted days for '{programme_name}':")
             if not restriction_rows:
                 print(f"         (none configured)")
@@ -1237,7 +2242,7 @@ def restricted_timerange(inv_id=None):
                     print(f"         • {r['day']:<10} {label}")
 
         # =====================================================================
-        # Per-investor printing
+        # Per-investor printing (display only, no notifications sent)
         # =====================================================================
         investors = fetch_active_investors_for_programme(programme_id)
         if not investors:
@@ -1247,20 +2252,20 @@ def restricted_timerange(inv_id=None):
         print(f"      👥 {len(investors)} active investor(s) associated:")
 
         for inv in investors:
-            inv_id_val = inv['investor_id']
+            inv_db_id_val = inv['investor_id']
             sub_id_val = inv['sub_account_id']
 
-            if inv_id is not None:
+            if inv_db_id is not None:
                 try:
-                    if str(inv_id_val) != str(inv_id):
+                    if str(inv_db_id_val) != str(inv_db_id):
                         continue
                 except Exception:
                     pass
 
-            identity = fetch_investor_identity(inv_id_val)
+            identity = fetch_investor_identity(inv_db_id_val)
             username = (identity.get('username')
                         or identity.get('fullname')
-                        or f"user{inv_id_val}")
+                        or f"user{inv_db_id_val}")
 
             print(
                 f"\n         👤 Investor {username} "
@@ -1346,16 +2351,20 @@ def restricted_timerange(inv_id=None):
                 print(f"            Status right now: ⚠️ restriction row is invalid")
 
     return {
-        'investor_id': inv_id if inv_id else 'all',
+        'investor_id':        inv_db_id if inv_db_id else 'all',
         'processing_success': True,
         'programmes_checked': total_programmes,
+        'restriction_map':    restriction_map,
+        'any_restricted':     any(
+            v.get('is_restricted') for v in restriction_map.values()
+        ),
     }
 
 
 # ==============================================================================
 #  RECENT HIGHEST BALANCE TARGET — DB-driven, programme-scoped
 # ==============================================================================
-def recent_highest_balance_target(inv_id=None):
+def recent_highest_balance_target_db(inv_db_id=None):
     """
     DB-driven recent_highest_balance tracker + daily_target_revenue writer.
 
@@ -1453,7 +2462,7 @@ def recent_highest_balance_target(inv_id=None):
 
     recent_highest_alert = {
         'is_triggered': False,
-        'investor_id': inv_id if inv_id else "all",
+        'investor_id': inv_db_id if inv_db_id else "all",
         'old_balance': None,
         'new_balance': None,
         'difference': None,
@@ -1468,11 +2477,11 @@ def recent_highest_balance_target(inv_id=None):
 
     print(f"\n{'='*10} 📊 RECENT HIGHEST BALANCE TARGET (DB) {'='*10}")
     print(f" 🕒 Lagos time now: {lagos_now().strftime('%Y-%m-%d %H:%M:%S %Z')} (source: {_LAGOS_TZ_SOURCE})")
-    if inv_id:
-        print(f" 🎯 Target Investor: {inv_id}")
+    if inv_db_id:
+        print(f" 🎯 Target Investor: {inv_db_id}")
 
     stats = {
-        "investor_id": inv_id if inv_id else "all",
+        "investor_id": inv_db_id if inv_db_id else "all",
         "investors_checked": 0,
         "investors_updated": 0,
         "investors_skipped": 0,
@@ -1494,7 +2503,6 @@ def recent_highest_balance_target(inv_id=None):
     # DB helpers specific to this stage
     # ----------------------------------------------------------------
     def db_get_harvhub_row(investor_id, sub_account_id):
-        """Fetch the harvhub row for this investor + sub-account."""
         sql = """
             SELECT id, sub_account_id, main_account_id, fullname, username, email,
                    broker_balance, execution_start_date,
@@ -1534,10 +2542,6 @@ def recent_highest_balance_target(inv_id=None):
         return ok
 
     def db_fetch_daily_target_config_for_programme(programme_id):
-        """
-        Read `programme_revenue_target` and reshape into the same dict
-        structure that the old JSON daily_target_config used.
-        """
         rows = db_fetch_all(
             """
             SELECT week_no, day_name, from_balance, to_balance,
@@ -1594,18 +2598,6 @@ def recent_highest_balance_target(inv_id=None):
                                    daily_target_owed=None,
                                    daily_target_owed_day_balance=None,
                                    daily_target_owed_date=None):
-        """
-        Upsert into daily_target_revenue for this investor sub-account.
-        Match key: (userid, sub_account_id, week, day, date).
-
-        Also persists the per-investor handoff fields:
-          - daily_target_owed
-          - daily_target_owed_day_balance
-          - daily_target_owed_date
-        These are investor-level totals, so they are written to every
-        day row produced in this run. Downstream consumers read the
-        latest row by date to obtain the current values.
-        """
         existing = db_fetch_one(
             """
             SELECT id FROM daily_target_revenue
@@ -2044,7 +3036,7 @@ def recent_highest_balance_target(inv_id=None):
             return out
 
     def calculate_daily_target_status(investor_data, profit, execution_start_date,
-                                      inv_id=None, starting_balance_for_today=None,
+                                      inv_db_id=None, starting_balance_for_today=None,
                                       effective_today=None,
                                       anchor_info=None,
                                       halter_recovered=False):
@@ -2399,7 +3391,7 @@ def recent_highest_balance_target(inv_id=None):
             return False, f"confirmation_error: {e}", 0.0
 
     # ================================================================
-    # ENUMERATE INVESTORS (DB-driven, same pattern as restricted_timerange)
+    # ENUMERATE INVESTORS (DB-driven)
     # ================================================================
     print("\n" + "─"*80)
     print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
@@ -2420,11 +3412,11 @@ def recent_highest_balance_target(inv_id=None):
         stats["processing_success"] = True
         return stats
 
-    if inv_id:
-        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_id)]
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
         if not jobs:
-            print(f" ⚠️ Investor {inv_id} not found in any VPS-scoped job")
-            stats["errors"].append(f"Investor {inv_id} not found")
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats["errors"].append(f"Investor {inv_db_id} not found")
             stats["processing_success"] = False
             return stats
     else:
@@ -2440,24 +3432,21 @@ def recent_highest_balance_target(inv_id=None):
     has_updates = False
 
     for job in investors_to_process:
-        inv_id_db = job.get('investor_id')
+        inv_db_id_db = job.get('investor_id')
         sub_id_db = job.get('sub_account_id')
         programme_id = job.get('programme_id')
         programme_name = job.get('programme_name') or f"programme_{programme_id}"
 
-        inv_id_str = str(inv_id_db)
+        inv_db_id_str = str(inv_db_id_db)
 
         print(f"\n{'─'*80}")
-        print(f" 📊 INVESTOR: {inv_id_db} (sub {sub_id_db}) | Programme: {programme_name} (id={programme_id})")
+        print(f" 📊 INVESTOR: {inv_db_id_db} (sub {sub_id_db}) | Programme: {programme_name} (id={programme_id})")
         print(f"{'─'*80}")
 
-        # ============================================================
-        # SECTION 0: PROGRAMME CONTEXT
-        # ============================================================
-        identity = fetch_investor_identity(inv_id_db)
+        identity = fetch_investor_identity(inv_db_id_db)
         username = (identity.get('username')
                     or identity.get('fullname')
-                    or f"user{inv_id_db}")
+                    or f"user{inv_db_id_db}")
 
         print(f"\n  📌 According to this programme '{programme_name}' (id={programme_id}):")
         print(f"     Investor {username} sub account {sub_id_db} "
@@ -2471,18 +3460,17 @@ def recent_highest_balance_target(inv_id=None):
 
         mt5_balance = get_mt5_balance()
         if mt5_balance is None:
-            print(f"  ⚠️ Could not get MT5 balance - Skipping investor {inv_id_db}")
-            stats["errors"].append(f"Could not get MT5 balance for {inv_id_db}")
+            print(f"  ⚠️ Could not get MT5 balance - Skipping investor {inv_db_id_db}")
+            stats["errors"].append(f"Could not get MT5 balance for {inv_db_id_db}")
             stats["investors_skipped"] += 1
             continue
 
         print(f"  💰 Current MT5 Balance: ${mt5_balance:.2f}")
 
-        # --- Fetch the harvhub row for this investor + sub-account ---
-        hub_row = db_get_harvhub_row(inv_id_db, sub_id_db)
+        hub_row = db_get_harvhub_row(inv_db_id_db, sub_id_db)
         if not hub_row:
-            print(f"  ⚠️ No harvhub row found for id={inv_id_db} sub={sub_id_db} - skipping")
-            stats["errors"].append(f"No harvhub row for {inv_id_db}/{sub_id_db}")
+            print(f"  ⚠️ No harvhub row found for id={inv_db_id_db} sub={sub_id_db} - skipping")
+            stats["errors"].append(f"No harvhub row for {inv_db_id_db}/{sub_id_db}")
             stats["investors_skipped"] += 1
             continue
 
@@ -2502,7 +3490,6 @@ def recent_highest_balance_target(inv_id=None):
         today_start_balance = mt5_balance - today_profit
 
         wall_clock_now = lagos_naive_now()
-
         effective_today = wall_clock_now
 
         if today_profit > 0 and latest_trade_dt is not None:
@@ -2533,9 +3520,6 @@ def recent_highest_balance_target(inv_id=None):
         yesterday_str = lagos_yesterday_str()
         today_str = lagos_today_str()
 
-        # ------------------------------------------------------------------
-        # START-OF-DAY BALANCE GUARD
-        # ------------------------------------------------------------------
         if execution_start_date:
             exec_start_parsed = parse_date_flexible(execution_start_date)
             if exec_start_parsed:
@@ -2554,9 +3538,6 @@ def recent_highest_balance_target(inv_id=None):
             print(f"\n  🛡️ START-OF-DAY BALANCE GUARD:")
             print(f"     No execution start date found — using MT5 start-of-day balance: ${today_start_balance:.2f}")
 
-        # ------------------------------------------------------------------
-        # STALE RECORD GUARD
-        # ------------------------------------------------------------------
         stale_record_detected = False
         if existing_recent is not None and existing_last_update and execution_start_date:
             exec_start_parsed = parse_date_flexible(execution_start_date)
@@ -2587,7 +3568,7 @@ def recent_highest_balance_target(inv_id=None):
             print(f"     → New date: {yesterday_str} (yesterday, Lagos)")
             print(f"     → New balance: ${reset_balance:.2f}")
 
-            db_write_recent_balance(inv_id_db, sub_id_db, round(reset_balance, 2), yesterday_str)
+            db_write_recent_balance(inv_db_id_db, sub_id_db, round(reset_balance, 2), yesterday_str)
 
             existing_recent = reset_balance
             existing_last_update = yesterday_str
@@ -2596,7 +3577,6 @@ def recent_highest_balance_target(inv_id=None):
 
             print(f"     ✅ Record reset complete")
 
-        # Initialize if doesn't exist
         if existing_recent is None:
             print(f"\n  📝 RECENT HIGHEST BALANCE DOES NOT EXIST - INITIALIZING")
             print(f"  ─────────────────────────────────────────────────────")
@@ -2629,7 +3609,7 @@ def recent_highest_balance_target(inv_id=None):
 
             recent_highest_alert = {
                 'is_triggered': False,
-                'investor_id': inv_id_db,
+                'investor_id': inv_db_id_db,
                 'old_balance': None,
                 'new_balance': init_balance,
                 'difference': None,
@@ -2643,7 +3623,7 @@ def recent_highest_balance_target(inv_id=None):
                 'init_source': 'mt5_balance' if mt5_balance >= starting_balance else 'starting_balance'
             }
 
-            db_write_recent_balance(inv_id_db, sub_id_db, round(init_balance, 2), yesterday_str)
+            db_write_recent_balance(inv_db_id_db, sub_id_db, round(init_balance, 2), yesterday_str)
             print(f"  💾 Recent highest balance initialised for {username} sub account {sub_id_db}: "
                   f"${init_balance:.2f} on {yesterday_str}")
 
@@ -2653,7 +3633,6 @@ def recent_highest_balance_target(inv_id=None):
             has_updates = True
             continue
 
-        # Check if MT5 balance > stored recent_highest_balance
         print(f"\n  📊 Checking for new high...")
         print(f"  📊 Stored Recent Highest: ${existing_recent:.2f}")
         print(f"  📊 Current MT5 Balance: ${mt5_balance:.2f}")
@@ -2668,7 +3647,7 @@ def recent_highest_balance_target(inv_id=None):
             stats["new_high_recorded_only"] += 1
             has_updates = True
 
-            db_write_recent_balance_balance_only(inv_id_db, sub_id_db, round(mt5_balance, 2))
+            db_write_recent_balance_balance_only(inv_db_id_db, sub_id_db, round(mt5_balance, 2))
             print(f"  💾 Recent highest balance for {username} sub account {sub_id_db} updated to: "
                   f"${mt5_balance:.2f} (date preserved: {existing_last_update})")
 
@@ -2695,7 +3674,6 @@ def recent_highest_balance_target(inv_id=None):
 
         print(f"  ✅ Loaded programme revenue target config for '{programme_name}' (id={programme_id})")
 
-        # Starting balance from harvhub.broker_balance (contract anchor)
         starting_balance = broker_balance
         if starting_balance is None:
             starting_balance = existing_recent
@@ -2731,7 +3709,6 @@ def recent_highest_balance_target(inv_id=None):
             current_mt5_balance=mt5_balance
         )
 
-        # ---- Halter recovery check (compare LIVE MT5 balance vs C) ----
         halter_recovered = False
         if anchor_info.get('anchor_found'):
             halter_net_profit = float(anchor_info.get('anchor_net_profit', 0.0) or 0.0)
@@ -2778,7 +3755,7 @@ def recent_highest_balance_target(inv_id=None):
             {'daily_target_config': daily_target_config},
             total_profit,
             execution_start_date,
-            inv_id_db,
+            inv_db_id_db,
             starting_balance_for_today=today_start_balance,
             effective_today=effective_today,
             anchor_info=anchor_info,
@@ -2796,17 +3773,6 @@ def recent_highest_balance_target(inv_id=None):
         total_all_debt = result['total_all_debt']
         daily_target_owed_combined = result['daily_target_owed']
 
-        # ------------------------------------------------------------------
-        # HANDOFF FIELDS (persisted to daily_target_revenue)
-        # ------------------------------------------------------------------
-        # daily_target_owed             -> combined owed debt
-        # daily_target_owed_day_balance -> anchor day balance if halter found,
-        #                                  otherwise the contract-aware start
-        #                                  balance (falls back so downstream
-        #                                  consumers always get a meaningful
-        #                                  number even with no halter yet)
-        # daily_target_owed_date        -> halter anchor date (NULL if none)
-        # ------------------------------------------------------------------
         daily_target_owed_value = float(daily_target_owed_combined or 0.0)
 
         if anchor_info.get('anchor_found'):
@@ -2880,13 +3846,6 @@ def recent_highest_balance_target(inv_id=None):
                     if is_pre_pending_day:
                         print(f"       ⬅️ Counted toward pre-pending sum: ${target:.2f}")
 
-        # ============================================================
-        # WRITE daily_target_revenue ROWS (per investor sub-account)
-        #   -> now also persists the handoff fields:
-        #        daily_target_owed
-        #        daily_target_owed_day_balance
-        #        daily_target_owed_date
-        # ============================================================
         rows_written = 0
         for week_key, week_data in weekly_targets.items():
             for day_name, day_data in week_data.items():
@@ -2897,7 +3856,7 @@ def recent_highest_balance_target(inv_id=None):
                 date_str = day_data['date']
 
                 ok = db_upsert_daily_target_row(
-                    userid=inv_id_db,
+                    userid=inv_db_id_db,
                     sub_account_id=sub_id_db,
                     week_label=week_key,
                     day_label=day_name,
@@ -2938,7 +3897,7 @@ def recent_highest_balance_target(inv_id=None):
 
             recent_highest_alert = {
                 'is_triggered': True,
-                'investor_id': inv_id_db,
+                'investor_id': inv_db_id_db,
                 'old_balance': existing_recent,
                 'new_balance': existing_recent,
                 'difference': 0,
@@ -2960,7 +3919,7 @@ def recent_highest_balance_target(inv_id=None):
                 'alarm_required_minimum': alarm_required_minimum
             }
 
-            db_write_recent_balance(inv_id_db, sub_id_db,
+            db_write_recent_balance(inv_db_id_db, sub_id_db,
                                     round(existing_recent, 2), today_str)
 
             print(f"  💾 Recent highest balance last updated for {username} sub account "
@@ -2996,7 +3955,7 @@ def recent_highest_balance_target(inv_id=None):
 
             recent_highest_alert = {
                 'is_triggered': False,
-                'investor_id': inv_id_db,
+                'investor_id': inv_db_id_db,
                 'old_balance': existing_recent,
                 'new_balance': existing_recent,
                 'difference': 0,
@@ -3028,7 +3987,7 @@ def recent_highest_balance_target(inv_id=None):
         has_updates = True
 
         stats["details"].append({
-            "investor_id": inv_id_db,
+            "investor_id": inv_db_id_db,
             "sub_account_id": sub_id_db,
             "programme_id": programme_id,
             "action": "alarm_triggered" if alarm_trigger else "alarm_off",
@@ -3105,7 +4064,7 @@ def recent_highest_balance_target(inv_id=None):
             if detail.get('action') == 'alarm_off' and detail.get('total_owed', 0) == 0:
                 print(f"     • {detail['investor_id']}: New high ${detail['recent_highest_balance']:.2f} recorded (alarm OFF) 📈")
 
-    if recent_highest_alert['is_triggered']:
+    if recent_highest_alert and recent_highest_alert.get('is_triggered'):
         print(f"\n  🚨 ALARM ACTIVE: {recent_highest_alert['investor_id']} - Trading SUSPENDED")
 
     print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
@@ -3113,17 +4072,11 @@ def recent_highest_balance_target(inv_id=None):
     stats["processing_success"] = True
     return stats
 
+
 # ==============================================================================
 #  STAGE RUNNER — isolate any future stage failure
 # ==============================================================================
 def run_stage(name, fn, **kwargs):
-    """
-    Run a single stage function safely.
-
-    - Any exception is caught, logged, and returned as a stage result
-      with processing_success=False so the orchestrator keeps going.
-    - The returned dict is stored under account_stats['stages'][name].
-    """
     t0 = time.time()
     print(f"\n[STAGE ▶] {name}")
     try:
@@ -3147,10 +4100,6 @@ def run_stage(name, fn, **kwargs):
 
 
 def run_stages_sequential(stages, **common_kwargs):
-    """
-    Run a list of (name, fn) pairs in order, sharing common kwargs.
-    Returns dict {name: stage_result}.
-    """
     out = {}
     for name, fn in stages:
         out[name] = run_stage(name, fn, **common_kwargs)
@@ -3158,254 +4107,1781 @@ def run_stages_sequential(stages, **common_kwargs):
 
 
 # ==============================================================================
-#  WORKER: one process per investor job (DB-driven)
+#  RESTRICTION GATE HELPERS
 # ==============================================================================
-def process_single_investor(job):
-    inv_id = job.get('investor_id')
+def _programme_restriction_verdict(timerange_stats, programme_id):
+    """
+    Extract the restriction verdict for a specific programme from the
+    result of restricted_timerange_db(). Returns {} if the programme was not
+    classified (treated as "not restricted").
+    """
+    if not isinstance(timerange_stats, dict):
+        return {}
+    rmap = timerange_stats.get('restriction_map') or {}
+    if not isinstance(rmap, dict):
+        return {}
+    verdict = rmap.get(programme_id)
+    if not isinstance(verdict, dict):
+        return {}
+    return verdict
+
+
+def _restriction_skip_banner(inv_db_id, sub_id, programme_id, programme_name,
+                             verdict):
+    kind = verdict.get('kind') or 'unknown'
+    day_name = verdict.get('day_name') or ''
+    window_desc = verdict.get('window_desc') or ''
+
+    reason_map = {
+        'restricted_date':      'today is a configured restricted date',
+        'restricted_day_full':  'today is a fully paused trading day',
+        'restricted_day_window':'the current time falls inside a paused window',
+    }
+    reason = reason_map.get(kind, 'a restriction is active')
+
+    print(f"\n[STAGE ⏭] Investor {inv_db_id} (sub {sub_id}) | "
+          f"programme '{programme_name}' (id={programme_id})")
+    print(f"           🚫 RESTRICTED — {reason}")
+    if day_name:
+        print(f"           📅 Day: {day_name}")
+    if window_desc:
+        print(f"           🕐 Window: {window_desc}")
+    print(f"           ⏭️  Skipping recent_highest_balance_target_db and every "
+          f"future stage — no trade activity allowed right now.")
+
+
+def _daily_target_alarm_banner(inv_db_id, sub_id, programme_id, programme_name,
+                               alert):
+    """
+    Uniform log banner for the daily-target alarm short-circuit. Mirrors
+    the local file's `recent_highest_hit` path.
+    """
+    mode = "PRE-PENDING" if alert.get('pre_pending_enabled') else "DAILY"
+    owed = alert.get('daily_target_owed')
+    pre_pending = alert.get('pre_pending_total')
+    total_debt = alert.get('total_all_debt')
+    effective_today = alert.get('effective_today')
+
+    print(f"\n[STAGE ⏭] Investor {inv_db_id} (sub {sub_id}) | "
+          f"programme '{programme_name}' (id={programme_id})")
+    print(f"           🚨 DAILY-TARGET ALARM ACTIVE [{mode}] — "
+          f"trading suspended, all future stages skipped.")
+    if effective_today:
+        print(f"           📅 Effective trade date: {effective_today}")
+    if owed is not None:
+        print(f"           💰 Daily target owed (combined): ${float(owed):.2f}")
+    if pre_pending is not None:
+        print(f"           🔮 Pre-pending total: ${float(pre_pending):.2f}")
+    if total_debt is not None:
+        print(f"           📊 Total all debt: ${float(total_debt):.2f}")
+
+# ==============================================================================
+#  MARTINGALE — DB version (complete, non-grid)
+#
+#  Configuration ownership:
+#    ┌─────────────────────────────────────────────────────────────────────┐
+#    │ PROGRAMME CONFIGURATION  (fetched ONCE per programme, shared)        │
+#    │   source: accountmanagement_trades_martingale                        │
+#    │           accountmanagement_balance_default_risk                     │
+#    │           accountmanagement.fixed_risk_reward / minimum_risk_reward  │
+#    │           programme_revenue_target.loss_streak_chances               │
+#    │           signals_provider_interest.risk_reward  (profit_factor R:R) │
+#    ├─────────────────────────────────────────────────────────────────────┤
+#    │ INVESTOR STATE  (fetched PER INVESTOR, independent per investor)     │
+#    │   source: harvhub (broker_balance = execution-start balance)         │
+#    │           daily_target_revenue (owed, day_balance, owed_date)        │
+#    │           MT5 (current balance, positions, pending orders)           │
+#    │           programme_trades (investor-scoped pending rows)            │
+#    └─────────────────────────────────────────────────────────────────────┘
+#
+#  profit_factor semantics:
+#     The R:R is a multiplier that turns RISK into REWARD.
+#     The target we must recover is the REWARD. So:
+#
+#         required_risk   = target_reward / rr
+#         required_volume = required_risk / (SL_distance × contract)
+#
+#     If the SL is reached: volume × SL_distance × contract is lost.
+#     If the TP is reached: that amount × rr is gained.
+#
+#     Rows are PENDING — no event has occurred. Log lines use "risk X
+#     → reward Y" (or "risk X" for stoploss_factor). Never "hit".
+#
+#  stoploss_factor semantics: unchanged — risk = target.
+# ==============================================================================
+def martingale_system_db(inv_db_id=None):
+    global martingale_alert
+    from datetime import datetime, timedelta, timezone
+
+    # ------------------------------------------------------------------
+    # LAGOS TIMEZONE
+    # ------------------------------------------------------------------
+    try:
+        from zoneinfo import ZoneInfo
+        LAGOS_TZ = ZoneInfo("Africa/Lagos")
+        _LAGOS_TZ_SOURCE = "zoneinfo"
+    except Exception:
+        LAGOS_TZ = timezone(timedelta(hours=1))
+        _LAGOS_TZ_SOURCE = "fixed_utc+1"
+
+    def lagos_now():
+        return datetime.now(LAGOS_TZ)
+
+    def lagos_now_str():
+        return lagos_now().strftime("%Y-%m-%d %H:%M:%S")
+
+    martingale_alert = {
+        'is_triggered': False,
+        'investor_id': inv_db_id if inv_db_id else 'all',
+        'programme_id': None,
+        'stage': 0,
+        'stage_drawdown': 0.0,
+        'total_drawdown': 0.0,
+        'sequence_next_risk': 0.0,
+        'rows_updated': 0,
+        'rows_restored': 0,
+        'mt5_cancelled': 0,
+        'mode': None,
+        'factor': None,
+        'programme_rr': None,
+        'errors': [],
+        'timestamp': lagos_now_str(),
+    }
+
+    print(f"\n{'='*10} 🎰 MARTINGALE SYSTEM (DB) {'='*10}")
+    print(f" 🕒 Lagos time now: {lagos_now().strftime('%Y-%m-%d %H:%M:%S %Z')} (source: {_LAGOS_TZ_SOURCE})")
+    if inv_db_id:
+        print(f" 🎯 Target Investor: {inv_db_id}")
+
+    stats = {
+        'investor_id': inv_db_id if inv_db_id else 'all',
+        'investors_processed': 0,
+        'investors_skipped': 0,
+        'programmes_processed': 0,
+        'rows_updated': 0,
+        'rows_restored': 0,
+        'mt5_cancelled': 0,
+        'errors': [],
+        'processing_success': False,
+        'details': [],
+    }
+
+    # ==================================================================
+    # SECTION 1 — PROGRAMME CONFIGURATION READERS
+    # ==================================================================
+    def programme_fetch_martingale_config(programme_id):
+        return db_fetch_all(
+            """
+            SELECT id, developerid, programme_id,
+                   from_balance, to_balance,
+                   enable_martingale, martingale_type, martingale_factor,
+                   martingale_for_position_order_scale,
+                   martingale_loss_recovery_adder_percentage,
+                   pre_drawdown_assumption, martingale_pre_scaling,
+                   martingale_linear_scaling,
+                   enable_initial_risk_retention,
+                   initial_risk_retention_percentage,
+                   martingale_per_stage_drawdown_amount
+              FROM accountmanagement_trades_martingale
+             WHERE programme_id = %s
+             ORDER BY from_balance ASC, id ASC
+            """,
+            [programme_id], timeout=15.0, quiet=True,
+        )
+
+    def programme_fetch_default_risk_rows(programme_id):
+        return db_fetch_all(
+            """
+            SELECT from_balance_range, to_balance_range, risk_amount
+              FROM accountmanagement_balance_default_risk
+             WHERE programme_id = %s
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+
+    def programme_fetch_rr_config(programme_id):
+        return db_fetch_one(
+            """
+            SELECT fixed_risk_reward, minimum_risk_reward
+              FROM accountmanagement
+             WHERE developerid = 0 AND programme_id = %s AND investorid = 0
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+
+    def programme_fetch_loss_streak_chances(programme_id):
+        row = db_fetch_one(
+            """
+            SELECT loss_streak_chances
+              FROM programme_revenue_target
+             WHERE programme_id = %s
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        return _coerce_int(_raw_first_key(row or {}, 'loss_streak_chances')) or 0
+
+    def programme_fetch_signal_provider_risk_reward(programme_id):
+        row = db_fetch_one(
+            """
+            SELECT risk_reward, risk_reward_type
+              FROM signals_provider_interest
+             WHERE programme_id = %s
+               AND risk_reward IS NOT NULL
+               AND risk_reward > 0
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        if not row:
+            return None
+        rr = _coerce_float(_raw_first_key(row, 'risk_reward'), default=None)
+        if rr is None or rr <= 0:
+            return None
+        return float(rr)
+
+    # ==================================================================
+    # SECTION 2 — INVESTOR-SPECIFIC READERS
+    # ==================================================================
+    def investor_fetch_harvhub_anchor(investor_id, sub_account_id):
+        return db_fetch_one(
+            """
+            SELECT id, sub_account_id, broker_balance, execution_start_date
+              FROM harvhub
+             WHERE id = %s AND sub_account_id = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=15.0, quiet=True,
+        )
+
+    def investor_fetch_daily_target(investor_id, sub_account_id):
+        return db_fetch_one(
+            """
+            SELECT id, userid, sub_account_id, week, day, date,
+                   daily_target, status, profit_allocated, remaining_needed,
+                   daily_target_owed, daily_target_owed_day_balance,
+                   daily_target_owed_date
+              FROM daily_target_revenue
+             WHERE userid = %s
+               AND sub_account_id = %s
+               AND daily_target_owed IS NOT NULL
+             ORDER BY updated_at DESC, id DESC
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=15.0, quiet=True,
+        )
+
+    def investor_fetch_pending_trades(investor_id, sub_account_id, programme_id):
+        return db_fetch_all(
+            """
+            SELECT id, tradeid, userid, programmeid,
+                   investor_id, investor_sub_account_id,
+                   symbol, ordertype, orderstatus, timeframe,
+                   entry, stoploss, takeprofit,
+                   trade_risk_reward, volume,
+                   created_at, updated_at
+              FROM programme_trades
+             WHERE userid = %s
+               AND programmeid = %s
+               AND investor_id = %s
+               AND investor_sub_account_id = %s
+               AND orderstatus = 'pending'
+             ORDER BY id ASC
+            """,
+            [investor_id, programme_id, investor_id, sub_account_id],
+            timeout=15.0, quiet=True,
+        )
+
+    def update_trade_volume(trade_row_id, new_volume):
+        ok, affected, msg = db_execute(
+            "UPDATE programme_trades SET volume = %s WHERE id = %s",
+            [round(float(new_volume), 8), trade_row_id],
+            timeout=15.0, quiet=True,
+        )
+        return ok and affected >= 0
+
+    def delete_trade_row(trade_row_id):
+        ok, affected, msg = db_execute(
+            "DELETE FROM programme_trades WHERE id = %s",
+            [trade_row_id], timeout=15.0, quiet=True,
+        )
+        return ok
+
+    def restore_trade_row(investor_id, sub_account_id, programme_id,
+                          tradeid, symbol, ordertype, entry, stoploss,
+                          takeprofit, volume, timeframe=None,
+                          trade_risk_reward=None):
+        existing = db_fetch_one(
+            """
+            SELECT id FROM programme_trades
+             WHERE userid = %s AND programmeid = %s
+               AND investor_id = %s AND investor_sub_account_id = %s
+               AND tradeid = %s
+             LIMIT 1
+            """,
+            [investor_id, programme_id, investor_id, sub_account_id, tradeid],
+            timeout=10.0, quiet=True,
+        )
+        if existing:
+            return False
+        tf = timeframe or 'M1'
+        ok, _, _ = db_execute(
+            """
+            INSERT INTO programme_trades
+                (userid, programmeid, investor_id, investor_sub_account_id,
+                 tradeid, symbol, ordertype, orderstatus, timeframe,
+                 entry, stoploss, takeprofit, trade_risk_reward, volume)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s,
+                    %s, %s, %s, %s, %s)
+            """,
+            [investor_id, programme_id, investor_id, sub_account_id,
+             tradeid, symbol, ordertype, tf,
+             entry, stoploss, takeprofit, trade_risk_reward,
+             round(float(volume), 8)],
+            timeout=15.0, quiet=True,
+        )
+        return ok
+
+    # ==================================================================
+    # SECTION 3 — MT5 READERS (investor-specific)
+    # ==================================================================
+    def get_effective_current_balance():
+        acc = mt5_account_info()
+        if acc is None:
+            return None
+        try:
+            return float(acc.balance)
+        except Exception:
+            return None
+
+    def get_open_positions_total_risk():
+        positions = mt5_positions_get()
+        if not positions:
+            return 0.0, []
+        total_risk = 0.0
+        details = []
+        skipped_no_sl = 0
+        skipped_breakeven = 0
+        for pos in positions:
+            sym = pos.symbol
+            info = mt5_symbol_info(sym)
+            if not info:
+                continue
+            if pos.sl is None or pos.sl == 0:
+                skipped_no_sl += 1
+                continue
+            if pos.type == 0:
+                price_diff = pos.price_open - pos.sl
+                direction = 'BUY'
+            else:
+                price_diff = pos.sl - pos.price_open
+                direction = 'SELL'
+            if price_diff <= 0:
+                skipped_breakeven += 1
+                print(f"  │ ⏭️ {sym} {direction}: SL at/beyond breakeven "
+                      f"(entry={pos.price_open:.5f}, SL={pos.sl:.5f}) → NO RISK")
+                continue
+            contract_size = float(getattr(info, 'trade_contract_size', 1.0))
+            risk = price_diff * pos.volume * contract_size
+            total_risk += risk
+            details.append({
+                'ticket': pos.ticket, 'symbol': sym, 'volume': pos.volume,
+                'entry': pos.price_open, 'sl': pos.sl, 'type': direction,
+                'risk': risk,
+            })
+        if skipped_no_sl:
+            print(f"  │ ℹ️ Skipped {skipped_no_sl} position(s) with no stop loss")
+        if skipped_breakeven:
+            print(f"  │ ℹ️ Skipped {skipped_breakeven} position(s) at breakeven/profit-locked")
+        return total_risk, details
+
+    def mt5_pending_orders_for_symbols(symbols):
+        out = []
+        for sym in symbols:
+            orders = mt5_orders_get(symbol=sym) or []
+            out.extend(orders)
+        return out
+
+    # ==================================================================
+    # SECTION 4 — MARGIN / LEVERAGE
+    # ==================================================================
+    def _get_account_margin_state():
+        acc = mt5_account_info()
+        if acc is None:
+            return None
+        return {
+            "balance": float(acc.balance),
+            "equity": float(acc.equity),
+            "margin": float(acc.margin),
+            "free_margin": float(acc.margin_free),
+            "margin_level": float(acc.margin_level) if acc.margin_level else None,
+            "leverage": int(acc.leverage),
+            "currency": acc.currency,
+        }
+
+    def _calc_order_margin(order_type_str, symbol, volume, price):
+        try:
+            ot = order_type_str.strip().lower()
+            if ot.startswith("buy"):
+                mt5_type = 0
+            elif ot.startswith("sell"):
+                mt5_type = 1
+            else:
+                mt5_type = 0 if 'buy' in ot else 1
+            margin = mt5_order_calc_margin(mt5_type, symbol, float(volume), float(price))
+            if margin is None or margin <= 0:
+                return None
+            return float(margin)
+        except Exception:
+            return None
+
+    def _shrink_volume_to_fit_margin(order, side, symbol_info, desired_volume,
+                                     max_margin_allowed, price):
+        if desired_volume is None or desired_volume <= 0:
+            return 0.0, 0.0, False
+        min_vol = symbol_info.volume_min if symbol_info else 0.01
+        step = symbol_info.volume_step if symbol_info and symbol_info.volume_step > 0 else 0.01
+        margin = _calc_order_margin(side, order.get("symbol"), desired_volume, price)
+        if margin is None:
+            return desired_volume, 0.0, False
+        if margin <= max_margin_allowed:
+            return desired_volume, margin, False
+        low = min_vol
+        high = desired_volume
+        best_vol = 0.0
+        best_margin = 0.0
+        low_margin = _calc_order_margin(side, order.get("symbol"), low, price)
+        if low_margin is None or low_margin > max_margin_allowed:
+            return 0.0, 0.0, True
+        best_vol = low
+        best_margin = low_margin
+        for _ in range(40):
+            mid = (low + high) / 2.0
+            steps = round(mid / step) if step > 0 else 0
+            mid = max(min_vol, round(steps * step, 2))
+            if mid <= best_vol:
+                break
+            m = _calc_order_margin(side, order.get("symbol"), mid, price)
+            if m is None:
+                high = mid
+                continue
+            if m <= max_margin_allowed:
+                best_vol = mid
+                best_margin = m
+                low = mid
+            else:
+                high = mid
+        steps = round(best_vol / step) if step > 0 else 0
+        best_vol = max(min_vol, round(steps * step, 2))
+        best_margin = _calc_order_margin(side, order.get("symbol"), best_vol, price) or 0.0
+        return best_vol, best_margin, True
+
+    def _validate_single_order_margin(order, side, desired_volume, buffer_pct=10.0):
+        acc_state = _get_account_margin_state()
+        if acc_state is None:
+            return desired_volume, 0.0, 0.0, True, False, "no_account_info"
+        symbol = order.get("symbol")
+        entry = order.get("entry")
+        if not symbol or entry is None:
+            return desired_volume, 0.0, 0.0, False, False, "missing_data"
+        symbol_info = mt5_symbol_info(symbol)
+        if not symbol_info:
+            return desired_volume, 0.0, 0.0, False, False, "no_symbol_info"
+        free_margin = acc_state["free_margin"]
+        allowed_margin = free_margin * (1.0 - buffer_pct / 100.0)
+        if allowed_margin <= 0:
+            return 0.0, 0.0, free_margin, False, True, "no_free_margin"
+        margin = _calc_order_margin(side, symbol, desired_volume, entry)
+        if margin is None:
+            return desired_volume, 0.0, free_margin, False, False, "margin_calc_failed"
+        if margin <= allowed_margin:
+            return desired_volume, margin, free_margin, True, False, "fits"
+        final_vol, final_margin, shrunk = _shrink_volume_to_fit_margin(
+            order, side, symbol_info, desired_volume, allowed_margin, entry
+        )
+        if final_vol <= 0:
+            return 0.0, 0.0, free_margin, False, True, "cannot_fit_min_volume"
+        return final_vol, final_margin, free_margin, True, True, "shrunk_to_fit"
+
+    # ==================================================================
+    # SECTION 5 — SEQUENCE / RISK MATHS
+    # ==================================================================
+    def parse_percent(value):
+        if value is None:
+            return 0.0
+        s = str(value).strip().replace('%', '')
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def resolve_default_risk_from_rows(rows, balance, fallback):
+        if not rows:
+            return float(fallback), 'fallback_default_minimum_risk'
+        best = None
+        for r in rows:
+            try:
+                lo = float(_coerce_float(_raw_first_key(r, 'from_balance_range'), default=0.0) or 0.0)
+                hi = float(_coerce_float(_raw_first_key(r, 'to_balance_range'), default=0.0) or 0.0)
+                amt = float(_coerce_float(_raw_first_key(r, 'risk_amount'), default=0.0) or 0.0)
+            except Exception:
+                continue
+            if lo <= balance <= hi:
+                return amt, f"range:{lo}-{hi}"
+            if best is None:
+                best = (lo, hi, amt)
+        if best:
+            return best[2], 'fallback_nearest'
+        return float(fallback), 'fallback_default_minimum_risk'
+
+    def resolve_rr_from_cfg(rr_cfg):
+        am = rr_cfg or {}
+        fixed = _coerce_float(_raw_first_key(am, 'fixed_risk_reward'), default=None)
+        minimum = _coerce_float(_raw_first_key(am, 'minimum_risk_reward'), default=None)
+        if fixed is not None and fixed > 0:
+            if minimum is None or fixed >= minimum:
+                return 1.0, float(fixed), f"fixed_risk_reward = 1:{fixed}"
+        if minimum is not None and minimum > 0:
+            return 1.0, float(minimum), f"minimum_risk_reward = 1:{minimum}"
+        return None, None, None
+
+    def build_target_sum_sequence(target_balance, target_owed, reward_ratio,
+                                  max_count_hint=None):
+        if target_balance <= 0 or target_owed <= 0:
+            return [], {'count': 0, 'within_chances': 0, 'excess_count': 0,
+                        'excess_sequence': [], 'natural_sum': 0.0,
+                        'capped': False, 'target_owed': target_owed,
+                        'target_balance': target_balance}
+        reward_ratio = max(1e-9, float(reward_ratio))
+        sequence = []
+        S = 0.0
+        safety_limit = 10000
+        while S < target_balance and len(sequence) < safety_limit:
+            r = round((S + target_owed) / reward_ratio, 2)
+            if r <= 0:
+                r = 0.01
+            if S + r >= target_balance:
+                remainder = round(target_balance - S, 2)
+                if remainder > 0:
+                    sequence.append(remainder)
+                    S += remainder
+                break
+            sequence.append(r)
+            S += r
+        sequence = [round(v, 2) for v in sequence]
+        residual_cents = int(round((target_balance - sum(sequence)) * 100))
+        if residual_cents != 0 and sequence:
+            sequence[-1] = round(sequence[-1] + residual_cents * 0.01, 2)
+            if sequence[-1] <= 0:
+                sequence[-1] = 0.01
+        natural_sum = round(sum(sequence), 2)
+        max_count_hint = max_count_hint if max_count_hint and max_count_hint > 0 else len(sequence)
+        within = min(len(sequence), max_count_hint)
+        excess_sequence = sequence[max_count_hint:] if len(sequence) > max_count_hint else []
+        return sequence, {
+            'count': len(sequence),
+            'within_chances': within,
+            'excess_count': len(excess_sequence),
+            'excess_sequence': excess_sequence,
+            'natural_sum': natural_sum,
+            'capped': natural_sum >= target_balance - 0.01,
+            'target_owed': target_owed,
+            'target_balance': target_balance,
+        }
+
+    def stage_max_risk_for_balance(config_rows, balance):
+        if not config_rows:
+            return 100.0
+        for r in config_rows:
+            lo = _coerce_float(_raw_first_key(r, 'from_balance'), default=None)
+            hi = _coerce_float(_raw_first_key(r, 'to_balance'), default=None)
+            amt = _coerce_float(_raw_first_key(r, 'martingale_per_stage_drawdown_amount'),
+                                default=None)
+            if lo is None or amt is None:
+                continue
+            if hi is None:
+                if balance >= lo:
+                    return float(amt)
+                continue
+            if lo <= balance <= hi:
+                return float(amt)
+        last_amt = _coerce_float(
+            _raw_first_key(config_rows[-1], 'martingale_per_stage_drawdown_amount'),
+            default=100.0,
+        )
+        return float(last_amt or 100.0)
+
+    # ==================================================================
+    # SECTION 6 — SIZE HELPERS
+    # ==================================================================
+    def _risk_per_lot(order, symbol_info):
+        entry = _coerce_float(order.get('entry'), default=None)
+        stop  = _coerce_float(order.get('stoploss'), default=None)
+        if entry is None or stop is None:
+            return 0.0
+        sl_distance = abs(entry - stop)
+        contract_size = float(getattr(symbol_info, 'trade_contract_size', 1.0))
+        return sl_distance * contract_size
+
+    def _size_volume_from_risk_target(order, symbol_info, target_risk_dollars):
+        risk_per_lot = _risk_per_lot(order, symbol_info)
+        if risk_per_lot <= 0:
+            return 0.0, 0.0, 0.0
+        vol = target_risk_dollars / risk_per_lot
+        step = float(getattr(symbol_info, 'volume_step', 0.01)) or 0.01
+        min_vol = float(getattr(symbol_info, 'volume_min', 0.01)) or 0.01
+        steps = round(vol / step) if step > 0 else 0
+        vol = max(min_vol, round(steps * step, 2))
+        actual_risk = vol * risk_per_lot
+        return vol, actual_risk, risk_per_lot
+
+    def _size_volume_from_tp_target(order, symbol_info, target_reward_dollars, programme_rr):
+        """
+        profit_factor: size so that volume × SL_distance × contract × rr
+        equals the target reward. Equivalent to:
+            required_risk   = target_reward / rr
+            required_volume = required_risk / risk_per_lot
+        Returns (volume, reward_if_tp, risk_if_sl).
+        """
+        if programme_rr is None or programme_rr <= 0:
+            return 0.0, 0.0, 0.0
+        risk_per_lot = _risk_per_lot(order, symbol_info)
+        if risk_per_lot <= 0:
+            return 0.0, 0.0, 0.0
+
+        required_risk = target_reward_dollars / float(programme_rr)
+        vol = required_risk / risk_per_lot
+
+        step = float(getattr(symbol_info, 'volume_step', 0.01)) or 0.01
+        min_vol = float(getattr(symbol_info, 'volume_min', 0.01)) or 0.01
+        steps = round(vol / step) if step > 0 else 0
+        vol = max(min_vol, round(steps * step, 2))
+
+        risk_if_sl = vol * risk_per_lot
+        reward_if_tp = risk_if_sl * float(programme_rr)
+        return vol, reward_if_tp, risk_if_sl
+
+    def _reward_per_lot_from_programme_rr(order, symbol_info, programme_rr):
+        if programme_rr is None or programme_rr <= 0:
+            return 0.0
+        risk_per_lot = _risk_per_lot(order, symbol_info)
+        if risk_per_lot <= 0:
+            return 0.0
+        return risk_per_lot * float(programme_rr)
+
+    def get_direction_from_order(order):
+        ot = (order.get('ordertype') or '').lower()
+        if 'sell-limit' in ot or 'buy-stop' in ot:
+            return "STEPUP"
+        if 'buy-limit' in ot or 'sell-stop' in ot:
+            return "STEPDOWN"
+        return "UNKNOWN"
+
+    def group_rows_by_linear(rows):
+        stepup_linear = []
+        stepdown_linear = []
+        for idx, order in enumerate(rows):
+            ot = (order.get('ordertype') or '').lower()
+            entry = order.get('entry')
+            if entry is None:
+                continue
+            info = {'order': order, 'index': idx}
+            if 'sell-limit' in ot or 'buy-stop' in ot:
+                stepup_linear.append(info)
+            elif 'buy-limit' in ot or 'sell-stop' in ot:
+                stepdown_linear.append(info)
+        stepup_linear.sort(key=lambda x: _coerce_float(x['order'].get('entry'), default=0) or 0)
+        stepdown_linear.sort(key=lambda x: _coerce_float(x['order'].get('entry'), default=0) or 0, reverse=True)
+        return stepup_linear, stepdown_linear
+
+    # ==================================================================
+    # SECTION 7 — PER-INVESTOR PIPELINE
+    # ==================================================================
+    def process_investor(investor_id, sub_account_id, programme_id,
+                         programme_name, programme_cfg):
+        detail = {
+            'investor_id': investor_id,
+            'sub_account_id': sub_account_id,
+            'programme_id': programme_id,
+            'programme_name': programme_name,
+            'mt5_balance': None,
+            'execution_start_balance': None,
+            'daily_target_owed': 0.0,
+            'daily_target_owed_day_balance': 0.0,
+            'daily_target_owed_date': None,
+            'drawdown': 0.0,
+            'stage': 0,
+            'stage_drawdown': 0.0,
+            'sequence_next_risk': 0.0,
+            'final_target_risk': 0.0,
+            'per_symbol_target': 0.0,
+            'programme_rr': None,
+            'rows_seen': 0,
+            'rows_updated': 0,
+            'rows_deleted': 0,
+            'rows_restored': 0,
+            'mt5_cancelled': 0,
+            'mode': None,
+            'factor': None,
+            'error': None,
+        }
+
+        enable_martingale = programme_cfg['enable_martingale']
+        martingale_type = programme_cfg['martingale_type']
+        martingale_factor = programme_cfg['martingale_factor']
+        recovery_adder_pct = programme_cfg['recovery_adder_pct']
+        pre_drawdown_assumption = programme_cfg['pre_drawdown_assumption']
+        martingale_pre_scaling = programme_cfg['martingale_pre_scaling']
+        linear_scaling = programme_cfg['linear_scaling']
+        enable_retention = programme_cfg['enable_retention']
+        retention_pct = programme_cfg['retention_pct']
+        config_rows = programme_cfg['config_rows']
+        default_risk_rows = programme_cfg['default_risk_rows']
+        rr_cfg = programme_cfg['rr_cfg']
+        loss_streak_chances = programme_cfg['loss_streak_chances']
+        programme_rr = programme_cfg.get('programme_rr')
+
+        detail['mode'] = martingale_type
+        detail['factor'] = martingale_factor
+        detail['programme_rr'] = programme_rr
+
+        if not enable_martingale:
+            print(f"\n  ⏭️ Investor {investor_id} | programme '{programme_name}' "
+                  f"(id={programme_id}) — martingale DISABLED")
+            detail['error'] = 'martingale_disabled'
+            return detail
+
+        if martingale_factor == 'profit_factor' and (programme_rr is None or programme_rr <= 0):
+            print(f"\n  ⚠️ Investor {investor_id} | programme '{programme_name}' "
+                  f"(id={programme_id}) — profit_factor set but no "
+                  f"signals_provider_interest.risk_reward available; skipping")
+            detail['error'] = 'programme_rr_missing'
+            return detail
+
+        print(f"\n{'─'*72}")
+        print(f" 🎰 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+        print(f"  PROGRAMME CONFIGURATION (id={programme_id}):")
+        print(f"  │ Mode              : {martingale_type}")
+        print(f"  │ Factor            : {martingale_factor}")
+        if martingale_factor == 'profit_factor':
+            print(f"  │ Programme R:R     : 1:{programme_rr}  "
+                  f"(risk → reward multiplier; the target is a reward)")
+        print(f"  │ Pre-drawdown      : {'ON' if pre_drawdown_assumption else 'OFF'}")
+        print(f"  │ Pre-scaling       : {'ON' if martingale_pre_scaling else 'OFF'}")
+        print(f"  │ Linear scaling    : {'ON' if linear_scaling else 'OFF'}")
+        print(f"  │ Retention         : {'ON' if enable_retention else 'OFF'} ({retention_pct}%)")
+        print(f"  │ Recovery adder    : {recovery_adder_pct}%")
+        print(f"  │ Loss streak chance: {loss_streak_chances}")
+        print(f"  INVESTOR STATE (sub {sub_account_id}):")
+
+        effective_balance = get_effective_current_balance()
+        if effective_balance is None:
+            detail['error'] = 'mt5_balance_unavailable'
+            print(f"  ✗ Failed to get MT5 balance")
+            return detail
+        current_balance = effective_balance
+        detail['mt5_balance'] = current_balance
+        print(f"  │ Current MT5 balance: ${current_balance:.2f}")
+
+        hub = investor_fetch_harvhub_anchor(investor_id, sub_account_id) or {}
+        broker_balance = _coerce_float(_raw_first_key(hub, 'broker_balance'), default=None)
+        if broker_balance is None:
+            detail['error'] = 'broker_balance_missing'
+            print(f"  ⚠️ harvhub.broker_balance is NULL — skipping investor")
+            return detail
+        detail['execution_start_balance'] = broker_balance
+        print(f"  │ Execution-start balance: ${broker_balance:.2f}")
+
+        dtr = investor_fetch_daily_target(investor_id, sub_account_id) or {}
+        daily_target_owed = _coerce_float(_raw_first_key(dtr, 'daily_target_owed'), default=0.0) or 0.0
+        owed_day_balance = _coerce_float(
+            _raw_first_key(dtr, 'daily_target_owed_day_balance'), default=None)
+        if owed_day_balance is None:
+            owed_day_balance = daily_target_owed
+        owed_date = _raw_first_key(dtr, 'daily_target_owed_date')
+        detail['daily_target_owed'] = daily_target_owed
+        detail['daily_target_owed_day_balance'] = owed_day_balance
+        detail['daily_target_owed_date'] = owed_date
+        print(f"  │ Daily target owed : ${daily_target_owed:.2f} "
+              f"(day balance ${owed_day_balance:.2f}, date {owed_date or '—'})")
+
+        default_minimum_risk = 2.0
+        default_risk_value, default_risk_src = resolve_default_risk_from_rows(
+            default_risk_rows, current_balance, default_minimum_risk)
+        print(f"  │ Default risk floor: ${default_risk_value:.2f} ({default_risk_src})")
+
+        base_drawdown = max(0.0, float(broker_balance) - float(current_balance))
+        total_drawdown = base_drawdown + daily_target_owed
+        if pre_drawdown_assumption:
+            print(f"\n  🔄 PRE-DRAWDOWN ASSUMPTION ENABLED:")
+            positions_risk, positions_details = get_open_positions_total_risk()
+            if positions_risk > 0:
+                print(f"  │ Found {len(positions_details)} open position(s) with stop losses:")
+                for pos in positions_details:
+                    print(f"  │   ├─ {pos['symbol']} {pos['type']}: ${pos['risk']:.2f} risk")
+                print(f"  │ Total open positions risk: ${positions_risk:.2f}")
+                print(f"  │ ${total_drawdown:.2f} + ${positions_risk:.2f} = "
+                      f"${total_drawdown + positions_risk:.2f}")
+                total_drawdown += positions_risk
+            else:
+                print(f"  │ No open positions with stop losses found")
+        else:
+            print(f"  │ Pre-drawdown assumption DISABLED")
+        detail['drawdown'] = total_drawdown
+        print(f"  │ Base drawdown    : ${base_drawdown:.2f}")
+        print(f"  │ Total drawdown   : ${total_drawdown:.2f}")
+
+        stage_max_risk = stage_max_risk_for_balance(config_rows, current_balance)
+        print(f"  │ Stage max risk (per round): ${stage_max_risk:.2f}")
+        if total_drawdown > 0 and stage_max_risk > 0:
+            current_stage = int(total_drawdown // stage_max_risk) + 1
+            current_stage_drawdown = total_drawdown % stage_max_risk
+            if current_stage_drawdown == 0 and current_stage > 1:
+                current_stage_drawdown = default_risk_value
+                print(f"  │ EXACT STAGE COMPLETION - using floor risk: ${default_risk_value:.2f}")
+            print(f"  │ Current stage: {current_stage}")
+            print(f"  │ Stage drawdown: ${current_stage_drawdown:.2f}")
+            print(f"  │ Total drawdown across all stages: ${total_drawdown:.2f}")
+        else:
+            current_stage = 1
+            current_stage_drawdown = 0.0
+            print(f"  │ No drawdown to recover")
+        detail['stage'] = current_stage
+        detail['stage_drawdown'] = current_stage_drawdown
+
+        sequence_risk = None
+
+        if martingale_type == 'loss_streak':
+            print(f"\n  📊 LOSS_STREAK TARGET CALCULATION")
+            if daily_target_owed <= 0:
+                print(f"  │ No daily_target_owed — falling back to default risk floor")
+                sequence_risk = default_risk_value
+            else:
+                risk_ratio, reward_ratio, rr_src = resolve_rr_from_cfg(rr_cfg)
+                if risk_ratio is None or reward_ratio is None:
+                    print(f"  │ ⚠️ R:R unavailable — falling back to default risk")
+                    sequence_risk = default_risk_value
+                else:
+                    target_balance = owed_day_balance if owed_day_balance > 0 else daily_target_owed
+                    target_owed = daily_target_owed
+
+                    sequence, meta = build_target_sum_sequence(
+                        target_balance=target_balance,
+                        target_owed=target_owed,
+                        reward_ratio=reward_ratio,
+                        max_count_hint=loss_streak_chances or None,
+                    )
+                    if not sequence:
+                        print(f"  │ ⚠️ Empty sequence — falling back to default risk")
+                        sequence_risk = default_risk_value
+                    else:
+                        rr_display = reward_ratio / risk_ratio if risk_ratio > 0 else reward_ratio
+                        print(f"\n{'='*60}")
+                        print(f"  🎰 LOSS STREAK PURE SEQUENCE")
+                        print(f"{'='*60}")
+                        print(f"  │ Daily target owed   : ${target_owed:.2f}")
+                        print(f"  │ Daily target balance: ${target_balance:.2f}")
+                        print(f"  │ Loss streak chances : {loss_streak_chances}")
+                        print(f"  │ R:R                 : 1:{rr_display:.0f} ({rr_src})")
+                        print(f"  │ Total risks needed  : {meta['count']}")
+                        print(f"  │ Total (sum)         : ${round(sum(sequence), 2):.2f}")
+                        print(f"  {'─'*58}")
+                        chunk_size = 5
+                        print(f"  📋 Risks sequence:")
+                        for i in range(0, len(sequence), chunk_size):
+                            chunk = sequence[i:i + chunk_size]
+                            print("     " + ", ".join(f"${v:.2f}" for v in chunk))
+                        if meta["excess_count"] > 0:
+                            print(f"  {'─'*58}")
+                            print(f"  📈 EXCESS sequence ({meta['excess_count']} risk(s)):")
+                            for i in range(0, len(meta["excess_sequence"]), chunk_size):
+                                chunk = meta["excess_sequence"][i:i + chunk_size]
+                                print("     " + ", ".join(f"${v:.2f}" for v in chunk))
+                        print(f"  {'─'*58}")
+
+                        base_drawdown_loss = max(0.0, round(total_drawdown - daily_target_owed, 2))
+                        cumulative = 0.0
+                        loss_prefix = []
+                        approx_position = 0
+                        for i, r in enumerate(sequence):
+                            cumulative = round(cumulative + r, 2)
+                            loss_prefix.append(r)
+                            approx_position = i + 1
+                            if cumulative + 1e-9 >= base_drawdown_loss:
+                                break
+                        if base_drawdown_loss <= 0:
+                            loss_prefix = []
+                            approx_position = 0
+                            cumulative = 0.0
+
+                        next_index = approx_position
+                        if next_index >= len(sequence):
+                            next_index = len(sequence) - 1
+
+                        positions_exist = bool(mt5_positions_get())
+                        advanced = False
+                        if positions_exist and pre_drawdown_assumption:
+                            next_index = min(next_index + 1, len(sequence) - 1)
+                            advanced = True
+
+                        sequence_risk = float(sequence[next_index])
+                        remaining_chances = max(0, len(sequence) - (next_index + 1))
+
+                        print(f"\n  🎯 DRAWDOWN / NEXT RISK ANALYSIS")
+                        print(f"  │ Base loss to recover   : ${base_drawdown_loss:.2f}")
+                        print(f"  │ Approx current drawdown: ${cumulative:.2f} "
+                              f"(≈ position {approx_position}, ceil-fit)")
+                        print(f"  │ Position exists        : {'YES' if positions_exist else 'NO'}")
+                        print(f"  │ Pre-drawdown assumption: {'ON' if pre_drawdown_assumption else 'OFF'}")
+                        if advanced:
+                            print(f"  │ → advanced 1 step")
+                        print(f"  │ NEXT RISK to use       : ${sequence_risk:.2f}")
+                        print(f"  │   ├─ Position in sequence: #{next_index + 1} of {len(sequence)}")
+                        print(f"  │   ├─ Recovers previous  : ${cumulative:.2f}")
+                        print(f"  │   ├─ Plus daily target  : ${target_owed:.2f}")
+                        print(f"  │   └─ Total win target   : ${round(cumulative + target_owed, 2):.2f}")
+                        print(f"  │ Remaining Chances       : {remaining_chances}")
+                        print(f"{'='*60}\n")
+
+        else:  # balance_based
+            print(f"\n  📊 BALANCE-BASED TARGET CALCULATION")
+            base_target_risk = total_drawdown
+            if base_target_risk == 0:
+                print(f"  │ No drawdown — using default risk from config")
+                base_target_risk = default_risk_value
+            sequence_risk = base_target_risk
+            print(f"  │ Base target risk: ${base_target_risk:.2f}")
+
+        detail['sequence_next_risk'] = float(sequence_risk or 0.0)
+
+        pending_rows = investor_fetch_pending_trades(
+            investor_id, sub_account_id, programme_id)
+        detail['rows_seen'] = len(pending_rows)
+        print(f"\n  📋 Pending trades for this investor: {len(pending_rows)}")
+        if not pending_rows:
+            print(f"  │ ℹ️ Nothing to modify")
+            return detail
+
+        symbol_info_cache = {}
+        def get_symbol_info(sym):
+            si = symbol_info_cache.get(sym)
+            if si is None:
+                si = mt5_symbol_info(sym)
+                if si is None:
+                    mt5_symbol_select(sym, True)
+                    si = mt5_symbol_info(sym)
+                symbol_info_cache[sym] = si
+            return si
+
+        rows_updated_vol = 0
+        rows_deleted = 0
+
+        # ------------------------------------------------------------------
+        # STEP 1: recovery / reset (sequence-driven)
+        # ------------------------------------------------------------------
+        if current_stage_drawdown > 0 or martingale_type == 'loss_streak':
+            print(f"\n  📝 STEP 1: Recovery Processing (SEQUENCE-DRIVEN)")
+        else:
+            print(f"\n  📝 STEP 1: Reset to SEQUENCE RISK")
+
+        print(f"  {'─'*40}")
+        print(f"  │ SEQUENCE NEXT RISK : ${sequence_risk:.2f}")
+
+        # --- remove invalid price levels ---
+        print(f"\n  🗑️ STEP: Removing Invalid Price Levels")
+        print(f"  {'─'*60}")
+        total_removed = 0
+        for row in pending_rows[:]:
+            sym = (_raw_first_key(row, 'symbol') or '').strip()
+            rid = _coerce_int(_raw_first_key(row, 'id'))
+            if not sym:
+                continue
+            si = get_symbol_info(sym)
+            if not si:
+                continue
+            entry = _coerce_float(_raw_first_key(row, 'entry'), default=None)
+            ot = (_raw_first_key(row, 'ordertype') or '').lower()
+            if entry is None:
+                continue
+            bid = getattr(si, 'bid', None)
+            ask = getattr(si, 'ask', None)
+            if bid is None or ask is None:
+                continue
+            is_valid = True
+            if ot in ('buy-stop', 'sell-limit'):
+                if entry <= ask:
+                    is_valid = False
+            elif ot in ('sell-stop', 'buy-limit'):
+                if entry >= bid:
+                    is_valid = False
+            if not is_valid:
+                if delete_trade_row(rid):
+                    total_removed += 1
+                    pending_rows.remove(row)
+                    print(f"  │ ✗ Removed invalid row {rid} ({sym} {ot} entry={entry})")
+        if total_removed:
+            print(f"  │ Removed {total_removed} invalid row(s)")
+
+        # --- apply sequence risk ---
+        for row in pending_rows:
+            rid = _coerce_int(_raw_first_key(row, 'id'))
+            tradeid = _coerce_int(_raw_first_key(row, 'tradeid'))
+            sym = (_raw_first_key(row, 'symbol') or '').strip()
+            ot = (_raw_first_key(row, 'ordertype') or '').lower()
+            entry = _coerce_float(_raw_first_key(row, 'entry'), default=None)
+            stoploss = _coerce_float(_raw_first_key(row, 'stoploss'), default=None)
+
+            if not sym or entry is None:
+                print(f"  │ ⚠️ row {rid}: missing symbol/entry — skipped")
+                continue
+            si = get_symbol_info(sym)
+            if si is None:
+                print(f"  │ ⚠️ row {rid}: no symbol_info for {sym} — skipped")
+                continue
+
+            if martingale_factor == 'profit_factor':
+                new_vol, reward_if_tp, risk_if_sl = _size_volume_from_tp_target(
+                    row, si, sequence_risk, programme_rr)
+                if new_vol > 0:
+                    print(f"  │ 🧮 row {rid}: recover ${sequence_risk:.2f} at 1:{programme_rr} "
+                          f"→ {new_vol:.2f} lots | risk ${risk_if_sl:.2f} → "
+                          f"reward ${reward_if_tp:.2f}")
+            else:
+                if stoploss is None:
+                    print(f"  │ ⚠️ row {rid}: no stoploss — skipped")
+                    continue
+                new_vol, risk_if_sl, _per_lot = _size_volume_from_risk_target(
+                    row, si, sequence_risk)
+                reward_if_tp = 0.0
+
+            if new_vol <= 0:
+                print(f"  │ ⚠️ row {rid}: could not size volume — skipped")
+                continue
+
+            order_for_margin = {"symbol": sym, "entry": entry, "ordertype": ot}
+            side = "buy" if 'buy' in ot else "sell"
+            valid_vol, margin, free_margin, ok, shrunk, reason = \
+                _validate_single_order_margin(order_for_margin, side, new_vol, buffer_pct=10.0)
+            if not ok or valid_vol <= 0:
+                print(f"  │ ⚠️ row {rid}: LEVERAGE CHECK failed "
+                      f"(free ${free_margin:.2f}, reason: {reason})")
+                continue
+            if shrunk:
+                print(f"  │ 🔻 row {rid}: LEVERAGE shrunk {new_vol:.2f} → {valid_vol:.2f}")
+                new_vol = valid_vol
+                risk_per_lot = _risk_per_lot(row, si)
+                risk_if_sl = new_vol * risk_per_lot
+                reward_if_tp = risk_if_sl * float(programme_rr) if martingale_factor == 'profit_factor' else 0.0
+
+            if update_trade_volume(rid, new_vol):
+                rows_updated_vol += 1
+                if martingale_factor == 'profit_factor':
+                    print(f"  │ ✓ row {rid} ({sym} {ot} tradeid={tradeid}) "
+                          f"→ {new_vol:.2f} lots | risk ${risk_if_sl:.2f} → "
+                          f"reward ${reward_if_tp:.2f}")
+                else:
+                    print(f"  │ ✓ row {rid} ({sym} {ot} tradeid={tradeid}) "
+                          f"→ {new_vol:.2f} lots | risk ${risk_if_sl:.2f}")
+            else:
+                print(f"  │ ✗ row {rid}: volume update failed")
+
+        # ------------------------------------------------------------------
+        # STEP 2: pre-scaling
+        # ------------------------------------------------------------------
+        if martingale_pre_scaling:
+            print(f"\n{'='*60}")
+            print(f"  🎯 PRE-SCALING ANALYSIS")
+            print(f"{'='*60}")
+            print(f"  │ Mode: {martingale_type.upper()}")
+            print(f"  │ Assumption: {martingale_factor.upper()}")
+            if martingale_factor == 'profit_factor':
+                print(f"  │ Programme R:R: 1:{programme_rr} "
+                      f"(risk → reward multiplier)")
+            print(f"  │ Linear scaling: {'✓ ENABLED' if linear_scaling else '✗ DISABLED'}")
+            print(f"  │ Initial risk adder: {'✓ ENABLED' if enable_retention else '✗ DISABLED'}")
+            print(f"  │   - retention: {retention_pct}%")
+            print(f"  │ Pre-drawdown assumption: {'✓ ENABLED' if pre_drawdown_assumption else '✗ DISABLED'}")
+            print(f"  │ Stage max risk: ${stage_max_risk:.2f}")
+            print(f"  │ Recovery adder: {recovery_adder_pct}%")
+            print(f"  │ Total drawdown: ${total_drawdown:.2f}")
+            print(f"{'─'*60}")
+
+            base_target_risk = total_drawdown if total_drawdown > 0 else default_risk_value
+
+            print(f"\n{'='*60}")
+            print(f"  📊 CALCULATING FINAL TARGET RISK")
+            print(f"{'='*60}")
+            print(f"  │ Base target risk: ${base_target_risk:.2f}")
+
+            final_target_risk = base_target_risk
+
+            if enable_retention:
+                print(f"\n  │ Initial-risk retention ON — computing contribution")
+                default_risk_val_for_bal, _ = resolve_default_risk_from_rows(
+                    default_risk_rows, current_balance, default_minimum_risk)
+                kept = default_risk_val_for_bal * (retention_pct / 100.0)
+                print(f"  │   ├─ Default risk for balance: ${default_risk_val_for_bal:.2f}")
+                print(f"  │   ├─ Keeping {retention_pct}%: ${kept:.2f}")
+                print(f"  │   └─ Added to target: +${kept:.2f}")
+                final_target_risk += kept
+
+            if recovery_adder_pct > 0:
+                applied = final_target_risk * (recovery_adder_pct / 100.0)
+                print(f"\n  │ Recovery adder ({recovery_adder_pct}%): +${applied:.2f}")
+                final_target_risk += applied
+
+            detail['final_target_risk'] = final_target_risk
+            print(f"\n  │ ✅ FINAL TARGET RISK: ${final_target_risk:.2f}")
+            print(f"{'='*60}")
+
+            symbols_in_rows = set()
+            for row in pending_rows:
+                sym = (_raw_first_key(row, 'symbol') or '').strip()
+                if sym:
+                    symbols_in_rows.add(sym)
+            num_symbols = max(1, len(symbols_in_rows))
+            per_symbol_target = final_target_risk / num_symbols
+            detail['per_symbol_target'] = per_symbol_target
+            print(f"\n  📊 SYMBOL-INDEPENDENT PRE-SCALING TARGETS:")
+            print(f"  │ Total symbols: {num_symbols}")
+            print(f"  │ Symbols: {', '.join(sorted(symbols_in_rows))}")
+            print(f"  │ Target per symbol: ${per_symbol_target:.2f}")
+
+            print(f"\n  📈 STEP: Scaling Limit Orders")
+            print(f"  {'─'*60}")
+
+            for sym in sorted(symbols_in_rows):
+                si = get_symbol_info(sym)
+                if not si:
+                    continue
+                symbol_rows = [r for r in pending_rows
+                               if (_raw_first_key(r, 'symbol') or '').strip() == sym]
+                if not symbol_rows:
+                    continue
+
+                print(f"\n  🔹 [NON-GRID] Scaling {sym} orders "
+                      f"(independent target: ${per_symbol_target:.2f}):")
+
+                if martingale_factor == 'profit_factor':
+                    print(f"     Target ${per_symbol_target:.2f} is the reward to earn at 1:{programme_rr}")
+                    for row in symbol_rows:
+                        rid = _coerce_int(_raw_first_key(row, 'id'))
+                        entry = _coerce_float(_raw_first_key(row, 'entry'), default=None)
+                        sl = _coerce_float(_raw_first_key(row, 'stoploss'), default=None)
+                        if entry is None or sl is None:
+                            continue
+                        risk_per_lot = _risk_per_lot(row, si)
+                        if risk_per_lot <= 0:
+                            print(f"        ⚠️ row {rid}: invalid entry/SL — skipped")
+                            continue
+                        required_risk = per_symbol_target / float(programme_rr)
+                        required_vol = required_risk / risk_per_lot
+                        step = float(getattr(si, 'volume_step', 0.01)) or 0.01
+                        min_vol = float(getattr(si, 'volume_min', 0.01)) or 0.01
+                        steps = round(required_vol / step)
+                        required_vol = max(min_vol, round(steps * step, 2))
+                        risk_if_sl = required_vol * risk_per_lot
+                        reward_if_tp = risk_if_sl * float(programme_rr)
+
+                        order_for_margin = {
+                            "symbol": sym, "entry": entry,
+                            "ordertype": (_raw_first_key(row, 'ordertype') or '').lower(),
+                        }
+                        side = "buy" if 'buy' in order_for_margin["ordertype"] else "sell"
+                        valid_vol, margin, free_margin, ok, shrunk, reason = \
+                            _validate_single_order_margin(order_for_margin, side,
+                                                          required_vol, buffer_pct=10.0)
+                        if not ok or valid_vol <= 0:
+                            print(f"        ⚠️ row {rid}: LEVERAGE failed "
+                                  f"(free ${free_margin:.2f}, {reason})")
+                            continue
+                        if shrunk:
+                            print(f"        🔻 row {rid}: LEVERAGE shrink "
+                                  f"{required_vol:.2f} → {valid_vol:.2f}")
+                            required_vol = valid_vol
+                            risk_if_sl = required_vol * risk_per_lot
+                            reward_if_tp = risk_if_sl * float(programme_rr)
+                        if update_trade_volume(rid, required_vol):
+                            rows_updated_vol += 1
+                            print(f"        ✅ row {rid} [{sym}]: {required_vol:.2f} lots | "
+                                  f"risk ${risk_if_sl:.2f} → reward ${reward_if_tp:.2f} "
+                                  f"(target ${per_symbol_target:.2f})")
+                else:
+                    print(f"     Target ${per_symbol_target:.2f} is the risk")
+                    for row in symbol_rows:
+                        rid = _coerce_int(_raw_first_key(row, 'id'))
+                        entry = _coerce_float(_raw_first_key(row, 'entry'), default=None)
+                        sl = _coerce_float(_raw_first_key(row, 'stoploss'), default=None)
+                        if entry is None or sl is None:
+                            continue
+                        risk_per_lot = _risk_per_lot(row, si)
+                        if risk_per_lot <= 0:
+                            continue
+                        required_vol = per_symbol_target / risk_per_lot
+                        step = float(getattr(si, 'volume_step', 0.01)) or 0.01
+                        min_vol = float(getattr(si, 'volume_min', 0.01)) or 0.01
+                        steps = round(required_vol / step)
+                        required_vol = max(min_vol, round(steps * step, 2))
+                        risk_if_sl = required_vol * risk_per_lot
+
+                        order_for_margin = {
+                            "symbol": sym, "entry": entry,
+                            "ordertype": (_raw_first_key(row, 'ordertype') or '').lower(),
+                        }
+                        side = "buy" if 'buy' in order_for_margin["ordertype"] else "sell"
+                        valid_vol, margin, free_margin, ok, shrunk, reason = \
+                            _validate_single_order_margin(order_for_margin, side,
+                                                          required_vol, buffer_pct=10.0)
+                        if not ok or valid_vol <= 0:
+                            print(f"        ⚠️ row {rid}: LEVERAGE failed "
+                                  f"(free ${free_margin:.2f}, {reason})")
+                            continue
+                        if shrunk:
+                            print(f"        🔻 row {rid}: LEVERAGE shrink "
+                                  f"{required_vol:.2f} → {valid_vol:.2f}")
+                            required_vol = valid_vol
+                            risk_if_sl = required_vol * risk_per_lot
+                        if update_trade_volume(rid, required_vol):
+                            rows_updated_vol += 1
+                            print(f"        ✅ row {rid} [{sym}]: {required_vol:.2f} lots | "
+                                  f"risk ${risk_if_sl:.2f}")
+
+            if linear_scaling:
+                print(f"\n{'─'*60}")
+                print(f"  📈 STEP: Linear Scaling (Progressive)")
+                print(f"{'─'*60}")
+                print(f"  IMPORTANT: NEVER scales DOWN, only UP or keep same")
+
+                for sym in sorted(symbols_in_rows):
+                    si = get_symbol_info(sym)
+                    if not si:
+                        continue
+                    symbol_rows = [r for r in pending_rows
+                                   if (_raw_first_key(r, 'symbol') or '').strip() == sym]
+                    if not symbol_rows:
+                        continue
+
+                    print(f"\n  🔹 Linear Scaling {sym} "
+                          f"(independent target: ${per_symbol_target:.2f}):")
+
+                    stepup_linear, stepdown_linear = group_rows_by_linear(symbol_rows)
+
+                    first_row = symbol_rows[0]
+                    first_vol = _coerce_float(_raw_first_key(first_row, 'volume'), default=0.01) or 0.01
+                    leader_amount = 0.0
+                    if martingale_factor == 'profit_factor':
+                        per_lot = _reward_per_lot_from_programme_rr(first_row, si, programme_rr)
+                        if per_lot > 0:
+                            leader_amount = per_lot * first_vol - per_symbol_target
+                            if leader_amount < 0:
+                                leader_amount = per_symbol_target * 0.01
+                            print(f"     LEADER reward after recovery: ${leader_amount:.2f}")
+                    else:
+                        per_lot = _risk_per_lot(first_row, si)
+                        if per_lot > 0:
+                            leader_amount = per_lot * first_vol
+                            print(f"     LEADER risk: ${leader_amount:.2f}")
+
+                    if leader_amount <= 0:
+                        print(f"     No valid leader amount for {sym}")
+                        continue
+
+                    def apply_linear(linear_group, name):
+                        if not linear_group:
+                            return
+                        print(f"\n     📊 {name.upper()} LINEAR SCALING ({len(linear_group)} orders):")
+                        prev_amount = None
+                        for item in linear_group:
+                            row = item['order']
+                            rid = _coerce_int(_raw_first_key(row, 'id'))
+                            entry = _coerce_float(_raw_first_key(row, 'entry'), default=None)
+                            vol = _coerce_float(_raw_first_key(row, 'volume'), default=0.01) or 0.01
+                            ot = (_raw_first_key(row, 'ordertype') or '').lower()
+                            if entry is None:
+                                continue
+
+                            if martingale_factor == 'profit_factor':
+                                per_lot = _reward_per_lot_from_programme_rr(row, si, programme_rr)
+                            else:
+                                per_lot = _risk_per_lot(row, si)
+                            if per_lot <= 0:
+                                continue
+                            amount = per_lot * vol
+
+                            if prev_amount is None:
+                                print(f"        🔹 Order #{rid} (LEADER) amount=${amount:.2f} vol={vol:.2f}")
+                                prev_amount = amount
+                                continue
+
+                            if amount >= prev_amount:
+                                print(f"        #{rid}: already ≥ target (${amount:.2f} vs ${prev_amount:.2f}) — keep")
+                                prev_amount = amount
+                                continue
+
+                            needed_amount = prev_amount
+                            needed_vol = needed_amount / per_lot
+                            step = float(getattr(si, 'volume_step', 0.01)) or 0.01
+                            min_vol = float(getattr(si, 'volume_min', 0.01)) or 0.01
+                            steps = round(needed_vol / step)
+                            needed_vol = max(min_vol, round(steps * step, 2))
+
+                            order_for_margin = {"symbol": sym, "entry": entry,
+                                                "ordertype": ot}
+                            side = "buy" if 'buy' in ot else "sell"
+                            valid_vol, margin, free_margin, ok, shrunk, reason = \
+                                _validate_single_order_margin(order_for_margin, side,
+                                                              needed_vol, buffer_pct=10.0)
+                            if not ok or valid_vol <= 0:
+                                print(f"        ⚠️ #{rid}: LEVERAGE failed — keep current vol")
+                                prev_amount = amount
+                                continue
+                            if shrunk:
+                                print(f"        🔻 #{rid}: LEVERAGE shrink "
+                                      f"{needed_vol:.2f} → {valid_vol:.2f}")
+                                needed_vol = valid_vol
+                            if update_trade_volume(rid, needed_vol):
+                                nonlocal_updated[0] += 1
+                                print(f"        ✅ #{rid}: {vol:.2f} → {needed_vol:.2f} lots "
+                                      f"(cascade to ${needed_amount:.2f})")
+                                prev_amount = needed_amount
+                            else:
+                                prev_amount = amount
+
+                    nonlocal_updated = [0]
+                    if stepup_linear:
+                        apply_linear(stepup_linear, "STEPUP")
+                    if stepdown_linear:
+                        apply_linear(stepdown_linear, "STEPDOWN")
+                    rows_updated_vol += nonlocal_updated[0]
+
+        # ------------------------------------------------------------------
+        # STEP 3: MT5 reconciliation (cancel mismatches)
+        # ------------------------------------------------------------------
+        print(f"\n{'='*60}")
+        print(f"  🗑️ CHECKING MT5 PENDING ORDERS")
+        print(f"{'='*60}")
+
+        pending_rows = investor_fetch_pending_trades(
+            investor_id, sub_account_id, programme_id)
+
+        system_analysis_results = {}
+        for row in pending_rows:
+            sym = (_raw_first_key(row, 'symbol') or '').strip()
+            if not sym:
+                continue
+            si = get_symbol_info(sym)
+            if not si:
+                continue
+            entry = _coerce_float(_raw_first_key(row, 'entry'), default=None)
+            sl = _coerce_float(_raw_first_key(row, 'stoploss'), default=None)
+            vol = _coerce_float(_raw_first_key(row, 'volume'), default=0.0) or 0.0
+            if entry is None or sl is None or vol <= 0:
+                continue
+            per_lot_risk = abs(entry - sl) * float(getattr(si, 'trade_contract_size', 1.0))
+            risk = per_lot_risk * vol
+            if martingale_factor == 'profit_factor':
+                reward = risk * float(programme_rr)
+                system_analysis_results[sym] = {
+                    'volume': vol, 'risk': risk, 'reward': reward,
+                }
+            else:
+                system_analysis_results[sym] = {
+                    'volume': vol, 'risk': risk, 'reward': 0.0,
+                }
+
+        print(f"\n  📊 System Analysis Results:")
+        for sym, res in system_analysis_results.items():
+            if martingale_factor == 'profit_factor':
+                print(f"     {sym}: {res['volume']:.2f} lots | "
+                      f"risk ${res['risk']:.2f} → reward ${res['reward']:.2f}")
+            else:
+                print(f"     {sym}: {res['volume']:.2f} lots | "
+                      f"risk ${res['risk']:.2f}")
+
+        cancelled = 0
+        symbols_in_rows = set(system_analysis_results.keys())
+        if symbols_in_rows:
+            mt5_orders = mt5_pending_orders_for_symbols(list(symbols_in_rows))
+            for order in mt5_orders:
+                sym = order.symbol
+                order_ticket = order.ticket
+                volume = float(getattr(order, 'volume_current', None)
+                               or getattr(order, 'volume_initial', 0) or 0)
+                entry_o = float(order.price_open)
+                sl_o = float(order.sl) if order.sl else None
+                magic = getattr(order, 'magic', None)
+
+                sys_res = system_analysis_results.get(sym)
+                if sys_res is None:
+                    print(f"  ❌ {sym} ticket#{order_ticket}: symbol not in system analysis — DELETE")
+                    try:
+                        req = {"action": mt5.TRADE_ACTION_REMOVE, "order": order_ticket}
+                        res = mt5_order_send(req)
+                        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                            cancelled += 1
+                            if magic is not None and int(magic) > 0:
+                                row_id = None
+                                for r in pending_rows:
+                                    if _coerce_int(_raw_first_key(r, 'tradeid')) == int(magic):
+                                        row_id = _coerce_int(_raw_first_key(r, 'id'))
+                                        break
+                                if row_id is not None:
+                                    delete_trade_row(row_id)
+                                    rows_deleted += 1
+                    except Exception as e:
+                        print(f"     delete error: {e}")
+                    continue
+
+                si = get_symbol_info(sym)
+                contract_size = float(getattr(si, 'trade_contract_size', 1.0)) if si else 1.0
+
+                if martingale_factor == 'profit_factor':
+                    if sl_o is None:
+                        continue
+                    live_risk = abs(entry_o - sl_o) * volume * contract_size
+                    live_amount = live_risk * float(programme_rr)
+                    sys_amount = sys_res['reward']
+                else:
+                    if sl_o is None:
+                        continue
+                    live_amount = abs(entry_o - sl_o) * volume * contract_size
+                    sys_amount = sys_res['risk']
+
+                sys_vol = sys_res['volume']
+                tolerance = 0.10
+                amount_match = (abs(live_amount - sys_amount) / sys_amount <= tolerance
+                                if sys_amount > 0 else False)
+                volume_match = abs(volume - sys_vol) <= 0.001
+
+                if amount_match and volume_match:
+                    print(f"  ✓ {sym} ticket#{order_ticket}: PRESERVED "
+                          f"(amount ${live_amount:.2f} ≈ ${sys_amount:.2f}, vol {volume:.2f})")
+                    continue
+
+                print(f"  ❌ {sym} ticket#{order_ticket}: mismatch "
+                      f"(amount ${live_amount:.2f} vs ${sys_amount:.2f}, "
+                      f"vol {volume:.2f} vs {sys_vol:.2f}) — DELETE")
+                try:
+                    req = {"action": mt5.TRADE_ACTION_REMOVE, "order": order_ticket}
+                    res = mt5_order_send(req)
+                    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                        cancelled += 1
+                        if magic is not None and int(magic) > 0:
+                            row_id = None
+                            for r in pending_rows:
+                                if _coerce_int(_raw_first_key(r, 'tradeid')) == int(magic):
+                                    row_id = _coerce_int(_raw_first_key(r, 'id'))
+                                    break
+                            if row_id is not None:
+                                delete_trade_row(row_id)
+                                rows_deleted += 1
+                except Exception as e:
+                    print(f"     delete error: {e}")
+
+        # ------------------------------------------------------------------
+        # STEP 4: restore MT5 orders not in DB (magic → tradeid)
+        # ------------------------------------------------------------------
+        symbols_in_rows = set()
+        for row in pending_rows:
+            sym = (_raw_first_key(row, 'symbol') or '').strip()
+            if sym:
+                symbols_in_rows.add(sym)
+
+        if symbols_in_rows:
+            mt5_orders = mt5_pending_orders_for_symbols(list(symbols_in_rows))
+            existing_tradeids = set()
+            for row in pending_rows:
+                tid = _coerce_int(_raw_first_key(row, 'tradeid'))
+                if tid is not None:
+                    existing_tradeids.add(tid)
+
+            type_map = {0: 'buy', 1: 'sell',
+                        2: 'buy-limit', 3: 'sell-limit',
+                        4: 'buy-stop', 5: 'sell-stop'}
+
+            for order in mt5_orders:
+                magic = getattr(order, 'magic', None)
+                if magic is None or int(magic) <= 0:
+                    continue
+                if int(magic) in existing_tradeids:
+                    continue
+
+                sym = order.symbol
+                typ = int(order.type)
+                ordertype = type_map.get(typ, 'buy-limit')
+                entry = float(order.price_open)
+                sl = float(order.sl) if order.sl else None
+                tp = float(order.tp) if order.tp else None
+                vol = float(getattr(order, 'volume_current', None)
+                            or getattr(order, 'volume_initial', 0) or 0)
+
+                restored = restore_trade_row(
+                    investor_id=investor_id,
+                    sub_account_id=sub_account_id,
+                    programme_id=programme_id,
+                    tradeid=int(magic),
+                    symbol=sym,
+                    ordertype=ordertype,
+                    entry=entry,
+                    stoploss=sl,
+                    takeprofit=tp,
+                    volume=vol,
+                    timeframe=(_raw_first_key(pending_rows[0], 'timeframe') or 'M1')
+                              if pending_rows else 'M1',
+                    trade_risk_reward=None,
+                )
+                if restored:
+                    existing_tradeids.add(int(magic))
+                    print(f"  ♻️ Restored MT5 order magic={magic} ({sym} {ordertype}) "
+                          f"→ programme_trades as tradeid={magic}, vol={vol:.2f}")
+
+        detail['rows_updated'] = rows_updated_vol
+        detail['rows_deleted'] = rows_deleted
+        detail['mt5_cancelled'] = cancelled
+
+        print(f"\n  📊 Investor {investor_id} summary: "
+              f"updated={rows_updated_vol} deleted={rows_deleted} cancelled={cancelled}")
+
+        return detail
+
+    # ==================================================================
+    # SECTION 8 — TOP-LEVEL ENUMERATION
+    # ==================================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─"*80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        stats['processing_success'] = False
+        martingale_alert['errors'] = list(stats['errors'])
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        martingale_alert['errors'] = []
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            stats['processing_success'] = False
+            martingale_alert['errors'] = list(stats['errors'])
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─"*80)
+
+    programme_cfg_cache = {}
+
+    def build_programme_cfg(programme_id, programme_name):
+        print(f"\n{'='*60}")
+        print(f"  📦 LOADING PROGRAMME CONFIGURATION (id={programme_id})")
+        print(f"{'='*60}")
+
+        config_rows = programme_fetch_martingale_config(programme_id)
+        if not config_rows:
+            print(f"  │ ⚠️ No martingale rows for programme {programme_id}")
+            return None
+
+        first = config_rows[0]
+        programme_rr = programme_fetch_signal_provider_risk_reward(programme_id)
+
+        cfg = {
+            'config_rows': config_rows,
+            'default_risk_rows': programme_fetch_default_risk_rows(programme_id),
+            'rr_cfg': programme_fetch_rr_config(programme_id),
+            'loss_streak_chances': programme_fetch_loss_streak_chances(programme_id),
+            'programme_rr': programme_rr,
+            'enable_martingale': to_bool(_raw_first_key(first, 'enable_martingale'), default=False),
+            'martingale_type': (_raw_first_key(first, 'martingale_type') or 'balance_based').strip(),
+            'martingale_factor': (_raw_first_key(first, 'martingale_factor') or 'stoploss_factor').strip(),
+            'recovery_adder_pct': parse_percent(_raw_first_key(first, 'martingale_loss_recovery_adder_percentage')),
+            'pre_drawdown_assumption': to_bool(_raw_first_key(first, 'pre_drawdown_assumption'), default=False),
+            'martingale_pre_scaling': to_bool(_raw_first_key(first, 'martingale_pre_scaling'), default=False),
+            'linear_scaling': to_bool(_raw_first_key(first, 'martingale_linear_scaling'), default=False),
+            'enable_retention': to_bool(_raw_first_key(first, 'enable_initial_risk_retention'), default=False),
+            'retention_pct': parse_percent(_raw_first_key(first, 'initial_risk_retention_percentage')),
+        }
+
+        print(f"  │ enable_martingale        : {cfg['enable_martingale']}")
+        print(f"  │ martingale_type          : {cfg['martingale_type']}")
+        print(f"  │ martingale_factor        : {cfg['martingale_factor']}")
+        if cfg['martingale_factor'] == 'profit_factor':
+            print(f"  │ programme_rr             : {cfg['programme_rr']}  "
+                  f"(risk → reward multiplier)")
+        print(f"  │ recovery_adder_pct       : {cfg['recovery_adder_pct']}%")
+        print(f"  │ pre_drawdown_assumption  : {cfg['pre_drawdown_assumption']}")
+        print(f"  │ martingale_pre_scaling   : {cfg['martingale_pre_scaling']}")
+        print(f"  │ linear_scaling           : {cfg['linear_scaling']}")
+        print(f"  │ enable_retention         : {cfg['enable_retention']} ({cfg['retention_pct']}%)")
+        print(f"  │ loss_streak_chances      : {cfg['loss_streak_chances']}")
+        print(f"  │ default_risk_rows        : {len(cfg['default_risk_rows'])}")
+        print(f"  │ rr_cfg                   : {cfg['rr_cfg']}")
+        print(f"{'='*60}\n")
+        return cfg
+
+    for job in jobs:
+        investor_id = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['investors_skipped'] += 1
+            continue
+
+        try:
+            if programme_id not in programme_cfg_cache:
+                programme_cfg_cache[programme_id] = build_programme_cfg(
+                    programme_id, programme_name)
+                stats['programmes_processed'] += 1
+            programme_cfg = programme_cfg_cache[programme_id]
+
+            if not programme_cfg:
+                print(f"\n ⏭️ Investor {investor_id}: no programme cfg — skipped")
+                stats['investors_skipped'] += 1
+                continue
+
+            detail = process_investor(investor_id, sub_account_id, programme_id,
+                                      programme_name, programme_cfg)
+            stats['details'].append(detail)
+            stats['investors_processed'] += 1
+
+            if not martingale_alert.get('programme_id'):
+                martingale_alert['programme_id'] = programme_id
+                martingale_alert['investor_id'] = investor_id
+                martingale_alert['stage'] = detail.get('stage', 0)
+                martingale_alert['stage_drawdown'] = detail.get('stage_drawdown', 0.0)
+                martingale_alert['total_drawdown'] = detail.get('drawdown', 0.0)
+                martingale_alert['sequence_next_risk'] = detail.get('sequence_next_risk', 0.0)
+                martingale_alert['mode'] = detail.get('mode')
+                martingale_alert['factor'] = detail.get('factor')
+                martingale_alert['programme_rr'] = detail.get('programme_rr')
+        except Exception as e:
+            print(f"\n[CRITICAL] martingale investor={investor_id}: {e}")
+            traceback.print_exc()
+            stats['errors'].append(f"investor={investor_id}: {e}")
+            stats['investors_skipped'] += 1
+
+    stats['rows_updated'] = sum(d.get('rows_updated', 0) for d in stats['details'])
+    stats['rows_restored'] = sum(d.get('rows_restored', 0) for d in stats['details'])
+    stats['mt5_cancelled'] = sum(d.get('mt5_cancelled', 0) for d in stats['details'])
+
+    martingale_alert['rows_updated'] = stats['rows_updated']
+    martingale_alert['rows_restored'] = stats['rows_restored']
+    martingale_alert['mt5_cancelled'] = stats['mt5_cancelled']
+    martingale_alert['errors'] = list(stats['errors'])
+
+    print(f"\n{'='*10} 🎰 MARTINGALE SUMMARY (DB) {'='*10}")
+    print(f"  Programmes processed: {stats['programmes_processed']}")
+    print(f"  Investors processed : {stats['investors_processed']}")
+    print(f"  Investors skipped   : {stats['investors_skipped']}")
+    print(f"  Rows volume-updated : {stats['rows_updated']}")
+    print(f"  Rows restored       : {stats['rows_restored']}")
+    print(f"  MT5 cancelled       : {stats['mt5_cancelled']}")
+    print(f"  Errors              : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+
+
+# ==============================================================================
+#  WORKER: one process per investor job (DB-driven)
+#
+#  MIRRORS process_single_investor_from_db_local ROUTING, BUT DB-ONLY.
+#
+#  Gate order (matches the local file's conditional routing):
+#    1. restricted_timerange_db  -> if restricted, skip everything else.
+#    2. recent_highest_balance_target_db -> populates recent_highest_alert.
+#    3. If recent_highest_alert['is_triggered'] -> skip every future
+#       trading stage (local file deletes open orders/positions at this
+#       point; the DB orchestrator will do the same once that stage is
+#       ported, via a DB-driven delete function).
+# ==============================================================================
+def process_single_investor_from_db(job):
+    """
+    DB version of process_single_investor_test_one_function().
+
+    Purpose: run ONLY the unauthorized-actions auditor against a single
+    investor so it can be tested solo without the rest of the pipeline.
+
+    No restriction gate. No alarm gate. No cleanup. Only the audit stage.
+    """
+
+    global unauthorized_alert
+
+    inv_db_id = job.get('investor_id')
     sub_id = job.get('sub_account_id')
     programme_id = job.get('programme_id')
     programme_name = job.get('programme_name') or ''
 
-    print(f"\n[START] ⚙️ Investor {inv_id} (sub {sub_id}) | "
+    print(f"\n[START][TEST] ⚙️ Unauthorized-actions-audit-only run for "
+          f"Investor {inv_db_id} (sub {sub_id}) | "
           f"programme '{programme_name}' (id={programme_id})")
 
     account_stats = {
-        'investor_id':   inv_id,
+        'investor_id':    inv_db_id,
         'sub_account_id': sub_id,
-        'programme_id':  programme_id,
-        'success': False,
-        'stages': {},
+        'programme_id':   programme_id,
+        'success':        False,
+        'stages':         {},
     }
 
     _worker_init()
 
     # ------------------------------------------------------------------
-    # MT5 CONNECT — must happen BEFORE any stage that reads MT5 state.
-    # Uses the REBRANDED terminal-path resolution (mirrors brokerdetails.py):
-    #   1. harvhub.Terminal_path — if the file exists on disk
-    #   2. Rebuild from server+login using brokerdetails' formula
+    # MT5 CONNECT
     # ------------------------------------------------------------------
-    mt5_ok = False
     try:
-        terminal_path = resolve_investor_terminal_path(inv_id, sub_id)
+        terminal_path = resolve_investor_terminal_path(inv_db_id, sub_id)
         print(f"[MT5-PATH] final resolved terminal = {terminal_path}")
 
         mt5_ok = mt5_connect(terminal_path=terminal_path, timeout_ms=15000)
         if mt5_ok:
             print(f"[MT5] ✅ Connected "
                   f"({'custom path' if terminal_path else 'default install'}) "
-                  f"for investor {inv_id} (sub {sub_id})")
+                  f"for investor {inv_db_id} (sub {sub_id})")
         else:
             print(f"[MT5] ⚠️ mt5_connect returned False "
                   f"(last_error={mt5_last_error()})")
     except Exception as e:
         print(f"[MT5] ⚠️ mt5_connect raised: {e}")
-        mt5_ok = False
 
     try:
-        # =====================================================================
-        # 1. RESTRICTED TIMERANGE (Restricted Dates first, then Days)
-        # =====================================================================
-        timerange_stats = run_stage(
-            'restricted_timerange',
-            restricted_timerange,
-            inv_id=inv_id,
+        # ==============================================================
+        # UNAUTHORIZED-ACTIONS AUDIT — THE ONLY STAGE
+        # ==============================================================
+        audit_stats = run_stage(
+            'check_and_record_unauthorized_actions_db',
+            check_and_record_unauthorized_actions_db,
+            inv_db_id=inv_db_id,
         )
-        account_stats['stages']['restricted_timerange'] = timerange_stats
-        account_stats['restricted_timerange_stats'] = timerange_stats
-
-        # =====================================================================
-        # 2. RECENT HIGHEST BALANCE TARGET + DAILY TARGET REVENUE (DB-driven)
-        # =====================================================================
-        recent_balance_stats = run_stage(
-            'recent_highest_balance_target',
-            recent_highest_balance_target,
-            inv_id=inv_id,
-        )
-        account_stats['stages']['recent_highest_balance_target'] = recent_balance_stats
-        account_stats['recent_highest_balance_stats'] = recent_balance_stats
+        account_stats['stages']['check_and_record_unauthorized_actions_db'] = audit_stats
+        account_stats['unauthorized_actions_stats'] = audit_stats
 
         account_stats['success'] = bool(
-            timerange_stats.get('processing_success', False)
-            and recent_balance_stats.get('processing_success', False)
+            audit_stats.get('processing_success', False)
         )
 
-        # =====================================================================
-        # FUTURE FUNCTIONS — insert here, in priority order.
-        # =====================================================================
-        #
-        # from programmetrades_impl import (
-        #     fetch_ohlc_data_for_investor,
-        #     directional_bias,
-        #     additional_candles_for_orders_limitation,
-        #     create_position_hedge,
-        #     symbols_dynamic_grid_prices,
-        #     manage_each_direction_levels_count_in_json,
-        #     deduplicate_orders,
-        #     validate_strategy_authorized_orders,
-        #     backup_limit_orders,
-        #     populate_orders_missing_fields,
-        #     calculate_investor_symbols_orders,
-        #     live_usd_risk_and_scaling,
-        #     apply_default_prices,
-        #     martingale_system,
-        #     padding_stoploss_below_minimum_risk_to_maximum_risk,
-        #     maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal,
-        #     pending_orders_per_symbol_limitation,
-        #     chunk_orders_with_volume_beyond_max,
-        #     place_usd_orders,
-        #     manage_position_and_pending_orders,
-        #     manage_single_position_and_pending,
-        #     close_unauthorized_orders,
-        #     orders_reward_correction,
-        #     check_pending_orders_risk,
-        #     apply_dynamic_breakeven,
-        #     check_and_record_unauthorized_actions,
-        #     trades_analytics,
-        # )
-        #
-        # ---------------------------------------------------------------------
-        # Always-run stages:
-        # ---------------------------------------------------------------------
-        # account_stats['stages']['check_and_record_unauthorized_actions'] = run_stage(
-        #     'check_and_record_unauthorized_actions',
-        #     check_and_record_unauthorized_actions,
-        #     inv_id=inv_id,
-        # )
-        #
-        # ---------------------------------------------------------------------
-        # OHLC / directional bias block (when enabled):
-        # ---------------------------------------------------------------------
-        # account_stats['stages']['additional_candles_for_orders_limitation_1'] = run_stage(
-        #     'additional_candles_for_orders_limitation_1',
-        #     additional_candles_for_orders_limitation,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['fetch_ohlc_data_for_investor'] = run_stage(
-        #     'fetch_ohlc_data_for_investor',
-        #     fetch_ohlc_data_for_investor,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['directional_bias'] = run_stage(
-        #     'directional_bias',
-        #     directional_bias,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['additional_candles_for_orders_limitation_2'] = run_stage(
-        #     'additional_candles_for_orders_limitation_2',
-        #     additional_candles_for_orders_limitation,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['create_position_hedge'] = run_stage(
-        #     'create_position_hedge',
-        #     create_position_hedge,
-        #     inv_id=inv_id,
-        # )
-        #
-        # ---------------------------------------------------------------------
-        # Grid block (when enabled):
-        # ---------------------------------------------------------------------
-        # account_stats['stages']['symbols_dynamic_grid_prices'] = run_stage(
-        #     'symbols_dynamic_grid_prices',
-        #     symbols_dynamic_grid_prices,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['manage_each_direction_levels_count_in_json'] = run_stage(
-        #     'manage_each_direction_levels_count_in_json',
-        #     manage_each_direction_levels_count_in_json,
-        #     inv_id=inv_id,
-        # )
-        #
-        # ---------------------------------------------------------------------
-        # Order pipeline:
-        # ---------------------------------------------------------------------
-        # account_stats['stages']['deduplicate_orders'] = run_stage(
-        #     'deduplicate_orders', deduplicate_orders, inv_id=inv_id,
-        # )
-        # account_stats['stages']['validate_strategy_authorized_orders'] = run_stage(
-        #     'validate_strategy_authorized_orders',
-        #     validate_strategy_authorized_orders, inv_id=inv_id,
-        # )
-        # account_stats['stages']['backup_limit_orders'] = run_stage(
-        #     'backup_limit_orders', backup_limit_orders, inv_id=inv_id,
-        # )
-        # account_stats['stages']['populate_orders_missing_fields'] = run_stage(
-        #     'populate_orders_missing_fields',
-        #     populate_orders_missing_fields, inv_id=inv_id,
-        # )
-        # account_stats['stages']['calculate_investor_symbols_orders'] = run_stage(
-        #     'calculate_investor_symbols_orders',
-        #     calculate_investor_symbols_orders, inv_id=inv_id,
-        # )
-        # account_stats['stages']['live_usd_risk_and_scaling'] = run_stage(
-        #     'live_usd_risk_and_scaling',
-        #     live_usd_risk_and_scaling, inv_id=inv_id,
-        # )
-        # account_stats['stages']['apply_default_prices'] = run_stage(
-        #     'apply_default_prices', apply_default_prices, inv_id=inv_id,
-        # )
-        # account_stats['stages']['martingale_system'] = run_stage(
-        #     'martingale_system', martingale_system, inv_id=inv_id,
-        # )
-        # account_stats['stages']['padding_stoploss_below_minimum_risk_to_maximum_risk'] = run_stage(
-        #     'padding_stoploss_below_minimum_risk_to_maximum_risk',
-        #     padding_stoploss_below_minimum_risk_to_maximum_risk,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal'] = run_stage(
-        #     'maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal',
-        #     maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal,
-        #     inv_id=inv_id,
-        # )
-        # account_stats['stages']['pending_orders_per_symbol_limitation'] = run_stage(
-        #     'pending_orders_per_symbol_limitation',
-        #     pending_orders_per_symbol_limitation, inv_id=inv_id,
-        # )
-        # account_stats['stages']['chunk_orders_with_volume_beyond_max'] = run_stage(
-        #     'chunk_orders_with_volume_beyond_max',
-        #     chunk_orders_with_volume_beyond_max, inv_id=inv_id,
-        # )
-        # account_stats['stages']['place_usd_orders'] = run_stage(
-        #     'place_usd_orders', place_usd_orders, inv_id=inv_id,
-        # )
-        #
-        # ---------------------------------------------------------------------
-        # Grid runtime block (when enabled):
-        # ---------------------------------------------------------------------
-        # account_stats['stages']['manage_position_and_pending_orders'] = run_stage(
-        #     'manage_position_and_pending_orders',
-        #     manage_position_and_pending_orders, inv_id=inv_id,
-        # )
-        # account_stats['stages']['manage_single_position_and_pending'] = run_stage(
-        #     'manage_single_position_and_pending',
-        #     manage_single_position_and_pending, inv_id=inv_id,
-        # )
-        #
-        # ---------------------------------------------------------------------
-        # Closing / cleanup:
-        # ---------------------------------------------------------------------
-        # account_stats['stages']['close_unauthorized_orders'] = run_stage(
-        #     'close_unauthorized_orders', close_unauthorized_orders, inv_id=inv_id,
-        # )
-        # account_stats['stages']['orders_reward_correction'] = run_stage(
-        #     'orders_reward_correction', orders_reward_correction, inv_id=inv_id,
-        # )
-        # account_stats['stages']['check_pending_orders_risk'] = run_stage(
-        #     'check_pending_orders_risk', check_pending_orders_risk, inv_id=inv_id,
-        # )
-        # account_stats['stages']['apply_dynamic_breakeven'] = run_stage(
-        #     'apply_dynamic_breakeven', apply_dynamic_breakeven, inv_id=inv_id,
-        # )
-        # account_stats['stages']['check_and_record_unauthorized_actions_final'] = run_stage(
-        #     'check_and_record_unauthorized_actions_final',
-        #     check_and_record_unauthorized_actions, inv_id=inv_id,
-        # )
-        # account_stats['stages']['trades_analytics'] = run_stage(
-        #     'trades_analytics', trades_analytics, inv_id=inv_id,
-        # )
-
     except Exception as e:
-        print(f"[CRITICAL ERROR] investor={inv_id}: {e}")
+        print(f"[CRITICAL ERROR][TEST] investor={inv_db_id}: {e}")
         traceback.print_exc()
         account_stats['success'] = False
         account_stats['error'] = str(e)
@@ -3423,6 +5899,282 @@ def process_single_investor(job):
 
     return account_stats
 
+def process_single_investor_from_db_(job):
+    """
+    DB version of process_single_investor_local().
+
+    Mirrors the LOCAL file's stage order exactly:
+        gate 1 (restriction)  -> skip-all + delete_all_orders_and_positions
+        gate 2 (alarm)        -> skip-all + delete_all_orders_and_positions
+        else                  -> full trading pipeline in local's exact order
+
+    Grid is out of scope: every grid-only stage is dropped from the pipeline
+    (they were previously behind `if grid_strategy_enabled:` in local).
+
+    Every stage that has not yet been ported to DB is present as a
+    commented stub, positioned exactly where the local file calls it.
+    Uncomment as each DB stage becomes available.
+
+    Note: `check_and_record_unauthorized_actions` and `trades_analytics`
+    are called TWICE in the local file (top and bottom of the pipeline).
+    That duplication is preserved here. Both calls are now live against
+    the DB port `check_and_record_unauthorized_actions_db`.
+    """
+
+    global martingale_alert
+    global unauthorized_alert
+
+    inv_db_id = job.get('investor_id')
+    sub_id = job.get('sub_account_id')
+    programme_id = job.get('programme_id')
+    programme_name = job.get('programme_name') or ''
+
+    print(f"\n[START] ⚙️ Investor {inv_db_id} (sub {sub_id}) | "
+          f"programme '{programme_name}' (id={programme_id})")
+
+    account_stats = {
+        'investor_id':    inv_db_id,
+        'sub_account_id': sub_id,
+        'programme_id':   programme_id,
+        'success':        False,
+        'restricted':     False,
+        'restricted_kind': None,
+        'restricted_window': None,
+        'restricted_day': None,
+        'alarm_hit':      False,
+        'alarm_mode':     None,
+        'alarm_details':  None,
+        'unauthorized_hit': False,
+        'unauthorized_types': [],
+        'account_mode':   'UNKNOWN',
+        'account_type':   'UNKNOWN',
+        'is_real_account': False,
+        'stages': {},
+    }
+
+    _worker_init()
+
+    # ------------------------------------------------------------------
+    # MT5 CONNECT
+    # ------------------------------------------------------------------
+    mt5_ok = False
+    try:
+        terminal_path = resolve_investor_terminal_path(inv_db_id, sub_id)
+        print(f"[MT5-PATH] final resolved terminal = {terminal_path}")
+
+        mt5_ok = mt5_connect(terminal_path=terminal_path, timeout_ms=15000)
+        if mt5_ok:
+            print(f"[MT5] ✅ Connected "
+                  f"({'custom path' if terminal_path else 'default install'}) "
+                  f"for investor {inv_db_id} (sub {sub_id})")
+        else:
+            print(f"[MT5] ⚠️ mt5_connect returned False "
+                  f"(last_error={mt5_last_error()})")
+    except Exception as e:
+        print(f"[MT5] ⚠️ mt5_connect raised: {e}")
+        mt5_ok = False
+
+    try:
+        # ==================================================================
+        # ACCOUNT INFO / TYPE (mirrors local's account_mode classification)
+        # ==================================================================
+        try:
+            acc = mt5_account_info()
+            if acc is not None:
+                account_stats['account_type'] = 'REAL' if getattr(acc, 'trade_mode', 0) == 0 else 'DEMO'
+                account_stats['account_mode'] = 'real' if getattr(acc, 'trade_mode', 0) == 0 else 'demo'
+                account_stats['is_real_account'] = bool(getattr(acc, 'trade_mode', 0) == 0)
+                print(f"[{inv_db_id}] Account mode: {account_stats['account_mode'].upper()} "
+                      f"({account_stats['account_type']})")
+        except Exception as acc_err:
+            print(f"[{inv_db_id}] ⚠️ account_info failed: {acc_err}")
+
+        # ==================================================================
+        # GATE 1 — RESTRICTED TIMERANGE
+        # ==================================================================
+        timerange_stats = run_stage(
+            'restricted_timerange_db',
+            restricted_timerange_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['restricted_timerange_db'] = timerange_stats
+        account_stats['restricted_timerange_db_stats'] = timerange_stats
+
+        verdict = _programme_restriction_verdict(timerange_stats, programme_id)
+        is_restricted_now = bool(verdict.get('is_restricted'))
+
+        if is_restricted_now:
+            _restriction_skip_banner(
+                inv_db_id=inv_db_id,
+                sub_id=sub_id,
+                programme_id=programme_id,
+                programme_name=programme_name,
+                verdict=verdict,
+            )
+
+            # --- Local CONDITION B/C: cleanup only ---
+            # delete_all_orders_and_positions(inv_db_id=inv_db_id)
+            # ^^^ DB port not yet available. Uncomment when ready.
+
+            account_stats['restricted'] = True
+            account_stats['restricted_kind'] = verdict.get('kind')
+            account_stats['restricted_window'] = verdict.get('window_desc')
+            account_stats['restricted_day'] = verdict.get('day_name')
+            account_stats['success'] = True
+            return account_stats
+
+        account_stats['restricted'] = False
+
+        # ==================================================================
+        # GATE 2 — RECENT HIGHEST BALANCE TARGET + DAILY-TARGET ALARM
+        # ==================================================================
+        recent_balance_stats = run_stage(
+            'recent_highest_balance_target_db',
+            recent_highest_balance_target_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['recent_highest_balance_target_db'] = recent_balance_stats
+        account_stats['recent_highest_balance_stats'] = recent_balance_stats
+
+        alert = recent_highest_alert or {}
+        alarm_hit = bool(alert.get('is_triggered'))
+
+        if alarm_hit:
+            _daily_target_alarm_banner(
+                inv_db_id=inv_db_id,
+                sub_id=sub_id,
+                programme_id=programme_id,
+                programme_name=programme_name,
+                alert=alert,
+            )
+
+            # --- Local: if recent_highest_hit -> delete_all_orders_and_positions ---
+            # delete_all_orders_and_positions(inv_db_id=inv_db_id)
+            # ^^^ DB port not yet available. Uncomment when ready.
+
+            account_stats['alarm_hit'] = True
+            account_stats['alarm_mode'] = (
+                "PRE-PENDING" if alert.get('pre_pending_enabled') else "DAILY"
+            )
+            account_stats['alarm_details'] = {
+                'daily_target_owed': alert.get('daily_target_owed'),
+                'pre_pending_total': alert.get('pre_pending_total'),
+                'total_all_debt':    alert.get('total_all_debt'),
+                'effective_today':   alert.get('effective_today'),
+                'action':            alert.get('action'),
+            }
+            account_stats['success'] = True
+            return account_stats
+
+        account_stats['alarm_hit'] = False
+
+        # ==================================================================
+        # CONDITION A — NO RESTRICTIONS: RUN THE FULL TRADING PIPELINE
+        # ==================================================================
+        print(f"  ✅ Trading allowed for {inv_db_id}")
+
+        # ------------------------------------------------------------------
+        # A1. Stages that ALWAYS run (top of local's Condition A)
+        # ------------------------------------------------------------------
+        audit_stats_top = run_stage(
+            'check_and_record_unauthorized_actions_db',
+            check_and_record_unauthorized_actions_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['check_and_record_unauthorized_actions_db_top'] = audit_stats_top
+        account_stats['unauthorized_actions_stats_top'] = audit_stats_top
+
+        # delete_unauthorized_symbol_files(inv_db_id=inv_db_id)
+        # ^^^ DB port not yet available. Uncomment when ready.
+
+        # OHLC and GRID callings or executions are not needed in this!!!
+        # regardless of them present in the local process single investor
+        # don't include them here.
+
+        # ------------------------------------------------------------------
+        # A2. Stages that ALWAYS run (middle of local's Condition A)
+        # ------------------------------------------------------------------
+        # deduplicate_orders(inv_db_id=inv_db_id)
+        # validate_strategy_authorized_orders(inv_db_id=inv_db_id)
+        # backup_limit_orders(inv_db_id=inv_db_id)
+        # populate_orders_missing_fields(inv_db_id=inv_db_id)
+        # calculate_investor_symbols_orders(inv_db_id=inv_db_id)
+        # live_usd_risk_and_scaling(inv_db_id=inv_db_id)
+        # apply_default_prices(inv_db_id=inv_db_id)
+        # ^^^ DB ports not yet available. Uncomment when ready.
+
+        # ------------------------------------------------------------------
+        # A5. MARTINGALE — same position as the local file.
+        # ------------------------------------------------------------------
+        martingale_stats = run_stage(
+            'martingale_system_db',
+            martingale_system_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['martingale_system_db'] = martingale_stats
+        account_stats['martingale_stats'] = martingale_stats
+
+        # ------------------------------------------------------------------
+        # A6. Stages that ALWAYS run (after martingale in local)
+        # ------------------------------------------------------------------
+        # padding_stoploss_below_minimum_risk_to_maximum_risk(inv_db_id=inv_db_id)
+        # maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_db_id=inv_db_id)
+        # pending_orders_per_symbol_limitation(inv_db_id=inv_db_id)
+        # chunk_orders_with_volume_beyond_max(inv_db_id=inv_db_id)
+        # place_usd_orders(inv_db_id=inv_db_id)
+        # ^^^ DB ports not yet available. Uncomment when ready.
+
+        # ------------------------------------------------------------------
+        # A7. GRID-gated manage block — OUT OF SCOPE.
+        # ------------------------------------------------------------------
+
+        # ------------------------------------------------------------------
+        # A8. Stages that ALWAYS run (tail of local's Condition A)
+        # ------------------------------------------------------------------
+        # close_unauthorized_orders(inv_db_id=inv_db_id)
+        # orders_reward_correction(inv_db_id=inv_db_id)
+        # check_pending_orders_risk(inv_db_id=inv_db_id)
+        # apply_dynamic_breakeven(inv_db_id=inv_db_id)
+
+        # 2nd call, same as local
+        audit_stats_tail = run_stage(
+            'check_and_record_unauthorized_actions_db',
+            check_and_record_unauthorized_actions_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['check_and_record_unauthorized_actions_db_tail'] = audit_stats_tail
+        account_stats['unauthorized_actions_stats_tail'] = audit_stats_tail
+
+        # trades_analytics(inv_db_id=inv_db_id)
+        # ^^^ DB port not yet available. Uncomment when ready.
+
+        # Surface the auditor's verdict on the account_stats
+        ua = unauthorized_alert or {}
+        account_stats['unauthorized_hit'] = bool(ua.get('is_triggered'))
+        account_stats['unauthorized_types'] = list(ua.get('unauthorized_types') or [])
+
+        account_stats['success'] = True
+        print(f"[SUCCESS] Finished full pipeline execution context for "
+              f"Investor {inv_db_id} ({account_stats['account_mode']})")
+
+    except Exception as e:
+        print(f"[CRITICAL ERROR] investor={inv_db_id}: {e}")
+        traceback.print_exc()
+        account_stats['success'] = False
+        account_stats['error'] = str(e)
+
+    finally:
+        try:
+            mt5_disconnect()
+        except Exception:
+            pass
+        try:
+            if _db is not None:
+                _db.release_channel()
+        except Exception:
+            pass
+
+    return account_stats
 
 # ==============================================================================
 #  ORCHESTRATOR — DB-driven, no local folders
@@ -3495,7 +6247,7 @@ def main_loop():
 
                 t0 = time.time()
                 async_jobs = [
-                    pool.apply_async(process_single_investor, args=(job,))
+                    pool.apply_async(process_single_investor_from_db, args=(job,))
                     for job in jobs
                 ]
 

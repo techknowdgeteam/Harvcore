@@ -4430,7 +4430,7 @@ def move_fetched_investors():
     
     return True
 
-def check_and_record_unauthorized_actions(inv_id=None):
+def check_and_record_unauthorized_actions_local_version(inv_id=None):
     """
     Check and record authorized/unauthorized actions for investors based on Magic Number only.
     
@@ -34585,7 +34585,7 @@ def process_single_investor(inv_folder):
         # CONDITION A: OUTSIDE RESTRICTED TIME RANGE -> EXECUTE ALL ENGINES
         # =====================================================================
         #trades_analytics(inv_id=inv_id)
-        #check_and_record_unauthorized_actions(inv_id=inv_id)
+        #check_and_record_unauthorized_actions_local_version(inv_id=inv_id)
         symbols_dynamic_grid_prices(inv_id=inv_id)
         #recent_highest_balance_target_local_version(inv_id=inv_id)
         martingale_system_local_version(inv_id=inv_id)
@@ -34953,7 +34953,7 @@ def process_single_investor_local(inv_folder):
                 # =================================================================
                 # FUNCTIONS THAT ALWAYS RUN (REGARDLESS OF ANY STRATEGY)
                 # =================================================================
-                check_and_record_unauthorized_actions(inv_id=inv_id)
+                check_and_record_unauthorized_actions_local_version(inv_id=inv_id)
                 delete_unauthorized_symbol_files(inv_id=inv_id)
 
                 # =================================================================
@@ -35025,7 +35025,7 @@ def process_single_investor_local(inv_folder):
                 #history_closed_orders_removal_in_pendingorders(inv_id=inv_id)
                 apply_dynamic_breakeven(inv_id=inv_id)
                 
-                check_and_record_unauthorized_actions(inv_id=inv_id)
+                check_and_record_unauthorized_actions_local_version(inv_id=inv_id)
                 trades_analytics(inv_id=inv_id)
 
                 account_stats["success"] = True
