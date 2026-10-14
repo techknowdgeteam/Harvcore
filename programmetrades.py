@@ -1115,59 +1115,52 @@ def fetch_programme_name(programme_id):
     return ''
 
 # ==============================================================================
-#  CHECK AND RECORD UNAUTHORIZED ACTIONS — DB version
+#  CHECK AND RECORD UNAUTHORIZED ACTIONS — DB version (tradeid-based)
 #
-#  Investor-scoped, MT5-facing, magic-number-driven.
+#  Investor-scoped, MT5-facing.
 #
 #  A trade (pending order, open position, or closed deal) is AUTHORIZED for
-#  an investor iff its `magic` is present in that investor's
-#  programme_trades.magic set. Otherwise it is UNAUTHORIZED.
+#  an investor iff its `magic` (as seen by MT5) is present in that
+#  investor's programme_trades.tradeid set for THIS programme.
 #
-#  On every run:
-#    * classify MT5 orders / positions / history deals as authorized or not
-#    * compute an expected current balance from an anchor + authorized P&L
-#    * detect an unaccounted deficit (MT5 < expected) → "unaccounted deficit"
-#    * write one row into `balance_log` for the current Lagos day
-#    * if any unauthorized action or deficit was detected, notify the
-#      investor's sub-account AND the programme owner (dedup per day, per
-#      kind) via the notification service
+#  Because the magic column has been dropped, MT5's `order.magic` is matched
+#  directly against programme_trades.tradeid. tradeid is a per-programme
+#  counter, so cross-programme collisions are impossible when the
+#  (programmeid, tradeid, owner) tuple is used as the lookup key.
 #
 #  Nothing here touches JSON files.
 # ==============================================================================
 def check_and_record_unauthorized_actions_db(inv_db_id=None):
     """
     Reads:
-        * programme_trades        -> this investor's authorized magic set
+        * programme_trades        -> this investor's authorized tradeid set
         * harvhub                 -> anchor (broker_balance, execution_start_date)
-                                     + current_balance semantics
+                                     + identity
         * balance_log             -> last known closing balance for continuity
         * MT5                     -> live orders / positions / history deals
 
     Writes:
-        * balance_log             -> one row per investor per Lagos day
-        * programme_notifications -> investor-side + programme-side alerts
-                                     via notification_service (dedup keyed)
+        * balance_log             -> ONE ROW PER LAGOS DAY from execution_start_date
+                                     through today (not just today)
+        * contract_notifications  -> INVESTOR-SIDE alert (per investor, per event)
+                                     via notification_service.record_contract_notification
+        * programme_notifications -> PROGRAMME-OWNER-SIDE aggregated alert
+                                     (one per programme per run) via
+                                     notification_service.record_programme_notification
 
-    Populates the module-global `unauthorized_alert` with:
-        {
-          'is_triggered': bool,
-          'investor_id': int,
-          'sub_account_id': int,
-          'programme_id': int,
-          'investor_authorized_magics': set,
-          'unauthorized_trades': [...],
-          'unauthorized_orders': [...],
-          'unauthorized_positions': [...],
-          'unauthorized_pnl_total': float,
-          'unaccounted_deficit': float,
-          'unauthorized_types': [...],
-          'application_status': str,
-          'errors': [...],
-        }
+        NOTE: NO DAY-LEVEL DEDUP on either side. A notification fires every
+        time unauthorized activity is detected.
+
+    ENFORCEMENT:
+        * Any MT5 pending order whose magic is NOT in the investor's
+          authorized tradeid set is CANCELLED immediately.
+        * Any MT5 open position whose magic is NOT in the investor's
+          authorized tradeid set is CLOSED immediately.
     """
 
     global unauthorized_alert
     from datetime import datetime, timedelta, timezone
+    import time as _time
 
     # ------------------------------------------------------------------
     # LAGOS TIMEZONE
@@ -1203,12 +1196,35 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         except Exception:
             return None
 
+    def lagos_date_str(dt):
+        if dt is None:
+            return None
+        try:
+            return dt.astimezone(LAGOS_TZ).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    def lagos_date_add(date_str, days):
+        try:
+            base = datetime.strptime(date_str, "%Y-%m-%d")
+            return (base + timedelta(days=days)).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    def lagos_daterange(start_str, end_str):
+        cur = start_str
+        guard = 0
+        while cur is not None and cur <= end_str and guard < 4000:
+            yield cur
+            cur = lagos_date_add(cur, 1)
+            guard += 1
+
     unauthorized_alert = {
         'is_triggered': False,
         'investor_id': inv_db_id if inv_db_id else 'all',
         'sub_account_id': None,
         'programme_id': None,
-        'investor_authorized_magics': set(),
+        'investor_authorized_tradeids': set(),
         'unauthorized_trades': [],
         'unauthorized_orders': [],
         'unauthorized_positions': [],
@@ -1228,7 +1244,9 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         'investors_processed': 0,
         'investors_with_unauthorized': 0,
         'unauthorized_orders_found': 0,
+        'unauthorized_orders_cancelled': 0,
         'unauthorized_positions_found': 0,
+        'unauthorized_positions_closed': 0,
         'unauthorized_trades_found': 0,
         'unaccounted_deficits_found': 0,
         'balance_log_rows_written': 0,
@@ -1239,29 +1257,101 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
     }
 
     # ==================================================================
+    # PROGRAMME-LEVEL VIOLATOR AGGREGATION
+    # ------------------------------------------------------------------
+    # One owner-side notification per programme per run. The owner's
+    # email is resolved here, at aggregation time, using a robust
+    # fallback chain (main account -> any harvhub row for that userid).
+    # ==================================================================
+    programme_violators = {}
+
+    def _register_programme_violator(
+        programme_id, programme_name,
+        investor_id, sub_account_id,
+        total_unauth_pnl, unauth_types,
+    ):
+        if not programme_id:
+            return
+        entry = programme_violators.setdefault(programme_id, {
+            'programme_name': programme_name or f"programme {programme_id}",
+            'violators': [],
+        })
+        if not entry['programme_name'] and programme_name:
+            entry['programme_name'] = programme_name
+        entry['violators'].append({
+            'investor_id': investor_id,
+            'sub_account_id': sub_account_id,
+            'pnl': float(total_unauth_pnl or 0.0),
+            'types': list(unauth_types or []),
+        })
+
+    # ==================================================================
     # SECTION 1 — PROGRAMME-SCOPED READERS
     # ==================================================================
-    def programme_fetch_owner_email(programme_id):
+    def programme_fetch_owner_identity(programme_id):
         """
-        Resolve the programme owner's email via programme.userid -> harvhub.email.
-        Returns (owner_email, programme_name) — both may be empty.
+        Resolve (owner_email, programme_name, owner_userid) for the programme.
+
+        Robust resolution strategy:
+          1. programme.program_name
+          2. programme.userid  -> harvhub.is_main_account = 1  (preferred)
+          3. programme.userid  -> any harvhub row (fallback)
+
+        Returns (owner_email, programme_name, owner_userid); any may be
+        empty/None.
         """
-        row = db_fetch_one(
-            """
-            SELECT p.program_name AS programme_name,
-                   h.email        AS owner_email
-              FROM programme p
-              LEFT JOIN harvhub h ON h.id = p.userid AND h.is_main_account = 1
-             WHERE p.id = %s
-             LIMIT 1
-            """,
+        prog_row = db_fetch_one(
+            "SELECT program_name, userid FROM programme WHERE id = %s LIMIT 1",
             [programme_id], timeout=10.0, quiet=True,
         )
-        if not row:
-            return '', ''
-        owner_email = (_pick_first_key(row, 'owner_email') or '').strip().lower()
-        programme_name = (_pick_first_key(row, 'programme_name') or '').strip()
-        return owner_email, programme_name
+        if not prog_row:
+            return '', '', None
+
+        programme_name = (
+            _pick_first_key(prog_row, 'program_name') or ''
+        ).strip()
+        owner_userid = _coerce_int(_raw_first_key(prog_row, 'userid'))
+
+        owner_email = ''
+        if owner_userid is not None and owner_userid > 0:
+            # Preferred: main account
+            main_row = db_fetch_one(
+                """
+                SELECT email FROM harvhub
+                 WHERE id = %s AND is_main_account = 1
+                 ORDER BY id ASC
+                 LIMIT 1
+                """,
+                [owner_userid], timeout=10.0, quiet=True,
+            )
+            if main_row:
+                owner_email = (
+                    _pick_first_key(main_row, 'email') or ''
+                ).strip().lower()
+
+            # Fallback: any harvhub row for this userid
+            if not owner_email:
+                any_row = db_fetch_one(
+                    """
+                    SELECT email FROM harvhub
+                     WHERE id = %s
+                       AND email IS NOT NULL
+                       AND email <> ''
+                     ORDER BY is_main_account DESC, id ASC
+                     LIMIT 1
+                    """,
+                    [owner_userid], timeout=10.0, quiet=True,
+                )
+                if any_row:
+                    owner_email = (
+                        _pick_first_key(any_row, 'email') or ''
+                    ).strip().lower()
+
+        if not owner_email:
+            print(f"      [NOTIF] ⚠️ Could not resolve owner email for "
+                  f"programme={programme_id} (userid={owner_userid})")
+
+        return owner_email, programme_name, owner_userid
 
     # ==================================================================
     # SECTION 2 — INVESTOR-SCOPED READERS
@@ -1280,7 +1370,6 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         return row or {}
 
     def investor_fetch_anchor(investor_id, sub_account_id):
-        """broker_balance = execution-start balance; also gives execution_start_date."""
         return db_fetch_one(
             """
             SELECT id, sub_account_id, broker_balance, execution_start_date
@@ -1291,49 +1380,40 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             [investor_id, sub_account_id], timeout=10.0, quiet=True,
         ) or {}
 
-    def investor_fetch_authorized_magics(investor_id, sub_account_id, programme_id):
-        """
-        Every pending programme_trades.magic for THIS investor under THIS
-        programme is an authorized magic. Anything MT5 shows with a
-        different magic is unauthorized.
-        """
+    def investor_fetch_authorized_tradeids(investor_id, sub_account_id, programme_id):
         rows = db_fetch_all(
             """
-            SELECT magic
+            SELECT tradeid
               FROM programme_trades
              WHERE userid = %s
                AND programmeid = %s
                AND investor_id = %s
                AND investor_sub_account_id = %s
                AND orderstatus = 'pending'
-               AND magic IS NOT NULL
+               AND tradeid IS NOT NULL
             """,
             [investor_id, programme_id, investor_id, sub_account_id],
             timeout=10.0, quiet=True,
         )
         out = set()
         for r in rows:
-            m = _coerce_int(_raw_first_key(r, 'magic'))
-            if m is not None and m > 0:
-                out.add(m)
+            t = _coerce_int(_raw_first_key(r, 'tradeid'))
+            if t is not None and t > 0:
+                out.add(t)
         return out
 
-    def balance_log_fetch_last_closing(investor_id, sub_account_id):
-        """Look up the last recorded closing balance for continuity."""
-        row = db_fetch_one(
+    def balance_log_fetch_day(investor_id, sub_account_id, date_str):
+        return db_fetch_one(
             """
-            SELECT date, day_closing_balance
+            SELECT id, date, day_starting_balance, day_closing_balance,
+                   day_authorized_trades_pnl, day_unauthorized_trades_pnl,
+                   unusual_activity
               FROM balance_log
-             WHERE userid = %s AND sub_account_id = %s
-             ORDER BY id DESC
+             WHERE userid = %s AND sub_account_id = %s AND date = %s
              LIMIT 1
             """,
-            [investor_id, sub_account_id], timeout=10.0, quiet=True,
-        )
-        if not row:
-            return None, None
-        return (_raw_first_key(row, 'date'),
-                _coerce_float(_raw_first_key(row, 'day_closing_balance'), default=None))
+            [investor_id, sub_account_id, date_str], timeout=10.0, quiet=True,
+        ) or {}
 
     def balance_log_upsert(investor_id, sub_account_id, date_str,
                            day_start_balance, auth_pnl, unauth_pnl,
@@ -1390,7 +1470,7 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             return ok, 'inserted'
 
     # ==================================================================
-    # SECTION 3 — MT5 READS (investor-scoped)
+    # SECTION 3 — MT5 READS
     # ==================================================================
     def mt5_history_deals_for_investor(execution_start_dt):
         if execution_start_dt is None:
@@ -1414,79 +1494,128 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             return []
 
     # ==================================================================
+    # SECTION 3b — MT5 ENFORCEMENT
+    # ==================================================================
+    def mt5_cancel_pending_order(order):
+        ticket = getattr(order, 'ticket', None)
+        if ticket is None:
+            return False, "no_ticket"
+        try:
+            req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(ticket)}
+            res = mt5_order_send(req)
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                return True, "cancelled"
+            if res:
+                return False, f"retcode={res.retcode} comment={getattr(res, 'comment', '')}"
+            return False, f"no_response last_error={mt5_last_error()}"
+        except Exception as e:
+            return False, f"exception: {e}"
+
+    def mt5_close_position(pos):
+        ticket = getattr(pos, 'ticket', None)
+        symbol = getattr(pos, 'symbol', None)
+        volume = getattr(pos, 'volume', None)
+        if ticket is None or not symbol or not volume:
+            return False, "missing_position_fields", None
+
+        tick = mt5_symbol_tick(symbol)
+        if tick is None:
+            return False, f"no_tick_for_{symbol}", None
+
+        if getattr(pos, 'type', None) == 0:
+            close_type = mt5.ORDER_TYPE_SELL if mt5 is not None else 1
+            close_price = tick.bid
+        else:
+            close_type = mt5.ORDER_TYPE_BUY if mt5 is not None else 0
+            close_price = tick.ask
+
+        attempts = [
+            {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": float(volume),
+                "type": close_type,
+                "position": int(ticket),
+                "price": float(close_price),
+                "deviation": 20,
+                "magic": int(getattr(pos, 'magic', 0) or 0),
+                "comment": "UNAUTH-CLOSE",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            },
+            {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": float(volume),
+                "type": close_type,
+                "position": int(ticket),
+                "price": float(close_price),
+                "deviation": 50,
+                "magic": int(getattr(pos, 'magic', 0) or 0),
+                "comment": "UNAUTH-CLOSE-RETRY",
+                "type_filling": mt5.ORDER_FILLING_RETURN,
+            },
+        ]
+        last_msg = "no_attempt"
+        for req in attempts:
+            try:
+                res = mt5_order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    return True, "closed", float(close_price)
+                if res:
+                    last_msg = f"retcode={res.retcode} comment={getattr(res, 'comment', '')}"
+                else:
+                    last_msg = f"no_response last_error={mt5_last_error()}"
+            except Exception as e:
+                last_msg = f"exception: {e}"
+        return False, last_msg, None
+
+    # ==================================================================
     # SECTION 4 — NOTIFICATION HOOKS
     # ==================================================================
-    def notify_investor_and_owner(investor_id, sub_account_id, programme_id,
-                                  investor_email, owner_email,
-                                  programme_name,
-                                  unauth_trades, unauth_orders,
-                                  unauth_positions, unauth_pnl,
-                                  unaccounted_deficit):
-        """
-        Fire investor-side + programme-side notifications about the
-        violations found. Uses record_programme_notification for BOTH
-        (the service exposes programme-scoped rows keyed by programme_id).
 
-        For investor-side we also use record_programme_notification with
-        the investor's own email — the row is scoped by
-        (programme_id, email), so the investor receives their own copy
-        while the owner receives theirs, without collision.
-        """
+    # ------------------------------------------------------------------
+    # INVESTOR-SIDE notification — contract-scoped.
+    #
+    # Investors live on contract_notifications, not programme_notifications.
+    # This uses record_contract_notification (not the _once variant) so
+    # it fires on EVERY detection — no day-level dedup.
+    # ------------------------------------------------------------------
+    def notify_investor_unauthorized(investor_id, sub_account_id,
+                                     investor_email, main_account_id):
+        if not investor_email or '@' not in investor_email:
+            print(f"      [NOTIF] investor email invalid — skip")
+            return 0
+
         try:
             from notification_service import (
-                record_programme_notification_once,
+                record_contract_notification,
             )
         except Exception as e:
             print(f"      [NOTIF] notification_service unavailable: {e}")
             return 0
 
-        today = lagos_today_str()
-        sent = 0
-
-        # ---- Build the human-readable summary once ----
-        parts = []
-        if unauth_trades:
-            parts.append(f"{len(unauth_trades)} unauthorized closed trade(s)")
-        if unauth_orders:
-            parts.append(f"{len(unauth_orders)} unauthorized pending order(s)")
-        if unauth_positions:
-            parts.append(f"{len(unauth_positions)} unauthorized open position(s)")
-        if unaccounted_deficit > 0.01:
-            parts.append(
-                f"an unaccounted balance deficit of ${unaccounted_deficit:.2f}"
-            )
-        if not parts:
-            return 0
-        summary = ", ".join(parts)
-
-        # ---- How severe? ----
-        # Any unauthorized trade / position / deficit → danger
-        # Only unauthorized pending orders → warning
-        if unauth_trades or unauth_positions or unaccounted_deficit > 0.01:
-            ntype = 'danger'
-            title_core = 'Unauthorized Actions Detected'
-        else:
-            ntype = 'warning'
-            title_core = 'Unauthorized Pending Orders Detected'
-
-        # ---- Investor-side message ----
-        investor_msg = (
-            f"We detected unauthorized actions on your programme "
-            f"'{programme_name}': {summary}. This means trades were "
-            f"placed outside the magic numbers issued by the programme. "
-            f"Please stop manual or third-party trading on this sub-account "
-            f"immediately to avoid contract violations."
+        message = (
+            "We detected unauthorized actions on your account. "
+            "This means trades were placed outside your contract trades. "
+            "Unfortunately your contract has been cancelled."
         )
+
+        event_id = f"{int(_time.time() * 1000)}"
         try:
-            nid = record_programme_notification_once(
+            nid = record_contract_notification(
                 _NOTIF_PDO,
-                int(programme_id),
-                investor_email,
                 {
-                    'notification_key': f'prog-unauth-investor-{programme_id}-{sub_account_id}-{today}',
-                    'title': title_core,
-                    'message': investor_msg,
-                    'type': ntype,
+                    'user_email': investor_email,
+                    'sub_account_id': int(sub_account_id),
+                    'main_account_id': int(main_account_id or 0),
+                    'notification_key': (
+                        f'contract-unauth-investor-{investor_id}-'
+                        f'{sub_account_id}-{event_id}'
+                    ),
+                    'title': 'Unauthorized Actions Detected',
+                    'message': message,
+                    'type': 'danger',
                     'section': 'Unauthorized',
                     'action_tab': 'activity',
                     'force': False,
@@ -1494,47 +1623,113 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
                 },
             )
             if nid:
-                sent += 1
-                print(f"      [NOTIF] investor {investor_email} notified (id={nid})")
-            else:
-                print(f"      [NOTIF] investor {investor_email} — already notified today (dedup)")
+                print(f"      [NOTIF] ✅ investor {investor_email} notified (id={nid})")
+                return 1
+            print(f"      [NOTIF] investor {investor_email} — record returned None")
+            return 0
         except Exception as e:
             print(f"      [NOTIF] investor notify failed: {e}")
+            return 0
 
-        # ---- Programme-owner message ----
-        if owner_email and '@' in owner_email:
-            owner_msg = (
-                f"Investor {investor_id} (sub-account {sub_account_id}) on "
-                f"programme '{programme_name}' has violated the contract "
-                f"agreement: {summary}. The investor's trading activity is "
-                f"outside the magic numbers your programme issued. Please "
-                f"review and take action."
+    # ------------------------------------------------------------------
+    # PROGRAMME-OWNER-SIDE aggregated notification — programme-scoped.
+    # Fires on EVERY detection run. No dedup.
+    #
+    # Wording: proper pluralisation ("investor" / "investors",
+    # "violator" / "violators"). No parenthesised "(s)" forms anywhere.
+    # ------------------------------------------------------------------
+    def notify_programme_owner_violators(
+        programme_id, programme_name, owner_email, violators,
+    ):
+        if not owner_email or '@' not in owner_email:
+            print(f"      [NOTIF] owner email missing/invalid for "
+                  f"programme={programme_id} — skip owner notify")
+            return 0
+        if not violators:
+            return 0
+
+        try:
+            from notification_service import (
+                record_programme_notification,
             )
-            try:
-                nid = record_programme_notification_once(
-                    _NOTIF_PDO,
-                    int(programme_id),
-                    owner_email,
-                    {
-                        'notification_key': f'prog-unauth-owner-{programme_id}-{sub_account_id}-{today}',
-                        'title': f'Contract Violation — Investor {investor_id}',
-                        'message': owner_msg,
-                        'type': 'danger',
-                        'section': 'Unauthorized',
-                        'action_tab': 'programme_investors',
-                        'force': False,
-                        'send_email': True,
-                    },
-                )
-                if nid:
-                    sent += 1
-                    print(f"      [NOTIF] owner {owner_email} notified (id={nid})")
-                else:
-                    print(f"      [NOTIF] owner {owner_email} — already notified today (dedup)")
-            except Exception as e:
-                print(f"      [NOTIF] owner notify failed: {e}")
+        except Exception as e:
+            print(f"      [NOTIF] notification_service unavailable: {e}")
+            return 0
 
-        return sent
+        count = len(violators)
+        violator_word = "violator" if count == 1 else "violators"
+        investor_word = "investor" if count == 1 else "investors"
+        have_word = "has" if count == 1 else "have"
+
+        profit_violators = [v for v in violators if (v.get('pnl') or 0.0) > 0.01]
+        noprofit_violators = [v for v in violators if (v.get('pnl') or 0.0) <= 0.01]
+
+        profit_count = len(profit_violators)
+        noprofit_count = len(noprofit_violators)
+
+        base = (
+            f"We detected {count} of your {programme_name} {investor_word} "
+            f"{have_word} violated the programme trades thus the "
+            f"{violator_word} {have_word} been paused and can no longer "
+            f"proceed with this contract."
+        )
+
+        clauses = []
+
+        if profit_count > 0:
+            profit_violator_word = (
+                "violator" if profit_count == 1 else "violators"
+            )
+            clauses.append(
+                f"Profit percentage made within the periods will be paid "
+                f"for the {profit_count} {profit_violator_word} that "
+                f"recorded profit."
+            )
+
+        if noprofit_count > 0:
+            noprofit_violator_word = (
+                "violator" if noprofit_count == 1 else "violators"
+            )
+            clauses.append(
+                f"Unfortunately no profit has been made for the "
+                f"{noprofit_count} {noprofit_violator_word} that did not "
+                f"record profit, so no profit percentage will be paid."
+            )
+
+        if not clauses:
+            clauses.append(
+                "No profit percentage is payable to the violator or violators."
+            )
+
+        message = base + " " + " ".join(clauses)
+
+        event_id = f"{int(_time.time() * 1000)}"
+        try:
+            nid = record_programme_notification(
+                _NOTIF_PDO,
+                int(programme_id),
+                owner_email,
+                {
+                    'notification_key': (
+                        f'prog-unauth-owner-{programme_id}-{event_id}'
+                    ),
+                    'title': 'Programme Contract Violation Detected',
+                    'message': message,
+                    'type': 'danger',
+                    'section': 'Unauthorized',
+                    'action_tab': 'programme_investors',
+                    'force': False,
+                    'send_email': True,
+                },
+            )
+            if nid:
+                print(f"      [NOTIF] ✅ owner {owner_email} notified (id={nid})")
+                return 1
+            print(f"      [NOTIF] owner {owner_email} — record returned None")
+            return 0
+        except Exception as e:
+            print(f"      [NOTIF] owner notify failed: {e}")
+            return 0
 
     # ==================================================================
     # SECTION 5 — PER-INVESTOR PIPELINE
@@ -1546,14 +1741,18 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             'programme_id': programme_id,
             'investor_email': None,
             'owner_email': None,
-            'authorized_magic_count': 0,
+            'main_account_id': 0,
+            'authorized_tradeid_count': 0,
             'unauthorized_orders': 0,
+            'unauthorized_orders_cancelled': 0,
             'unauthorized_positions': 0,
+            'unauthorized_positions_closed': 0,
             'unauthorized_trades': 0,
             'unauthorized_pnl_total': 0.0,
             'unaccounted_deficit': 0.0,
             'unauthorized_types': [],
             'balance_log_action': None,
+            'balance_log_days_written': 0,
             'notifications_sent': 0,
             'application_status': 'approved',
             'error': None,
@@ -1562,10 +1761,14 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         # -------- identity + anchor + programme owner --------
         identity = investor_fetch_identity(investor_id, sub_account_id)
         investor_email = (_pick_first_key(identity, 'email') or '').strip().lower()
+        main_account_id = _coerce_int(
+            _raw_first_key(identity, 'main_account_id')
+        ) or 0
         fullname = _pick_first_key(identity, 'fullname') or f"user{investor_id}"
         detail['investor_email'] = investor_email
+        detail['main_account_id'] = main_account_id
 
-        owner_email, prog_name = programme_fetch_owner_email(programme_id)
+        owner_email, prog_name, owner_userid = programme_fetch_owner_identity(programme_id)
         if not programme_name:
             programme_name = prog_name
         detail['owner_email'] = owner_email
@@ -1575,20 +1778,21 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
               f"programme '{programme_name}' (id={programme_id})")
         print(f"{'─'*72}")
         print(f"  │ Investor email      : {investor_email or '—'}")
-        print(f"  │ Programme owner     : {owner_email or '—'}")
+        print(f"  │ Programme owner     : {owner_email or '—'}"
+              f"{f' (userid={owner_userid})' if owner_userid else ''}")
 
-        # -------- authorized magic set --------
-        authorized_magics = investor_fetch_authorized_magics(
+        # -------- authorized tradeid set --------
+        authorized_tradeids = investor_fetch_authorized_tradeids(
             investor_id, sub_account_id, programme_id)
-        detail['authorized_magic_count'] = len(authorized_magics)
-        if authorized_magics:
-            sample = sorted(authorized_magics)[:8]
-            print(f"  │ Authorized magics   : {len(authorized_magics)} "
-                  f"(sample: {sample}{'…' if len(authorized_magics) > 8 else ''})")
+        detail['authorized_tradeid_count'] = len(authorized_tradeids)
+        if authorized_tradeids:
+            sample = sorted(authorized_tradeids)[:8]
+            print(f"  │ Authorized trade IDs: {len(authorized_tradeids)} "
+                  f"(sample: {sample}{'…' if len(authorized_tradeids) > 8 else ''})")
         else:
-            print(f"  │ Authorized magics   : NONE — every MT5 action will be flagged")
+            print(f"  │ Authorized trade IDs: NONE — every MT5 action will be flagged")
 
-        # -------- anchor: broker_balance = execution-start balance --------
+        # -------- anchor --------
         anchor = investor_fetch_anchor(investor_id, sub_account_id)
         broker_balance = _coerce_float(_raw_first_key(anchor, 'broker_balance'), default=None)
         execution_start_date = _raw_first_key(anchor, 'execution_start_date')
@@ -1602,7 +1806,6 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             mt5_balance_now = None
 
         if broker_balance is None:
-            # no anchor at all — we can still audit but cannot compute a deficit
             broker_balance = mt5_balance_now
             print(f"  │ ⚠️ harvhub.broker_balance NULL — using MT5 balance "
                   f"as anchor (${(mt5_balance_now or 0):.2f})")
@@ -1611,36 +1814,69 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         pending_orders = mt5_pending_orders()
         open_positions = mt5_open_positions()
 
+        # -------- ENFORCEMENT A: cancel unauthorized pending --------
         unauth_orders = []
+        cancelled_orders = 0
         for order in pending_orders:
             try:
                 om = int(getattr(order, 'magic', 0) or 0)
             except Exception:
                 om = 0
-            if om not in authorized_magics:
-                unauth_orders.append({
-                    'ticket': getattr(order, 'ticket', None),
-                    'symbol': getattr(order, 'symbol', None),
-                    'volume': float(getattr(order, 'volume_current', 0) or 0),
-                    'price': float(getattr(order, 'price_open', 0) or 0),
-                    'magic': om,
-                })
+            if om in authorized_tradeids:
+                continue
 
+            order_rec = {
+                'ticket': getattr(order, 'ticket', None),
+                'symbol': getattr(order, 'symbol', None),
+                'volume': float(getattr(order, 'volume_current', 0) or 0),
+                'price': float(getattr(order, 'price_open', 0) or 0),
+                'magic': om,
+                'action': 'pending',
+            }
+            print(f"  │ 🚫 UNAUTHORIZED PENDING #{order_rec['ticket']} "
+                  f"{order_rec['symbol']} magic={om} — cancelling…")
+            ok, msg = mt5_cancel_pending_order(order)
+            if ok:
+                order_rec['action'] = 'cancelled'
+                cancelled_orders += 1
+                print(f"  │    ✅ cancelled")
+            else:
+                order_rec['action'] = 'cancel_failed'
+                print(f"  │    ✗ cancel failed: {msg}")
+            unauth_orders.append(order_rec)
+
+        # -------- ENFORCEMENT B: close unauthorized positions --------
         unauth_positions = []
+        closed_positions = 0
         for pos in open_positions:
             try:
                 pm = int(getattr(pos, 'magic', 0) or 0)
             except Exception:
                 pm = 0
-            if pm not in authorized_magics:
-                unauth_positions.append({
-                    'ticket': getattr(pos, 'ticket', None),
-                    'symbol': getattr(pos, 'symbol', None),
-                    'volume': float(getattr(pos, 'volume', 0) or 0),
-                    'price': float(getattr(pos, 'price_open', 0) or 0),
-                    'profit': float(getattr(pos, 'profit', 0) or 0),
-                    'magic': pm,
-                })
+            if pm in authorized_tradeids:
+                continue
+
+            pos_rec = {
+                'ticket': getattr(pos, 'ticket', None),
+                'symbol': getattr(pos, 'symbol', None),
+                'volume': float(getattr(pos, 'volume', 0) or 0),
+                'price': float(getattr(pos, 'price_open', 0) or 0),
+                'profit': float(getattr(pos, 'profit', 0) or 0),
+                'magic': pm,
+                'action': 'open',
+            }
+            print(f"  │ 🚫 UNAUTHORIZED POSITION #{pos_rec['ticket']} "
+                  f"{pos_rec['symbol']} magic={pm} — closing…")
+            ok, msg, close_price = mt5_close_position(pos)
+            if ok:
+                pos_rec['action'] = 'closed'
+                pos_rec['close_price'] = close_price
+                closed_positions += 1
+                print(f"  │    ✅ closed @ {close_price}")
+            else:
+                pos_rec['action'] = 'close_failed'
+                print(f"  │    ✗ close failed: {msg}")
+            unauth_positions.append(pos_rec)
 
         # -------- MT5: closed deals since execution start --------
         start_dt = None
@@ -1654,7 +1890,6 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
                     continue
         if start_dt is None:
             start_dt = lagos_now() - timedelta(days=30)
-        # Make naive for MT5
         start_dt_naive = start_dt.replace(tzinfo=None)
 
         deals = mt5_history_deals_for_investor(start_dt_naive)
@@ -1666,6 +1901,8 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         auth_count = 0
         unauth_count = 0
 
+        per_day = {}
+
         for deal in deals:
             try:
                 dm = int(getattr(deal, 'magic', 0) or 0)
@@ -1676,6 +1913,10 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
                 + float(getattr(deal, 'swap', 0) or 0)
             deal_ts = getattr(deal, 'time', None) or getattr(deal, 'time_msc', None)
             deal_lagos = lagos_from_timestamp(deal_ts)
+            day_key = lagos_date_str(deal_lagos)
+            if day_key is None:
+                continue
+
             rec = {
                 'ticket': getattr(deal, 'ticket', None),
                 'symbol': getattr(deal, 'symbol', None),
@@ -1684,14 +1925,26 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
                 'magic': dm,
                 'time': deal_lagos.strftime('%Y-%m-%d %H:%M:%S') if deal_lagos else None,
             }
-            if dm in authorized_magics:
+
+            bucket = per_day.setdefault(day_key, {
+                'auth': 0.0, 'unauth': 0.0,
+                'auth_n': 0, 'unauth_n': 0,
+                'records': [],
+            })
+            bucket['records'].append(rec)
+
+            if dm in authorized_tradeids:
                 authorized_deals.append(rec)
                 total_auth_pnl += pnl
                 auth_count += 1
+                bucket['auth'] += pnl
+                bucket['auth_n'] += 1
             else:
                 unauthorized_deals.append(rec)
                 total_unauth_pnl += pnl
                 unauth_count += 1
+                bucket['unauth'] += pnl
+                bucket['unauth_n'] += 1
 
         # -------- expected balance + unaccounted deficit --------
         expected_balance = None
@@ -1721,24 +1974,27 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             unauth_types.append('unaccounted_balance_deficit')
 
         if any_unauthorized:
-            application_status = 'approved_with_issues' if not has_deficit else 'approved_with_issues'
+            application_status = 'approved_with_issues'
         else:
             application_status = 'approved'
 
         detail['unauthorized_orders'] = len(unauth_orders)
+        detail['unauthorized_orders_cancelled'] = cancelled_orders
         detail['unauthorized_positions'] = len(unauth_positions)
+        detail['unauthorized_positions_closed'] = closed_positions
         detail['unauthorized_trades'] = len(unauthorized_deals)
         detail['unauthorized_pnl_total'] = round(total_unauth_pnl, 2)
         detail['unaccounted_deficit'] = unaccounted_deficit
         detail['unauthorized_types'] = unauth_types
         detail['application_status'] = application_status
 
-        # -------- summary print --------
         print(f"  │ Authorized closed   : {auth_count} (P&L ${total_auth_pnl:+.2f})")
         print(f"  │ Unauthorized closed : {len(unauthorized_deals)} "
               f"(P&L ${total_unauth_pnl:+.2f})")
-        print(f"  │ Unauthorized orders : {len(unauth_orders)}")
-        print(f"  │ Unauthorized pos.   : {len(unauth_positions)}")
+        print(f"  │ Unauthorized orders : {len(unauth_orders)} "
+              f"(cancelled {cancelled_orders})")
+        print(f"  │ Unauthorized pos.   : {len(unauth_positions)} "
+              f"(closed {closed_positions})")
         if expected_balance is not None and mt5_balance_now is not None:
             print(f"  │ Expected balance    : ${expected_balance:.2f}")
             print(f"  │ MT5 balance         : ${mt5_balance_now:.2f}")
@@ -1749,58 +2005,119 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
         else:
             print(f"  │ Status              : ✅ clean")
 
-        # -------- upsert balance_log row for today --------
+        # ==================================================================
+        # SECTION 5b — PER-DAY balance_log WRITE
+        # ==================================================================
         today = lagos_today_str()
+        exec_start_str = None
+        if execution_start_date:
+            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d",
+                        "%Y-%m-%d %H:%M:%S"):
+                try:
+                    exec_start_str = datetime.strptime(
+                        str(execution_start_date), fmt
+                    ).strftime("%Y-%m-%d")
+                    break
+                except Exception:
+                    continue
 
-        # day-start balance: the last recorded closing balance if any, else
-        # MT5 balance minus today's realized P&L
-        last_date, last_closing = balance_log_fetch_last_closing(
-            investor_id, sub_account_id)
-        if last_date == today and last_closing is not None:
-            day_start_balance = float(last_closing)
-        else:
-            day_start_balance = float(mt5_balance_now or 0.0) - total_auth_pnl - total_unauth_pnl
-            # but that may drift — prefer last_closing if available and
-            # today is a fresh row
-            if last_closing is not None:
-                day_start_balance = float(last_closing)
+        if not exec_start_str:
+            exec_start_str = today
+        if exec_start_str > today:
+            exec_start_str = today
 
-        closing_balance = float(mt5_balance_now or 0.0)
+        running_balance = float(broker_balance or 0.0)
 
-        unusual = any_unauthorized
-        ok, action = balance_log_upsert(
-            investor_id, sub_account_id, today,
-            day_start_balance=day_start_balance,
-            auth_pnl=total_auth_pnl,
-            unauth_pnl=total_unauth_pnl,
-            unauth_withdrawals=unaccounted_deficit,
-            closing_balance=closing_balance,
-            unusual=unusual,
-            auth_count=auth_count,
-            unauth_count=unauth_count,
-        )
-        if ok:
-            detail['balance_log_action'] = action
-            print(f"  │ 📝 balance_log {action} for {today}")
-        else:
-            print(f"  │ ⚠️ balance_log upsert failed")
+        days_written = 0
+        last_action = None
+
+        print(f"\n  📅 BALANCE_LOG HISTORY WRITE — {exec_start_str} → {today}")
+        print(f"     ├─ Anchor (execution-start broker_balance): ${running_balance:.2f}")
+        print(f"     ├─ Days with deals in window              : {len(per_day)}")
+        print(f"     └─ Days to write                          : "
+              f"{len(list(lagos_daterange(exec_start_str, today)))}")
+
+        for day_key in lagos_daterange(exec_start_str, today):
+            bucket = per_day.get(day_key, {
+                'auth': 0.0, 'unauth': 0.0,
+                'auth_n': 0, 'unauth_n': 0,
+                'records': [],
+            })
+
+            day_open = running_balance
+            day_auth = float(bucket['auth'])
+            day_unauth = float(bucket['unauth'])
+
+            if day_key == today and mt5_balance_now is not None:
+                day_close = float(mt5_balance_now)
+            else:
+                day_close = day_open + day_auth + day_unauth
+
+            existing_row = balance_log_fetch_day(
+                investor_id, sub_account_id, day_key)
+            existing_withdrawals = _coerce_float(
+                _raw_first_key(existing_row, 'day_unauthorized_withdrawals'),
+                default=0.0,
+            ) or 0.0
+
+            day_unusual = (bucket['unauth_n'] > 0)
+
+            ok, action = balance_log_upsert(
+                investor_id, sub_account_id, day_key,
+                day_start_balance=day_open,
+                auth_pnl=day_auth,
+                unauth_pnl=day_unauth,
+                unauth_withdrawals=existing_withdrawals,
+                closing_balance=day_close,
+                unusual=day_unusual,
+                auth_count=bucket['auth_n'],
+                unauth_count=bucket['unauth_n'],
+            )
+
+            marker = ''
+            if day_key == today:
+                marker = '  ← today'
+            elif bucket['auth_n'] + bucket['unauth_n'] > 0:
+                marker = f"  ({bucket['auth_n']+bucket['unauth_n']} deal(s))"
+
+            if ok:
+                days_written += 1
+                last_action = action
+                print(f"     │ {day_key}: open=${day_open:.2f} "
+                      f"auth=${day_auth:+.2f} unauth=${day_unauth:+.2f} "
+                      f"close=${day_close:.2f} [{action}]{marker}")
+            else:
+                print(f"     │ {day_key}: ⚠️ upsert failed{marker}")
+
+            running_balance = day_close
+
+        detail['balance_log_action'] = last_action
+        detail['balance_log_days_written'] = days_written
+        print(f"     └─ {days_written} row(s) written to balance_log")
 
         # -------- notify if any violation --------
         if any_unauthorized:
-            sent = notify_investor_and_owner(
+            notif_count = 0
+
+            # 1) INVESTOR side — contract_notifications
+            notif_count += notify_investor_unauthorized(
                 investor_id=investor_id,
                 sub_account_id=sub_account_id,
-                programme_id=programme_id,
                 investor_email=investor_email,
-                owner_email=owner_email,
-                programme_name=programme_name,
-                unauth_trades=unauthorized_deals,
-                unauth_orders=unauth_orders,
-                unauth_positions=unauth_positions,
-                unauth_pnl=total_unauth_pnl,
-                unaccounted_deficit=unaccounted_deficit,
+                main_account_id=main_account_id,
             )
-            detail['notifications_sent'] = sent
+
+            # 2) Register for the aggregated owner-side alert
+            _register_programme_violator(
+                programme_id=programme_id,
+                programme_name=programme_name,
+                investor_id=investor_id,
+                sub_account_id=sub_account_id,
+                total_unauth_pnl=total_unauth_pnl,
+                unauth_types=unauth_types,
+            )
+
+            detail['notifications_sent'] = notif_count
 
         return detail
 
@@ -1855,21 +2172,22 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             stats['details'].append(detail)
             stats['investors_processed'] += 1
             stats['unauthorized_orders_found'] += detail.get('unauthorized_orders', 0)
+            stats['unauthorized_orders_cancelled'] += detail.get('unauthorized_orders_cancelled', 0)
             stats['unauthorized_positions_found'] += detail.get('unauthorized_positions', 0)
+            stats['unauthorized_positions_closed'] += detail.get('unauthorized_positions_closed', 0)
             stats['unauthorized_trades_found'] += detail.get('unauthorized_trades', 0)
             if detail.get('unaccounted_deficit', 0.0) > 0.01:
                 stats['unaccounted_deficits_found'] += 1
             if detail.get('unauthorized_types'):
                 stats['investors_with_unauthorized'] += 1
-            if detail.get('balance_log_action'):
-                stats['balance_log_rows_written'] += 1
+            stats['balance_log_rows_written'] += detail.get('balance_log_days_written', 0)
             stats['notifications_queued'] += detail.get('notifications_sent', 0)
 
             if not unauthorized_alert.get('programme_id'):
                 unauthorized_alert['programme_id'] = programme_id
                 unauthorized_alert['investor_id'] = investor_id
                 unauthorized_alert['sub_account_id'] = sub_account_id
-                unauthorized_alert['investor_authorized_magics'] = set()
+                unauthorized_alert['investor_authorized_tradeids'] = set()
                 unauthorized_alert['application_status'] = detail.get('application_status', 'approved')
                 if detail.get('unauthorized_types'):
                     unauthorized_alert['is_triggered'] = True
@@ -1881,11 +2199,40 @@ def check_and_record_unauthorized_actions_db(inv_db_id=None):
             traceback.print_exc()
             stats['errors'].append(f"investor={investor_id}: {e}")
 
+    # ==================================================================
+    # SECTION 7 — AGGREGATED PROGRAMME-OWNER NOTIFICATIONS
+    # ==================================================================
+    if programme_violators:
+        print(f"\n{'='*10} 📣 AGGREGATED PROGRAMME-OWNER NOTIFICATIONS {'='*10}")
+        for pid, entry in programme_violators.items():
+            programme_name = entry.get('programme_name') or f"programme {pid}"
+            violators = entry.get('violators') or []
+            if not violators:
+                continue
+
+            # Resolve owner email HERE, at aggregation time, robustly.
+            owner_email, resolved_name, owner_userid = programme_fetch_owner_identity(pid)
+            if resolved_name and not entry.get('programme_name'):
+                programme_name = resolved_name
+
+            print(f"  │ Programme {pid} ('{programme_name}') — "
+                  f"{len(violators)} violator(s) | owner={owner_email or '—'}")
+
+            sent = notify_programme_owner_violators(
+                programme_id=pid,
+                programme_name=programme_name,
+                owner_email=owner_email,
+                violators=violators,
+            )
+            stats['notifications_queued'] += sent
+
     print(f"\n{'='*10} 🔍 AUTHORIZED-ACTIONS AUDIT SUMMARY (DB) {'='*10}")
     print(f"  Investors processed        : {stats['investors_processed']}")
     print(f"  Investors with unauthorized: {stats['investors_with_unauthorized']}")
     print(f"  Unauthorized orders        : {stats['unauthorized_orders_found']}")
+    print(f"  Unauthorized orders cancelled: {stats['unauthorized_orders_cancelled']}")
     print(f"  Unauthorized positions     : {stats['unauthorized_positions_found']}")
+    print(f"  Unauthorized positions closed: {stats['unauthorized_positions_closed']}")
     print(f"  Unauthorized trades        : {stats['unauthorized_trades_found']}")
     print(f"  Unaccounted deficits       : {stats['unaccounted_deficits_found']}")
     print(f"  balance_log rows written   : {stats['balance_log_rows_written']}")
@@ -4387,7 +4734,9 @@ def martingale_system_db(inv_db_id=None):
                AND programmeid = %s
                AND investor_id = %s
                AND investor_sub_account_id = %s
-               AND orderstatus = 'pending'
+               AND (orderstatus = 'pending'
+                    OR orderstatus IS NULL
+                    OR orderstatus = '')
              ORDER BY id ASC
             """,
             [investor_id, programme_id, investor_id, sub_account_id],
@@ -5513,7 +5862,7 @@ def martingale_system_db(inv_db_id=None):
                                or getattr(order, 'volume_initial', 0) or 0)
                 entry_o = float(order.price_open)
                 sl_o = float(order.sl) if order.sl else None
-                magic = getattr(order, 'magic', None)
+                order_magic = getattr(order, 'magic', None)
 
                 sys_res = system_analysis_results.get(sym)
                 if sys_res is None:
@@ -5523,10 +5872,10 @@ def martingale_system_db(inv_db_id=None):
                         res = mt5_order_send(req)
                         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                             cancelled += 1
-                            if magic is not None and int(magic) > 0:
+                            if order_magic is not None and int(order_magic) > 0:
                                 row_id = None
                                 for r in pending_rows:
-                                    if _coerce_int(_raw_first_key(r, 'tradeid')) == int(magic):
+                                    if _coerce_int(_raw_first_key(r, 'tradeid')) == int(order_magic):
                                         row_id = _coerce_int(_raw_first_key(r, 'id'))
                                         break
                                 if row_id is not None:
@@ -5570,10 +5919,10 @@ def martingale_system_db(inv_db_id=None):
                     res = mt5_order_send(req)
                     if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                         cancelled += 1
-                        if magic is not None and int(magic) > 0:
+                        if order_magic is not None and int(order_magic) > 0:
                             row_id = None
                             for r in pending_rows:
-                                if _coerce_int(_raw_first_key(r, 'tradeid')) == int(magic):
+                                if _coerce_int(_raw_first_key(r, 'tradeid')) == int(order_magic):
                                     row_id = _coerce_int(_raw_first_key(r, 'id'))
                                     break
                             if row_id is not None:
@@ -5583,7 +5932,7 @@ def martingale_system_db(inv_db_id=None):
                     print(f"     delete error: {e}")
 
         # ------------------------------------------------------------------
-        # STEP 4: restore MT5 orders not in DB (magic → tradeid)
+        # STEP 4: restore MT5 orders not in DB (order.magic → tradeid)
         # ------------------------------------------------------------------
         symbols_in_rows = set()
         for row in pending_rows:
@@ -5604,10 +5953,10 @@ def martingale_system_db(inv_db_id=None):
                         4: 'buy-stop', 5: 'sell-stop'}
 
             for order in mt5_orders:
-                magic = getattr(order, 'magic', None)
-                if magic is None or int(magic) <= 0:
+                order_magic = getattr(order, 'magic', None)
+                if order_magic is None or int(order_magic) <= 0:
                     continue
-                if int(magic) in existing_tradeids:
+                if int(order_magic) in existing_tradeids:
                     continue
 
                 sym = order.symbol
@@ -5623,7 +5972,7 @@ def martingale_system_db(inv_db_id=None):
                     investor_id=investor_id,
                     sub_account_id=sub_account_id,
                     programme_id=programme_id,
-                    tradeid=int(magic),
+                    tradeid=int(order_magic),
                     symbol=sym,
                     ordertype=ordertype,
                     entry=entry,
@@ -5635,9 +5984,9 @@ def martingale_system_db(inv_db_id=None):
                     trade_risk_reward=None,
                 )
                 if restored:
-                    existing_tradeids.add(int(magic))
-                    print(f"  ♻️ Restored MT5 order magic={magic} ({sym} {ordertype}) "
-                          f"→ programme_trades as tradeid={magic}, vol={vol:.2f}")
+                    existing_tradeids.add(int(order_magic))
+                    print(f"  ♻️ Restored MT5 order magic={order_magic} ({sym} {ordertype}) "
+                          f"→ programme_trades as tradeid={order_magic}, vol={vol:.2f}")
 
         detail['rows_updated'] = rows_updated_vol
         detail['rows_deleted'] = rows_deleted
@@ -5801,6 +6150,4571 @@ def martingale_system_db(inv_db_id=None):
     stats['processing_success'] = True
     return stats
 
+# ==============================================================================
+#  CALCULATE INVESTOR SYMBOLS ORDERS — DB version
+#
+#  Source of truth for R:R:  signals_provider_interest (programme-scoped)
+#      interest_risk_reward       -> numeric R:R ratio (e.g. 8 means 1:8)
+#      interest_risk_reward_type  -> string classifier:
+#
+#          'custom minimum risk reward'   minimum floor
+#              - compute current R:R from entry to takeprofit
+#              - if current < value  -> recalculate volume so R:R == value
+#              - if current >= value -> NO change
+#
+#          'fixed risk reward'            exact rewrite
+#              - compute current R:R
+#              - if current != value -> recalculate volume so R:R == value
+#
+#          'custom fixed risk reward'     do nothing
+#              - no recalculation at all
+#              - EXCEPT: if current R:R < 1.0, force recalc to R:R == 1.0
+#
+#  The function ALSO syncs the per-investor authorisation snapshot:
+#  it copies interest_risk_reward + interest_risk_reward_type down to each
+#  investor row (same values the signals dashboard uses) so downstream
+#  consumers see a consistent view.
+#
+#  Per row it:
+#    * reads entry, takeprofit, stoploss (stoploss is required to solve
+#      for volume: volume = (|entry - tp| / (rr * |entry - sl|)) * base_volume)
+#    * computes the R:R of the CURRENT record
+#    * applies the classifier rules above
+#    * writes back the new volume (and nothing else) via
+#      UPDATE programme_trades SET volume = %s WHERE id = %s
+#
+#  It is PROGRAMME-SCOPED for config, INVESTOR-SCOPED for writes.
+#  It does NOT touch MT5. It does NOT read or write JSON. It only touches
+#  the DB.
+# ==============================================================================
+
+def _validate_single_order_margin_for_calc(order, side, desired_volume, buffer_pct=10.0):
+    """
+    Module-level wrapper around MT5 margin validation for the calculate
+    stage. Returns (final_volume, margin_used, free_margin, allowed,
+    shrunk, reason). Falls back to a no-op "allowed" result when the
+    account is unavailable, so the calculate stage never blocks on a
+    missing MT5 connection.
+    """
+    acc = mt5_account_info()
+    if acc is None:
+        return desired_volume, 0.0, 0.0, True, False, "no_account_info"
+    symbol = order.get("symbol")
+    entry = order.get("entry")
+    if not symbol or entry is None:
+        return desired_volume, 0.0, 0.0, False, False, "missing_data"
+    si = mt5_symbol_info(symbol)
+    if not si:
+        return desired_volume, 0.0, 0.0, False, False, "no_symbol_info"
+    try:
+        free_margin = float(acc.margin_free)
+    except Exception:
+        return desired_volume, 0.0, 0.0, True, False, "no_free_margin_field"
+    allowed = free_margin * (1.0 - buffer_pct / 100.0)
+    if allowed <= 0:
+        return 0.0, 0.0, free_margin, False, True, "no_free_margin"
+    mt5_type = 0 if side == "buy" else 1
+    try:
+        margin = mt5_order_calc_margin(mt5_type, symbol, float(desired_volume), float(entry))
+    except Exception:
+        margin = None
+    if margin is None or margin <= 0:
+        return desired_volume, 0.0, free_margin, True, False, "margin_calc_failed"
+    if margin <= allowed:
+        return desired_volume, float(margin), free_margin, True, False, "fits"
+    # shrink linearly
+    step = float(getattr(si, 'volume_step', 0.01) or 0.01)
+    min_vol = float(getattr(si, 'volume_min', 0.01) or 0.01)
+    ratio = allowed / margin
+    raw = max(min_vol, desired_volume * ratio)
+    steps = round(raw / step) if step > 0 else 0
+    shrunk_vol = max(min_vol, round(steps * step, 2))
+    try:
+        shrunk_margin = mt5_order_calc_margin(mt5_type, symbol, shrunk_vol, float(entry))
+    except Exception:
+        shrunk_margin = None
+    if shrunk_margin is None or shrunk_margin > allowed:
+        return 0.0, 0.0, free_margin, False, True, "cannot_fit_min_volume"
+    return shrunk_vol, float(shrunk_margin), free_margin, True, True, "shrunk_to_fit"
+
+# ==============================================================================
+#  CALCULATE INVESTOR SYMBOLS ORDERS — DB version
+#
+#  Source of truth for R:R:  signals_provider_interest (programme-scoped)
+#      interest_risk_reward       -> numeric R:R ratio (e.g. 8 means 1:8)
+#      interest_risk_reward_type  -> string classifier:
+#
+#          'custom minimum risk reward'   minimum floor
+#              - compute current R:R from entry to takeprofit
+#              - if current < value  -> recalculate volume so R:R == value
+#              - if current >= value -> NO change
+#
+#          'fixed risk reward'            exact rewrite
+#              - compute current R:R
+#              - if current != value -> recalculate volume so R:R == value
+#
+#          'custom fixed risk reward'     do nothing
+#              - no recalculation at all
+#              - EXCEPT: if current R:R < 1.0, force recalc to R:R == 1.0
+#
+#  The function ALSO syncs the per-investor authorisation snapshot:
+#  it copies interest_risk_reward + interest_risk_reward_type down to each
+#  investor row (same values the signals dashboard uses) so downstream
+#  consumers see a consistent view.
+#
+#  ACTIONABLE-ROW PREDICATE (must match every other stage):
+#      orderstatus = 'pending'  OR  orderstatus IS NULL  OR  orderstatus = ''
+#
+#  NO files, NO JSON, NO local folders. Pure DB.
+# ==============================================================================
+def calculate_investor_symbols_orders_db(inv_db_id=None):
+    print(f"\n{'='*10} 📐 CALCULATE INVESTOR SYMBOLS ORDERS (DB) {'='*10}")
+
+    stats = {
+        'investor_id': inv_db_id if inv_db_id else 'all',
+        'programmes_processed': 0,
+        'investors_processed': 0,
+        'rows_seen': 0,
+        'rows_calculated': 0,
+        'rows_skipped': 0,
+        'rows_synced_only': 0,
+        'rows_volume_seeded': 0,
+        'rows_risk_resized': 0,
+        'rows_rr_resized': 0,
+        'rows_tp_synthesized': 0,
+        'errors': [],
+        'details': [],
+        'processing_success': False,
+    }
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _norm_rr_type(raw):
+        """Canonicalise any stored risk_reward_type into one of three keys."""
+        if raw is None:
+            return 'fixed risk reward'
+        s = str(raw).strip().lower()
+        s = s.replace('_', ' ').replace('-', ' ')
+        s = ' '.join(s.split())
+        if not s:
+            return 'fixed risk reward'
+        for filler in (' and ', ' & ', ' + ', '  and  '):
+            s = s.replace(filler, ' ')
+        s = ' '.join(s.split())
+
+        aliases = {
+            'custom fixed risk reward':     'custom fixed risk reward',
+            'customfixed risk reward':      'custom fixed risk reward',
+            'custom fixed':                 'custom fixed risk reward',
+            'customfixed':                  'custom fixed risk reward',
+            'fixed custom':                 'custom fixed risk reward',
+            'custom risk reward':           'custom fixed risk reward',
+
+            'custom minimum risk reward':   'custom minimum risk reward',
+            'customminimum risk reward':    'custom minimum risk reward',
+            'custom minimum':               'custom minimum risk reward',
+            'customminimum':                'custom minimum risk reward',
+            'minimum risk reward':          'custom minimum risk reward',
+            'minimum':                      'custom minimum risk reward',
+            'min':                          'custom minimum risk reward',
+            'floor':                        'custom minimum risk reward',
+
+            'fixed risk reward':            'fixed risk reward',
+            'fixedrisk reward':             'fixed risk reward',
+            'fixed':                        'fixed risk reward',
+            'fixed rr':                     'fixed risk reward',
+            'exact':                        'fixed risk reward',
+            'exact risk reward':            'fixed risk reward',
+        }
+        if s in aliases:
+            return aliases[s]
+
+        has_custom = 'custom' in s
+        has_min    = ('minimum' in s) or ('min' in s.split()) or ('floor' in s)
+        has_fixed  = ('fixed' in s)
+
+        if has_custom and has_min and not has_fixed:
+            return 'custom minimum risk reward'
+        if has_custom and has_fixed:
+            return 'custom fixed risk reward'
+        if has_fixed:
+            return 'fixed risk reward'
+        if has_min:
+            return 'custom minimum risk reward'
+        return s
+
+    def _fetch_programme_rr(programme_id):
+        row = db_fetch_one(
+            """
+            SELECT id, risk_reward, risk_reward_type
+              FROM signals_provider_interest
+             WHERE programme_id = %s
+               AND risk_reward IS NOT NULL
+               AND risk_reward > 0
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        if not row:
+            return None, None, None
+        rr_val  = _coerce_float(_raw_first_key(row, 'risk_reward'), default=None)
+        rr_type = _raw_first_key(row, 'risk_reward_type')
+        if rr_val is None or rr_val <= 0:
+            return None, None, row
+        return float(rr_val), rr_type, row
+
+    def _fetch_programme_default_risk_brackets(programme_id):
+        rows = db_fetch_all(
+            """
+            SELECT from_balance_range, to_balance_range, risk_amount
+              FROM accountmanagement_balance_default_risk
+             WHERE programme_id = %s
+             ORDER BY from_balance_range ASC, id ASC
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        out = []
+        for r in rows:
+            try:
+                lo = _coerce_float(_raw_first_key(r, 'from_balance_range'), default=None)
+                hi = _coerce_float(_raw_first_key(r, 'to_balance_range'),   default=None)
+                rk = _coerce_float(_raw_first_key(r, 'risk_amount'),        default=None)
+            except Exception:
+                continue
+            if lo is None or rk is None:
+                continue
+            if hi is None or hi <= 0:
+                hi = float('inf')
+            out.append({'from': float(lo), 'to': float(hi), 'risk': float(rk)})
+        return out
+
+    def _resolve_default_risk_for_balance(brackets, balance):
+        if not brackets or balance is None:
+            return None, None
+        for b in brackets:
+            if b['from'] <= balance <= b['to']:
+                return b['risk'], b
+        below = [b for b in brackets if b['from'] <= balance]
+        if below:
+            chosen = below[-1]
+            return chosen['risk'], chosen
+        return brackets[0]['risk'], brackets[0]
+
+    def _compute_current_rr(entry, sl, tp):
+        if entry is None or sl is None or tp is None:
+            return None, None, None
+        risk   = abs(float(entry) - float(sl))
+        reward = abs(float(tp) - float(entry))
+        if risk <= 0:
+            return None, risk, reward
+        return reward / risk, risk, reward
+
+    def _round_volume_to_symbol(volume, symbol_info):
+        if volume is None or volume <= 0:
+            return 0.0
+        step    = float(getattr(symbol_info, 'volume_step', 0.01) or 0.01)
+        min_vol = float(getattr(symbol_info, 'volume_min', 0.01) or 0.01)
+        max_vol = float(getattr(symbol_info, 'volume_max', 100.0) or 100.0)
+        if step <= 0:
+            step = 0.01
+        steps = round(volume / step)
+        return max(min_vol, min(max_vol, round(steps * step, 2)))
+
+    def _min_volume_for_symbol(symbol_info):
+        if symbol_info is None:
+            return 0.01
+        try:
+            v = float(getattr(symbol_info, 'volume_min', 0.01) or 0.01)
+            return v if v > 0 else 0.01
+        except Exception:
+            return 0.01
+
+    def _price_digits(symbol_info, tick_size):
+        try:
+            if symbol_info is not None and hasattr(symbol_info, 'digits'):
+                d = int(symbol_info.digits)
+                if d >= 0:
+                    return d
+        except Exception:
+            pass
+        try:
+            ts = float(tick_size) if tick_size else 0.00001
+            if ts <= 0:
+                ts = 0.00001
+            if ts < 1:
+                return len(f"{ts:.10f}".rstrip('0').split('.')[-1])
+        except Exception:
+            pass
+        return 5
+
+    def _synthesize_tp(entry, sl, rr_value, is_buy, digits):
+        if entry is None or sl is None or rr_value is None or rr_value <= 0:
+            return None
+        try:
+            entry_f = float(entry)
+            sl_f    = float(sl)
+            risk_dist = abs(entry_f - sl_f)
+            if risk_dist <= 0:
+                return None
+            reward_dist = risk_dist * float(rr_value)
+            tp = (entry_f + reward_dist) if is_buy else (entry_f - reward_dist)
+            return round(tp, digits)
+        except Exception:
+            return None
+
+    def _risk_per_lot(entry, sl, symbol_info):
+        if entry is None or sl is None or symbol_info is None:
+            return 0.0
+        try:
+            price_dist = abs(float(entry) - float(sl))
+            contract   = float(getattr(symbol_info, 'trade_contract_size', 1.0) or 1.0)
+            return price_dist * contract
+        except Exception:
+            return 0.0
+
+    def _risk_driven_volume(target_risk, risk_per_lot, symbol_info):
+        if target_risk is None or target_risk <= 0:
+            return None
+        if risk_per_lot is None or risk_per_lot <= 0:
+            return None
+        try:
+            raw = float(target_risk) / float(risk_per_lot)
+        except Exception:
+            return None
+        return _round_volume_to_symbol(raw, symbol_info)
+
+    def _rr_driven_volume(current_volume, current_rr, target_rr, symbol_info):
+        if current_rr is None or current_rr <= 0 or target_rr <= 0:
+            return None
+        try:
+            scale = current_rr / float(target_rr)
+            raw   = float(current_volume) * scale
+        except Exception:
+            return None
+        return _round_volume_to_symbol(raw, symbol_info)
+
+    # ==================================================================
+    # TOP-LEVEL ENUMERATION (VPS-scoped)
+    # ==================================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─"*80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─"*80)
+
+    programme_rr_cache      = {}
+    programme_bracket_cache = {}
+    symbol_info_cache       = {}
+
+    def get_symbol_info(sym):
+        si = symbol_info_cache.get(sym)
+        if si is None:
+            si = mt5_symbol_info(sym)
+            if si is None:
+                mt5_symbol_select(sym, True)
+                si = mt5_symbol_info(sym)
+            symbol_info_cache[sym] = si
+        return si
+
+    def _current_balance():
+        acc = mt5_account_info()
+        if acc is None:
+            return None
+        try:
+            return float(acc.balance)
+        except Exception:
+            return None
+
+    # ==================================================================
+    # PER-INVESTOR PIPELINE
+    # ==================================================================
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['rows_skipped'] += 1
+            continue
+
+        cfg = programme_rr_cache.get(programme_id)
+        if cfg is None:
+            rr_val, rr_type, raw_row = _fetch_programme_rr(programme_id)
+            cfg = {
+                'rr_value':     rr_val,
+                'rr_type_raw':  rr_type,
+                'rr_type_norm': _norm_rr_type(rr_type),
+                'raw_row':      raw_row,
+            }
+            programme_rr_cache[programme_id] = cfg
+            stats['programmes_processed'] += 1
+
+        brackets = programme_bracket_cache.get(programme_id)
+        if brackets is None:
+            brackets = _fetch_programme_default_risk_brackets(programme_id)
+            programme_bracket_cache[programme_id] = brackets
+
+        print(f"\n{'─'*72}")
+        print(f" 📐 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+        print(f"  │ Programme R:R value : "
+              f"{'1:' + str(cfg['rr_value']) if cfg['rr_value'] is not None else '—'}")
+        print(f"  │ Programme R:R type  : {cfg['rr_type_raw'] or '—'}")
+        print(f"  │ Normalised type     : '{cfg['rr_type_norm']}'")
+        print(f"  │ Default risk brackets: {len(brackets)}")
+
+        if cfg['rr_value'] is None:
+            print(f"  │ ⚠️ No usable signals_provider_interest.risk_reward — "
+                  f"skipping investor")
+            stats['rows_skipped'] += 1
+            continue
+
+        balance = _current_balance()
+        target_risk     = None
+        matched_bracket = None
+        if balance is not None and brackets:
+            target_risk, matched_bracket = _resolve_default_risk_for_balance(brackets, balance)
+        print(f"  │ Live MT5 balance    : "
+              f"{'$' + format(balance, '.2f') if balance is not None else '—'}")
+        if matched_bracket is not None and target_risk is not None:
+            print(f"  │ Default risk applied: ${target_risk:.2f} "
+                  f"(bracket {matched_bracket['from']:.2f} - {matched_bracket['to']:.2f})")
+        else:
+            print(f"  │ Default risk applied: — (no bracket available)")
+
+        # ------------------------------------------------------------------
+        # ACTIONABLE ROWS
+        # Same predicate as place_usd_orders_db, chunk, martingale:
+        #   orderstatus = 'pending'  OR  IS NULL  OR  = ''
+        # ------------------------------------------------------------------
+        rows = db_fetch_all(
+            """
+            SELECT id, tradeid, userid, programmeid,
+                   investor_id, investor_sub_account_id,
+                   symbol, ordertype, orderstatus, timeframe,
+                   entry, stoploss, takeprofit, volume,
+                   trade_risk_reward,
+                   interest_risk_reward, interest_risk_reward_type
+              FROM programme_trades
+             WHERE userid = %s
+               AND programmeid = %s
+               AND investor_id = %s
+               AND investor_sub_account_id = %s
+               AND (orderstatus = 'pending'
+                    OR orderstatus IS NULL
+                    OR orderstatus = '')
+             ORDER BY id ASC
+            """,
+            [investor_id, programme_id, investor_id, sub_account_id],
+            timeout=15.0, quiet=True,
+        )
+
+        stats['rows_seen'] += len(rows)
+        stats['investors_processed'] += 1
+
+        if not rows:
+            print(f"  │ ℹ️ No actionable rows for this investor")
+            continue
+
+        print(f"  │ Actionable rows     : {len(rows)}")
+
+        for r in rows:
+            row_id  = _coerce_int(_raw_first_key(r, 'id'))
+            tradeid = _coerce_int(_raw_first_key(r, 'tradeid'))
+            sym     = (_raw_first_key(r, 'symbol') or '').strip()
+            ot      = (_raw_first_key(r, 'ordertype') or '').strip().lower()
+            entry   = _coerce_float(_raw_first_key(r, 'entry'), default=None)
+            sl      = _coerce_float(_raw_first_key(r, 'stoploss'), default=None)
+            tp      = _coerce_float(_raw_first_key(r, 'takeprofit'), default=None)
+            cur_vol = _coerce_float(_raw_first_key(r, 'volume'), default=None)
+
+            if row_id is None:
+                stats['rows_skipped'] += 1
+                continue
+
+            try:
+                db_execute(
+                    """
+                    UPDATE programme_trades
+                       SET interest_risk_reward      = %s,
+                           interest_risk_reward_type = %s
+                     WHERE id = %s
+                    """,
+                    [cfg['rr_value'], cfg['rr_type_raw'], row_id],
+                    timeout=10.0, quiet=True,
+                )
+                stats['rows_synced_only'] += 1
+            except Exception:
+                pass
+
+            if not sym or entry is None or sl is None:
+                stats['rows_skipped'] += 1
+                print(f"  │ ⚠️ row {row_id}: missing symbol/entry/sl — skipped")
+                continue
+
+            si = get_symbol_info(sym)
+            if si is None:
+                stats['rows_skipped'] += 1
+                print(f"  │ ⚠️ row {row_id}: no symbol_info for {sym} — skipped")
+                continue
+
+            is_buy = 'buy' in ot
+
+            # ---------- 1. SYNTHESIZE TP IF MISSING ----------
+            tp_synthesized = False
+            if tp is None:
+                synth_rr = float(cfg['rr_value'])
+                digits   = _price_digits(si, getattr(si, 'trade_tick_size', None))
+                new_tp   = _synthesize_tp(entry, sl, synth_rr, is_buy, digits)
+
+                if new_tp is None:
+                    stats['rows_skipped'] += 1
+                    print(f"  │ ⚠️ row {row_id}: could not synthesize TP "
+                          f"(entry={entry}, sl={sl}, rr=1:{synth_rr})")
+                    continue
+
+                try:
+                    db_execute(
+                        "UPDATE programme_trades SET takeprofit = %s WHERE id = %s",
+                        [new_tp, row_id], timeout=10.0, quiet=True,
+                    )
+                except Exception:
+                    pass
+
+                tp = new_tp
+                tp_synthesized = True
+                stats['rows_tp_synthesized'] += 1
+                print(f"  │ 🎯 row {row_id}: TP was NULL — synthesized to "
+                      f"{tp}  (programme R:R = 1:{synth_rr}, is_buy={is_buy})")
+
+            # ---------- 2. SELF-HEALING BASELINE VOLUME ----------
+            vol_seeded = False
+            if cur_vol is None or cur_vol <= 0:
+                cur_vol = _min_volume_for_symbol(si)
+                vol_seeded = True
+                stats['rows_volume_seeded'] += 1
+                print(f"  │ 🩹 row {row_id}: volume was NULL — seeding from "
+                      f"{sym} volume_min = {cur_vol}")
+
+            # ---------- 3. RISK-DRIVEN RESIZE ----------
+            risk_resized = False
+            if target_risk is not None:
+                rpl = _risk_per_lot(entry, sl, si)
+                if rpl > 0:
+                    risk_vol = _risk_driven_volume(target_risk, rpl, si)
+                    if risk_vol is not None and risk_vol > 0:
+                        if abs(risk_vol - cur_vol) > 1e-9:
+                            risk_resized = True
+                            stats['rows_risk_resized'] += 1
+                        cur_vol = risk_vol
+
+            # ---------- 4. R:R CLASSIFIER ----------
+            current_rr, risk_dist, reward_dist = _compute_current_rr(entry, sl, tp)
+            if current_rr is None:
+                if risk_resized or vol_seeded or tp_synthesized:
+                    ok_w, _, _ = db_execute(
+                        "UPDATE programme_trades SET volume = %s WHERE id = %s",
+                        [round(float(cur_vol), 8), row_id],
+                        timeout=15.0, quiet=True,
+                    )
+                    if ok_w:
+                        stats['rows_calculated'] += 1
+                        print(f"  │    ✅ row {row_id}: volume written "
+                              f"({cur_vol:.2f}) — risk-sized only")
+                    else:
+                        stats['rows_skipped'] += 1
+                        print(f"  │    ✗ row {row_id}: write failed")
+                else:
+                    stats['rows_skipped'] += 1
+                    print(f"  │    ℹ️ row {row_id}: risk_dist=0 — no change")
+                continue
+
+            target_rr = float(cfg['rr_value'])
+            rr_type   = cfg['rr_type_norm']
+
+            decision = 'noop'
+            target_for_calc = None
+            reason = ''
+
+            if rr_type == 'custom minimum risk reward':
+                if current_rr < target_rr - 1e-9:
+                    decision = 'raise'
+                    target_for_calc = target_rr
+                    reason = f"custom minimum floor: current 1:{round(current_rr, 4)} < 1:{target_rr}"
+                else:
+                    decision = 'noop'
+                    reason = f"custom minimum floor: current 1:{round(current_rr, 4)} >= 1:{target_rr} — no change"
+            elif rr_type == 'fixed risk reward':
+                if abs(current_rr - target_rr) > 1e-9:
+                    decision = 'rewrite'
+                    target_for_calc = target_rr
+                    reason = f"fixed: current 1:{round(current_rr, 4)} != 1:{target_rr}"
+                else:
+                    decision = 'noop'
+                    reason = f"fixed: current already equals 1:{target_rr}"
+            elif rr_type == 'custom fixed risk reward':
+                if current_rr < 1.0 - 1e-9:
+                    decision = 'raise'
+                    target_for_calc = 1.0
+                    reason = f"custom fixed: current 1:{round(current_rr, 4)} < 1:1 — forcing 1:1"
+                else:
+                    decision = 'noop'
+                    reason = f"custom fixed: current 1:{round(current_rr, 4)} — no change by design"
+            else:
+                if abs(current_rr - target_rr) > 1e-9:
+                    decision = 'rewrite'
+                    target_for_calc = target_rr
+                    reason = f"unrecognised type '{rr_type}' -> treating as fixed; current 1:{round(current_rr, 4)} != 1:{target_rr}"
+                else:
+                    decision = 'noop'
+                    reason = f"unrecognised type '{rr_type}' -> treating as fixed; current already 1:{target_rr}"
+
+            print(f"\n  │ 📄 row {row_id} (tradeid={tradeid}, {sym} {ot.upper()})")
+            print(f"  │    entry={entry}  sl={sl}  tp={tp}"
+                  f"{'  (synthesized)' if tp_synthesized else ''}")
+            print(f"  │    baseline vol      : {cur_vol}"
+                  f"{'  (seeded)' if vol_seeded else ''}"
+                  f"{'  (risk-resized)' if risk_resized else ''}")
+            print(f"  │    current R:R       = 1:{round(current_rr, 4)}")
+            print(f"  │    target R:R        = 1:{target_rr}")
+            print(f"  │    type              = '{rr_type}'")
+            print(f"  │    decision          : {decision.upper()} — {reason}")
+
+            # ---------- 5. APPLY R:R REWRITE IF NEEDED ----------
+            final_vol = cur_vol
+            rr_resized = False
+            if decision != 'noop':
+                new_vol = _rr_driven_volume(
+                    current_volume=cur_vol,
+                    current_rr=current_rr,
+                    target_rr=target_for_calc,
+                    symbol_info=si,
+                )
+                if new_vol is not None and new_vol > 0:
+                    if abs(new_vol - cur_vol) > 1e-9:
+                        rr_resized = True
+                        stats['rows_rr_resized'] += 1
+                    final_vol = new_vol
+
+            if (not risk_resized) and (not rr_resized) and (not vol_seeded) and (not tp_synthesized):
+                stats['rows_skipped'] += 1
+                print(f"  │    ℹ️ no change")
+                continue
+
+            # ---------- 6. MARGIN GUARD (best effort) ----------
+            order_for_margin = {"symbol": sym, "entry": entry, "ordertype": ot}
+            side = "buy" if is_buy else "sell"
+            try:
+                valid_vol, margin, free_margin, ok, shrunk, mreason = \
+                    _validate_single_order_margin_for_calc(
+                        order_for_margin, side, final_vol, buffer_pct=10.0
+                    )
+                if not ok or valid_vol <= 0:
+                    stats['rows_skipped'] += 1
+                    print(f"  │    ⚠️ margin check failed ({mreason}) — skipped")
+                    continue
+                if shrunk:
+                    print(f"  │    🔻 margin shrink: {final_vol:.2f} -> {valid_vol:.2f}")
+                    final_vol = valid_vol
+            except NameError:
+                pass
+
+            # ---------- 7. WRITE VOLUME ----------
+            ok_w, _, _ = db_execute(
+                "UPDATE programme_trades SET volume = %s WHERE id = %s",
+                [round(float(final_vol), 8), row_id],
+                timeout=15.0, quiet=True,
+            )
+            if not ok_w:
+                stats['rows_skipped'] += 1
+                print(f"  │    ✗ volume write failed for row {row_id}")
+                continue
+
+            stats['rows_calculated'] += 1
+            print(f"  │    ✅ final volume    = {final_vol}"
+                  f"  (risk target ${target_risk if target_risk is not None else '—'})")
+
+            stats['details'].append({
+                'row_id':          row_id,
+                'tradeid':         tradeid,
+                'symbol':          sym,
+                'ordertype':       ot,
+                'old_volume':      cur_vol,
+                'final_volume':    float(final_vol),
+                'current_rr':      round(current_rr, 6),
+                'target_rr':       float(target_for_calc) if target_for_calc is not None else None,
+                'rr_type':         rr_type,
+                'decision':        decision,
+                'volume_seeded':   vol_seeded,
+                'risk_resized':    risk_resized,
+                'rr_resized':      rr_resized,
+                'tp_synthesized':  tp_synthesized,
+                'target_risk':     float(target_risk) if target_risk is not None else None,
+            })
+
+    # ==================================================================
+    # SUMMARY
+    # ==================================================================
+    print(f"\n{'='*10} 📐 CALCULATE SUMMARY (DB) {'='*10}")
+    print(f"  Programmes processed : {stats['programmes_processed']}")
+    print(f"  Investors processed  : {stats['investors_processed']}")
+    print(f"  Rows seen            : {stats['rows_seen']}")
+    print(f"  Rows calculated      : {stats['rows_calculated']}")
+    print(f"  Rows synced only     : {stats['rows_synced_only']}")
+    print(f"  Rows volume-seeded   : {stats['rows_volume_seeded']}")
+    print(f"  Rows risk-resized    : {stats['rows_risk_resized']}")
+    print(f"  Rows R:R-resized     : {stats['rows_rr_resized']}")
+    print(f"  Rows TP-synthesized  : {stats['rows_tp_synthesized']}")
+    print(f"  Rows skipped         : {stats['rows_skipped']}")
+    print(f"  Errors               : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+
+# ==============================================================================
+#  CHUNK ORDERS WITH VOLUME BEYOND MAX — DB version
+#
+#  SEMANTICS
+#  ---------
+#  Reads programme_trades rows where orderstatus = 'pending' for the investor
+#  (VPS-scoped via fetch_vps_investor_jobs) and, for each row:
+#
+#    * Looks up the symbol's MT5 volume_max / volume_min / volume_step.
+#    * IF volume <= volume_max:
+#         -> chunked_pieces is forced to 0 (idempotent).
+#         -> volume is NEVER touched.
+#    * IF volume > volume_max:
+#         -> chunked_pieces = ceil(volume / volume_max).
+#         -> volume is NEVER touched.
+#         -> No new rows are inserted; no rows are deleted.
+#         -> The `volume` column keeps the full original volume. The chunk
+#            count is the only thing this stage writes.
+#
+#  WHY CHUNKED_PIECES AND NOT CHILD ROWS?
+#  --------------------------------------
+#  The downstream placer (place_usd_orders) reads chunked_pieces and
+#  iterates the MT5 submission in `chunked_pieces` pieces of ≤ volume_max
+#  each. The DB row remains the single source of truth for the trade; the
+#  piece count is metadata.
+#
+#  GUARANTEES
+#  ----------
+#  * volume is NEVER updated by this stage.
+#  * chunked_pieces is the ONLY field written.
+#  * Idempotent: safe to run every cycle.
+#  * No JSON. No local folders. No MT5 order submission.
+# ==============================================================================
+
+def chunk_orders_with_volume_beyond_max_db(inv_db_id=None):
+    """
+    DB version of chunk_orders_with_volume_beyond_max_local_version.
+
+    INVESTOR-SCOPED, NOT ID-SCOPED:
+        Every pending programme_trades row belonging to the investor
+        (matched by investor_id + investor_sub_account_id + programmeid,
+        and further guarded by userid) is processed. Row `id` is only
+        read so we can write back to the correct row. The `tradeid` is
+        NOT used as a unique key — multiple rows may share the same
+        tradeid (e.g. tree pieces), and ALL of them are chunked.
+
+    For each pending row:
+      * Look up the symbol's MT5 volume_max.
+      * If volume > volume_max:
+            chunked_pieces = ceil(volume / volume_max)
+            volume is NEVER touched.
+      * If volume <= volume_max:
+            chunked_pieces = 0
+            volume is NEVER touched.
+
+    Returns a stats dict.
+    """
+    import math
+
+    print(f"\n{'='*10} 📦 CHUNKING ORDERS WITH VOLUME BEYOND MAX (DB) {'='*10}")
+
+    stats = {
+        'investor_id':          inv_db_id if inv_db_id else 'all',
+        'investors_processed':  0,
+        'rows_seen':            0,
+        'rows_chunked':         0,
+        'rows_unchanged':       0,
+        'rows_skipped':         0,
+        'total_pieces_created': 0,
+        'total_volume_chunked': 0.0,
+        'errors':               [],
+        'details':              [],
+        'processing_success':   False,
+    }
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _floor_to_step(value, step):
+        if step <= 0:
+            return value
+        try:
+            multiples = math.floor(round(value / step, 10))
+            return round(multiples * step, 10)
+        except Exception:
+            return value
+
+    def _ceil_to_step(value, step):
+        if step <= 0:
+            return value
+        try:
+            multiples = math.ceil(round(value / step, 10))
+            return round(multiples * step, 10)
+        except Exception:
+            return value
+
+    _symbol_info_cache = {}
+
+    def _get_symbol_info(sym):
+        si = _symbol_info_cache.get(sym)
+        if si is None:
+            si = mt5_symbol_info(sym)
+            if si is None:
+                mt5_symbol_select(sym, True)
+                si = mt5_symbol_info(sym)
+            _symbol_info_cache[sym] = si
+        return si
+
+    # ------------------------------------------------------------------
+    # enumeration (VPS-scoped)
+    # ------------------------------------------------------------------
+    print("\n" + "─" * 80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─" * 80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─" * 80)
+
+    # ------------------------------------------------------------------
+    # per-investor processing
+    # ------------------------------------------------------------------
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['rows_skipped'] += 1
+            continue
+
+        print(f"\n{'─'*72}")
+        print(f" 📦 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+
+        # ---- fetch ALL pending rows for THIS investor (investor-scoped, NOT id-scoped) ----
+        # Multiple rows may share the same tradeid — every one of them is
+        # processed. `userid` is included as the ownership guard.
+        rows = db_fetch_all(
+            """
+            SELECT id, tradeid, userid, programmeid,
+                   investor_id, investor_sub_account_id,
+                   symbol, ordertype, orderstatus,
+                   volume, chunked_pieces
+              FROM programme_trades
+             WHERE investor_id = %s
+               AND investor_sub_account_id = %s
+               AND programmeid = %s
+               AND userid = %s
+               AND (orderstatus = 'pending'
+                    OR orderstatus IS NULL
+                    OR orderstatus = '')
+             ORDER BY id ASC
+            """,
+            [investor_id, sub_account_id, programme_id, investor_id],
+            timeout=15.0, quiet=True,
+        )
+
+        stats['rows_seen'] += len(rows)
+        stats['investors_processed'] += 1
+
+        if not rows:
+            print(f"  │ ℹ️ No pending rows for this investor")
+            continue
+
+        print(f"  │ Pending rows: {len(rows)}")
+
+        investor_chunked = 0
+        investor_unchanged = 0
+        investor_skipped = 0
+        investor_pieces = 0
+        investor_volume = 0.0
+
+        for r in rows:
+            row_id    = _coerce_int(_raw_first_key(r, 'id'))
+            tradeid   = _coerce_int(_raw_first_key(r, 'tradeid'))
+            sym       = (_raw_first_key(r, 'symbol') or '').strip()
+            ot        = (_raw_first_key(r, 'ordertype') or '').strip().lower()
+            volume    = _coerce_float(_raw_first_key(r, 'volume'), default=None)
+            existing_pieces = _coerce_int(_raw_first_key(r, 'chunked_pieces')) or 0
+
+            if row_id is None:
+                stats['rows_skipped'] += 1
+                investor_skipped += 1
+                continue
+
+            if not sym or volume is None or volume <= 0:
+                # Nothing to chunk — mark chunked_pieces = 0
+                if existing_pieces != 0:
+                    db_execute(
+                        "UPDATE programme_trades SET chunked_pieces = 0 WHERE id = %s",
+                        [row_id], timeout=10.0, quiet=True,
+                    )
+                stats['rows_unchanged'] += 1
+                investor_unchanged += 1
+                continue
+
+            si = _get_symbol_info(sym)
+            if si is None:
+                print(f"  │ ⚠️ row {row_id}: no symbol_info for {sym} — skipped")
+                stats['rows_skipped'] += 1
+                investor_skipped += 1
+                continue
+
+            try:
+                max_volume = float(getattr(si, 'volume_max', 0) or 0)
+                min_volume = float(getattr(si, 'volume_min', 0.01) or 0.01)
+                volume_step = float(getattr(si, 'volume_step', 0.01) or 0.01)
+            except Exception:
+                print(f"  │ ⚠️ row {row_id}: cannot read volume limits for {sym} — skipped")
+                stats['rows_skipped'] += 1
+                investor_skipped += 1
+                continue
+
+            if max_volume <= 0:
+                # No max limit → never chunk
+                if existing_pieces != 0:
+                    db_execute(
+                        "UPDATE programme_trades SET chunked_pieces = 0 WHERE id = %s",
+                        [row_id], timeout=10.0, quiet=True,
+                    )
+                stats['rows_unchanged'] += 1
+                investor_unchanged += 1
+                continue
+
+            # ============================================================
+            # CASE 1: volume within max → chunked_pieces = 0
+            # ============================================================
+            if volume <= max_volume + 1e-9:
+                if existing_pieces != 0:
+                    db_execute(
+                        "UPDATE programme_trades SET chunked_pieces = 0 WHERE id = %s",
+                        [row_id], timeout=10.0, quiet=True,
+                    )
+                    print(f"  │ ✓ row {row_id} ({sym}) tradeid={tradeid}: "
+                          f"volume {volume:.2f} ≤ max {max_volume:.2f} "
+                          f"→ chunked_pieces = 0 (reset from {existing_pieces})")
+                else:
+                    print(f"  │ − row {row_id} ({sym}) tradeid={tradeid}: "
+                          f"volume {volume:.2f} ≤ max {max_volume:.2f} "
+                          f"→ chunked_pieces = 0")
+                stats['rows_unchanged'] += 1
+                investor_unchanged += 1
+                continue
+
+            # ============================================================
+            # CASE 2: volume exceeds max → chunked_pieces = ceil(volume / max)
+            # ============================================================
+            needed_pieces = int(math.ceil(round(volume / max_volume, 10)))
+            if needed_pieces < 1:
+                needed_pieces = 1
+
+            print(f"\n  │ 📦 row {row_id} ({sym} {ot}) tradeid={tradeid}")
+            print(f"  │    volume        : {volume:.8f}")
+            print(f"  │    volume_max    : {max_volume:.2f}")
+            print(f"  │    volume_step   : {volume_step}")
+            print(f"  │    volume_min    : {min_volume}")
+            print(f"  │    needed pieces : {needed_pieces}")
+            print(f"  │    current pieces: {existing_pieces}")
+
+            if needed_pieces == existing_pieces:
+                print(f"  │    ℹ️ chunked_pieces already = {existing_pieces} — no change")
+                stats['rows_unchanged'] += 1
+                investor_unchanged += 1
+                continue
+
+            # ---- Only chunked_pieces is written. volume is NEVER touched. ----
+            ok, _, msg = db_execute(
+                "UPDATE programme_trades SET chunked_pieces = %s WHERE id = %s",
+                [int(needed_pieces), row_id],
+                timeout=15.0, quiet=True,
+            )
+
+            if not ok:
+                print(f"  │    ✗ failed to write chunked_pieces: {msg}")
+                stats['errors'].append(f"row {row_id}: write failed")
+                stats['rows_skipped'] += 1
+                investor_skipped += 1
+                continue
+
+            stats['rows_chunked'] += 1
+            investor_chunked += 1
+            stats['total_pieces_created'] += needed_pieces
+            investor_pieces += needed_pieces
+            stats['total_volume_chunked'] += volume
+            investor_volume += volume
+
+            print(f"  │    ✅ chunked_pieces = {needed_pieces} "
+                  f"(volume left at {volume:.8f})")
+
+            stats['details'].append({
+                'row_id':          row_id,
+                'tradeid':         tradeid,
+                'symbol':          sym,
+                'ordertype':       ot,
+                'volume':          volume,
+                'volume_max':      max_volume,
+                'needed_pieces':   needed_pieces,
+                'previous_pieces': existing_pieces,
+            })
+
+        print(f"\n  │ Investor summary:")
+        print(f"  │   chunked   : {investor_chunked}")
+        print(f"  │   unchanged : {investor_unchanged}")
+        print(f"  │   skipped   : {investor_skipped}")
+        print(f"  │   pieces    : {investor_pieces}")
+        print(f"  │   volume    : {investor_volume:.8f}")
+
+    # ------------------------------------------------------------------
+    # summary
+    # ------------------------------------------------------------------
+    print(f"\n{'='*10} 📦 CHUNKING SUMMARY (DB) {'='*10}")
+    print(f"  Investors processed  : {stats['investors_processed']}")
+    print(f"  Rows seen            : {stats['rows_seen']}")
+    print(f"  Rows chunked         : {stats['rows_chunked']}")
+    print(f"  Rows unchanged       : {stats['rows_unchanged']}")
+    print(f"  Rows skipped         : {stats['rows_skipped']}")
+    print(f"  Total pieces created : {stats['total_pieces_created']}")
+    print(f"  Total volume chunked : {stats['total_volume_chunked']:.8f}")
+    print(f"  Errors               : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+
+# ==============================================================================
+#  PLACE USD ORDERS — DB version (reconciliation-aware, chunked-pieces, no grid)
+#
+#  READS:
+#    * programme_trades     -> pending rows for this investor
+#    * harvhub              -> execution_start_date (for MT5 history anchoring)
+#    * accountmanagement    -> default / maximum risk brackets (per programme)
+#    * MT5                  -> pending orders / open positions / history deals
+#
+#  WRITES:
+#    * programme_trades     -> orderstatus reflects what was placed at MT5:
+#                                 'pending'  → MT5 pending order (limit / stop)
+#                                 'running'  → MT5 open position (instant buy/sell)
+#                                 'closed'   → row is done (found in MT5 history)
+#    * (No JSON. No local files. No grid.)
+#
+#  ORDERSTATUS vs MT5 RECONCILIATION (BEFORE ANY PLACEMENT)
+#  ---------------------------------------------------------
+#  For every DB row the placer examines (investor-scoped, ordered by id):
+#
+#    STEP 1 — DB orderstatus pre-filter
+#      * 'closed' or 'running'  → SKIP ENTIRELY (no reconciliation, no placement).
+#      * 'pending' or NULL/''   → proceed to MT5 reconciliation.
+#
+#    STEP 2 — MT5 history deals (magic == tradeid)  ← CHECKED FIRST!
+#      * found in MT5 history   → ROW IS CLOSED.
+#                                 - Delete any MT5 pending order with the
+#                                   same magic (the "bypassed" order) via
+#                                   TRADE_ACTION_REMOVE.
+#                                 - Force DB orderstatus = 'closed'.
+#                                 - SKIP placement.
+#
+#    STEP 3 — MT5 open positions (magic == tradeid)
+#      * found in MT5 positions → ROW IS RUNNING.
+#                                 Ensure DB orderstatus = 'running'. SKIP.
+#
+#    STEP 4 — MT5 pending orders (magic == tradeid)
+#      * found in MT5 pending   → ROW IS A PENDING ORDER.
+#                                 Ensure DB orderstatus = 'pending'. SKIP.
+#
+#    STEP 5 — Not found anywhere → PLACE
+#      * If orderstatus = 'pending' → PLACE (subject to risk guard + chunks).
+#      * If orderstatus = NULL/''   → PLACE (subject to risk guard + chunks).
+#      * If orderstatus = 'closed' / 'running' (handled at step 1) → never reach here.
+#
+#  POST-PLACEMENT DB STATUS (STEP 5)
+#  ---------------------------------
+#    * If the MT5 type we sent is a PENDING order (buy-limit / sell-limit /
+#      buy-stop / sell-stop) → DB orderstatus = 'pending'.
+#    * If the MT5 type we sent is an INSTANT MARKET order (buy / sell)
+#      → DB orderstatus = 'running'.
+#
+#  CHUNKING SEMANTICS:
+#    * chunked_pieces <= 1 → place ONE order of `volume`.
+#    * chunked_pieces  > 1 → place `chunked_pieces` pieces of volume / pieces,
+#                            capped by volume_max, floored by volume_min, and
+#                            every piece subject to the max-risk guard.
+#
+#  NO GRID LOGIC. NO JSON. NO LOCAL FOLDERS.
+# ==============================================================================
+
+def place_usd_orders_db(inv_db_id=None):
+    """
+    Reconciliation-aware DB placer.
+
+    Key safety rule enforced here:
+    * A tradeid/magic that already appears in MT5 HISTORY (closed) is
+      considered DONE. Any live MT5 pending order carrying that same
+      magic is a leak — it is CANCELLED in MT5 immediately, and the
+      DB row is forced to orderstatus='closed'. The row is never
+      re-placed.
+
+    Reconciliation order (per row, when DB says pending/NULL):
+        STEP 2 — MT5 history deals (magic == tradeid)  → cancel live pending, mark closed, skip.
+        STEP 3 — MT5 open positions (magic == tradeid) → mark running, skip.
+        STEP 4 — MT5 pending orders (magic == tradeid) → mark pending, skip.
+        STEP 5 — Not found anywhere                    → PLACE.
+    """
+    from datetime import datetime, timedelta, timezone
+    import math
+
+    # ------------------------------------------------------------------
+    # LAGOS TIMEZONE
+    # ------------------------------------------------------------------
+    try:
+        from zoneinfo import ZoneInfo
+        LAGOS_TZ = ZoneInfo("Africa/Lagos")
+        _LAGOS_TZ_SOURCE = "zoneinfo"
+    except Exception:
+        LAGOS_TZ = timezone(timedelta(hours=1))
+        _LAGOS_TZ_SOURCE = "fixed_utc+1"
+
+    def lagos_now():
+        return datetime.now(LAGOS_TZ)
+
+    print(f"\n{'='*10} 🚀 PLACE USD ORDERS (DB) {'='*10}")
+    print(f" 🕒 Lagos time now: {lagos_now().strftime('%Y-%m-%d %H:%M:%S %Z')} (source: {_LAGOS_TZ_SOURCE})")
+    if inv_db_id:
+        print(f" 🎯 Target Investor: {inv_db_id}")
+
+    stats = {
+        'investor_id':                       inv_db_id if inv_db_id else 'all',
+        'investors_processed':               0,
+        'investors_skipped':                 0,
+        'programmes_processed':              0,
+        'rows_seen':                         0,
+        'rows_skipped_closed':               0,
+        'rows_skipped_running':              0,
+        'rows_marked_pending':               0,
+        'rows_marked_running':               0,
+        'rows_marked_closed':                0,
+        'rows_skipped_found_pending':        0,
+        'rows_closed_and_pending_purged':    0,   # history hit → cancel leaked MT5 pending + mark closed
+        'mt5_pending_purged_count':          0,   # individual MT5 pending orders removed
+        'rows_placed':                       0,
+        'rows_skipped':                      0,
+        'pieces_placed':                     0,
+        'pieces_failed':                     0,
+        'orders_rejected_by_risk':           0,
+        'errors':                            [],
+        'details':                           [],
+        'processing_success':                False,
+    }
+
+    # ==================================================================
+    # SECTION 1 — SYMBOL / MT5 HELPERS
+    # ==================================================================
+    _symbol_info_cache = {}
+
+    def _get_symbol_info(sym):
+        si = _symbol_info_cache.get(sym)
+        if si is None:
+            si = mt5_symbol_info(sym)
+            if si is None:
+                mt5_symbol_select(sym, True)
+                si = mt5_symbol_info(sym)
+            _symbol_info_cache[sym] = si
+        return si
+
+    def _get_tick(sym):
+        return mt5_symbol_tick(sym)
+
+    def _round_to_step(value, step):
+        if step is None or step <= 0:
+            return value
+        try:
+            multiples = round(round(value / step, 10))
+            return round(multiples * step, 10)
+        except Exception:
+            return value
+
+    def _price_digits(si):
+        try:
+            if si is not None and hasattr(si, 'digits'):
+                d = int(si.digits)
+                if d >= 0:
+                    return d
+        except Exception:
+            pass
+        return 5
+
+    def _order_type_to_mt5(order_type_str, entry=None, ask=None, bid=None):
+        """
+        Map DB ordertype to MT5 constant. Falls back to instant market
+        if the pending type is invalid for the current price.
+        Returns (mt5_type, was_converted, reason).
+        """
+        ot = (order_type_str or '').strip().lower()
+        mapping = {
+            'buy':        mt5.ORDER_TYPE_BUY,
+            'sell':       mt5.ORDER_TYPE_SELL,
+            'buy-limit':  mt5.ORDER_TYPE_BUY_LIMIT,
+            'sell-limit': mt5.ORDER_TYPE_SELL_LIMIT,
+            'buy-stop':   mt5.ORDER_TYPE_BUY_STOP,
+            'sell-stop':  mt5.ORDER_TYPE_SELL_STOP,
+        }
+        mt5_type = mapping.get(ot)
+        if mt5_type is None:
+            return None, False, f"unknown order type '{order_type_str}'"
+
+        if entry is None or ask is None or bid is None:
+            return mt5_type, False, "no price context"
+
+        if mt5_type == mt5.ORDER_TYPE_BUY_STOP and entry <= ask:
+            return mt5.ORDER_TYPE_BUY, True, "buy-stop below ask -> instant buy"
+        if mt5_type == mt5.ORDER_TYPE_SELL_STOP and entry >= bid:
+            return mt5.ORDER_TYPE_SELL, True, "sell-stop above bid -> instant sell"
+        if mt5_type == mt5.ORDER_TYPE_BUY_LIMIT and entry >= ask:
+            return mt5.ORDER_TYPE_BUY, True, "buy-limit above ask -> instant buy"
+        if mt5_type == mt5.ORDER_TYPE_SELL_LIMIT and entry <= bid:
+            return mt5.ORDER_TYPE_SELL, True, "sell-limit below bid -> instant sell"
+
+        return mt5_type, False, "valid pending"
+
+    def _get_supported_filling_modes(si, is_pending_order=False):
+        if si is None:
+            return [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        try:
+            execution_mode = si.trade_exemode
+            filling_mode_mask = si.filling_mode
+        except Exception:
+            return [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+        SYMBOL_FILLING_FOK = 0x01
+        SYMBOL_FILLING_IOC = 0x02
+        SYMBOL_FILLING_BOC = 0x04
+
+        if is_pending_order:
+            return [mt5.ORDER_FILLING_RETURN]
+
+        modes = []
+        try:
+            if execution_mode == mt5.SYMBOL_TRADE_EXECUTION_EXCHANGE:
+                if filling_mode_mask & SYMBOL_FILLING_BOC:
+                    modes.append(mt5.ORDER_FILLING_BOC)
+                if filling_mode_mask & SYMBOL_FILLING_IOC:
+                    modes.append(mt5.ORDER_FILLING_IOC)
+                if filling_mode_mask & SYMBOL_FILLING_FOK:
+                    modes.append(mt5.ORDER_FILLING_FOK)
+                modes.append(mt5.ORDER_FILLING_RETURN)
+            elif execution_mode == mt5.SYMBOL_TRADE_EXECUTION_MARKET:
+                if filling_mode_mask & SYMBOL_FILLING_IOC:
+                    modes.append(mt5.ORDER_FILLING_IOC)
+                modes.append(mt5.ORDER_FILLING_RETURN)
+                if filling_mode_mask & SYMBOL_FILLING_FOK:
+                    modes.append(mt5.ORDER_FILLING_FOK)
+            elif execution_mode in (mt5.SYMBOL_TRADE_EXECUTION_INSTANT,
+                                    mt5.SYMBOL_TRADE_EXECUTION_REQUEST):
+                if filling_mode_mask & SYMBOL_FILLING_FOK:
+                    modes.append(mt5.ORDER_FILLING_FOK)
+                modes.append(mt5.ORDER_FILLING_RETURN)
+            else:
+                modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        except Exception:
+            modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+        uniq = []
+        for m in modes:
+            if m not in uniq:
+                uniq.append(m)
+        return uniq
+
+    def _send_order_with_auto_filling(request_template, filling_modes, is_pending_order):
+        last_err = None
+        for filling_mode in filling_modes:
+            req = dict(request_template)
+            req["type_filling"] = filling_mode
+            req["action"] = (mt5.TRADE_ACTION_PENDING if is_pending_order
+                             else mt5.TRADE_ACTION_DEAL)
+            res = mt5_order_send(req)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                return res, filling_mode, None
+            if res is not None and res.retcode == 10009:
+                last_err = f"filling {filling_mode} not supported"
+                continue
+            if res is not None:
+                return res, filling_mode, f"retcode={res.retcode} comment={getattr(res, 'comment', '')}"
+            last_err = f"no_response last_error={mt5_last_error()}"
+        return None, None, (last_err or "all filling modes failed")
+
+    # ==================================================================
+    # SECTION 2 — RECONCILIATION HELPERS (magic == tradeid)
+    # ==================================================================
+    def _row_is_in_mt5_history(tradeid, execution_start_date):
+        """
+        True iff an MT5 history deal exists with magic == tradeid,
+        between execution_start_date (parsed from DB) and now.
+        Falls back to 30 days if execution_start_date is unusable.
+        """
+        if not tradeid:
+            return False
+
+        start_dt = None
+        if execution_start_date:
+            for fmt in ("%Y-%m-%d", "%B %d, %Y", "%Y/%m/%d",
+                        "%Y-%m-%d %H:%M:%S"):
+                try:
+                    start_dt = datetime.strptime(str(execution_start_date), fmt)
+                    break
+                except Exception:
+                    continue
+        if start_dt is None:
+            start_dt = lagos_now() - timedelta(days=30)
+
+        start_naive = start_dt.replace(tzinfo=None)
+        end_naive = lagos_now().replace(tzinfo=None)
+
+        try:
+            deals = mt5_history_deals(start_naive, end_naive) or []
+        except Exception:
+            return False
+
+        for d in deals:
+            try:
+                if int(getattr(d, 'magic', 0) or 0) == int(tradeid):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _cancel_mt5_pending_by_magic(tradeid):
+        """
+        Delete every live MT5 pending order whose magic == tradeid.
+        Used to purge leaked pending orders when the trade is already
+        found in MT5 history (i.e. the trade has closed).
+        Returns list of cancelled tickets.
+        """
+        cancelled_tickets = []
+        if not tradeid:
+            return cancelled_tickets
+        try:
+            live_pending = mt5_orders_get() or []
+        except Exception:
+            return cancelled_tickets
+
+        for o in live_pending:
+            try:
+                if int(getattr(o, 'magic', 0) or 0) != int(tradeid):
+                    continue
+            except Exception:
+                continue
+
+            ticket = getattr(o, 'ticket', None)
+            if ticket is None:
+                continue
+
+            print(f"  │    🗑️ Cancelling leaked MT5 pending #{ticket} "
+                  f"(magic={tradeid}, symbol={getattr(o, 'symbol', '?')})")
+            try:
+                req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(ticket)}
+                res = mt5_order_send(req)
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    cancelled_tickets.append(int(ticket))
+                    print(f"  │       ✅ MT5 pending #{ticket} cancelled")
+                else:
+                    err = (getattr(res, 'comment', '') if res is not None
+                           else f"no_response last_error={mt5_last_error()}")
+                    print(f"  │       ✗ cancel #{ticket} failed — {err}")
+            except Exception as e:
+                print(f"  │       ✗ cancel #{ticket} raised: {e}")
+
+        return cancelled_tickets
+
+    def _set_orderstatus(row_id, new_status):
+        """Write a new orderstatus to programme_trades for a row."""
+        ok, _, msg = db_execute(
+            "UPDATE programme_trades SET orderstatus = %s WHERE id = %s",
+            [new_status, row_id], timeout=10.0, quiet=True,
+        )
+        return ok, msg
+
+    # ==================================================================
+    # SECTION 3 — RISK GUARD (per symbol + direction + EXACT entry)
+    # ==================================================================
+    def _order_risk_in_dollars(entry, sl, symbol, volume, is_buy):
+        if entry is None or sl is None or sl == 0:
+            return 0.0
+        try:
+            calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+            profit = mt5_order_calc_profit(calc_type, symbol, float(volume),
+                                           float(entry), float(sl))
+            return abs(float(profit)) if profit else 0.0
+        except Exception:
+            return 0.0
+
+    def _normalize_mt5_direction(order_or_position):
+        t = getattr(order_or_position, 'type', None)
+        if t in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_BUY_LIMIT,
+                 mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_BUY_STOP_LIMIT):
+            return 'buy'
+        if t in (mt5.ORDER_TYPE_SELL, mt5.ORDER_TYPE_SELL_LIMIT,
+                 mt5.ORDER_TYPE_SELL_STOP, mt5.ORDER_TYPE_SELL_STOP_LIMIT):
+            return 'sell'
+        return None
+
+    def _collect_existing_risk_for_entry(symbol, direction, entry):
+        """Sum the risk (USD) of all MT5 pending orders + open positions
+        matching (symbol, direction, exact entry)."""
+        total = 0.0
+        try:
+            pending = mt5_orders_get(symbol=symbol) or []
+        except Exception:
+            pending = []
+        try:
+            positions = mt5_positions_get(symbol=symbol) or []
+        except Exception:
+            positions = []
+
+        for o in pending:
+            if _normalize_mt5_direction(o) != direction:
+                continue
+            try:
+                if abs(float(o.price_open) - float(entry)) > 1e-6:
+                    continue
+            except Exception:
+                continue
+            vol = float(getattr(o, 'volume_initial', 0) or getattr(o, 'volume_current', 0) or 0)
+            sl = getattr(o, 'sl', None)
+            total += _order_risk_in_dollars(o.price_open, sl, symbol, vol, direction == 'buy')
+
+        for p in positions:
+            if _normalize_mt5_direction(p) != direction:
+                continue
+            try:
+                if abs(float(p.price_open) - float(entry)) > 1e-6:
+                    continue
+            except Exception:
+                continue
+            vol = float(getattr(p, 'volume', 0) or 0)
+            sl = getattr(p, 'sl', None)
+            total += _order_risk_in_dollars(p.price_open, sl, symbol, vol, direction == 'buy')
+
+        return total
+
+    # ==================================================================
+    # SECTION 4 — PROGRAMME RISK CONFIG (default + maximum)
+    # ==================================================================
+    _risk_cfg_cache = {}
+
+    def _load_programme_risk_cfg(programme_id):
+        cfg = _risk_cfg_cache.get(programme_id)
+        if cfg is not None:
+            return cfg
+
+        rows = db_fetch_all(
+            """
+            SELECT from_balance_range, to_balance_range, risk_amount
+              FROM accountmanagement_balance_default_risk
+             WHERE programme_id = %s
+             ORDER BY from_balance_range ASC, id ASC
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        brackets = []
+        for r in rows:
+            try:
+                lo = _coerce_float(_raw_first_key(r, 'from_balance_range'), default=None)
+                hi = _coerce_float(_raw_first_key(r, 'to_balance_range'),   default=None)
+                rk = _coerce_float(_raw_first_key(r, 'risk_amount'),        default=None)
+            except Exception:
+                continue
+            if lo is None or rk is None:
+                continue
+            if hi is None or hi <= 0:
+                hi = float('inf')
+            brackets.append({'from': float(lo), 'to': float(hi), 'risk': float(rk)})
+
+        max_rows = db_fetch_all(
+            """
+            SELECT from_balance_range, to_balance_range, risk_amount
+              FROM accountmanagement_balance_maximum_risk
+             WHERE programme_id = %s
+             ORDER BY from_balance_range ASC, id ASC
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        max_brackets = []
+        for r in max_rows:
+            try:
+                lo = _coerce_float(_raw_first_key(r, 'from_balance_range'), default=None)
+                hi = _coerce_float(_raw_first_key(r, 'to_balance_range'),   default=None)
+                rk = _coerce_float(_raw_first_key(r, 'risk_amount'),        default=None)
+            except Exception:
+                continue
+            if lo is None or rk is None:
+                continue
+            if hi is None or hi <= 0:
+                hi = float('inf')
+            max_brackets.append({'from': float(lo), 'to': float(hi), 'risk': float(rk)})
+
+        def _pick(brackets, balance, fallback=None):
+            if not brackets or balance is None:
+                return fallback
+            for b in brackets:
+                if b['from'] <= balance <= b['to']:
+                    return b['risk']
+            below = [b for b in brackets if b['from'] <= balance]
+            if below:
+                return below[-1]['risk']
+            return brackets[0]['risk']
+
+        cfg = {
+            'default_brackets': brackets,
+            'max_brackets':     max_brackets,
+            'pick_default':     lambda bal: _pick(brackets, bal),
+            'pick_max':         lambda bal: _pick(max_brackets, bal) or _pick(brackets, bal),
+        }
+        _risk_cfg_cache[programme_id] = cfg
+        return cfg
+
+    def _resolve_risk_for_balance(programme_id, balance):
+        cfg = _load_programme_risk_cfg(programme_id)
+        default_r = cfg['pick_default'](balance)
+        maximum_r = cfg['pick_max'](balance)
+        if default_r is None and maximum_r is None:
+            return None, None
+        if default_r is None:
+            default_r = maximum_r
+        if maximum_r is None:
+            maximum_r = default_r
+        if maximum_r < default_r:
+            maximum_r = default_r
+        return float(default_r), float(maximum_r)
+
+    # ==================================================================
+    # SECTION 5 — MT5 CONNECTION CHECK
+    # ==================================================================
+    acc = mt5_account_info()
+    if acc is None:
+        print(f"  ⚠️ MT5 not connected — cannot place orders")
+        stats['errors'].append('MT5 not connected')
+        return stats
+
+    try:
+        current_balance = float(acc.balance)
+    except Exception:
+        current_balance = 0.0
+    print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
+
+    # ==================================================================
+    # SECTION 6 — ENUMERATION (VPS-scoped)
+    # ==================================================================
+    print("\n" + "─"*80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─"*80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─"*80)
+
+    # ==================================================================
+    # SECTION 7 — PER-INVESTOR PIPELINE
+    # ==================================================================
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['investors_skipped'] += 1
+            continue
+
+        print(f"\n{'─'*72}")
+        print(f" 🚀 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+
+        stats['investors_processed'] += 1
+        stats['programmes_processed'] += 1
+
+        # --- resolve risk brackets for this programme / balance ---
+        default_risk, maximum_risk = _resolve_risk_for_balance(programme_id, current_balance)
+        if default_risk is None or maximum_risk is None:
+            print(f"  ⚠️ No risk brackets for programme {programme_id} — skipping")
+            stats['errors'].append(f"programme {programme_id}: no risk brackets")
+            stats['investors_skipped'] += 1
+            continue
+        print(f"  🎯 Risk guard: default=${default_risk:.2f}  maximum=${maximum_risk:.2f}")
+
+        # --- fetch execution_start_date once (used by history reconciliation) ---
+        exec_row = db_fetch_one(
+            """
+            SELECT execution_start_date
+              FROM harvhub
+             WHERE id = %s AND sub_account_id = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        ) or {}
+        execution_start_date = _raw_first_key(exec_row, 'execution_start_date')
+
+        # --- fetch ALL pending-or-null rows for THIS investor (investor-scoped) ---
+        rows = db_fetch_all(
+            """
+            SELECT id, tradeid, userid, programmeid,
+                   investor_id, investor_sub_account_id,
+                   symbol, ordertype, orderstatus, timeframe,
+                   entry, stoploss, takeprofit,
+                   volume, chunked_pieces
+              FROM programme_trades
+             WHERE investor_id = %s
+               AND investor_sub_account_id = %s
+               AND programmeid = %s
+               AND userid = %s
+               AND (orderstatus = 'pending' OR orderstatus IS NULL OR orderstatus = '')
+             ORDER BY id ASC
+            """,
+            [investor_id, sub_account_id, programme_id, investor_id],
+            timeout=15.0, quiet=True,
+        )
+
+        stats['rows_seen'] += len(rows)
+        if not rows:
+            print(f"  │ ℹ️ No pending/NULL rows for this investor")
+            continue
+
+        print(f"  │ Candidate rows: {len(rows)}")
+
+        # ---------- Pre-fetch MT5 snapshots once per investor ----------
+        try:
+            pending_snapshot = mt5_orders_get() or []
+        except Exception:
+            pending_snapshot = []
+        try:
+            positions_snapshot = mt5_positions_get() or []
+        except Exception:
+            positions_snapshot = []
+
+        # Build magic → presence lookups (magic == tradeid)
+        pending_magics = set()
+        for o in pending_snapshot:
+            try:
+                m = int(getattr(o, 'magic', 0) or 0)
+                if m > 0:
+                    pending_magics.add(m)
+            except Exception:
+                continue
+
+        position_magics = set()
+        for p in positions_snapshot:
+            try:
+                m = int(getattr(p, 'magic', 0) or 0)
+                if m > 0:
+                    position_magics.add(m)
+            except Exception:
+                continue
+
+        # History is only consulted for rows that aren't found in pending/positions.
+        _history_cache = {}
+
+        def _history_has_magic(tid):
+            if not tid:
+                return False
+            cached = _history_cache.get(tid)
+            if cached is not None:
+                return cached
+            found = _row_is_in_mt5_history(tid, execution_start_date)
+            _history_cache[tid] = found
+            return found
+
+        for r in rows:
+            row_id    = _coerce_int(_raw_first_key(r, 'id'))
+            tradeid   = _coerce_int(_raw_first_key(r, 'tradeid'))
+            db_status = (_raw_first_key(r, 'orderstatus') or '')
+            if isinstance(db_status, str):
+                db_status = db_status.strip().lower()
+            else:
+                db_status = ''
+
+            sym       = (_raw_first_key(r, 'symbol') or '').strip()
+            ot        = (_raw_first_key(r, 'ordertype') or '').strip().lower()
+            entry     = _coerce_float(_raw_first_key(r, 'entry'), default=None)
+            sl        = _coerce_float(_raw_first_key(r, 'stoploss'), default=None)
+            tp        = _coerce_float(_raw_first_key(r, 'takeprofit'), default=None)
+            volume    = _coerce_float(_raw_first_key(r, 'volume'), default=None)
+            pieces    = _coerce_int(_raw_first_key(r, 'chunked_pieces')) or 0
+
+            print(f"\n  │ 📄 row {row_id} (tradeid={tradeid}, {sym} {ot}, db_status='{db_status or 'NULL'}')")
+            print(f"  │    entry={entry}  sl={sl}  tp={tp}")
+            print(f"  │    volume={volume}  chunked_pieces={pieces}")
+
+            if row_id is None:
+                stats['rows_skipped'] += 1
+                continue
+
+            # ==============================================================
+            # STEP 1 — DB orderstatus pre-filter
+            # --------------------------------------------------------------
+            # 'closed' / 'running' → skip entirely (no reconciliation, no placement).
+            # 'pending' / NULL / ''  → proceed to MT5 reconciliation.
+            # ==============================================================
+            if db_status == 'closed':
+                print(f"  │    ⏭️ DB says 'closed' — SKIPPING without reconciliation")
+                stats['rows_skipped_closed'] += 1
+                stats['details'].append({
+                    'row_id': row_id, 'tradeid': tradeid, 'symbol': sym,
+                    'ordertype': ot, 'action': 'skipped_db_closed',
+                })
+                continue
+
+            if db_status == 'running':
+                print(f"  │    ⏭️ DB says 'running' — SKIPPING without reconciliation")
+                stats['rows_skipped_running'] += 1
+                stats['details'].append({
+                    'row_id': row_id, 'tradeid': tradeid, 'symbol': sym,
+                    'ordertype': ot, 'action': 'skipped_db_running',
+                })
+                continue
+
+            # From here on, db_status is 'pending' or NULL/''.
+
+            # ==============================================================
+            # STEP 2 — MT5 HISTORY (magic == tradeid)  ← CHECKED FIRST
+            # --------------------------------------------------------------
+            # If the trade already appears in MT5 history, it has been closed
+            # at the broker. Any live MT5 pending order carrying the same
+            # magic is a leak that must be purged. Then force the DB to
+            # 'closed' and never place again.
+            # ==============================================================
+            if tradeid and _history_has_magic(tradeid):
+                print(f"  │    🕓 Found in MT5 history (magic={tradeid}) — "
+                      f"trade is CLOSED. Reconciling.")
+
+                # 2a — purge any leaked MT5 pending order(s) with this magic
+                leaked_before = int(tradeid) in pending_magics
+                if leaked_before:
+                    print(f"  │       ⚠️ Leaked MT5 pending order(s) detected for "
+                          f"magic={tradeid} — purging…")
+                cancelled_tickets = _cancel_mt5_pending_by_magic(tradeid)
+                if cancelled_tickets:
+                    stats['mt5_pending_purged_count'] += len(cancelled_tickets)
+                    stats['rows_closed_and_pending_purged'] += 1
+                    # Immediately drop them from the in-memory snapshot so
+                    # later rows in the same run don't see them as live.
+                    for tkt in cancelled_tickets:
+                        pending_magics.discard(int(tradeid))  # magic-keyed, so just drop the magic
+                    # Also remove from pending_snapshot list (defensive)
+                    try:
+                        pending_snapshot[:] = [
+                            o for o in pending_snapshot
+                            if int(getattr(o, 'magic', 0) or 0) != int(tradeid)
+                        ]
+                    except Exception:
+                        pass
+
+                # 2b — force DB to 'closed'
+                if db_status != 'closed':
+                    ok, msg = _set_orderstatus(row_id, 'closed')
+                    if ok:
+                        stats['rows_marked_closed'] += 1
+                        print(f"  │       DB updated: orderstatus='closed'")
+                    else:
+                        print(f"  │       ⚠️ DB update failed: {msg}")
+                        stats['errors'].append(f"row {row_id}: mark closed failed — {msg}")
+                else:
+                    print(f"  │       DB already 'closed'")
+
+                print(f"  │    ⏭️ Row is CLOSED — not placing")
+                stats['details'].append({
+                    'row_id': row_id, 'tradeid': tradeid, 'symbol': sym,
+                    'ordertype': ot,
+                    'action': 'closed_history_purged_pending',
+                    'purged_tickets': cancelled_tickets,
+                })
+                continue
+
+            # ==============================================================
+            # STEP 3 — MT5 open positions (magic == tradeid)
+            # --------------------------------------------------------------
+            # Found in MT5 positions → row IS a running market position.
+            # Ensure the DB says 'running', then skip placement.
+            # ==============================================================
+            if tradeid and int(tradeid) in position_magics:
+                if db_status != 'running':
+                    print(f"  │    ✅ Found in MT5 open positions (magic={tradeid}) — "
+                          f"marking DB as 'running'")
+                    ok, msg = _set_orderstatus(row_id, 'running')
+                    if ok:
+                        stats['rows_marked_running'] += 1
+                        print(f"  │       DB updated: orderstatus='running'")
+                    else:
+                        print(f"  │       ⚠️ DB update failed: {msg}")
+                        stats['errors'].append(f"row {row_id}: mark running failed — {msg}")
+                else:
+                    print(f"  │    ✅ Found in MT5 open positions (magic={tradeid}) — "
+                          f"DB already 'running', SKIPPING placement")
+                stats['details'].append({
+                    'row_id': row_id, 'tradeid': tradeid, 'symbol': sym,
+                    'ordertype': ot, 'action': 'marked_running_from_mt5_position',
+                })
+                continue
+
+            # ==============================================================
+            # STEP 4 — MT5 pending orders (magic == tradeid)
+            # --------------------------------------------------------------
+            # Found in MT5 pending → row IS a pending order.
+            # Ensure the DB says 'pending', then skip placement.
+            # ==============================================================
+            if tradeid and int(tradeid) in pending_magics:
+                if db_status != 'pending':
+                    print(f"  │    ✅ Found in MT5 pending (magic={tradeid}) — "
+                          f"DB was '{db_status or 'NULL'}' → marking 'pending'")
+                    ok, msg = _set_orderstatus(row_id, 'pending')
+                    if ok:
+                        stats['rows_marked_pending'] += 1
+                        print(f"  │       DB updated: orderstatus='pending'")
+                    else:
+                        print(f"  │       ⚠️ DB update failed: {msg}")
+                        stats['errors'].append(f"row {row_id}: mark pending failed — {msg}")
+                else:
+                    print(f"  │    ✅ Found in MT5 pending (magic={tradeid}) — "
+                          f"DB already 'pending', SKIPPING placement")
+                stats['rows_skipped_found_pending'] += 1
+                stats['details'].append({
+                    'row_id': row_id, 'tradeid': tradeid, 'symbol': sym,
+                    'ordertype': ot, 'action': 'skipped_found_in_mt5_pending',
+                })
+                continue
+
+            # ==============================================================
+            # STEP 5 — Not found anywhere → PLACE
+            # --------------------------------------------------------------
+            # Only reached for rows whose DB status is 'pending' or NULL/''
+            # AND which are not present in MT5 pending/positions/history.
+            #
+            # Post-placement DB status:
+            #   'pending'  if we sent an MT5 PENDING order (limit / stop)
+            #   'running'  if we sent an MT5 INSTANT MARKET order (buy / sell)
+            # ==============================================================
+            print(f"  │    🎯 Not found in MT5 pending/positions/history — PLACING")
+
+            if not sym or volume is None or volume <= 0:
+                print(f"  │    ⚠️ incomplete row — skipped")
+                stats['rows_skipped'] += 1
+                continue
+
+            si = _get_symbol_info(sym)
+            if si is None:
+                print(f"  │    ⚠️ no symbol_info for {sym} — skipped")
+                stats['rows_skipped'] += 1
+                continue
+
+            tick = _get_tick(sym)
+            if tick is None:
+                print(f"  │    ⚠️ no tick for {sym} — skipped")
+                stats['rows_skipped'] += 1
+                continue
+
+            digits   = _price_digits(si)
+            vol_min  = float(getattr(si, 'volume_min', 0.01) or 0.01)
+            vol_max  = float(getattr(si, 'volume_max', 100.0) or 100.0)
+            vol_step = float(getattr(si, 'volume_step', 0.01) or 0.01)
+
+            # -------- DECOMPOSE INTO PIECES --------
+            num_pieces = 1
+            if pieces and pieces > 1:
+                num_pieces = int(pieces)
+
+            raw_piece_vol = float(volume) / float(num_pieces)
+            if raw_piece_vol > vol_max:
+                num_pieces = int(math.ceil(volume / vol_max))
+                raw_piece_vol = float(volume) / float(num_pieces)
+
+            piece_vol = _round_to_step(raw_piece_vol, vol_step)
+            if piece_vol < vol_min:
+                piece_vol = vol_min
+            if piece_vol > vol_max:
+                piece_vol = vol_max
+
+            print(f"  │    pieces={num_pieces}  piece_vol≈{piece_vol}  "
+                  f"(vol_min={vol_min}, vol_max={vol_max}, step={vol_step})")
+
+            # -------- DETERMINE MT5 ORDER TYPE --------
+            mt5_type, converted, conv_reason = _order_type_to_mt5(
+                ot, entry=entry, ask=tick.ask, bid=tick.bid
+            )
+            if mt5_type is None:
+                print(f"  │    ⚠️ {conv_reason} — skipped")
+                stats['rows_skipped'] += 1
+                continue
+            if converted:
+                print(f"  │    🔄 {conv_reason}")
+
+            is_pending = mt5_type in (mt5.ORDER_TYPE_BUY_LIMIT,
+                                      mt5.ORDER_TYPE_SELL_LIMIT,
+                                      mt5.ORDER_TYPE_BUY_STOP,
+                                      mt5.ORDER_TYPE_SELL_STOP)
+            direction = 'buy' if mt5_type in (mt5.ORDER_TYPE_BUY,
+                                              mt5.ORDER_TYPE_BUY_LIMIT,
+                                              mt5.ORDER_TYPE_BUY_STOP) else 'sell'
+
+            # DB status we will write after a fully successful placement
+            target_status = 'pending' if is_pending else 'running'
+
+            if is_pending and (entry is None or entry <= 0):
+                print(f"  │    ⚠️ pending order needs entry price — skipped")
+                stats['rows_skipped'] += 1
+                continue
+
+            # -------- PLACE PIECES ONE BY ONE --------
+            pieces_placed_this_row  = 0
+            pieces_failed_this_row  = 0
+            pieces_skipped_this_row = 0
+
+            for piece_i in range(1, num_pieces + 1):
+                entry_for_risk = entry if is_pending else (
+                    tick.ask if direction == 'buy' else tick.bid
+                )
+                piece_risk = _order_risk_in_dollars(
+                    entry_for_risk, sl, sym, piece_vol, direction == 'buy'
+                )
+                existing_risk = _collect_existing_risk_for_entry(
+                    sym, direction, entry_for_risk
+                )
+                total_risk = existing_risk + piece_risk
+
+                if piece_risk > 0 and total_risk > maximum_risk:
+                    print(f"  │    🚫 piece {piece_i}/{num_pieces}: "
+                          f"total risk ${total_risk:.2f} > max ${maximum_risk:.2f} "
+                          f"(existing ${existing_risk:.2f} + piece ${piece_risk:.2f}) — STOP")
+                    stats['orders_rejected_by_risk'] += 1
+                    pieces_skipped_this_row += 1
+                    break
+
+                req_price = entry_for_risk
+                if not is_pending:
+                    req_price = tick.ask if direction == 'buy' else tick.bid
+
+                request = {
+                    "symbol": sym,
+                    "volume": float(piece_vol),
+                    "type": mt5_type,
+                    "price": round(float(req_price), digits),
+                    "deviation": 20,
+                    "magic": int(tradeid or 0),
+                    "comment": f"DBPIECE{piece_i}OF{num_pieces}"[:31],
+                    "type_time": mt5.ORDER_TIME_GTC,
+                }
+                if sl is not None and sl > 0:
+                    request["sl"] = round(float(sl), digits)
+                if tp is not None and tp > 0:
+                    request["tp"] = round(float(tp), digits)
+
+                filling_modes = _get_supported_filling_modes(si, is_pending_order=is_pending)
+
+                res, used_mode, err = _send_order_with_auto_filling(
+                    request, filling_modes, is_pending_order=is_pending
+                )
+
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    pieces_placed_this_row += 1
+                    stats['pieces_placed'] += 1
+                    print(f"  │    ✅ piece {piece_i}/{num_pieces}: "
+                          f"{sym} {direction.upper()} {piece_vol} lots "
+                          f"@ {request['price']} ticket={res.order} "
+                          f"[filling={used_mode}]")
+                else:
+                    pieces_failed_this_row += 1
+                    stats['pieces_failed'] += 1
+                    print(f"  │    ✗ piece {piece_i}/{num_pieces}: "
+                          f"placement failed — {err}")
+
+            # -------- UPDATE ROW STATUS --------
+            if num_pieces == 1:
+                if pieces_placed_this_row == 1:
+                    ok, msg = _set_orderstatus(row_id, target_status)
+                    if ok:
+                        stats['rows_placed'] += 1
+                        print(f"  │    🏁 row {row_id} → orderstatus='{target_status}' "
+                              f"(single piece)")
+                    else:
+                        print(f"  │    ⚠️ row {row_id}: status update failed — {msg}")
+                        stats['errors'].append(f"row {row_id}: status update failed — {msg}")
+                else:
+                    stats['rows_skipped'] += 1
+                    print(f"  │    ✗ row {row_id}: single piece failed, row unchanged in DB")
+            else:
+                if pieces_placed_this_row == num_pieces:
+                    ok, msg = _set_orderstatus(row_id, target_status)
+                    if ok:
+                        stats['rows_placed'] += 1
+                        print(f"  │    🏁 row {row_id} → orderstatus='{target_status}' "
+                              f"(all {num_pieces} pieces placed)")
+                    else:
+                        print(f"  │    ⚠️ row {row_id}: status update failed — {msg}")
+                        stats['errors'].append(f"row {row_id}: status update failed — {msg}")
+                else:
+                    stats['rows_skipped'] += 1
+                    print(f"  │    ⏸ row {row_id}: only {pieces_placed_this_row}/"
+                          f"{num_pieces} pieces placed — row unchanged in DB")
+
+            stats['details'].append({
+                'row_id':            row_id,
+                'tradeid':           tradeid,
+                'symbol':            sym,
+                'ordertype':         ot,
+                'chunked_pieces':    num_pieces,
+                'piece_volume':      piece_vol,
+                'pieces_placed':     pieces_placed_this_row,
+                'pieces_failed':     pieces_failed_this_row,
+                'pieces_skipped':    pieces_skipped_this_row,
+                'converted':         converted,
+                'target_status':     target_status,
+                'action':            'placed',
+            })
+
+    # ==================================================================
+    # SECTION 8 — SUMMARY
+    # ==================================================================
+    print(f"\n{'='*10} 🚀 PLACE USD ORDERS SUMMARY (DB) {'='*10}")
+    print(f"  Investors processed                : {stats['investors_processed']}")
+    print(f"  Investors skipped                  : {stats['investors_skipped']}")
+    print(f"  Rows seen (pending/NULL)           : {stats['rows_seen']}")
+    print(f"  -- DB-side skips --")
+    print(f"  Skipped (DB 'closed')              : {stats['rows_skipped_closed']}")
+    print(f"  Skipped (DB 'running')             : {stats['rows_skipped_running']}")
+    print(f"  -- MT5 reconciliation --")
+    print(f"  Closed via MT5 history + purged    : {stats['rows_closed_and_pending_purged']}")
+    print(f"  MT5 pending orders purged          : {stats['mt5_pending_purged_count']}")
+    print(f"  Skipped (found in MT5 pending)     : {stats['rows_skipped_found_pending']}")
+    print(f"  Marked 'pending' (MT5 pending)     : {stats['rows_marked_pending']}")
+    print(f"  Marked 'running' (MT5 position)    : {stats['rows_marked_running']}")
+    print(f"  Marked 'closed'  (MT5 history)     : {stats['rows_marked_closed']}")
+    print(f"  -- placement --")
+    print(f"  Rows placed                        : {stats['rows_placed']}")
+    print(f"  Rows skipped                       : {stats['rows_skipped']}")
+    print(f"  Pieces placed                      : {stats['pieces_placed']}")
+    print(f"  Pieces failed                      : {stats['pieces_failed']}")
+    print(f"  Rejected by risk guard             : {stats['orders_rejected_by_risk']}")
+    print(f"  Errors                             : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+    
+# ==============================================================================
+#  CHECK PENDING ORDERS RISK — DB version
+#
+#  Enforces the programme's risk ceiling (accountmanagement_balance_maximum_risk)
+#  against every live MT5 pending order for the investor, and purges any order
+#  whose REAL risk (entry -> SL, in account currency) exceeds the hard cap.
+#
+#  SOURCES
+#  -------
+#  READS:
+#    * accountmanagement_balance_default_risk  -> per-programme target risk
+#                                                 (fallback when maximum is missing)
+#    * accountmanagement_balance_maximum_risk  -> per-programme hard cap
+#    * programme_trades                        -> row identity (tradeid <-> magic)
+#    * MT5                                     -> live pending orders + SL
+#  WRITES:
+#    * MT5  -> TRADE_ACTION_REMOVE for offending tickets
+#    * programme_trades -> orderstatus = 'closed' for the matching tradeid
+#                          (the pending order is gone; nothing left to place)
+#
+#  RULES (mirrors check_pending_orders_risk_local)
+#  ----------------------------------------------
+#    0. Order has no SL                        -> REMOVE
+#    1. risk <= default                        -> KEEP
+#    2. default < risk <= maximum              -> KEEP
+#    3. risk > maximum                         -> REMOVE
+#    4. default missing                        -> maximum used as both
+#    5. maximum missing                        -> default used as both
+#    6. both missing                           -> skip investor
+#
+#  Magic semantics: order.magic == programme_trades.tradeid (same as the
+#  rest of programmetrades.py).
+# ==============================================================================
+def check_pending_orders_risk_db(inv_db_id=None):
+    print(f"\n{'='*10} 🛡️ PENDING ORDERS RISK AUDIT (DB) {'='*10}")
+
+    stats = {
+        'investor_id':                       inv_db_id if inv_db_id else 'all',
+        'investors_processed':               0,
+        'investors_skipped':                 0,
+        'programmes_processed':              0,
+        'orders_checked':                    0,
+        'orders_kept':                       0,
+        'orders_removed':                    0,
+        'orders_removed_no_sl':              0,
+        'orders_removed_exceeded_max':       0,
+        'cancel_failures':                   0,
+        'rows_marked_closed':                0,
+        'errors':                            [],
+        'details':                           [],
+        'processing_success':                False,
+    }
+
+    # ------------------------------------------------------------------
+    # MT5 helpers
+    # ------------------------------------------------------------------
+    def _digits(si):
+        try:
+            if si is not None and hasattr(si, 'digits'):
+                d = int(si.digits)
+                if d >= 0:
+                    return d
+        except Exception:
+            pass
+        return 5
+
+    def _order_risk_usd(order, si):
+        """
+        Risk (account currency) from order.price_open -> order.sl.
+        Returns (risk_abs, sl_distance, contract_size, direction) or
+        (None, ...) when it cannot be computed.
+        """
+        try:
+            entry = float(order.price_open)
+            sl = float(order.sl) if order.sl else 0.0
+        except Exception:
+            return None, 0.0, 1.0, None
+
+        if sl <= 0:
+            return None, 0.0, 1.0, None
+
+        t = int(getattr(order, 'type', -1))
+        is_buy = t in (mt5.ORDER_TYPE_BUY_LIMIT,
+                       mt5.ORDER_TYPE_BUY_STOP,
+                       mt5.ORDER_TYPE_BUY_STOP_LIMIT)
+        direction = 'buy' if is_buy else 'sell'
+
+        sl_distance = abs(entry - sl)
+        if sl_distance <= 0:
+            return 0.0, 0.0, 1.0, direction
+
+        contract = 1.0
+        try:
+            if si is not None:
+                contract = float(getattr(si, 'trade_contract_size', 1.0) or 1.0)
+        except Exception:
+            contract = 1.0
+
+        vol = float(getattr(order, 'volume_current', 0)
+                    or getattr(order, 'volume_initial', 0) or 0)
+        if vol <= 0:
+            return 0.0, sl_distance, contract, direction
+
+        try:
+            calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+            profit = mt5_order_calc_profit(
+                calc_type, order.symbol, vol, entry, sl
+            )
+            if profit is None:
+                return sl_distance * vol * contract, sl_distance, contract, direction
+            return abs(float(profit)), sl_distance, contract, direction
+        except Exception:
+            return sl_distance * vol * contract, sl_distance, contract, direction
+
+    def _cancel_pending(ticket):
+        try:
+            req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(ticket)}
+            res = mt5_order_send(req)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                return True, 'cancelled'
+            if res is not None:
+                return False, f"retcode={res.retcode} comment={getattr(res, 'comment', '')}"
+            return False, f"no_response last_error={mt5_last_error()}"
+        except Exception as e:
+            return False, f"exception: {e}"
+
+    def _mark_row_closed_by_tradeid(tradeid, investor_id, sub_account_id, programme_id):
+        if tradeid is None:
+            return False
+        ok, affected, msg = db_execute(
+            """
+            UPDATE programme_trades
+               SET orderstatus = 'closed'
+             WHERE userid = %s
+               AND programmeid = %s
+               AND investor_id = %s
+               AND investor_sub_account_id = %s
+               AND tradeid = %s
+               AND orderstatus = 'pending'
+            """,
+            [investor_id, programme_id, investor_id, sub_account_id, int(tradeid)],
+            timeout=15.0, quiet=True,
+        )
+        return bool(ok) and (affected or 0) >= 0
+
+    # ------------------------------------------------------------------
+    # Programme risk-bracket readers (cached)
+    # ------------------------------------------------------------------
+    _risk_cfg_cache = {}
+
+    def _load_programme_risk_cfg(programme_id):
+        cfg = _risk_cfg_cache.get(programme_id)
+        if cfg is not None:
+            return cfg
+
+        def _read(table):
+            rows = db_fetch_all(
+                f"""
+                SELECT from_balance_range, to_balance_range, risk_amount
+                  FROM {table}
+                 WHERE programme_id = %s
+                 ORDER BY from_balance_range ASC, id ASC
+                """,
+                [programme_id], timeout=10.0, quiet=True,
+            )
+            out = []
+            for r in rows:
+                try:
+                    lo = _coerce_float(_raw_first_key(r, 'from_balance_range'), default=None)
+                    hi = _coerce_float(_raw_first_key(r, 'to_balance_range'),   default=None)
+                    rk = _coerce_float(_raw_first_key(r, 'risk_amount'),        default=None)
+                except Exception:
+                    continue
+                if lo is None or rk is None:
+                    continue
+                if hi is None or hi <= 0:
+                    hi = float('inf')
+                out.append({'from': float(lo), 'to': float(hi), 'risk': float(rk)})
+            return out
+
+        def _pick(brackets, balance):
+            if not brackets or balance is None:
+                return None
+            for b in brackets:
+                if b['from'] <= balance <= b['to']:
+                    return b['risk']
+            below = [b for b in brackets if b['from'] <= balance]
+            if below:
+                return below[-1]['risk']
+            return brackets[0]['risk']
+
+        cfg = {
+            'default_brackets': _read('accountmanagement_balance_default_risk'),
+            'max_brackets':     _read('accountmanagement_balance_maximum_risk'),
+            'pick_default':     lambda bal: _pick(
+                _read('accountmanagement_balance_default_risk'), bal
+            ),
+            'pick_max':         lambda bal: _pick(
+                _read('accountmanagement_balance_maximum_risk'), bal
+            ),
+        }
+        _risk_cfg_cache[programme_id] = cfg
+        return cfg
+
+    def _resolve_risk_pair(programme_id, balance):
+        cfg = _load_programme_risk_cfg(programme_id)
+        default_r = cfg['pick_default'](balance)
+        maximum_r = cfg['pick_max'](balance)
+
+        if default_r is None and maximum_r is None:
+            return None, None, 'no_config'
+        if default_r is None:
+            return float(maximum_r), float(maximum_r), 'max_only'
+        if maximum_r is None:
+            return float(default_r), float(default_r), 'default_only'
+        if maximum_r < default_r:
+            maximum_r = default_r
+        return float(default_r), float(maximum_r), 'both'
+
+    # ------------------------------------------------------------------
+    # MT5 connection check
+    # ------------------------------------------------------------------
+    acc = mt5_account_info()
+    if acc is None:
+        print(f"  ⚠️ MT5 not connected — cannot audit pending risk")
+        stats['errors'].append('MT5 not connected')
+        return stats
+
+    try:
+        current_balance = float(acc.balance)
+    except Exception:
+        current_balance = 0.0
+    print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
+
+    # ------------------------------------------------------------------
+    # Enumeration
+    # ------------------------------------------------------------------
+    print("\n" + "─" * 80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─" * 80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─" * 80)
+
+    # ------------------------------------------------------------------
+    # Per-investor loop
+    # ------------------------------------------------------------------
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['investors_skipped'] += 1
+            continue
+
+        print(f"\n{'─'*72}")
+        print(f" 🛡️ Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+
+        stats['investors_processed'] += 1
+        stats['programmes_processed']  += 1
+
+        default_risk, maximum_risk, cfg_src = _resolve_risk_pair(
+            programme_id, current_balance
+        )
+        if default_risk is None or maximum_risk is None:
+            print(f"  │ ⚠️ No risk configuration — skipping investor")
+            stats['investors_skipped'] += 1
+            continue
+        if cfg_src == 'max_only':
+            print(f"  │ ℹ️ default missing → using maximum for both")
+        elif cfg_src == 'default_only':
+            print(f"  │ ℹ️ maximum missing → using default for both")
+        print(f"  │ Target risk (default) : ${default_risk:.2f}")
+        print(f"  │ Maximum allowed (cap) : ${maximum_risk:.2f}")
+
+        # Build a tradeid lookup for row-status flips after removal.
+        row_lookup = {}
+        try:
+            rows = db_fetch_all(
+                """
+                SELECT id, tradeid
+                  FROM programme_trades
+                 WHERE userid = %s
+                   AND programmeid = %s
+                   AND investor_id = %s
+                   AND investor_sub_account_id = %s
+                   AND orderstatus = 'pending'
+                """,
+                [investor_id, programme_id, investor_id, sub_account_id],
+                timeout=15.0, quiet=True,
+            )
+            for r in rows:
+                tid = _coerce_int(_raw_first_key(r, 'tradeid'))
+                rid = _coerce_int(_raw_first_key(r, 'id'))
+                if tid is not None and rid is not None:
+                    row_lookup[tid] = rid
+        except Exception:
+            pass
+
+        # Snapshot live pending orders
+        try:
+            live_pending = mt5_orders_get() or []
+        except Exception:
+            live_pending = []
+
+        if not live_pending:
+            print(f"  │ 🔘 No live pending orders")
+            continue
+
+        print(f"  │ 🔍 Scanning {len(live_pending)} pending order(s)…")
+
+        symbol_info_cache = {}
+
+        def _si(sym):
+            si = symbol_info_cache.get(sym)
+            if si is None:
+                si = mt5_symbol_info(sym)
+                if si is None:
+                    mt5_symbol_select(sym, True)
+                    si = mt5_symbol_info(sym)
+                symbol_info_cache[sym] = si
+            return si
+
+        for order in live_pending:
+            ticket = getattr(order, 'ticket', None)
+            sym = getattr(order, 'symbol', '?')
+            tradeid = None
+            try:
+                tradeid = int(getattr(order, 'magic', 0) or 0)
+            except Exception:
+                tradeid = 0
+
+            si = _si(sym)
+            digits = _digits(si)
+
+            print(f"\n  │ 📋 ticket #{ticket} | {sym} | magic={tradeid} "
+                  f"| vol={float(getattr(order, 'volume_current', 0) or 0):.2f}")
+
+            # Rule 0 — no SL
+            sl_raw = getattr(order, 'sl', None)
+            try:
+                sl_val = float(sl_raw) if sl_raw else 0.0
+            except Exception:
+                sl_val = 0.0
+
+            if sl_val <= 0:
+                print(f"  │    🗑️ PURGING: no stoploss protection detected")
+                ok, msg = _cancel_pending(ticket)
+                stats['orders_checked'] += 1
+                if ok:
+                    stats['orders_removed'] += 1
+                    stats['orders_removed_no_sl'] += 1
+                    print(f"  │    ✅ Order removed")
+                    if tradeid and tradeid in row_lookup:
+                        if _mark_row_closed_by_tradeid(
+                            tradeid, investor_id, sub_account_id, programme_id
+                        ):
+                            stats['rows_marked_closed'] += 1
+                else:
+                    stats['cancel_failures'] += 1
+                    print(f"  │    ✗ Cancel failed: {msg}")
+                continue
+
+            # Compute real risk
+            risk_usd, sl_dist, contract, direction = _order_risk_usd(order, si)
+            stats['orders_checked'] += 1
+            if risk_usd is None:
+                print(f"  │    ⚠️ Could not compute risk — leaving order alone")
+                stats['orders_kept'] += 1
+                continue
+
+            print(f"  │    order risk : ${risk_usd:.2f}  "
+                  f"(SL dist={sl_dist}, contract={contract}, {direction})")
+            print(f"  │    target     : ${default_risk:.2f} | "
+                  f"maximum: ${maximum_risk:.2f}")
+
+            if risk_usd > maximum_risk + 1e-9:
+                print(f"  │    🗑️ PURGING: risk exceeds maximum threshold")
+                print(f"  │       ${risk_usd:.2f} > ${maximum_risk:.2f} "
+                      f"(excess ${risk_usd - maximum_risk:.2f})")
+                ok, msg = _cancel_pending(ticket)
+                if ok:
+                    stats['orders_removed'] += 1
+                    stats['orders_removed_exceeded_max'] += 1
+                    print(f"  │    ✅ Order removed")
+                    if tradeid and tradeid in row_lookup:
+                        if _mark_row_closed_by_tradeid(
+                            tradeid, investor_id, sub_account_id, programme_id
+                        ):
+                            stats['rows_marked_closed'] += 1
+                else:
+                    stats['cancel_failures'] += 1
+                    print(f"  │    ✗ Cancel failed: {msg}")
+            elif risk_usd <= default_risk + 1e-9:
+                stats['orders_kept'] += 1
+                print(f"  │    ✅ KEEPING: within target range")
+            else:
+                stats['orders_kept'] += 1
+                print(f"  │    ✅ KEEPING: between target and maximum")
+
+            stats['details'].append({
+                'investor_id':     investor_id,
+                'sub_account_id':  sub_account_id,
+                'programme_id':    programme_id,
+                'ticket':          ticket,
+                'symbol':          sym,
+                'magic_tradeid':   tradeid,
+                'risk_usd':        float(risk_usd),
+                'default_risk':    float(default_risk),
+                'maximum_risk':    float(maximum_risk),
+                'action':          'removed_exceeded_max' if risk_usd > maximum_risk + 1e-9
+                                   else 'kept',
+            })
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    print(f"\n{'='*10} 🛡️ PENDING ORDERS RISK SUMMARY (DB) {'='*10}")
+    print(f"  Investors processed            : {stats['investors_processed']}")
+    print(f"  Investors skipped              : {stats['investors_skipped']}")
+    print(f"  Orders checked                 : {stats['orders_checked']}")
+    print(f"  Orders kept                    : {stats['orders_kept']}")
+    print(f"  Orders removed (total)         : {stats['orders_removed']}")
+    print(f"    - No stoploss                : {stats['orders_removed_no_sl']}")
+    print(f"    - Exceeded maximum risk      : {stats['orders_removed_exceeded_max']}")
+    print(f"  Cancel failures                : {stats['cancel_failures']}")
+    print(f"  programme_trades marked closed : {stats['rows_marked_closed']}")
+    print(f"  Errors                         : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+
+# ==============================================================================
+#  ORDERS REWARD CORRECTION — DB version
+#
+#  Aligns live MT5 pending orders AND open positions' TPs to the programme's
+#  R:R configuration, using the SAME classifier semantics as
+#  calculate_investor_symbols_orders_db.
+#
+#  SOURCES
+#  -------
+#  READS:
+#    * signals_provider_interest.risk_reward
+#      signals_provider_interest.risk_reward_type   (programme-scoped)
+#    * accountmanagement.fixed_risk_reward
+#      accountmanagement.minimum_risk_reward        (fallback when
+#                                                    signals_provider_interest
+#                                                    has no usable row)
+#    * accountmanagement_balance_default_risk       (only used for logging the
+#                                                    base risk alongside)
+#    * programme_trades                             (for the magic <-> tradeid
+#                                                    link, so we can look up
+#                                                    ordertype/comment when
+#                                                    MT5 doesn't carry it)
+#    * MT5                                          (live pending + positions)
+#
+#  WRITES:
+#    * MT5 -> TRADE_ACTION_MODIFY on pending orders (tp only)
+#    * MT5 -> TRADE_ACTION_SLTP  on open positions  (tp only)
+#    * programme_trades -> takeprofit is NOT touched. The DB is the source of
+#      the ORIGINAL signal; the R:R applied at MT5 is a live correction.
+#
+#  R:R CLASSIFIER (identical to calculate_investor_symbols_orders_db)
+#  ---------------------------------------------------------------
+#    'custom minimum risk reward'   minimum floor
+#        current_rr <  value   -> raise to value (new TP)
+#        current_rr >= value   -> NO change
+#
+#    'fixed risk reward'            exact rewrite
+#        current_rr != value   -> rewrite to value
+#        current_rr == value   -> NO change
+#
+#    'custom fixed risk reward'     do nothing by design
+#        current_rr >= 1.0     -> NO change
+#        current_rr <  1.0     -> force to 1.0
+#
+#  TP SYNTHESIS
+#  ------------
+#  If takeprofit is missing (tp == 0), the correct TP is synthesized from
+#  entry + SL and the target R:R, exactly as the DB calculate stage does.
+#  Rounded to symbol digits.
+#
+#  ORDER TYPE
+#  ----------
+#  Applies to BOTH pending orders (TRADE_ACTION_MODIFY, tp only) and open
+#  positions (TRADE_ACTION_SLTP, sl preserved + tp updated). Market orders
+#  and pending orders are treated identically — the target R:R is the same.
+#
+#  No JSON. No local folders. No grid. Magic == programme_trades.tradeid.
+# ==============================================================================
+def orders_reward_correction_db(inv_db_id=None):
+    print(f"\n{'='*10} 📐 ORDERS REWARD CORRECTION (DB) {'='*10}")
+
+    stats = {
+        'investor_id':                  inv_db_id if inv_db_id else 'all',
+        'investors_processed':          0,
+        'investors_skipped':            0,
+        'programmes_processed':         0,
+        'orders_checked':               0,
+        'orders_adjusted':              0,
+        'orders_skipped':               0,
+        'orders_error':                 0,
+        'positions_checked':            0,
+        'positions_adjusted':           0,
+        'positions_skipped':            0,
+        'positions_error':              0,
+        'rows_tp_synthesized':          0,
+        'rr_matches':                   {},
+        'rr_mismatches':                0,
+        'mode':                         None,
+        'programme_rr':                 None,
+        'programme_rr_type_raw':        None,
+        'programme_rr_type_norm':       None,
+        'errors':                       [],
+        'details':                      [],
+        'processing_success':           False,
+    }
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _norm_rr_type(raw):
+        """Canonicalise risk_reward_type into one of three keys."""
+        if raw is None:
+            return 'fixed risk reward'
+        s = str(raw).strip().lower()
+        s = s.replace('_', ' ').replace('-', ' ')
+        s = ' '.join(s.split())
+        if not s:
+            return 'fixed risk reward'
+        for filler in (' and ', ' & ', ' + '):
+            s = s.replace(filler, ' ')
+        s = ' '.join(s.split())
+
+        aliases = {
+            'custom fixed risk reward':     'custom fixed risk reward',
+            'customfixed risk reward':      'custom fixed risk reward',
+            'custom fixed':                 'custom fixed risk reward',
+            'customfixed':                  'custom fixed risk reward',
+            'fixed custom':                 'custom fixed risk reward',
+            'custom risk reward':           'custom fixed risk reward',
+
+            'custom minimum risk reward':   'custom minimum risk reward',
+            'customminimum risk reward':    'custom minimum risk reward',
+            'custom minimum':               'custom minimum risk reward',
+            'customminimum':                'custom minimum risk reward',
+            'minimum risk reward':          'custom minimum risk reward',
+            'minimum':                      'custom minimum risk reward',
+            'min':                          'custom minimum risk reward',
+            'floor':                        'custom minimum risk reward',
+
+            'fixed risk reward':            'fixed risk reward',
+            'fixedrisk reward':             'fixed risk reward',
+            'fixed':                        'fixed risk reward',
+            'fixed rr':                     'fixed risk reward',
+            'exact':                        'fixed risk reward',
+            'exact risk reward':            'fixed risk reward',
+        }
+        if s in aliases:
+            return aliases[s]
+
+        has_custom = 'custom' in s
+        has_min    = ('minimum' in s) or ('min' in s.split()) or ('floor' in s)
+        has_fixed  = ('fixed' in s)
+
+        if has_custom and has_min and not has_fixed:
+            return 'custom minimum risk reward'
+        if has_custom and has_fixed:
+            return 'custom fixed risk reward'
+        if has_fixed:
+            return 'fixed risk reward'
+        if has_min:
+            return 'custom minimum risk reward'
+        return s
+
+    def _digits(si):
+        try:
+            if si is not None and hasattr(si, 'digits'):
+                d = int(si.digits)
+                if d >= 0:
+                    return d
+        except Exception:
+            pass
+        return 5
+
+    def _min_volume_for_symbol(si):
+        if si is None:
+            return 0.01
+        try:
+            v = float(getattr(si, 'volume_min', 0.01) or 0.01)
+            return v if v > 0 else 0.01
+        except Exception:
+            return 0.01
+
+    def _compute_current_rr(entry, sl, tp):
+        if entry is None or sl is None or tp is None:
+            return None, None, None
+        risk   = abs(float(entry) - float(sl))
+        reward = abs(float(tp) - float(entry))
+        if risk <= 0:
+            return None, risk, reward
+        return reward / risk, risk, reward
+
+    def _synthesize_tp(entry, sl, rr_value, is_buy, digits):
+        if entry is None or sl is None or rr_value is None or rr_value <= 0:
+            return None
+        try:
+            entry_f = float(entry)
+            sl_f    = float(sl)
+            risk_dist = abs(entry_f - sl_f)
+            if risk_dist <= 0:
+                return None
+            reward_dist = risk_dist * float(rr_value)
+            tp = (entry_f + reward_dist) if is_buy else (entry_f - reward_dist)
+            return round(tp, digits)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Programme-scoped readers (cached per run)
+    # ------------------------------------------------------------------
+    _prog_cfg_cache = {}
+    _symbol_info_cache = {}
+
+    def _get_symbol_info(sym):
+        si = _symbol_info_cache.get(sym)
+        if si is None:
+            si = mt5_symbol_info(sym)
+            if si is None:
+                mt5_symbol_select(sym, True)
+                si = mt5_symbol_info(sym)
+            _symbol_info_cache[sym] = si
+        return si
+
+    def _fetch_programme_rr(programme_id):
+        """
+        Returns (rr_value, rr_type_raw, rr_type_norm, source_label).
+
+        Priority:
+          1. signals_provider_interest (risk_reward + risk_reward_type)
+          2. accountmanagement (fixed_risk_reward / minimum_risk_reward)
+        """
+        row = db_fetch_one(
+            """
+            SELECT id, risk_reward, risk_reward_type
+              FROM signals_provider_interest
+             WHERE programme_id = %s
+               AND risk_reward IS NOT NULL
+               AND risk_reward > 0
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        if row:
+            rr_val  = _coerce_float(_raw_first_key(row, 'risk_reward'), default=None)
+            rr_type = _raw_first_key(row, 'risk_reward_type')
+            if rr_val is not None and rr_val > 0:
+                return (
+                    float(rr_val),
+                    rr_type,
+                    _norm_rr_type(rr_type),
+                    'signals_provider_interest',
+                )
+
+        # Fallback — accountmanagement
+        am = db_fetch_one(
+            """
+            SELECT fixed_risk_reward, minimum_risk_reward
+              FROM accountmanagement
+             WHERE developerid = 0 AND programme_id = %s AND investorid = 0
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        if not am:
+            return None, None, None, None
+
+        fixed   = _coerce_float(_raw_first_key(am, 'fixed_risk_reward'),   default=None)
+        minimum = _coerce_float(_raw_first_key(am, 'minimum_risk_reward'), default=None)
+
+        if fixed is not None and fixed > 0 and (minimum is None or fixed >= minimum):
+            return float(fixed), 'fixed_risk_reward', 'fixed risk reward', 'accountmanagement.fixed_risk_reward'
+        if minimum is not None and minimum > 0:
+            return float(minimum), 'minimum_risk_reward', 'custom minimum risk reward', 'accountmanagement.minimum_risk_reward'
+        return None, None, None, None
+
+    def _programme_cfg(programme_id):
+        cfg = _prog_cfg_cache.get(programme_id)
+        if cfg is not None:
+            return cfg
+        rr_val, rr_type_raw, rr_type_norm, src = _fetch_programme_rr(programme_id)
+        cfg = {
+            'rr_value':       rr_val,
+            'rr_type_raw':    rr_type_raw,
+            'rr_type_norm':   rr_type_norm,
+            'source':         src,
+        }
+        _prog_cfg_cache[programme_id] = cfg
+        return cfg
+
+    # ------------------------------------------------------------------
+    # MT5 modify helpers
+    # ------------------------------------------------------------------
+    def _modify_pending_tp(ticket, entry, sl, new_tp, digits):
+        req = {
+            "action": mt5.TRADE_ACTION_MODIFY,
+            "order":  int(ticket),
+            "price":  round(float(entry), digits),
+            "sl":     round(float(sl), digits) if sl else 0.0,
+            "tp":     round(float(new_tp), digits),
+        }
+        try:
+            res = mt5_order_send(req)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                return True, 'ok'
+            if res is not None:
+                return False, f"retcode={res.retcode} comment={getattr(res, 'comment', '')}"
+            return False, f"no_response last_error={mt5_last_error()}"
+        except Exception as e:
+            return False, f"exception: {e}"
+
+    def _modify_position_tp(ticket, sl, new_tp, digits):
+        req = {
+            "action":   mt5.TRADE_ACTION_SLTP,
+            "position": int(ticket),
+            "sl":       round(float(sl), digits) if sl else 0.0,
+            "tp":       round(float(new_tp), digits),
+        }
+        try:
+            res = mt5_order_send(req)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                return True, 'ok'
+            if res is not None:
+                return False, f"retcode={res.retcode} comment={getattr(res, 'comment', '')}"
+            return False, f"no_response last_error={mt5_last_error()}"
+        except Exception as e:
+            return False, f"exception: {e}"
+
+    # ------------------------------------------------------------------
+    # R:R classifier (identical semantics to calculate_investor_symbols_orders_db)
+    # ------------------------------------------------------------------
+    def _decide_action(current_rr, target_rr, rr_type):
+        """
+        Returns (decision, target_for_calc, reason).
+
+        decision ∈ {'noop', 'raise', 'rewrite', 'force_1to1'}
+        target_for_calc is the R:R to align to (None when noop).
+        """
+        if rr_type == 'custom minimum risk reward':
+            if current_rr is None:
+                return 'raise', target_rr, f"minimum floor: no TP set — apply 1:{target_rr}"
+            if current_rr < target_rr - 1e-9:
+                return 'raise', target_rr, f"minimum floor: current 1:{round(current_rr, 4)} < 1:{target_rr}"
+            return 'noop', None, f"minimum floor: current 1:{round(current_rr, 4)} >= 1:{target_rr}"
+
+        if rr_type == 'fixed risk reward':
+            if current_rr is None:
+                return 'rewrite', target_rr, f"fixed: no TP set — rewrite to 1:{target_rr}"
+            if abs(current_rr - target_rr) > 1e-9:
+                return 'rewrite', target_rr, f"fixed: current 1:{round(current_rr, 4)} != 1:{target_rr}"
+            return 'noop', None, f"fixed: current already equals 1:{target_rr}"
+
+        if rr_type == 'custom fixed risk reward':
+            if current_rr is None:
+                # No TP — do nothing. Custom-fixed says "leave it alone".
+                return 'noop', None, "custom fixed: no TP set — no change by design"
+            if current_rr < 1.0 - 1e-9:
+                return 'force_1to1', 1.0, f"custom fixed: current 1:{round(current_rr, 4)} < 1:1 — forcing 1:1"
+            return 'noop', None, f"custom fixed: current 1:{round(current_rr, 4)} — no change by design"
+
+        # Unknown -> treat as fixed (safest fallback)
+        if current_rr is None:
+            return 'rewrite', target_rr, f"unrecognised type '{rr_type}' -> fixed: no TP set — rewrite to 1:{target_rr}"
+        if abs(current_rr - target_rr) > 1e-9:
+            return 'rewrite', target_rr, f"unrecognised type '{rr_type}' -> fixed: 1:{round(current_rr, 4)} != 1:{target_rr}"
+        return 'noop', None, f"unrecognised type '{rr_type}' -> fixed: current already 1:{target_rr}"
+
+    # ------------------------------------------------------------------
+    # MT5 connection check
+    # ------------------------------------------------------------------
+    acc = mt5_account_info()
+    if acc is None:
+        print(f"  ⚠️ MT5 not connected — cannot correct reward")
+        stats['errors'].append('MT5 not connected')
+        return stats
+
+    try:
+        current_balance = float(acc.balance)
+    except Exception:
+        current_balance = 0.0
+    print(f"  💰 Current MT5 balance: ${current_balance:.2f}")
+
+    # ------------------------------------------------------------------
+    # Enumeration
+    # ------------------------------------------------------------------
+    print("\n" + "─" * 80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─" * 80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─" * 80)
+
+    # ------------------------------------------------------------------
+    # Per-investor loop
+    # ------------------------------------------------------------------
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['investors_skipped'] += 1
+            continue
+
+        print(f"\n{'─'*72}")
+        print(f" 📐 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+
+        stats['investors_processed'] += 1
+
+        cfg = _programme_cfg(programme_id)
+        if cfg is None or cfg['rr_value'] is None or cfg['rr_value'] <= 0:
+            print(f"  │ ⚠️ No usable R:R config for programme {programme_id} — skipping investor")
+            stats['investors_skipped'] += 1
+            continue
+
+        rr_value    = float(cfg['rr_value'])
+        rr_type_raw = cfg['rr_type_raw']
+        rr_type     = cfg['rr_type_norm']
+        rr_source   = cfg['source']
+
+        stats['programme_rr'] = rr_value
+        stats['programme_rr_type_raw'] = rr_type_raw
+        stats['programme_rr_type_norm'] = rr_type
+        stats['mode'] = rr_type
+
+        print(f"  │ Programme R:R value : 1:{rr_value}")
+        print(f"  │ Programme R:R type  : {rr_type_raw or '—'}")
+        print(f"  │ Normalised type     : '{rr_type}'")
+        print(f"  │ Source              : {rr_source}")
+
+        # Pre-load known tradeids for this investor so we can annotate logs
+        known_tradeids = set()
+        try:
+            tradeid_rows = db_fetch_all(
+                """
+                SELECT tradeid
+                  FROM programme_trades
+                 WHERE userid = %s
+                   AND programmeid = %s
+                   AND investor_id = %s
+                   AND investor_sub_account_id = %s
+                   AND tradeid IS NOT NULL
+                """,
+                [investor_id, programme_id, investor_id, sub_account_id],
+                timeout=15.0, quiet=True,
+            )
+            for tr in tradeid_rows:
+                tid = _coerce_int(_raw_first_key(tr, 'tradeid'))
+                if tid is not None and tid > 0:
+                    known_tradeids.add(tid)
+        except Exception:
+            pass
+
+        # Snapshot MT5 once per investor
+        try:
+            live_pending = mt5_orders_get() or []
+        except Exception:
+            live_pending = []
+        try:
+            live_positions = mt5_positions_get() or []
+        except Exception:
+            live_positions = []
+
+        # ==============================================================
+        # SECTION A — OPEN POSITIONS (MARKET)
+        # ==============================================================
+        if live_positions:
+            print(f"\n  └─ 🔍 Scanning {len(live_positions)} open positions (MARKET)…")
+
+        for pos in live_positions:
+            stats['positions_checked'] += 1
+
+            sym  = getattr(pos, 'symbol', None)
+            tkt  = getattr(pos, 'ticket', None)
+            mt5_type_pos = int(getattr(pos, 'type', -1))
+            is_buy = (mt5_type_pos == 0)
+
+            if not sym:
+                stats['positions_skipped'] += 1
+                continue
+
+            si = _get_symbol_info(sym)
+            if si is None:
+                stats['positions_skipped'] += 1
+                continue
+
+            digits = _digits(si)
+
+            print(f"\n    └─ 📋 Position #{tkt} | "
+                  f"{'BUY (MARKET)' if is_buy else 'SELL (MARKET)'} | {sym}")
+
+            entry = float(getattr(pos, 'price_open', 0) or 0)
+            sl    = float(getattr(pos, 'sl', 0) or 0)
+            tp    = float(getattr(pos, 'tp', 0) or 0)
+
+            if sl <= 0:
+                print(f"       ⏭️ No SL — cannot compute R:R. Skipping.")
+                stats['positions_skipped'] += 1
+                continue
+
+            current_rr, risk_dist, reward_dist = _compute_current_rr(entry, sl, tp)
+
+            decision, target_for_calc, reason = _decide_action(
+                current_rr, rr_value, rr_type
+            )
+            print(f"       → {reason}")
+
+            if decision == 'noop':
+                stats['positions_skipped'] += 1
+                stats['rr_matches'][f"noop_{rr_type}"] = (
+                    stats['rr_matches'].get(f"noop_{rr_type}", 0) + 1
+                )
+                continue
+
+            # Effective target R:R for this action
+            effective_rr = float(target_for_calc)
+
+            # Synthesize TP if needed (tp == 0)
+            tp_synthesized = False
+            if tp <= 0:
+                new_tp = _synthesize_tp(entry, sl, effective_rr, is_buy, digits)
+                if new_tp is None:
+                    print(f"       ⚠️ Could not synthesize TP (entry={entry}, sl={sl}, "
+                          f"rr=1:{effective_rr})")
+                    stats['positions_error'] += 1
+                    stats['orders_error'] += 1
+                    continue
+                tp_synthesized = True
+                stats['rows_tp_synthesized'] += 1
+                print(f"       📝 No TP set — synthesizing to {new_tp} "
+                      f"(target R:R = 1:{effective_rr})")
+                new_tp_final = new_tp
+            else:
+                current_rr_v, _, _ = _compute_current_rr(entry, sl, tp)
+                if current_rr_v is None:
+                    print(f"       ⚠️ Cannot compute current R:R. Skipping.")
+                    stats['positions_error'] += 1
+                    stats['orders_error'] += 1
+                    continue
+                # Build the new TP that yields effective_rr
+                synthesized = _synthesize_tp(entry, sl, effective_rr, is_buy, digits)
+                if synthesized is None:
+                    print(f"       ⚠️ Could not synthesize TP. Skipping.")
+                    stats['positions_error'] += 1
+                    stats['orders_error'] += 1
+                    continue
+                new_tp_final = synthesized
+
+            # Direction sanity
+            if is_buy and new_tp_final <= entry:
+                print(f"       ⚠️ Synthesized TP ({new_tp_final}) not above entry — skipping")
+                stats['positions_skipped'] += 1
+                continue
+            if (not is_buy) and new_tp_final >= entry:
+                print(f"       ⚠️ Synthesized TP ({new_tp_final}) not below entry — skipping")
+                stats['positions_skipped'] += 1
+                continue
+
+            old_rr_disp = f"{round(current_rr, 4)}" if current_rr is not None else "—"
+            print(f"       entry={entry}  sl={sl}  tp={tp if tp > 0 else '—'}")
+            print(f"       current R:R = 1:{old_rr_disp}  →  target R:R = 1:{effective_rr}")
+            print(f"       new TP = {new_tp_final}")
+
+            ok, msg = _modify_position_tp(tkt, sl, new_tp_final, digits)
+            if ok:
+                stats['positions_adjusted'] += 1
+                stats['orders_adjusted'] += 1
+                stats['rr_matches'][f"{rr_type}_{effective_rr}"] = (
+                    stats['rr_matches'].get(f"{rr_type}_{effective_rr}", 0) + 1
+                )
+                print(f"       ✅ TP adjusted successfully to {new_tp_final}")
+            else:
+                stats['positions_error'] += 1
+                stats['orders_error'] += 1
+                print(f"       ✗ Modify failed: {msg}")
+
+        # ==============================================================
+        # SECTION B — PENDING ORDERS (LIMIT & STOP)
+        # ==============================================================
+        if live_pending:
+            print(f"\n  └─ 🔍 Scanning {len(live_pending)} pending orders (LIMIT & STOP)…")
+
+        for order in live_pending:
+            stats['orders_checked'] += 1
+
+            sym = getattr(order, 'symbol', None)
+            tkt = getattr(order, 'ticket', None)
+            mt5_type_ord = int(getattr(order, 'type', -1))
+            is_buy = mt5_type_ord in (
+                mt5.ORDER_TYPE_BUY_LIMIT,
+                mt5.ORDER_TYPE_BUY_STOP,
+                mt5.ORDER_TYPE_BUY_STOP_LIMIT,
+            )
+
+            if not sym:
+                stats['orders_skipped'] += 1
+                continue
+
+            si = _get_symbol_info(sym)
+            if si is None:
+                stats['orders_skipped'] += 1
+                continue
+
+            digits = _digits(si)
+
+            # Magic == tradeid lookup for logging
+            try:
+                tradeid = int(getattr(order, 'magic', 0) or 0)
+            except Exception:
+                tradeid = 0
+            in_db = tradeid in known_tradeids if tradeid else False
+
+            print(f"\n    └─ 📋 Order #{tkt} | "
+                  f"{'BUY' if is_buy else 'SELL'} | {sym} | magic={tradeid}"
+                  f"{'  (known)' if in_db else ''}")
+
+            entry = float(getattr(order, 'price_open', 0) or 0)
+            sl    = float(getattr(order, 'sl', 0) or 0)
+            tp    = float(getattr(order, 'tp', 0) or 0)
+
+            if sl <= 0:
+                print(f"       ⏭️ No SL — cannot compute R:R. Skipping.")
+                stats['orders_skipped'] += 1
+                continue
+
+            current_rr, risk_dist, reward_dist = _compute_current_rr(entry, sl, tp)
+
+            decision, target_for_calc, reason = _decide_action(
+                current_rr, rr_value, rr_type
+            )
+            print(f"       → {reason}")
+
+            if decision == 'noop':
+                stats['orders_skipped'] += 1
+                stats['rr_matches'][f"noop_{rr_type}"] = (
+                    stats['rr_matches'].get(f"noop_{rr_type}", 0) + 1
+                )
+                continue
+
+            effective_rr = float(target_for_calc)
+
+            tp_synthesized = False
+            if tp <= 0:
+                new_tp = _synthesize_tp(entry, sl, effective_rr, is_buy, digits)
+                if new_tp is None:
+                    print(f"       ⚠️ Could not synthesize TP (entry={entry}, sl={sl}, "
+                          f"rr=1:{effective_rr})")
+                    stats['orders_error'] += 1
+                    continue
+                tp_synthesized = True
+                stats['rows_tp_synthesized'] += 1
+                print(f"       📝 No TP set — synthesizing to {new_tp} "
+                      f"(target R:R = 1:{effective_rr})")
+                new_tp_final = new_tp
+            else:
+                synthesized = _synthesize_tp(entry, sl, effective_rr, is_buy, digits)
+                if synthesized is None:
+                    print(f"       ⚠️ Could not synthesize TP. Skipping.")
+                    stats['orders_error'] += 1
+                    continue
+                new_tp_final = synthesized
+
+            if is_buy and new_tp_final <= entry:
+                print(f"       ⚠️ Synthesized TP ({new_tp_final}) not above entry — skipping")
+                stats['orders_skipped'] += 1
+                continue
+            if (not is_buy) and new_tp_final >= entry:
+                print(f"       ⚠️ Synthesized TP ({new_tp_final}) not below entry — skipping")
+                stats['orders_skipped'] += 1
+                continue
+
+            old_rr_disp = f"{round(current_rr, 4)}" if current_rr is not None else "—"
+            print(f"       entry={entry}  sl={sl}  tp={tp if tp > 0 else '—'}")
+            print(f"       current R:R = 1:{old_rr_disp}  →  target R:R = 1:{effective_rr}")
+            print(f"       new TP = {new_tp_final}")
+
+            ok, msg = _modify_pending_tp(tkt, entry, sl, new_tp_final, digits)
+            if ok:
+                stats['orders_adjusted'] += 1
+                stats['rr_matches'][f"{rr_type}_{effective_rr}"] = (
+                    stats['rr_matches'].get(f"{rr_type}_{effective_rr}", 0) + 1
+                )
+                print(f"       ✅ TP adjusted successfully to {new_tp_final}")
+            else:
+                stats['orders_error'] += 1
+                print(f"       ✗ Modify failed: {msg}")
+
+        stats['programmes_processed'] += 1
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    print(f"\n{'='*10} 📐 ORDERS REWARD CORRECTION SUMMARY (DB) {'='*10}")
+    print(f"  Investor ID                     : {stats['investor_id']}")
+    print(f"  Investors processed             : {stats['investors_processed']}")
+    print(f"  Investors skipped               : {stats['investors_skipped']}")
+    print(f"  Mode (R:R type)                 : {stats['mode'] or '—'}")
+    if stats['programme_rr'] is not None:
+        print(f"  Programme R:R value             : 1:{stats['programme_rr']}")
+    print(f"  Positions checked               : {stats['positions_checked']}")
+    print(f"  Positions adjusted              : {stats['positions_adjusted']}")
+    print(f"  Positions skipped               : {stats['positions_skipped']}")
+    print(f"  Positions errors                : {stats['positions_error']}")
+    print(f"  Pending orders checked          : {stats['orders_checked']}")
+    print(f"  Pending orders adjusted         : {stats['orders_adjusted']}")
+    print(f"  Pending orders skipped          : {stats['orders_skipped']}")
+    print(f"  Pending orders errors           : {stats['orders_error']}")
+    print(f"  Rows TP synthesized             : {stats['rows_tp_synthesized']}")
+    print(f"  Total checked                   : {stats['positions_checked'] + stats['orders_checked']}")
+    print(f"  Total adjusted                  : {stats['positions_adjusted'] + stats['orders_adjusted']}")
+    if stats['rr_matches']:
+        print(f"\n  📊 R:R Usage Breakdown:")
+        for k, v in sorted(stats['rr_matches'].items()):
+            print(f"     • [{k}]: {v}")
+    print(f"  Errors                          : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+
+# ==============================================================================
+#  APPLY DYNAMIC BREAKEVEN — DB version
+#
+#  Investor-scoped. For every OPEN MT5 position belonging to the investor
+#  (magic == programme_trades.tradeid), compute the running reward multiple
+#  (current floating profit / risk at SL) and — if it meets a threshold from
+#  accountmanagement_trades_breakeven — push the stop loss forward.
+#
+#  READS:
+#    * accountmanagement_trades_breakeven   -> programme-scoped rules:
+#                                                floating_profit_at_risk_reward
+#                                                breakeven_at_risk_reward
+#    * harvhub                              -> investor identity (for logs)
+#    * MT5                                  -> open positions + tick data
+#
+#  WRITES:
+#    * MT5 -> TRADE_ACTION_SLTP on open positions (sl only; tp preserved)
+#
+#  RULES (mirrors apply_dynamic_breakeven_local)
+#  ---------------------------------------------
+#    * Only PROFITABLE positions are considered (position.profit > 0).
+#    * Risk is computed as |entry - SL| × volume × contract_size
+#      (falls back to mt5.order_calc_profit on the SL leg, then to
+#       0.5 × profit as a last resort — same as the local version).
+#    * current_r_multiple = position.profit / risk_usd
+#    * Match the HIGHEST rule whose if_floating_profit_at_risk_reward is
+#      satisfied by current_r_multiple.
+#    * Target SL = entry ± (risk_distance × breakeven_at_risk_reward)
+#      (plus for BUY, minus for SELL).
+#    * Fallback ladder: if the target SL violates stops_level or the
+#      direction check, drop to the next-lower rule and retry.
+#
+#  NO DEDUP:
+#    Every row in accountmanagement_trades_breakeven is respected exactly
+#    as it exists in the DB. Rows that share a breakeven_at_risk_reward
+#    (but differ in trigger) are ALL loaded. The fallback ladder resolves
+#    any practical overlap at runtime.
+#
+#  Note: MT5 preserves our tp as-is; we only push the SL.
+# ==============================================================================
+def apply_dynamic_breakeven_db(inv_db_id=None):
+    print(f"\n{'='*10} 🎯 DYNAMIC BREAKEVEN (DB) {'='*10}")
+
+    stats = {
+        'investor_id':                inv_db_id if inv_db_id else 'all',
+        'investors_processed':        0,
+        'investors_skipped':          0,
+        'programmes_processed':       0,
+        'positions_checked':          0,
+        'positions_profitable':       0,
+        'positions_adjusted':         0,
+        'positions_skipped':          0,
+        'positions_error':            0,
+        'breakeven_events':           0,
+        'rules_loaded':               0,
+        'errors':                     [],
+        'details':                    [],
+        'processing_success':         False,
+    }
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    _symbol_info_cache = {}
+    _tick_cache = {}
+
+    def _get_symbol_info(sym):
+        si = _symbol_info_cache.get(sym)
+        if si is None:
+            si = mt5_symbol_info(sym)
+            if si is None:
+                mt5_symbol_select(sym, True)
+                si = mt5_symbol_info(sym)
+            _symbol_info_cache[sym] = si
+        return si
+
+    def _get_tick(sym):
+        t = _tick_cache.get(sym)
+        if t is None:
+            t = mt5_symbol_tick(sym)
+            _tick_cache[sym] = t
+        return t
+
+    def _digits(si):
+        try:
+            if si is not None and hasattr(si, 'digits'):
+                d = int(si.digits)
+                if d >= 0:
+                    return d
+        except Exception:
+            pass
+        return 5
+
+    # ------------------------------------------------------------------
+    # Programme-scoped reader (cached per run)
+    #
+    # NO DEDUP: every row returned by the DB is preserved. Rows are
+    # ordered ascending by trigger so the per-position code can pick
+    # `applicable_rules[-1]` (the highest-trigger match) and then walk
+    # downward through every lower-index rule as a fallback.
+    # ------------------------------------------------------------------
+    _breakeven_cache = {}
+
+    def _load_breakeven_rules(programme_id):
+        cached = _breakeven_cache.get(programme_id)
+        if cached is not None:
+            return cached
+
+        rows = db_fetch_all(
+            """
+            SELECT id,
+                   floating_profit_at_risk_reward,
+                   breakeven_at_risk_reward
+              FROM accountmanagement_trades_breakeven
+             WHERE programme_id = %s
+             ORDER BY floating_profit_at_risk_reward ASC, id ASC
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+
+        cleaned = []
+        for r in rows:
+            trig = _coerce_float(
+                _raw_first_key(r, 'floating_profit_at_risk_reward'),
+                default=None,
+            )
+            tgt = _coerce_float(
+                _raw_first_key(r, 'breakeven_at_risk_reward'),
+                default=None,
+            )
+            if trig is None or tgt is None:
+                continue
+            row_id = _coerce_int(_raw_first_key(r, 'id'))
+            cleaned.append({
+                'id':                                 row_id,
+                'if_floating_profit_at_risk_reward':  float(trig),
+                'breakeven_at_risk_reward':           float(tgt),
+            })
+
+        # Stable ascending sort by trigger, then by id — no dedup.
+        cleaned.sort(
+            key=lambda x: (
+                x['if_floating_profit_at_risk_reward'],
+                x['id'] if x['id'] is not None else 0,
+            )
+        )
+
+        print(f"  │ [BE] loaded {len(cleaned)} rule(s) "
+              f"from DB (rows fetched = {len(rows)})")
+
+        _breakeven_cache[programme_id] = cleaned
+        return cleaned
+
+    # ------------------------------------------------------------------
+    # MT5 connection check
+    # ------------------------------------------------------------------
+    acc = mt5_account_info()
+    if acc is None:
+        print(f"  ⚠️ MT5 not connected — cannot apply dynamic breakeven")
+        stats['errors'].append('MT5 not connected')
+        return stats
+
+    # ------------------------------------------------------------------
+    # Enumeration
+    # ------------------------------------------------------------------
+    print("\n" + "─" * 80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─" * 80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─" * 80)
+
+    # ------------------------------------------------------------------
+    # Per-investor loop
+    # ------------------------------------------------------------------
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['investors_skipped'] += 1
+            continue
+
+        print(f"\n{'─'*72}")
+        print(f" 🎯 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+
+        stats['investors_processed'] += 1
+        stats['programmes_processed'] += 1
+
+        # -------- load programme breakeven rules --------
+        breakeven_config = _load_breakeven_rules(programme_id)
+        if not breakeven_config:
+            print(f"  │ ⏭️ No breakeven rules configured for programme {programme_id}")
+            stats['investors_skipped'] += 1
+            continue
+
+        stats['rules_loaded'] += len(breakeven_config)
+        print(f"  │ ✅ Loaded {len(breakeven_config)} breakeven level(s):")
+        for rule in breakeven_config:
+            rid_display = f"id={rule['id']}" if rule.get('id') is not None else "id=—"
+            print(f"  │    • [{rid_display}] Floating profit at >= "
+                  f"{rule['if_floating_profit_at_risk_reward']}R → "
+                  f"SL at {rule['breakeven_at_risk_reward']}R")
+
+        # -------- load known tradeids (magic filter) for this investor --------
+        known_tradeids = set()
+        try:
+            tradeid_rows = db_fetch_all(
+                """
+                SELECT tradeid
+                  FROM programme_trades
+                 WHERE userid = %s
+                   AND programmeid = %s
+                   AND investor_id = %s
+                   AND investor_sub_account_id = %s
+                   AND tradeid IS NOT NULL
+                """,
+                [investor_id, programme_id, investor_id, sub_account_id],
+                timeout=15.0, quiet=True,
+            )
+            for tr in tradeid_rows:
+                tid = _coerce_int(_raw_first_key(tr, 'tradeid'))
+                if tid is not None and tid > 0:
+                    known_tradeids.add(tid)
+        except Exception:
+            pass
+
+        # -------- snapshot live positions --------
+        try:
+            positions = mt5_positions_get() or []
+        except Exception:
+            positions = []
+
+        if not positions:
+            print(f"  │ 📭 No open positions")
+            continue
+
+        # Filter by known tradeids (magic == tradeid)
+        investor_positions = []
+        for pos in positions:
+            try:
+                m = int(getattr(pos, 'magic', 0) or 0)
+            except Exception:
+                m = 0
+            if m in known_tradeids:
+                investor_positions.append(pos)
+
+        if not investor_positions:
+            print(f"  │ 📭 No positions belonging to this investor "
+                  f"(by magic/tradeid match)")
+            continue
+
+        # -------- keep only profitable ones --------
+        profitable_positions = [p for p in investor_positions
+                                if float(getattr(p, 'profit', 0) or 0) > 0]
+
+        stats['positions_checked'] += len(investor_positions)
+        stats['positions_profitable'] += len(profitable_positions)
+
+        if not profitable_positions:
+            print(f"  │ 📭 {len(investor_positions)} position(s) checked, "
+                  f"none profitable — nothing to do")
+            continue
+
+        print(f"  │ 🔍 {len(profitable_positions)} profitable position(s) to audit")
+
+        for idx, position in enumerate(profitable_positions, 1):
+            print(f"\n  📊 POSITION #{idx}/{len(profitable_positions)}")
+            print(f"  ────────────────────────────────────────")
+            print(f"    Ticket:      #{position.ticket}")
+            print(f"    Symbol:      {position.symbol}")
+            print(f"    Type:        {'BUY' if position.type == 0 else 'SELL'}")
+            print(f"    Volume:      {position.volume}")
+            print(f"    Open Price:  {position.price_open:.5f}")
+            print(f"    Current SL:  {position.sl:.5f}")
+            print(f"    Current TP:  {position.tp:.5f}")
+            print(f"    Profit/Loss: ${position.profit:.2f}")
+
+            si = _get_symbol_info(position.symbol)
+            if si is None:
+                print(f"    ⚠️ Symbol info not found — skipping")
+                stats['positions_skipped'] += 1
+                continue
+
+            tick = _get_tick(position.symbol)
+            if tick is None:
+                print(f"    ⚠️ Tick info not found — skipping")
+                stats['positions_skipped'] += 1
+                continue
+
+            is_buy = (position.type == 0)
+            current_price = tick.ask if is_buy else tick.bid
+            digits = _digits(si)
+
+            print(f"    Current Price: {current_price:.5f}")
+
+            # -------- risk distance --------
+            if position.sl == 0:
+                print(f"    ⚠️ No stop loss set — skipping")
+                stats['positions_skipped'] += 1
+                continue
+
+            if is_buy:
+                risk_distance = position.price_open - position.sl
+            else:
+                risk_distance = position.sl - position.price_open
+
+            if risk_distance <= 0:
+                print(f"    ⚠️ Invalid risk distance: {risk_distance:.5f} — skipping")
+                stats['positions_error'] += 1
+                continue
+
+            print(f"    Risk Distance: {risk_distance:.5f} points")
+
+            # -------- risk USD (with local's fallback ladder) --------
+            calc_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+            sl_profit = mt5_order_calc_profit(
+                calc_type, position.symbol, position.volume,
+                position.price_open, position.sl,
+            )
+
+            if sl_profit is None or sl_profit == 0:
+                print(f"    ⚠️ order_calc_profit returned {sl_profit} — using fallback")
+                try:
+                    contract_size = float(getattr(si, 'trade_contract_size', 0) or 0)
+                    if contract_size > 0:
+                        risk_usd = abs(risk_distance * position.volume * contract_size)
+                    else:
+                        risk_usd = abs(float(position.profit)) * 0.5
+                except Exception:
+                    risk_usd = abs(float(position.profit)) * 0.5
+            else:
+                risk_usd = round(abs(float(sl_profit)), 2)
+
+            if risk_usd <= 0:
+                print(f"    ⚠️ Risk USD is zero or negative ({risk_usd:.2f}) — skipping")
+                stats['positions_skipped'] += 1
+                continue
+
+            current_r_multiple = float(position.profit) / risk_usd if risk_usd > 0 else 0.0
+
+            print(f"    Risk Amount:  ${risk_usd:.2f}")
+            print(f"    Current R/R:  {current_r_multiple:.2f}R")
+
+            # -------- find applicable rules --------
+            applicable_rules = [
+                rule for rule in breakeven_config
+                if current_r_multiple >= rule['if_floating_profit_at_risk_reward']
+            ]
+
+            if not applicable_rules:
+                min_thresh = breakeven_config[0]['if_floating_profit_at_risk_reward']
+                print(f"    ⏭️ Current R/R ({current_r_multiple:.2f}R) below minimum "
+                      f"threshold ({min_thresh}R) — skipping")
+                stats['positions_skipped'] += 1
+                continue
+
+            highest_rule = applicable_rules[-1]
+            target_reward = highest_rule['breakeven_at_risk_reward']
+
+            print(f"    ✅ Matched: floating >= "
+                  f"{highest_rule['if_floating_profit_at_risk_reward']}R "
+                  f"→ SL at {target_reward}R "
+                  f"(rule id={highest_rule.get('id')})")
+
+            # -------- stops level --------
+            try:
+                stops_level_points = max(int(getattr(si, 'trade_stops_level', 0) or 0), 10)
+            except Exception:
+                stops_level_points = 10
+            try:
+                point = float(getattr(si, 'point', 0.0) or 0.0)
+                if point <= 0:
+                    point = 0.00001
+            except Exception:
+                point = 0.00001
+            stoplevel = stops_level_points * point
+            print(f"    Stop Level:   {stoplevel:.5f}")
+
+            # -------- fallback ladder --------
+            # Walk from the highest-trigger match downward through every
+            # lower-index rule. Rows sharing a breakeven level are still
+            # tried independently because nothing is deduped.
+            current_index = breakeven_config.index(highest_rule)
+            sl_set = False
+
+            for i in range(current_index, -1, -1):
+                test_reward = breakeven_config[i]['breakeven_at_risk_reward']
+                test_rule_id = breakeven_config[i].get('id')
+
+                if is_buy:
+                    target_sl = position.price_open + (risk_distance * test_reward)
+                    is_valid_direction = (
+                        target_sl < current_price - stoplevel and
+                        target_sl >= position.sl - (point * 5)
+                    )
+                    print(f"    └─ BUY attempt: target SL={target_sl:.5f} "
+                          f"({test_reward}R, id={test_rule_id}) "
+                          f"valid={'YES' if is_valid_direction else 'NO'}")
+                else:
+                    target_sl = position.price_open - (risk_distance * test_reward)
+                    is_valid_direction = (
+                        target_sl > current_price + stoplevel and
+                        target_sl <= position.sl + (point * 5)
+                    )
+                    print(f"    └─ SELL attempt: target SL={target_sl:.5f} "
+                          f"({test_reward}R, id={test_rule_id}) "
+                          f"valid={'YES' if is_valid_direction else 'NO'}")
+
+                if not is_valid_direction:
+                    continue
+
+                target_sl = round(target_sl, digits)
+                if target_sl <= 0:
+                    print(f"       ⚠️ Invalid target SL value {target_sl} — skipping")
+                    continue
+
+                # ---- send modify ----
+                req = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": int(position.ticket),
+                    "sl": float(target_sl),
+                    "tp": float(position.tp),
+                }
+                try:
+                    res = mt5_order_send(req)
+                except Exception as e:
+                    print(f"       ✗ Modify raised: {e}")
+                    res = None
+
+                if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    stats['positions_adjusted'] += 1
+                    stats['breakeven_events'] += 1
+                    sl_set = True
+                    print(f"       ✅ SUCCESS — SL moved to {target_sl:.5f} "
+                          f"({test_reward}R)")
+                    stats['details'].append({
+                        'investor_id':    investor_id,
+                        'sub_account_id': sub_account_id,
+                        'programme_id':   programme_id,
+                        'ticket':         position.ticket,
+                        'symbol':         position.symbol,
+                        'direction':      'buy' if is_buy else 'sell',
+                        'r_multiple':     round(current_r_multiple, 4),
+                        'target_r':       float(test_reward),
+                        'rule_id':        test_rule_id,
+                        'new_sl':         float(target_sl),
+                        'old_sl':         float(position.sl),
+                        'action':         'sl_moved',
+                    })
+                    break
+                else:
+                    err = (getattr(res, 'comment', '') if res is not None
+                           else f"no_response last_error={mt5_last_error()}")
+                    retcode = getattr(res, 'retcode', 'None') if res is not None else 'None'
+                    print(f"       ✗ Modify failed: {err} (retcode={retcode})")
+
+            if not sl_set:
+                stats['positions_error'] += 1
+                print(f"    ✗ All fallback attempts failed for #{position.ticket}")
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    print(f"\n{'='*10} 🎯 DYNAMIC BREAKEVEN SUMMARY (DB) {'='*10}")
+    print(f"  Investors processed       : {stats['investors_processed']}")
+    print(f"  Investors skipped         : {stats['investors_skipped']}")
+    print(f"  Programmes processed      : {stats['programmes_processed']}")
+    print(f"  Rules loaded (total)      : {stats['rules_loaded']}")
+    print(f"  Positions checked         : {stats['positions_checked']}")
+    print(f"  Positions profitable      : {stats['positions_profitable']}")
+    print(f"  Positions adjusted        : {stats['positions_adjusted']}")
+    print(f"  Positions skipped         : {stats['positions_skipped']}")
+    print(f"  Positions errors          : {stats['positions_error']}")
+    print(f"  Breakeven events          : {stats['breakeven_events']}")
+    print(f"  Errors                    : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
+
+# ==============================================================================
+#  TRADES ANALYTICS — DB version
+#
+#  Investor-scoped. Walks MT5 history from execution_start_date → contract
+#  expiry (or now), groups deals by position_id, and writes:
+#
+#    * investors_analytics   — ONE row per (userid, sub_account_id) with all the
+#                              flat scalars your useranalytics.php consumes.
+#    * authorized_trades     — one row per authorized closed trade.
+#    * unauthorized_trades   — one row per unauthorized closed trade.
+#
+#  AUTHORIZATION
+#  -------------
+#  A trade is AUTHORIZED iff its entry_deal.magic is in the investor's
+#  programme_trades.tradeid set for this programme (same convention used by
+#  check_and_record_unauthorized_actions_db).
+#
+#  WRITES (all idempotent — upsert where a natural key exists):
+#    investors_analytics:
+#      total_trades, total_pnl, profit_trades, loss_trades,
+#      profit_amount, loss_amount,
+#      lowest_trades_per_day, highest_trades_per_day, average_trades_per_day,
+#      lowest_trades_per_week, highest_trades_per_week, average_trades_per_week,
+#      highest_loss_per_trade, highest_drawdown,
+#      symbols_traded, closed_deals_with_sl_tp, closed_deals_without_sl_tp,
+#      consecutive_losses_count, total_loss_pnl,
+#      consecutive_days_in_loss_count,
+#      consecutive_days_in_loss_count_total_loss_pnl,
+#      revenue_percentage, revenue_profit_percentage, revenue_loss_percentage,
+#      recent_risk_reward
+#    authorized_trades / unauthorized_trades:
+#      one row per trade (dedup by ticket).
+#
+#  No JSON. No local folders. Magic == programme_trades.tradeid.
+# ==============================================================================
+def trades_analytics_db(inv_db_id=None):
+    print(f"\n{'='*10} 📊 TRADES ANALYTICS (DB) {'='*10}")
+
+    from datetime import datetime, timedelta, timezone
+    import re as _re
+
+    # ------------------------------------------------------------------
+    # LAGOS TIMEZONE
+    # ------------------------------------------------------------------
+    try:
+        from zoneinfo import ZoneInfo
+        LAGOS_TZ = ZoneInfo("Africa/Lagos")
+        _LAGOS_TZ_SOURCE = "zoneinfo"
+    except Exception:
+        LAGOS_TZ = timezone(timedelta(hours=1))
+        _LAGOS_TZ_SOURCE = "fixed_utc+1"
+
+    def lagos_now():
+        return datetime.now(LAGOS_TZ)
+
+    stats = {
+        'investor_id':             inv_db_id if inv_db_id else 'all',
+        'investors_processed':     0,
+        'investors_skipped':       0,
+        'programmes_processed':    0,
+        'total_deals_seen':        0,
+        'total_trades_grouped':    0,
+        'authorized_trades':       0,
+        'unauthorized_trades':     0,
+        'analytics_rows_upserted': 0,
+        'authorized_rows_written': 0,
+        'unauthorized_rows_written': 0,
+        'errors':                  [],
+        'details':                 [],
+        'processing_success':      False,
+    }
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    def _extract_rr_from_comment(comment):
+        if not comment or not isinstance(comment, str):
+            return 0.0
+        m = _re.search(r'R([0-9]+(?:\.[0-9]+)?)', comment)
+        if m:
+            try:
+                return float(m.group(1))
+            except (ValueError, TypeError):
+                return 0.0
+        return 0.0
+
+    def _day_key(ts):
+        try:
+            return datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d')
+        except Exception:
+            return None
+
+    def _week_key(ts):
+        try:
+            d = datetime.fromtimestamp(int(ts)).isocalendar()
+            return f"{d[0]}-W{d[1]:02d}"
+        except Exception:
+            return None
+
+    def _iso(ts):
+        try:
+            return datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            return None
+
+    def _parse_date_flexible(date_str):
+        if not date_str:
+            return None
+        if isinstance(date_str, datetime):
+            return date_str
+        s = str(date_str).strip()
+        if s.upper() == "NULL" or s == "":
+            return None
+        for fmt in ("%Y-%m-%d", "%B %d, %Y", "%B %d %Y", "%Y/%m/%d",
+                    "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%m-%d-%Y",
+                    "%Y-%m-%d %H:%M:%S", "%B %d, %Y %H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                continue
+        return None
+
+    def _ensure_analytics_row(investor_id, sub_account_id):
+        """Guarantee a row exists so the UPDATE below has somewhere to land."""
+        row = db_fetch_one(
+            """
+            SELECT id FROM investors_analytics
+             WHERE userid = %s AND sub_account_id = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        )
+        if row and _raw_first_key(row, 'id'):
+            return _coerce_int(_raw_first_key(row, 'id'))
+        ok, new_id, _ = db_execute(
+            """
+            INSERT INTO investors_analytics (userid, sub_account_id)
+            VALUES (%s, %s)
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        )
+        if not ok:
+            return None
+        row = db_fetch_one(
+            """
+            SELECT id FROM investors_analytics
+             WHERE userid = %s AND sub_account_id = %s
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        )
+        return _coerce_int(_raw_first_key(row or {}, 'id'))
+
+    # ------------------------------------------------------------------
+    # MT5 connection check
+    # ------------------------------------------------------------------
+    acc = mt5_account_info()
+    if acc is None:
+        print(f"  ⚠️ MT5 not connected — cannot read trade history")
+        stats['errors'].append('MT5 not connected')
+        return stats
+
+    # ------------------------------------------------------------------
+    # Enumeration
+    # ------------------------------------------------------------------
+    print("\n" + "─" * 80)
+    print(" 📁 LOADING INVESTOR JOBS FROM DB (VPS-scoped)")
+    print("─" * 80)
+
+    local_ip = get_local_ip()
+    if not local_ip:
+        print(" ⚠️ Could not determine local IP")
+        stats['errors'].append('local IP unknown')
+        return stats
+    print(f" │ Local IP: {local_ip}")
+
+    all_jobs = fetch_vps_investor_jobs(local_ip)
+    if not all_jobs:
+        print(" │ ℹ️ No active investor jobs found for this VPS")
+        stats['processing_success'] = True
+        return stats
+
+    if inv_db_id:
+        jobs = [j for j in all_jobs if str(j.get('investor_id')) == str(inv_db_id)]
+        if not jobs:
+            print(f" ⚠️ Investor {inv_db_id} not found in any VPS-scoped job")
+            stats['errors'].append(f"Investor {inv_db_id} not found")
+            return stats
+    else:
+        jobs = all_jobs
+
+    print(f" │ Loaded {len(jobs)} investor job(s) from DB")
+    print("─" * 80)
+
+    # ------------------------------------------------------------------
+    # Per-investor pipeline
+    # ------------------------------------------------------------------
+    for job in jobs:
+        investor_id    = job.get('investor_id')
+        sub_account_id = job.get('sub_account_id')
+        programme_id   = job.get('programme_id')
+        programme_name = job.get('programme_name') or f"programme_{programme_id}"
+
+        if investor_id is None or sub_account_id is None or programme_id is None:
+            stats['investors_skipped'] += 1
+            continue
+
+        print(f"\n{'─'*72}")
+        print(f" 📊 Investor {investor_id} (sub {sub_account_id}) | "
+              f"programme '{programme_name}' (id={programme_id})")
+        print(f"{'─'*72}")
+
+        stats['investors_processed'] += 1
+        stats['programmes_processed'] += 1
+
+        # -------- anchor + window --------
+        anchor = db_fetch_one(
+            """
+            SELECT broker_balance, execution_start_date
+              FROM harvhub
+             WHERE id = %s AND sub_account_id = %s
+             LIMIT 1
+            """,
+            [investor_id, sub_account_id], timeout=10.0, quiet=True,
+        ) or {}
+        execution_start_date = _raw_first_key(anchor, 'execution_start_date')
+        start_dt = _parse_date_flexible(execution_start_date)
+        if start_dt is None:
+            print(f"  │ ⚠️ No usable execution_start_date — skipping investor")
+            stats['investors_skipped'] += 1
+            continue
+
+        # Contract end = start + duration from accountmanagement if available
+        contract_days = None
+        am = db_fetch_one(
+            """
+            SELECT contract_duration
+              FROM accountmanagement
+             WHERE developerid = 0 AND programme_id = %s AND investorid = 0
+             LIMIT 1
+            """,
+            [programme_id], timeout=10.0, quiet=True,
+        )
+        if am:
+            try:
+                contract_days = int(_coerce_int(_raw_first_key(am, 'contract_duration')) or 0)
+            except Exception:
+                contract_days = None
+
+        end_dt = lagos_now().replace(tzinfo=None)
+        if contract_days and contract_days > 0:
+            candidate = start_dt + timedelta(days=contract_days)
+            if candidate < end_dt:
+                end_dt = candidate
+        if end_dt < start_dt:
+            end_dt = lagos_now().replace(tzinfo=None)
+
+        print(f"  │ Window : {start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}")
+
+        # -------- authorized tradeid set --------
+        authorized_tradeids = set()
+        try:
+            rows = db_fetch_all(
+                """
+                SELECT tradeid
+                  FROM programme_trades
+                 WHERE userid = %s
+                   AND programmeid = %s
+                   AND investor_id = %s
+                   AND investor_sub_account_id = %s
+                   AND tradeid IS NOT NULL
+                """,
+                [investor_id, programme_id, investor_id, sub_account_id],
+                timeout=15.0, quiet=True,
+            )
+            for r in rows:
+                tid = _coerce_int(_raw_first_key(r, 'tradeid'))
+                if tid is not None and tid > 0:
+                    authorized_tradeids.add(tid)
+        except Exception:
+            pass
+        print(f"  │ Authorized trade IDs: {len(authorized_tradeids)}")
+
+        # -------- pull MT5 history --------
+        try:
+            deals = mt5_history_deals(start_dt, end_dt) or []
+        except Exception as e:
+            print(f"  │ ✗ Could not read MT5 history: {e}")
+            stats['errors'].append(f"investor {investor_id}: mt5 history error: {e}")
+            stats['investors_skipped'] += 1
+            continue
+
+        stats['total_deals_seen'] += len(deals)
+        if not deals:
+            print(f"  │ 📭 No closed deals in window")
+            continue
+
+        try:
+            hist_orders = mt5_history_orders(start_dt, end_dt) or []
+        except Exception:
+            hist_orders = []
+
+        # Collect order comments + SL/TP per position_id
+        order_comments = {}
+        order_sl_tp = {}
+        for o in hist_orders:
+            pid = getattr(o, 'position_id', None)
+            if pid is None:
+                continue
+            if pid not in order_comments:
+                order_comments[pid] = getattr(o, 'comment', '') or ''
+            sl = float(getattr(o, 'sl', 0) or 0)
+            tp = float(getattr(o, 'tp', 0) or 0)
+            cur = order_sl_tp.setdefault(pid, {'sl': 0.0, 'tp': 0.0})
+            if sl > 0 and cur['sl'] == 0.0:
+                cur['sl'] = sl
+            if tp > 0 and cur['tp'] == 0.0:
+                cur['tp'] = tp
+
+        # -------- group deals by position_id --------
+        deals_by_position = {}
+        for d in deals:
+            # Only entry/exit deal types (0=BUY, 1=SELL). Ignore balance ops.
+            if getattr(d, 'type', None) in (0, 1):
+                deals_by_position.setdefault(d.position_id, []).append(d)
+
+        master_trades = []
+        for position_id, dlist in deals_by_position.items():
+            dlist.sort(key=lambda x: x.time)
+            if len(dlist) < 2:
+                continue
+
+            total_profit     = sum(float(getattr(d, 'profit', 0) or 0) for d in dlist)
+            total_commission = sum(float(getattr(d, 'commission', 0) or 0) for d in dlist)
+            total_swap       = sum(float(getattr(d, 'swap', 0) or 0) for d in dlist)
+            total_pnl        = total_profit + total_commission + total_swap
+
+            entry_deal = dlist[0]
+            exit_deal  = dlist[-1]
+
+            try:
+                entry_magic = int(getattr(entry_deal, 'magic', 0) or 0)
+            except Exception:
+                entry_magic = 0
+            is_authorized = entry_magic in authorized_tradeids
+            auth_group = 'authorized' if is_authorized else 'unauthorized'
+
+            trade_type = 'BUY' if entry_deal.type == 0 else 'SELL'
+            mt5_action = mt5.ORDER_TYPE_BUY if entry_deal.type == 0 else mt5.ORDER_TYPE_SELL
+
+            total_volume = float(getattr(entry_deal, 'volume', 0) or 0)
+            entry_price  = float(getattr(entry_deal, 'price', 0) or 0)
+            exit_price   = float(getattr(exit_deal,  'price', 0) or 0)
+
+            sl_tp_rec = order_sl_tp.get(position_id, {})
+            stoploss   = float(getattr(entry_deal, 'sl', 0) or 0) or sl_tp_rec.get('sl', 0.0)
+            takeprofit = float(getattr(entry_deal, 'tp', 0) or 0) or sl_tp_rec.get('tp', 0.0)
+
+            trade_risk = 0.0
+            if stoploss > 0:
+                calc = mt5_order_calc_profit(
+                    mt5_action, entry_deal.symbol, total_volume,
+                    entry_price, stoploss,
+                )
+                if calc is not None:
+                    trade_risk = abs(float(calc))
+
+            risk_reward = 0.0
+            if stoploss > 0 and stoploss != entry_price and takeprofit > 0:
+                risk_dist = abs(entry_price - stoploss)
+                if risk_dist > 0:
+                    risk_reward = round(abs(takeprofit - entry_price) / risk_dist, 2)
+
+            comment = getattr(entry_deal, 'comment', '') or order_comments.get(position_id, '')
+            if risk_reward == 0 and comment:
+                rr = _extract_rr_from_comment(comment)
+                if rr > 0:
+                    risk_reward = rr
+
+            close_ts = int(getattr(exit_deal, 'time', 0) or 0)
+
+            master_trades.append({
+                'ticket':         position_id,
+                'symbol':         getattr(entry_deal, 'symbol', '') or '',
+                'type':           trade_type,
+                'entry_price':    round(entry_price, 5),
+                'exit_price':     round(exit_price, 5),
+                'stoploss':       round(stoploss, 5),
+                'take_profit':    round(takeprofit, 5),
+                'trade_risk':     round(trade_risk, 2),
+                'risk_reward':    float(risk_reward),
+                'volume':         round(total_volume, 2),
+                'time_open':      _iso(getattr(entry_deal, 'time', 0)),
+                'time_close':     _iso(close_ts),
+                'closed_time':    _iso(close_ts),
+                'magic':          entry_magic,
+                'total_pnl':      round(total_pnl, 2),
+                'state':          'CLOSED',
+                'raw_close_time': close_ts,
+                'auth_group':     auth_group,
+                'comment':        comment,
+            })
+
+        stats['total_trades_grouped'] += len(master_trades)
+
+        if not master_trades:
+            print(f"  │ 📭 No grouped trades after filtering")
+            continue
+
+        # -------- build scalar analytics --------
+        ordered = sorted(master_trades, key=lambda x: x['raw_close_time'])
+        p_list = [t for t in ordered if t['total_pnl'] > 0]
+        l_list = [t for t in ordered if t['total_pnl'] < 0]
+
+        total_pnl_all = sum(t['total_pnl'] for t in ordered)
+        p_rev = sum(t['total_pnl'] for t in p_list)
+        l_rev = sum(t['total_pnl'] for t in l_list)
+
+        highest_loss_per_trade = 0.0
+        for t in ordered:
+            if t['total_pnl'] < 0:
+                v = abs(t['total_pnl'])
+                if v > highest_loss_per_trade:
+                    highest_loss_per_trade = v
+
+        sl_tp   = sum(1 for t in ordered if t['stoploss'] > 0 and t['take_profit'] > 0)
+        no_sl_tp = sum(1 for t in ordered if not (t['stoploss'] > 0 and t['take_profit'] > 0))
+
+        # per-day counts
+        per_day = {}
+        for t in ordered:
+            d = _day_key(t['raw_close_time'])
+            if not d:
+                continue
+            per_day[d] = per_day.get(d, 0) + 1
+
+        if per_day:
+            values = list(per_day.values())
+            lowest  = min(values)
+            highest = max(values)
+            average = round(sum(values) / len(values))
+        else:
+            lowest = highest = average = 0
+
+        # per-week counts
+        per_week = {}
+        for t in ordered:
+            w = _week_key(t['raw_close_time'])
+            if not w:
+                continue
+            per_week[w] = per_week.get(w, 0) + 1
+
+        if per_week:
+            wvalues = list(per_week.values())
+            wlowest  = min(wvalues)
+            whighest = max(wvalues)
+            waverage = round(sum(wvalues) / len(wvalues))
+        else:
+            wlowest = whighest = waverage = 0
+
+        # drawdown
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for t in ordered:
+            equity += t['total_pnl']
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+
+        # consecutive losing trades
+        max_loss_count = 0
+        max_loss_amount = 0.0
+        cur_count = 0
+        cur_amount = 0.0
+        for t in ordered:
+            if t['total_pnl'] < 0:
+                cur_count += 1
+                cur_amount += abs(t['total_pnl'])
+                if cur_count > max_loss_count:
+                    max_loss_count = cur_count
+                    max_loss_amount = cur_amount
+                elif cur_count == max_loss_count and cur_amount > max_loss_amount:
+                    max_loss_amount = cur_amount
+            else:
+                cur_count = 0
+                cur_amount = 0.0
+
+        # consecutive losing days
+        day_pnl = {}
+        for t in ordered:
+            d = _day_key(t['raw_close_time'])
+            if not d:
+                continue
+            day_pnl[d] = day_pnl.get(d, 0.0) + t['total_pnl']
+
+        max_days = 0
+        max_days_loss = 0.0
+        cur_days = 0
+        cur_days_loss = 0.0
+        for d in sorted(day_pnl.keys()):
+            if day_pnl[d] < 0:
+                cur_days += 1
+                cur_days_loss += abs(day_pnl[d])
+                if cur_days > max_days:
+                    max_days = cur_days
+                    max_days_loss = cur_days_loss
+                elif cur_days == max_days and cur_days_loss > max_days_loss:
+                    max_days_loss = cur_days_loss
+            else:
+                cur_days = 0
+                cur_days_loss = 0.0
+
+        # symbols count + highest rr
+        sym_set = set()
+        highest_rr = 0.0
+        for t in ordered:
+            sym_set.add(t['symbol'])
+            rr = t.get('risk_reward', 0) or 0
+            if rr > highest_rr:
+                highest_rr = rr
+
+        # revenue split
+        total_rev = abs(p_rev) + abs(l_rev)
+        if total_rev > 0:
+            p_pct = round((abs(p_rev) / total_rev) * 100.0, 2)
+            l_pct = round((abs(l_rev) / total_rev) * 100.0, 2)
+            rev_pct = round(p_pct - l_pct, 2)
+            if rev_pct < 0:
+                rev_pct = 0.0
+        else:
+            p_pct = l_pct = rev_pct = 0.0
+
+        # -------- upsert investors_analytics --------
+        _ensure_analytics_row(investor_id, sub_account_id)
+
+        upd_sql = """
+            UPDATE investors_analytics
+               SET total_trades                               = %s,
+                   total_pnl                                  = %s,
+                   profit_trades                              = %s,
+                   loss_trades                                = %s,
+                   profit_amount                              = %s,
+                   loss_amount                                = %s,
+                   lowest_trades_per_day                      = %s,
+                   highest_trades_per_day                     = %s,
+                   average_trades_per_day                     = %s,
+                   lowest_trades_per_week                     = %s,
+                   highest_trades_per_week                    = %s,
+                   average_trades_per_week                    = %s,
+                   highest_loss_per_trade                     = %s,
+                   highest_drawdown                           = %s,
+                   symbols_traded                             = %s,
+                   closed_deals_with_sl_tp                    = %s,
+                   closed_deals_without_sl_tp                 = %s,
+                   consecutive_losses_count                   = %s,
+                   total_loss_pnl                             = %s,
+                   consecutive_days_in_loss_count             = %s,
+                   consecutive_days_in_loss_count_total_loss_pnl = %s,
+                   revenue_percentage                         = %s,
+                   revenue_profit_percentage                  = %s,
+                   revenue_loss_percentage                    = %s,
+                   recent_risk_reward                         = %s
+             WHERE userid = %s
+               AND sub_account_id = %s
+        """
+        params = [
+            int(len(ordered)),
+            round(total_pnl_all, 2),
+            int(len(p_list)),
+            int(len(l_list)),
+            round(p_rev, 2),
+            round(abs(l_rev), 2),
+            int(lowest),
+            int(highest),
+            int(average),
+            int(wlowest),
+            int(whighest),
+            int(waverage),
+            round(highest_loss_per_trade, 2),
+            round(max_dd, 2),
+            int(len(sym_set)),
+            int(sl_tp),
+            int(no_sl_tp),
+            int(max_loss_count),
+            round(-max_loss_amount, 2),
+            int(max_days),
+            round(-max_days_loss, 2),
+            round(rev_pct, 2),
+            round(p_pct, 2),
+            round(l_pct, 2),
+            round(highest_rr, 4),
+            investor_id,
+            sub_account_id,
+        ]
+        ok, affected, msg = db_execute(upd_sql, params, timeout=20.0, quiet=True)
+        if ok:
+            stats['analytics_rows_upserted'] += 1
+            print(f"  │ ✅ investors_analytics upserted "
+                  f"(trades={len(ordered)}, pnl=${total_pnl_all:+.2f}, "
+                  f"profit={len(p_list)}, loss={len(l_list)}, "
+                  f"dd=${max_dd:.2f}, symbols={len(sym_set)})")
+        else:
+            print(f"  │ ✗ investors_analytics upsert failed: {msg}")
+            stats['errors'].append(f"investor {investor_id}: analytics upsert: {msg}")
+
+        # -------- write authorized/unauthorized trade rows --------
+        def _write_trade_rows(table, trades):
+            written = 0
+            for t in trades:
+                exists = db_fetch_one(
+                    f"""
+                    SELECT id FROM {table}
+                     WHERE userid = %s
+                       AND sub_account_id = %s
+                       AND ticket = %s
+                     LIMIT 1
+                    """,
+                    [investor_id, sub_account_id, int(t['ticket'])],
+                    timeout=10.0, quiet=True,
+                )
+                if exists and _raw_first_key(exists, 'id'):
+                    ok_up, _, _ = db_execute(
+                        f"""
+                        UPDATE {table}
+                           SET symbol        = %s,
+                               type          = %s,
+                               volume        = %s,
+                               entry         = %s,
+                               exit_price    = %s,
+                               stoploss      = %s,
+                               target        = %s,
+                               pnl           = %s,
+                               risk_reward   = %s,
+                               closed_time   = %s,
+                               comment       = %s,
+                               magic         = %s
+                         WHERE id = %s
+                        """,
+                        [
+                            t['symbol'], t['type'], t['volume'],
+                            t['entry_price'], t['exit_price'],
+                            t['stoploss'], t['take_profit'],
+                            t['total_pnl'], t['risk_reward'],
+                            t['closed_time'], t['comment'], t['magic'],
+                            _coerce_int(_raw_first_key(exists, 'id')),
+                        ],
+                        timeout=15.0, quiet=True,
+                    )
+                    if ok_up:
+                        written += 1
+                else:
+                    ok_ins, _, _ = db_execute(
+                        f"""
+                        INSERT INTO {table}
+                            (userid, sub_account_id, ticket, symbol, type,
+                             volume, entry, exit_price, stoploss, target,
+                             pnl, risk_reward, closed_time, comment, magic)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s)
+                        """,
+                        [
+                            investor_id, sub_account_id, int(t['ticket']),
+                            t['symbol'], t['type'], t['volume'],
+                            t['entry_price'], t['exit_price'],
+                            t['stoploss'], t['take_profit'],
+                            t['total_pnl'], t['risk_reward'],
+                            t['closed_time'], t['comment'], t['magic'],
+                        ],
+                        timeout=15.0, quiet=True,
+                    )
+                    if ok_ins:
+                        written += 1
+            return written
+
+        auth_trades   = [t for t in ordered if t['auth_group'] == 'authorized']
+        unauth_trades = [t for t in ordered if t['auth_group'] == 'unauthorized']
+
+        auth_written = _write_trade_rows('authorized_trades', auth_trades)
+        stats['authorized_trades'] += len(auth_trades)
+        stats['authorized_rows_written'] += auth_written
+        print(f"  │ ✅ authorized_trades : {auth_written} row(s) written "
+              f"({len(auth_trades)} trade(s))")
+
+        if unauth_trades:
+            unauth_written = _write_trade_rows('unauthorized_trades', unauth_trades)
+            stats['unauthorized_trades'] += len(unauth_trades)
+            stats['unauthorized_rows_written'] += unauth_written
+            print(f"  │ ⚠️ unauthorized_trades: {unauth_written} row(s) written "
+                  f"({len(unauth_trades)} trade(s))")
+        else:
+            print(f"  │ ✅ unauthorized_trades: none")
+
+        stats['details'].append({
+            'investor_id':          investor_id,
+            'sub_account_id':       sub_account_id,
+            'programme_id':         programme_id,
+            'total_trades':         len(ordered),
+            'authorized_trades':    len(auth_trades),
+            'unauthorized_trades':  len(unauth_trades),
+            'total_pnl':            round(total_pnl_all, 2),
+            'highest_drawdown':     round(max_dd, 2),
+            'symbols_traded':       len(sym_set),
+        })
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    print(f"\n{'='*10} 📊 TRADES ANALYTICS SUMMARY (DB) {'='*10}")
+    print(f"  Investors processed        : {stats['investors_processed']}")
+    print(f"  Investors skipped          : {stats['investors_skipped']}")
+    print(f"  Programmes processed       : {stats['programmes_processed']}")
+    print(f"  MT5 deals seen             : {stats['total_deals_seen']}")
+    print(f"  Trades grouped             : {stats['total_trades_grouped']}")
+    print(f"  Authorized trades          : {stats['authorized_trades']}  "
+          f"(rows written {stats['authorized_rows_written']})")
+    print(f"  Unauthorized trades        : {stats['unauthorized_trades']}  "
+          f"(rows written {stats['unauthorized_rows_written']})")
+    print(f"  investors_analytics upserts: {stats['analytics_rows_upserted']}")
+    print(f"  Errors                     : {len(stats['errors'])}")
+    for e in stats['errors']:
+        print(f"     • {e}")
+    print(f"{'='*10} 🏁 COMPLETE {'='*10}\n")
+
+    stats['processing_success'] = True
+    return stats
 
 # ==============================================================================
 #  WORKER: one process per investor job (DB-driven)
@@ -5815,14 +10729,17 @@ def martingale_system_db(inv_db_id=None):
 #       point; the DB orchestrator will do the same once that stage is
 #       ported, via a DB-driven delete function).
 # ==============================================================================
-def process_single_investor_from_db(job):
+def process_single_investor_from_db_(job):
     """
-    DB version of process_single_investor_test_one_function().
+    SOLO TEST PATH — runs:
+        1. chunk_orders_with_volume_beyond_max_db(inv_db_id=...)
+        2. place_usd_orders_db(inv_db_id=...)
+        3. check_pending_orders_risk_db(inv_db_id=...)
+        4. orders_reward_correction_db(inv_db_id=...)
+        5. apply_dynamic_breakeven_db(inv_db_id=...)
+        6. trades_analytics_db(inv_db_id=...)              ← NEW, at the end
 
-    Purpose: run ONLY the unauthorized-actions auditor against a single
-    investor so it can be tested solo without the rest of the pipeline.
-
-    No restriction gate. No alarm gate. No cleanup. Only the audit stage.
+    No restriction gate, no alarm gate, no cleanup, no grid.
     """
 
     global unauthorized_alert
@@ -5832,7 +10749,7 @@ def process_single_investor_from_db(job):
     programme_id = job.get('programme_id')
     programme_name = job.get('programme_name') or ''
 
-    print(f"\n[START][TEST] ⚙️ Unauthorized-actions-audit-only run for "
+    print(f"\n[START][TEST] ⚙️ Full solo pipeline for "
           f"Investor {inv_db_id} (sub {sub_id}) | "
           f"programme '{programme_name}' (id={programme_id})")
 
@@ -5865,20 +10782,14 @@ def process_single_investor_from_db(job):
         print(f"[MT5] ⚠️ mt5_connect raised: {e}")
 
     try:
-        # ==============================================================
-        # UNAUTHORIZED-ACTIONS AUDIT — THE ONLY STAGE
-        # ==============================================================
-        audit_stats = run_stage(
-            'check_and_record_unauthorized_actions_db',
-            check_and_record_unauthorized_actions_db,
+
+        place_stats = run_stage(
+            'place_usd_orders_db',
+            place_usd_orders_db,
             inv_db_id=inv_db_id,
         )
-        account_stats['stages']['check_and_record_unauthorized_actions_db'] = audit_stats
-        account_stats['unauthorized_actions_stats'] = audit_stats
-
-        account_stats['success'] = bool(
-            audit_stats.get('processing_success', False)
-        )
+        account_stats['stages']['place_usd_orders_db'] = place_stats
+        account_stats['place_stats'] = place_stats
 
     except Exception as e:
         print(f"[CRITICAL ERROR][TEST] investor={inv_db_id}: {e}")
@@ -5899,26 +10810,25 @@ def process_single_investor_from_db(job):
 
     return account_stats
 
-def process_single_investor_from_db_(job):
+def process_single_investor_from_db(job):
     """
     DB version of process_single_investor_local().
 
-    Mirrors the LOCAL file's stage order exactly:
-        gate 1 (restriction)  -> skip-all + delete_all_orders_and_positions
-        gate 2 (alarm)        -> skip-all + delete_all_orders_and_positions
-        else                  -> full trading pipeline in local's exact order
+    Stage order (mirrors the LOCAL file, minus grid):
+        gate 1 (restriction)
+        gate 2 (alarm)
+        else:
+            check_and_record_unauthorized_actions_db
+            calculate_investor_symbols_orders_db
+            chunk_orders_with_volume_beyond_max_db
+            martingale_system_db
+            place_usd_orders_db
+            check_pending_orders_risk_db
+            orders_reward_correction_db
+            apply_dynamic_breakeven_db
+            trades_analytics_db              ← NEW, at the very end
 
-    Grid is out of scope: every grid-only stage is dropped from the pipeline
-    (they were previously behind `if grid_strategy_enabled:` in local).
-
-    Every stage that has not yet been ported to DB is present as a
-    commented stub, positioned exactly where the local file calls it.
-    Uncomment as each DB stage becomes available.
-
-    Note: `check_and_record_unauthorized_actions` and `trades_analytics`
-    are called TWICE in the local file (top and bottom of the pipeline).
-    That duplication is preserved here. Both calls are now live against
-    the DB port `check_and_record_unauthorized_actions_db`.
+    No JSON. No local folders. No grid logic.
     """
 
     global martingale_alert
@@ -5976,7 +10886,7 @@ def process_single_investor_from_db_(job):
 
     try:
         # ==================================================================
-        # ACCOUNT INFO / TYPE (mirrors local's account_mode classification)
+        # ACCOUNT INFO / TYPE
         # ==================================================================
         try:
             acc = mt5_account_info()
@@ -6012,10 +10922,6 @@ def process_single_investor_from_db_(job):
                 verdict=verdict,
             )
 
-            # --- Local CONDITION B/C: cleanup only ---
-            # delete_all_orders_and_positions(inv_db_id=inv_db_id)
-            # ^^^ DB port not yet available. Uncomment when ready.
-
             account_stats['restricted'] = True
             account_stats['restricted_kind'] = verdict.get('kind')
             account_stats['restricted_window'] = verdict.get('window_desc')
@@ -6048,10 +10954,6 @@ def process_single_investor_from_db_(job):
                 alert=alert,
             )
 
-            # --- Local: if recent_highest_hit -> delete_all_orders_and_positions ---
-            # delete_all_orders_and_positions(inv_db_id=inv_db_id)
-            # ^^^ DB port not yet available. Uncomment when ready.
-
             account_stats['alarm_hit'] = True
             account_stats['alarm_mode'] = (
                 "PRE-PENDING" if alert.get('pre_pending_enabled') else "DAILY"
@@ -6074,7 +10976,7 @@ def process_single_investor_from_db_(job):
         print(f"  ✅ Trading allowed for {inv_db_id}")
 
         # ------------------------------------------------------------------
-        # A1. Stages that ALWAYS run (top of local's Condition A)
+        # A1. Unauthorized-actions audit
         # ------------------------------------------------------------------
         audit_stats_top = run_stage(
             'check_and_record_unauthorized_actions_db',
@@ -6084,27 +10986,30 @@ def process_single_investor_from_db_(job):
         account_stats['stages']['check_and_record_unauthorized_actions_db_top'] = audit_stats_top
         account_stats['unauthorized_actions_stats_top'] = audit_stats_top
 
-        # delete_unauthorized_symbol_files(inv_db_id=inv_db_id)
-        # ^^^ DB port not yet available. Uncomment when ready.
-
-        # OHLC and GRID callings or executions are not needed in this!!!
-        # regardless of them present in the local process single investor
-        # don't include them here.
-
         # ------------------------------------------------------------------
-        # A2. Stages that ALWAYS run (middle of local's Condition A)
+        # A2. CALCULATE INVESTOR SYMBOLS ORDERS
         # ------------------------------------------------------------------
-        # deduplicate_orders(inv_db_id=inv_db_id)
-        # validate_strategy_authorized_orders(inv_db_id=inv_db_id)
-        # backup_limit_orders(inv_db_id=inv_db_id)
-        # populate_orders_missing_fields(inv_db_id=inv_db_id)
-        # calculate_investor_symbols_orders(inv_db_id=inv_db_id)
-        # live_usd_risk_and_scaling(inv_db_id=inv_db_id)
-        # apply_default_prices(inv_db_id=inv_db_id)
-        # ^^^ DB ports not yet available. Uncomment when ready.
+        calc_stats = run_stage(
+            'calculate_investor_symbols_orders_db',
+            calculate_investor_symbols_orders_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['calculate_investor_symbols_orders_db'] = calc_stats
+        account_stats['calculate_stats'] = calc_stats
 
         # ------------------------------------------------------------------
-        # A5. MARTINGALE — same position as the local file.
+        # A3. CHUNK ORDERS WITH VOLUME BEYOND MAX
+        # ------------------------------------------------------------------
+        chunk_stats = run_stage(
+            'chunk_orders_with_volume_beyond_max_db',
+            chunk_orders_with_volume_beyond_max_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['chunk_orders_with_volume_beyond_max_db'] = chunk_stats
+        account_stats['chunk_stats'] = chunk_stats
+
+        # ------------------------------------------------------------------
+        # A4. MARTINGALE
         # ------------------------------------------------------------------
         martingale_stats = run_stage(
             'martingale_system_db',
@@ -6115,40 +11020,60 @@ def process_single_investor_from_db_(job):
         account_stats['martingale_stats'] = martingale_stats
 
         # ------------------------------------------------------------------
-        # A6. Stages that ALWAYS run (after martingale in local)
+        # A5. PLACE USD ORDERS
         # ------------------------------------------------------------------
-        # padding_stoploss_below_minimum_risk_to_maximum_risk(inv_db_id=inv_db_id)
-        # maximum_risk_distance_and_adjust_to_max_risk_distance_no_removal(inv_db_id=inv_db_id)
-        # pending_orders_per_symbol_limitation(inv_db_id=inv_db_id)
-        # chunk_orders_with_volume_beyond_max(inv_db_id=inv_db_id)
-        # place_usd_orders(inv_db_id=inv_db_id)
-        # ^^^ DB ports not yet available. Uncomment when ready.
-
-        # ------------------------------------------------------------------
-        # A7. GRID-gated manage block — OUT OF SCOPE.
-        # ------------------------------------------------------------------
-
-        # ------------------------------------------------------------------
-        # A8. Stages that ALWAYS run (tail of local's Condition A)
-        # ------------------------------------------------------------------
-        # close_unauthorized_orders(inv_db_id=inv_db_id)
-        # orders_reward_correction(inv_db_id=inv_db_id)
-        # check_pending_orders_risk(inv_db_id=inv_db_id)
-        # apply_dynamic_breakeven(inv_db_id=inv_db_id)
-
-        # 2nd call, same as local
-        audit_stats_tail = run_stage(
-            'check_and_record_unauthorized_actions_db',
-            check_and_record_unauthorized_actions_db,
+        place_stats = run_stage(
+            'place_usd_orders_db',
+            place_usd_orders_db,
             inv_db_id=inv_db_id,
         )
-        account_stats['stages']['check_and_record_unauthorized_actions_db_tail'] = audit_stats_tail
-        account_stats['unauthorized_actions_stats_tail'] = audit_stats_tail
+        account_stats['stages']['place_usd_orders_db'] = place_stats
+        account_stats['place_stats'] = place_stats
 
-        # trades_analytics(inv_db_id=inv_db_id)
-        # ^^^ DB port not yet available. Uncomment when ready.
+        # ------------------------------------------------------------------
+        # A6. CHECK PENDING ORDERS RISK
+        # ------------------------------------------------------------------
+        risk_stats = run_stage(
+            'check_pending_orders_risk_db',
+            check_pending_orders_risk_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['check_pending_orders_risk_db'] = risk_stats
+        account_stats['pending_risk_stats'] = risk_stats
 
-        # Surface the auditor's verdict on the account_stats
+        # ------------------------------------------------------------------
+        # A7. ORDERS REWARD CORRECTION
+        # ------------------------------------------------------------------
+        reward_stats = run_stage(
+            'orders_reward_correction_db',
+            orders_reward_correction_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['orders_reward_correction_db'] = reward_stats
+        account_stats['reward_correction_stats'] = reward_stats
+
+        # ------------------------------------------------------------------
+        # A8. APPLY DYNAMIC BREAKEVEN
+        # ------------------------------------------------------------------
+        breakeven_stats = run_stage(
+            'apply_dynamic_breakeven_db',
+            apply_dynamic_breakeven_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['apply_dynamic_breakeven_db'] = breakeven_stats
+        account_stats['breakeven_stats'] = breakeven_stats
+
+        # ------------------------------------------------------------------
+        # A9. TRADES ANALYTICS DB                ← NEW, VERY LAST STAGE
+        # ------------------------------------------------------------------
+        analytics_stats = run_stage(
+            'trades_analytics_db',
+            trades_analytics_db,
+            inv_db_id=inv_db_id,
+        )
+        account_stats['stages']['trades_analytics_db'] = analytics_stats
+        account_stats['analytics_stats'] = analytics_stats
+
         ua = unauthorized_alert or {}
         account_stats['unauthorized_hit'] = bool(ua.get('is_triggered'))
         account_stats['unauthorized_types'] = list(ua.get('unauthorized_types') or [])
